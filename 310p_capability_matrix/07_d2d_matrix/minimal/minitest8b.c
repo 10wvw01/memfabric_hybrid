@@ -1,0 +1,300 @@
+/*
+ * minitest8b.c — 8-rank 变量隔离测试
+ *
+ * T21: 8 ranks, r0 只 import 跨 socket peers (p4-p7), r1 只 import p4
+ *      → 验证: 是否需要 r0 import 全部 7 peers 才会触发问题
+ * T22: 8 ranks, r0 import 全部 7 peers, r1 只 import p4
+ *      → 验证: r0 的完整 import 是否影响 r1
+ * T23: 8 ranks, r0 import 全部 7 peers, r1 只 import p2 (同 socket)
+ *      → 验证: 问题是特定于跨 socket 还是普遍问题
+ * T24: 8 ranks, r0 import 全部 7 peers, r1 import p0(DEFAULT), p2(PEER), p4(PEER)
+ *      → 验证: r1 的 import 序列是否影响结果
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <mpi.h>
+#include "acl/acl.h"
+
+#define N           8
+#define SLAB_SIZE   (16u * 1024u * 1024u)
+#define IPC_KEY_LEN 65
+
+static int32_t env_int(const char *n, int32_t d)
+{
+    const char *s = getenv(n);
+    return s ? (int32_t)atoi(s) : d;
+}
+
+static const char *ret_str(int32_t r)
+{
+    return r == 0 ? "OK" : (r == 507899 ? "FAIL(507899)" : "FAIL(other)");
+}
+
+static int is_die_pair(int i, int j)
+{
+    return i != j && (i / 2) == (j / 2);
+}
+
+static void do_import(int rank, int target, char keys[N][IPC_KEY_LEN], void **ipc_va, int *imp_ok)
+{
+    int die = is_die_pair(rank, target);
+    uint32_t flag = die ? ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT
+                        : ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS;
+    void *pv = NULL;
+    int32_t ret = aclrtIpcMemImportByKey(&pv, keys[target], flag);
+    imp_ok[target] = (ret == 0);
+    if (imp_ok[target]) ipc_va[target] = pv;
+    printf("    r%d import p%d (%s): %s\n", rank, target, die ? "die/DEFAULT" : "cross/PEER", ret_str(ret));
+}
+
+/* ================================================================
+ *  T21: 8 ranks, r0 只 import p4-p7 (跨 socket), r1 只 import p4
+ * ================================================================ */
+static void test21(int rank, int32_t dev)
+{
+    void *slab = NULL;
+    char mykey[IPC_KEY_LEN] = {0};
+    char keys[N][IPC_KEY_LEN];
+    void *ipc_va[N] = {NULL};
+    int imp_ok[N] = {0};
+
+    int32_t ret = aclrtMalloc(&slab, SLAB_SIZE, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
+    if (ret == ACL_ERROR_NONE) {
+        ret = aclrtIpcMemGetExportKey(slab, SLAB_SIZE, mykey, IPC_KEY_LEN,
+                                      ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
+    }
+    printf("  r%d(dev%d): create slab %s\n", rank, dev, (ret == 0) ? "OK" : "FAIL");
+
+    MPI_Allgather(mykey, IPC_KEY_LEN, MPI_CHAR,
+                  &keys[0][0], IPC_KEY_LEN, MPI_CHAR, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        printf("  r0: importing p4-p7 (跨 socket only)...\n");
+        for (int p = 4; p < 8; p++) {
+            do_import(rank, p, keys, ipc_va, imp_ok);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 1) {
+        printf("  r1: importing p4 only...\n");
+        do_import(rank, 4, keys, ipc_va, imp_ok);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p]) aclrtIpcMemClose(keys[p]);
+    }
+    aclrtIpcMemClose(mykey);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (slab) aclrtFree(slab);
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p] && !is_die_pair(rank, p)) aclrtDeviceDisablePeerAccess(p);
+    }
+    aclrtResetDevice(dev);
+}
+
+/* ================================================================
+ *  T22: 8 ranks, r0 import 全部 7 peers, r1 只 import p4
+ * ================================================================ */
+static void test22(int rank, int32_t dev)
+{
+    void *slab = NULL;
+    char mykey[IPC_KEY_LEN] = {0};
+    char keys[N][IPC_KEY_LEN];
+    void *ipc_va[N] = {NULL};
+    int imp_ok[N] = {0};
+
+    int32_t ret = aclrtMalloc(&slab, SLAB_SIZE, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
+    if (ret == ACL_ERROR_NONE) {
+        ret = aclrtIpcMemGetExportKey(slab, SLAB_SIZE, mykey, IPC_KEY_LEN,
+                                      ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
+    }
+    printf("  r%d(dev%d): create slab %s\n", rank, dev, (ret == 0) ? "OK" : "FAIL");
+
+    MPI_Allgather(mykey, IPC_KEY_LEN, MPI_CHAR,
+                  &keys[0][0], IPC_KEY_LEN, MPI_CHAR, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        printf("  r0: importing all 7 peers...\n");
+        for (int p = 0; p < N; p++) {
+            if (p == rank) continue;
+            do_import(rank, p, keys, ipc_va, imp_ok);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 1) {
+        printf("  r1: importing p4 only...\n");
+        do_import(rank, 4, keys, ipc_va, imp_ok);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p]) aclrtIpcMemClose(keys[p]);
+    }
+    aclrtIpcMemClose(mykey);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (slab) aclrtFree(slab);
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p] && !is_die_pair(rank, p)) aclrtDeviceDisablePeerAccess(p);
+    }
+    aclrtResetDevice(dev);
+}
+
+/* ================================================================
+ *  T23: 8 ranks, r0 import 全部 7 peers, r1 只 import p2 (同 socket)
+ * ================================================================ */
+static void test23(int rank, int32_t dev)
+{
+    void *slab = NULL;
+    char mykey[IPC_KEY_LEN] = {0};
+    char keys[N][IPC_KEY_LEN];
+    void *ipc_va[N] = {NULL};
+    int imp_ok[N] = {0};
+
+    int32_t ret = aclrtMalloc(&slab, SLAB_SIZE, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
+    if (ret == ACL_ERROR_NONE) {
+        ret = aclrtIpcMemGetExportKey(slab, SLAB_SIZE, mykey, IPC_KEY_LEN,
+                                      ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
+    }
+    printf("  r%d(dev%d): create slab %s\n", rank, dev, (ret == 0) ? "OK" : "FAIL");
+
+    MPI_Allgather(mykey, IPC_KEY_LEN, MPI_CHAR,
+                  &keys[0][0], IPC_KEY_LEN, MPI_CHAR, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        printf("  r0: importing all 7 peers...\n");
+        for (int p = 0; p < N; p++) {
+            if (p == rank) continue;
+            do_import(rank, p, keys, ipc_va, imp_ok);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 1) {
+        printf("  r1: importing p2 only (同 socket)...\n");
+        do_import(rank, 2, keys, ipc_va, imp_ok);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p]) aclrtIpcMemClose(keys[p]);
+    }
+    aclrtIpcMemClose(mykey);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (slab) aclrtFree(slab);
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p] && !is_die_pair(rank, p)) aclrtDeviceDisablePeerAccess(p);
+    }
+    aclrtResetDevice(dev);
+}
+
+/* ================================================================
+ *  T24: 8 ranks, r0 import 全部 7 peers, r1 import p0(DEFAULT), p2(PEER), p4(PEER)
+ * ================================================================ */
+static void test24(int rank, int32_t dev)
+{
+    void *slab = NULL;
+    char mykey[IPC_KEY_LEN] = {0};
+    char keys[N][IPC_KEY_LEN];
+    void *ipc_va[N] = {NULL};
+    int imp_ok[N] = {0};
+
+    int32_t ret = aclrtMalloc(&slab, SLAB_SIZE, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
+    if (ret == ACL_ERROR_NONE) {
+        ret = aclrtIpcMemGetExportKey(slab, SLAB_SIZE, mykey, IPC_KEY_LEN,
+                                      ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
+    }
+    printf("  r%d(dev%d): create slab %s\n", rank, dev, (ret == 0) ? "OK" : "FAIL");
+
+    MPI_Allgather(mykey, IPC_KEY_LEN, MPI_CHAR,
+                  &keys[0][0], IPC_KEY_LEN, MPI_CHAR, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        printf("  r0: importing all 7 peers...\n");
+        for (int p = 0; p < N; p++) {
+            if (p == rank) continue;
+            do_import(rank, p, keys, ipc_va, imp_ok);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 1) {
+        printf("  r1: importing p0(DEFAULT), p2(PEER), p4(PEER)...\n");
+        do_import(rank, 0, keys, ipc_va, imp_ok);
+        do_import(rank, 2, keys, ipc_va, imp_ok);
+        do_import(rank, 4, keys, ipc_va, imp_ok);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p]) aclrtIpcMemClose(keys[p]);
+    }
+    aclrtIpcMemClose(mykey);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (slab) aclrtFree(slab);
+    for (int p = 0; p < N; p++) {
+        if (p != rank && imp_ok[p] && !is_die_pair(rank, p)) aclrtDeviceDisablePeerAccess(p);
+    }
+    aclrtResetDevice(dev);
+}
+
+int main(int argc, char *argv[])
+{
+    MPI_Init(&argc, &argv);
+    int rank, nproc;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
+
+    if (nproc != N) {
+        if (rank == 0) printf("need -np %d, got %d\n", N, nproc);
+        MPI_Finalize();
+        return 1;
+    }
+
+    int tnum = env_int("T", 21);
+    int32_t dev = rank;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (rank == 0)
+        printf("=== T%d: 8-rank 变量隔离测试 ===\n", tnum);
+
+    aclError ret = aclInit(NULL);
+    if (ret != 0) {
+        printf("r%d: aclInit FAIL ret=%d\n", rank, ret);
+        MPI_Finalize();
+        return 1;
+    }
+    ret = aclrtSetDevice(dev);
+    if (ret != 0) {
+        printf("r%d: SetDevice(%d) FAIL ret=%d\n", rank, dev, ret);
+        aclFinalize();
+        MPI_Finalize();
+        return 1;
+    }
+
+    switch (tnum) {
+    case 21: test21(rank, dev); break;
+    case 22: test22(rank, dev); break;
+    case 23: test23(rank, dev); break;
+    case 24: test24(rank, dev); break;
+    default:
+        if (rank == 0) printf("unknown T=%d\n", tnum);
+        break;
+    }
+
+    if (rank == 0)
+        printf("=== T%d done ===\n\n", tnum);
+
+    aclrtResetDevice(dev);
+    aclFinalize();
+    MPI_Finalize();
+    return 0;
+}

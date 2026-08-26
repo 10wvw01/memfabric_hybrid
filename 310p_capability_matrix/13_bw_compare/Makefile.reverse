@@ -1,0 +1,12 @@
+include ../common.mk
+
+test_reverse: test_reverse.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+
+run: test_reverse
+	timeout 60 mpirun --allow-run-as-root -np 2 ./test_reverse
+
+clean:
+	rm -f test_reverse
+
+.PHONY: run clean
