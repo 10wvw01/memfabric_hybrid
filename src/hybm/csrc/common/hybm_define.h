@@ -71,6 +71,7 @@ constexpr uint64_t HBM_SLICE_EXPORT_INFO_MAGIC = 0xAABB1234FFFFEE01UL;
 constexpr uint64_t DRAM_SLICE_EXPORT_INFO_MAGIC = 0xAABB1234FFFFEE02UL;
 constexpr uint64_t VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC = 0xAABB1234FFFFEE03UL;
 constexpr uint64_t VMM_BASE_DRAM_SLICE_EXPORT_INFO_MAGIC = 0xAABB1234FFFFEE04UL;
+constexpr uint64_t ACL_VMM_HBM_SLICE_EXPORT_INFO_MAGIC = 0xAABB1234FFFFEE05UL; // 310P ACL VMM 段
 constexpr uint64_t EXPORT_INFO_VERSION = 0x1UL;
 
 constexpr uint16_t SEGMENT_TYPE_VMM = 0x1U;
@@ -85,7 +86,8 @@ inline bool IsDramSlice(uint64_t magic)
 }
 inline bool IsHbmSlice(uint64_t magic)
 {
-    return magic == HBM_SLICE_EXPORT_INFO_MAGIC || magic == VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
+    return magic == HBM_SLICE_EXPORT_INFO_MAGIC || magic == VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC ||
+           magic == ACL_VMM_HBM_SLICE_EXPORT_INFO_MAGIC;
 }
 
 inline bool IsArmArch()
@@ -101,6 +103,7 @@ enum AscendSocType {
     ASCEND_910B,
     ASCEND_910C,
     ASCEND_950,
+    ASCEND_310P,
 };
 
 enum DeviceSystemInfoType {
