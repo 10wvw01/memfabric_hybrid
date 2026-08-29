@@ -1,0 +1,222 @@
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank2 = dev2 ===
+[17] r2: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank3 = dev3 ===
+[17] r3: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank6 = dev6 ===
+[17] r6: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank7 = dev7 ===
+[17] r7: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank0 = dev0 ===
+[17] r0: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank1 = dev1 ===
+[17] r1: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank4 = dev4 ===
+[17] r4: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] === 17_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank5 = dev5 ===
+[17] r5: 2MB slab x8 slot window(16MB), 7-attr chain, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)
+[17] r1 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r1 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r1 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r1 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r1 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r1 create: pool base=0x12c140000000 own slot1 @ 0x12c140200000 (SetAccess ret=0)
+[17] r0 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r0 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r0 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r0 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r0 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r0 create: pool base=0x12c140000000 own slot0 @ 0x12c140000000 (SetAccess ret=0)
+[17] r1 create: export sh=0x100000003
+[17] r0 create: export sh=0x3
+[17] r2 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r2 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r2 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r2 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r2 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r2 create: pool base=0x12c140000000 own slot2 @ 0x12c140400000 (SetAccess ret=0)
+[17] r2 create: export sh=0x200000003
+[17] r5 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r5 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r5 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r5 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r5 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r5 create: pool base=0x12c140000000 own slot5 @ 0x12c140a00000 (SetAccess ret=0)
+[17] r5 create: export sh=0x500000003
+[17] r4 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r4 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r4 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r4 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r4 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r4 create: pool base=0x12c140000000 own slot4 @ 0x12c140800000 (SetAccess ret=0)
+[17] r4 create: export sh=0x400000003
+[17] r3 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r3 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r3 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r3 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r3 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r3 create: pool base=0x12c140000000 own slot3 @ 0x12c140600000 (SetAccess ret=0)
+[17] r3 create: export sh=0x300000003
+[17] r7 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r7 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r7 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r7 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r6 [slab attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r7 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r6 [slab attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r6 [slab attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r6 [slab attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(2MB) ret=100000
+[17] r6 [slab attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(2MB) ret=0
+[17]   [slab] chosen MEM_P2P_HUGE  , 2MB = 1 x gran 2097152B
+[17] r7 create: pool base=0x12c140000000 own slot7 @ 0x12c140e00000 (SetAccess ret=0)
+[17] r6 create: pool base=0x12c140000000 own slot6 @ 0x12c140c00000 (SetAccess ret=0)
+[17] r7 create: export sh=0x700000003
+[17] r6 create: export sh=0x600000003
+[17] r0 exchange: allgathered 8 handles
+[17] r0 join: token-ring serial import begins (no EnablePeerAccess)
+[17] r2 exchange: allgathered 8 handles
+[17] r2 join: token-ring serial import begins (no EnablePeerAccess)
+[17] r5 exchange: allgathered 8 handles
+[17] r5 join: token-ring serial import begins (no EnablePeerAccess)
+[17] r4 exchange: allgathered 8 handles
+[17] r4 join: token-ring serial import begins (no EnablePeerAccess)
+[17] r7 exchange: allgathered 8 handles
+[17] r7 join: token-ring serial import begins (no EnablePeerAccess)
+[17] r6 exchange: allgathered 8 handles
+[17] r6 join: token-ring serial import begins (no EnablePeerAccess)
+[17] r1 exchange: allgathered 8 handles
+[17] r1 join: token-ring serial import begins (no EnablePeerAccess)
+[17] r3 exchange: allgathered 8 handles
+[17] r3 join: token-ring serial import begins (no EnablePeerAccess)
+[17]   r0 import p1 (die): OK method=2 va=0x12c140200000 map ret=0 sa ret=0
+[17]   r0 import p2 (cross): OK method=1 va=0x12c140400000 map ret=0 sa ret=0
+[17]   r0 import p3 (cross): OK method=1 va=0x12c140600000 map ret=0 sa ret=0
+[17]   r0 import p4 (cross): OK method=1 va=0x12c140800000 map ret=0 sa ret=0
+[17]   r0 import p5 (cross): OK method=1 va=0x12c140a00000 map ret=0 sa ret=0
+[17]   r0 import p6 (cross): OK method=1 va=0x12c140c00000 map ret=0 sa ret=0
+[17]   r0 import p7 (cross): OK method=1 va=0x12c140e00000 map ret=0 sa ret=0
+[17] r0 joined 7/7 peers (m1 own-ctx=6, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17]   r1 import p0 (die): OK method=2 va=0x12c140000000 map ret=0 sa ret=0
+[17]   r1 import p2 (cross): OK method=1 va=0x12c140400000 map ret=0 sa ret=0
+[17]   r1 import p3 (cross): OK method=1 va=0x12c140600000 map ret=0 sa ret=0
+[17]   r1 import p4 (cross): FAIL ret=507899
+[17]   r1 import p5 (cross): FAIL ret=507899
+[17]   r1 import p6 (cross): FAIL ret=507899
+[17]   r1 import p7 (cross): FAIL ret=507899
+[17] r1 joined 3/7 peers (m1 own-ctx=2, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17]   r2 import p0 (cross): OK method=1 va=0x12c140000000 map ret=0 sa ret=0
+[17]   r2 import p1 (cross): OK method=1 va=0x12c140200000 map ret=0 sa ret=0
+[17]   r2 import p3 (die): OK method=2 va=0x12c140600000 map ret=0 sa ret=0
+[17]   r2 import p4 (cross): OK method=1 va=0x12c140800000 map ret=0 sa ret=0
+[17]   r2 import p5 (cross): OK method=1 va=0x12c140a00000 map ret=0 sa ret=0
+[17]   r2 import p6 (cross): OK method=1 va=0x12c140c00000 map ret=0 sa ret=0
+[17]   r2 import p7 (cross): OK method=1 va=0x12c140e00000 map ret=0 sa ret=0
+[17] r2 joined 7/7 peers (m1 own-ctx=6, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17]   r3 import p0 (cross): OK method=1 va=0x12c140000000 map ret=0 sa ret=0
+[17]   r3 import p1 (cross): OK method=1 va=0x12c140200000 map ret=0 sa ret=0
+[17]   r3 import p2 (die): OK method=2 va=0x12c140400000 map ret=0 sa ret=0
+[17]   r3 import p4 (cross): FAIL ret=507899
+[17]   r3 import p5 (cross): FAIL ret=507899
+[17]   r3 import p6 (cross): FAIL ret=507899
+[17]   r3 import p7 (cross): FAIL ret=507899
+[17] r3 joined 3/7 peers (m1 own-ctx=2, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17]   r4 import p0 (cross): OK method=1 va=0x12c140000000 map ret=0 sa ret=0
+[17]   r4 import p1 (cross): FAIL ret=507899
+[17]   r4 import p2 (cross): OK method=1 va=0x12c140400000 map ret=0 sa ret=0
+[17]   r4 import p3 (cross): FAIL ret=507899
+[17]   r4 import p5 (die): OK method=2 va=0x12c140a00000 map ret=0 sa ret=0
+[17]   r4 import p6 (cross): OK method=1 va=0x12c140c00000 map ret=0 sa ret=0
+[17]   r4 import p7 (cross): OK method=1 va=0x12c140e00000 map ret=0 sa ret=0
+[17] r4 joined 5/7 peers (m1 own-ctx=4, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17]   r5 import p0 (cross): OK method=1 va=0x12c140000000 map ret=0 sa ret=0
+[17]   r5 import p1 (cross): FAIL ret=507899
+[17]   r5 import p2 (cross): OK method=1 va=0x12c140400000 map ret=0 sa ret=0
+[17]   r5 import p3 (cross): FAIL ret=507899
+[17]   r5 import p4 (die): OK method=2 va=0x12c140800000 map ret=0 sa ret=0
+[17]   r5 import p6 (cross): OK method=1 va=0x12c140c00000 map ret=0 sa ret=0
+[17]   r5 import p7 (cross): OK method=1 va=0x12c140e00000 map ret=0 sa ret=0
+[17] r5 joined 5/7 peers (m1 own-ctx=4, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17]   r6 import p0 (cross): OK method=1 va=0x12c140000000 map ret=0 sa ret=0
+[17]   r6 import p1 (cross): FAIL ret=507899
+[17]   r6 import p2 (cross): OK method=1 va=0x12c140400000 map ret=0 sa ret=0
+[17]   r6 import p3 (cross): FAIL ret=507899
+[17]   r6 import p4 (cross): OK method=1 va=0x12c140800000 map ret=0 sa ret=0
+[17]   r6 import p5 (cross): OK method=1 va=0x12c140a00000 map ret=0 sa ret=0
+[17]   r6 import p7 (die): OK method=2 va=0x12c140e00000 map ret=0 sa ret=0
+[17] r6 joined 5/7 peers (m1 own-ctx=4, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17]   r7 import p0 (cross): OK method=1 va=0x12c140000000 map ret=0 sa ret=0
+[17]   r7 import p1 (cross): FAIL ret=507899
+[17]   r7 import p2 (cross): OK method=1 va=0x12c140400000 map ret=0 sa ret=0
+[17]   r7 import p3 (cross): FAIL ret=507899
+[17]   r7 import p4 (cross): OK method=1 va=0x12c140800000 map ret=0 sa ret=0
+[17]   r7 import p5 (cross): OK method=1 va=0x12c140a00000 map ret=0 sa ret=0
+[17]   r7 import p6 (die): OK method=2 va=0x12c140c00000 map ret=0 sa ret=0
+[17] r7 joined 5/7 peers (m1 own-ctx=4, m2 ctx-trick(die)=1, m3 ctx-trick(fallback)=0)
+[17] VA matrix (row=rank observer, col=slab owner, slot layout):
+[17]          p0          p1          p2          p3          p4          p5          p6          p7        
+[17] r0  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] r1  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] r2  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] r3  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] r4  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] r5  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] r6  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] r7  0x12c140000000 0x12c140200000 0x12c140400000 0x12c140600000 0x12c140800000 0x12c140a00000 0x12c140c00000 0x12c140e00000 
+[17] VA consistency: CONSISTENT (all 8 rows identical) 
+[17] r3 write D2D 16MB -> p4: SKIP (import not ok)
+[17] r6 write D2D 16MB -> p7: OK (ret=0)
+[17] r4 write D2D 16MB -> p5: OK (ret=0)
+[17] r2 write D2D 16MB -> p3: OK (ret=0)
+[17] r7 write D2D 16MB -> p0: OK (ret=0)
+[17] r5 write D2D 16MB -> p6: OK (ret=0)
+[17] r1 write D2D 16MB -> p2: OK (ret=0)
+[17] r0 write D2D 16MB -> p1: FAIL (ret=107020)
+[17] r4 verify: writer p3 did not deliver, skip
+[17] r1 verify: writer p0 did not deliver, skip
+[17] r5 verify own slab (writer p4, tag=0x64): OK
+[17] r7 verify own slab (writer p6, tag=0x66): OK
+[17] r6 verify own slab (writer p5, tag=0x65): OK
+[17] r0 verify own slab (writer p7, tag=0x67): OK
+[17] r3 verify own slab (writer p2, tag=0x62): OK
+[17] r2 verify own slab (writer p1, tag=0x61): OK
+[17] r7 bandwidth: SKIPPED (correctness not passed)
+[17] r4 bandwidth: SKIPPED (correctness not passed)
+[17] r4 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r2 bandwidth: SKIPPED (correctness not passed)
+[17] r2 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r3 bandwidth: SKIPPED (correctness not passed)
+[17] r3 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r5 bandwidth: SKIPPED (correctness not passed)
+[17] r5 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r0 bandwidth: SKIPPED (correctness not passed)
+[17] r0 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r6 bandwidth: SKIPPED (correctness not passed)
+[17] r6 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r1 bandwidth: SKIPPED (correctness not passed)
+[17] r1 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r7 RESULT: FAIL (join:FAIL write:FAIL VA:CONSISTENT)
+[17] r0 cleanup: DisablePeerAccess x7 best-effort (ok=6 err=1, err=507899 expected since never enabled)
+[17] r2 cleanup: DisablePeerAccess x7 best-effort (ok=6 err=1, err=507899 expected since never enabled)
+[17] r4 cleanup: DisablePeerAccess x7 best-effort (ok=4 err=3, err=507899 expected since never enabled)
+[17] r5 cleanup: DisablePeerAccess x7 best-effort (ok=4 err=3, err=507899 expected since never enabled)
+[17] r7 cleanup: DisablePeerAccess x7 best-effort (ok=4 err=3, err=507899 expected since never enabled)
+[17] r3 cleanup: DisablePeerAccess x7 best-effort (ok=2 err=5, err=507899 expected since never enabled)
+[17] r1 cleanup: DisablePeerAccess x7 best-effort (ok=2 err=5, err=507899 expected since never enabled)
+[17] r6 cleanup: DisablePeerAccess x7 best-effort (ok=4 err=3, err=507899 expected since never enabled)
+--------------------------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code. Per user-direction, the job has been aborted.
+--------------------------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[21784,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

@@ -18,3 +18,11 @@ __pycache__
 *.egg-info
 .DS_Store
 .clion.source.upload.marker
+
+
+# 构建产物(二进制),由各目录 Makefile 生成,勿提交
+*.o
+test*
+!test*.c
+minitest*
+!minitest*.c
