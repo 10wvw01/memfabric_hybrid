@@ -6,6 +6,7 @@
 >   （双 rank 双池三阶段 8MB 逐字校验 mismatch=0，干净销毁）
 > - 全量 UT 已完成：83/90 套件 PASS（1700/1700 用例），非通过项经纯基线对照证实为存量问题（见第二节）
 > - **UT / example 复现命令见第八节（可直接复制执行）**；**V2 候选改进（PID 白名单恢复、公开 API 设备查询、算子真异步）见第九节 TODO**
+> - **开发流程踩坑记录与规范见附录（A1-A7）——构建/测试/验证前必读，防止复犯**
 >
 > 目标：在当前 Atlas 300I Duo（310P3）机器上，**单卡双 die（dev0/dev1）2-rank** 建池实测通过——
 > HBM 池（ACL VMM shareable handle + SetContext 导入 + `aclrtMemcpyAsync` D2D）与
@@ -285,3 +286,119 @@ D2D 为 `AclrtMemcpyAsync` 提交后**立即** `SynchronizeStream`；`DataCopyAs
 3. 同步语义（无 flag 无 stream）保持现状：提交后立即等——行为不变，零回归风险
 4. 验收：e2e 增加异步路径用例（`smem_bm_copy(..., ASYNC_COPY_FLAG)` + `smem_bm_wait` 逐字校验）；
    带宽对比确认多段拷贝场景收益
+
+## 附录：开发流程踩坑记录与规范（防止复犯）
+
+> 本附录固化 V1 开发中实际踩过的流程类问题及其根因、正确做法。**每条都是真实发生过并造成过
+> 返工的错误**，后续开发/验证前先过一遍本清单。
+
+### A1：build/ 双模式互斥——UT 与实机 e2e 不能共用同一份构建产物
+
+**踩坑过程**：实机 e2e 用 `build/`（当时为 RELEASE）静态库编译通过并全绿；随后跑
+`run_ut.sh` 全量 UT，`build/` 被重配为 ASAN+UT 模式；之后未重新构建直接又拿 `build/` 的库
+编 e2e → 链接报大量 `__asan_*/__gcov_*` 未定义；强行加 `-fsanitize` 链接成功但运行必失败
+（`read version is empty` → `hybm_init` 报驱动不支持）。
+
+**根因**：仓库两个脚本对 `build/` 要求互斥的配置，cmake 参数变化即触发整体重配：
+
+| 脚本 | build/ 配置 | 库的属性 |
+|---|---|---|
+| `run_ut.sh` | ASAN + gcov + `-DUT_ENABLED=ON` | 带 ASAN/覆盖率插桩；驱动版本检查重定向到 mock 假 CANN 树（`$ASCEND_HOME_PATH/driver/version.info`，UT 时指向 output 下的 mock 树） |
+| `build.sh` | RELEASE + `-DUT_ENABLED=OFF` | 无插桩；连真实驱动/CANN，产物供实机使用 |
+
+**正确做法（强制）**：
+1. 跑实机 e2e / 出正式产物前，必须先 `bash script/build.sh`（或 `build_and_pack_run.sh`）恢复 RELEASE
+2. 跑 UT 用 `bash script/run_ut.sh`（--fast 可过滤套件）
+3. 两种验证交替时，**每次切换都重跑对应脚本**，不假设 build/ 还是上次的配置
+
+**当前配置自查命令**：
+```bash
+grep CMAKE_BUILD_TYPE:STRING build/CMakeCache.txt   # ASAN 还是 RELEASE
+grep BUILD_UT:BOOL build/CMakeCache.txt             # ON 还是 OFF
+```
+
+### A2：禁止绕开仓库脚本自建构建目录
+
+**踩坑过程**：开发期为快速迭代在仓库根建了 `build_quick/`（后又建 `build_rel/`），导致：
+①违背"临时产物放临时目录"约定；②跑完 UT 后误用 ASAN-UT 库链 e2e（见 A1），且因产物路径
+不标准连续排查数轮才定位；③`cmake --build` 只更新 build 树不 install 时，`output/` 里还是
+陈旧二进制，对照实验全被污染（曾据此得出错误结论后作废重做）。
+
+**正确做法（强制）**：
+1. 构建**只**用仓库脚本（`build.sh` / `run_ut.sh` / `build_and_pack_run.sh`），产物只认
+   `build/` 和 `output/`，不在仓库内创建任何其他构建目录
+2. 手动增量编译若必要（如只重链测试程序），完成后必须 `cmake --install` 同步 `output/`，
+   并核对二进制 mtime 确认拿到的是新产物（`ls -la --time-style=+%T output/bin/ut/test_memfabric`）
+3. 探测程序等一次性代码放 `/home/t00842504/memfabfric_tmp/`（不进仓库），验证日志放
+   `/tmp/opencode/`
+
+### A3：新增源文件后 GLOB 不自动收编——必须触发 reconfigure
+
+**踩坑过程**：新增 `hybm_acl_vmm_segment.cpp` 后直接编译，链接报 vtable/符号未定义——
+CMake 的 `file(GLOB_RECURSE)` 在 configure 期求值且无 `CONFIGURE_DEPENDS`，新文件静默不编译。
+
+**正确做法**：新增/删除 .cpp 后，先 `touch src/hybm/csrc/CMakeLists.txt`
+（或 `test/ut/testcase/CMakeLists.txt`）再跑 cmake，确保 GLOB 重新求值。
+判定方法：链接报新类的 vtable/未定义符号，首先怀疑此问题。
+
+### A4：mockcpp 机器码打桩与 ASAN fake-stack 存量不兼容——全量 UT 用逐套件模式
+
+**现象**：`run_ut.sh` 单进程串行跑全量时，多个**存量**套件（HybmDataOpSdmaTest /
+SmemBmTest / SmemHaConfigStoreTest / SmemShmTest）在中途以
+`AddressSanitizer: stack-use-after-return`（崩溃点均在 `mockcpp::ApiHookKey` 构造，
+经由 `HostDataOpSDMA::Initialize` 的 GetAscendSocType mock 链）崩溃；单用例隔离跑全过。
+
+**根因**：mockcpp AArch64 打桩实现（覆写被 mock 函数前 16 字节机器码 + patch/unpatch 循环）
+与 ASAN fake-stack（`detect_stack_use_after_return=1`，run_ut.sh 设置）存量不兼容，
+进程内打桩次数累积触发，且对二进制布局敏感（纯基线 + 无关空函数扰动也能复现；
+纯基线以逐位相同进度崩溃——已用对照实验证实与 310P 改动无关）。
+
+**正确做法**：
+1. 全量 UT 结果以**逐套件独立进程**模式为准（命令见第八节 8.2），单进程崩溃不作为回归依据
+2. 判断崩溃是否存量：stash 全部改动后在纯基线复跑同一套件，比对崩溃进度是否一致
+3. 根治属独立 issue（可考虑修 mockcpp `JmpOnlyApiHook` 补丁生命周期，或对打桩密集套件
+   关闭 fake-stack），不阻塞业务合入
+
+### A5：ASAN 误判排查——"手工链接版全过"不能作为无内存错误的证据
+
+**踩坑过程**：`HybmAclVmmSegmentTest` 在正式 UT 二进制（ASAN+gcov）崩 use-after-free
+（`ReleaseSliceMemory` 中 `slices_.erase` 后再访问入参 `slice->index_`——入参是 map 内
+shared_ptr 的引用，析构路径下 map 为最后所有者），而手工链接的非 ASAN 版全过，一度以为
+是 UT 环境问题。
+
+**正确做法**：
+1. 非 ASAN 二进制的"通过"只证明功能正确，不证明无内存错误；**内存安全结论只认 ASAN 构建**
+2. 对外接口若持有容器内智能指针的引用/裸指针，erase 容器项后原指针即悬空——需在 erase 前
+   拷贝一份提升引用计数（本次修复：入口 `MemSlicePtr holder = slice`）
+3. 类似模式自查：遍历容器时删除元素（用 while+begin() 或 erase 返回值迭代）、
+   lambda 捕获引用超出作用域
+
+### A6：验证命令与环境变量——完整导出、绝对路径、防 shell 会话污染
+
+**踩坑过程（三例）**：
+1. e2e 运行失败排查半天，根因是 shell 会话里残留上一场景的 `ASCEND_HOME_PATH`（指向 mock
+   假树）与 `LD_PRELOAD`（ASAN），导致驱动版本检查读不到真文件
+2. 相对路径编译命令在 cwd 不符时报"找不到 .a"，明明产物存在
+3. 交互式 shell 跑长任务被超时中断（nohup 未脱离会话），误以为构建失败；后台进程被
+   shell 退出连带杀掉，测试只跑了一半
+
+**正确做法**：
+1. 每次运行 e2e/实机程序前**显式完整导出**三个变量（见 8.4 节命令），不依赖会话残留：
+   `ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0`（实机）+ `LD_LIBRARY_PATH`（cann/driver
+   三个目录）+ `unset LD_PRELOAD`（防 ASAN 泄漏）；UT 环境则用 output 下 mock 树路径
+2. 编译/运行命令一律**绝对路径**（源文件、库、输出产物），不依赖 cwd
+3. 长任务用 `(setsid nohup cmd > log 2>&1 < /dev/null &)` 完全脱离会话，用日志+mtime 判定
+   完成状态，不靠进程是否还活着猜
+
+### A7：对照实验的有效性——确认变量唯一、产物新鲜
+
+**踩坑过程**：为判定"崩溃是否我的改动引入"，做了三次 stash 对照实验，结论却互相矛盾——
+事后发现三次实验跑的都是**同一个陈旧二进制**（手动 build 更新了 build 树但没 install 到
+output，跑的始终是 output 里的旧文件），全部作废重做。
+
+**正确做法**：
+1. 对照实验前先确认被测产物确实是新构建的（`nm` 查特征符号是否存在 +
+   `ls --time-style` 核对 mtime）
+2. 一次实验只改一个变量；stash 后要检查新增未跟踪文件是否也需要移走（未跟踪文件不受
+   stash 影响，会残留在编译单元里造成"改了没生效"的假象）
+3. 实验结论以"重做后且产物新鲜"的那次为准，作废实验明确标记，不留混淆
