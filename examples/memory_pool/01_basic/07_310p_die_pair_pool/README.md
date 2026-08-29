@@ -44,11 +44,13 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）上组建 2-rank BM �
    - PhaseC（DRAM 池）：H2GH/GH2H
 3. `destroy`/`uninit` 干净退出（无 D 态挂死、无 double free）
 
-## 运行（Python）
+## 运行（Python，实机已验证）
 
 ```bash
-# 需先构建并安装 memfabric_hybrid wheel(含 310P 支持)
+# 需先构建并安装 memfabric_hybrid wheel(含 310P 支持), 且需 torch(host 侧缓冲)
+pip3 install <wheel 路径>/memfabric_hybrid-*.whl torch
 python3 07_310p_die_pair_pool.py
+# 期望输出: "07_310p_die_pair_pool ok"
 ```
 
 ## 运行（C++，实机已验证）
