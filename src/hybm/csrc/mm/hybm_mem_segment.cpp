@@ -20,6 +20,7 @@
 #include "hybm_dev_legacy_segment.h"
 #include "hybm_gva.h"
 #include "hybm_types.h"
+#include "hybm_acl_vmm_segment.h"
 #include "hybm_host_shm_segment.h"
 #include "hybm_conn_based_segment.h"
 #include "hybm_vmm_based_segment.h"
@@ -80,7 +81,10 @@ MemSegmentPtr MemSegment::Create(const MemSegmentOptions &options, int entityId)
     MemSegmentPtr tmpSeg;
     switch (options.segType) {
         case HYBM_MST_HBM:
-            if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950) {
+            if (socType_ == AscendSocType::ASCEND_310P) {
+                // 310P: soc 判断优先于 GVA 版本判断(310P 驱动可能被映射为 V4, 但无 halMem* 语义)
+                tmpSeg = std::make_shared<HybmAclVmmSegment>(options, entityId);
+            } else if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950) {
                 tmpSeg = std::make_shared<HybmVmmBasedSegment>(options, entityId);
             } else {
                 tmpSeg = std::make_shared<HybmDevLegacySegment>(options, entityId);
@@ -158,6 +162,24 @@ Result MemSegment::RegisterMemCommon(const void *addr, uint64_t size, MemSlicePt
     return BM_OK;
 }
 
+Result MemSegment::QueryDeviceInfoSocTolerant(int32_t infoType, const char *name, int64_t &value) noexcept
+{
+    auto ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, infoType, &value);
+    if (ret == BM_OK) {
+        return BM_OK;
+    }
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+        // 310P 驱动不支持 SDID/SERVER_ID 等 INFO_TYPE 查询(实测 207000), 降级为无效值,
+        // 可达性由 HybmAclVmmSegment 按映射状态判定, 不依赖拓扑坐标
+        BM_LOG_WARN(name << " query failed on 310P, ret:" << ret << " deviceId:" << deviceId_
+                        << ", fallback to invalid value");
+        value = -1;
+        return BM_OK;
+    }
+    BM_LOG_ERROR("get " << name << " failed: " << ret << " deviceId:" << deviceId_);
+    return BM_DL_FUNCTION_FAILED;
+}
+
 Result MemSegment::InitDeviceInfo(int devId)
 {
 #if !defined(ASCEND_NPU)
@@ -207,25 +229,22 @@ Result MemSegment::InitDeviceInfo(int devId)
     }
 
     int64_t value = 0;
-    ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_SDID, &value);
+    ret = QueryDeviceInfoSocTolerant(INFO_TYPE_SDID, "sdid", value);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("get sdid failed: " << ret);
-        return BM_DL_FUNCTION_FAILED;
+        return ret;
     }
 
     sdid_ = static_cast<uint32_t>(value);
-    ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_SERVER_ID, &value);
+    ret = QueryDeviceInfoSocTolerant(INFO_TYPE_SERVER_ID, "server id", value);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("get server id failed: " << ret);
-        return BM_DL_FUNCTION_FAILED;
+        return ret;
     }
     serverId_ = static_cast<uint32_t>(value);
     BM_LOG_DEBUG("local server=0x" << std::hex << serverId_);
 
-    ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_SUPER_POD_ID, &value);
+    ret = QueryDeviceInfoSocTolerant(INFO_TYPE_SUPER_POD_ID, "super pod id", value);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("get super pod id failed: " << ret);
-        return BM_DL_FUNCTION_FAILED;
+        return ret;
     }
 
     superPodId_ = static_cast<uint32_t>(value);
