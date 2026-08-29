@@ -311,6 +311,13 @@ D2D 为 `AclrtMemcpyAsync` 提交后**立即** `SynchronizeStream`；`DataCopyAs
 2. 跑 UT 用 `bash script/run_ut.sh`（--fast 可过滤套件）
 3. 两种验证交替时，**每次切换都重跑对应脚本**，不假设 build/ 还是上次的配置
 
+**无需手动删除 build/（常见误解澄清）**：两个脚本都自带清理——
+`build.sh` 每次执行先 `rm -rf ./build ./output` 再全新配置 RELEASE（script/build.sh:156）；
+`run_ut.sh` fast 模式靠 `build/.build_fingerprint` 指纹（`ASAN-UT-OPEN_ABI`）检测配置不匹配后
+自删重建，完整模式总是删。**任何时候都不要手动删 build/，也不要手动"恢复"它——只跑脚本**。
+真正要防的错误是：跑完一个脚本后**不跑任何脚本**、直接把 build/ 里残留的库拿去链接
+别的目标（V1 踩坑正是如此：拿了 ASAN-UT 库去编 e2e）。
+
 **当前配置自查命令**：
 ```bash
 grep CMAKE_BUILD_TYPE:STRING build/CMakeCache.txt   # ASAN 还是 RELEASE
