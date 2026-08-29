@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Copyright: (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """310P Duo 单卡双 die 2-rank HBM+DRAM 双池示例(Python 版, 需 memfabric_hybrid wheel)
 
 与 06/03 号示例不同点:
