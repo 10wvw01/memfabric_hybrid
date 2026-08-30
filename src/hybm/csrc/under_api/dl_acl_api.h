@@ -60,7 +60,10 @@ using aclrtParamHandle = void *;
 using aclrtDrvMemHandle = void *;   // aclrtMallocPhysical 返回的物理内存句柄
 using aclrtContext = void *;        // aclrtCreateContext 返回的 context 句柄
 
-/* ---- ACL VMM 相关本地声明(与 CANN acl_rt.h 对齐, 310P 内存池使用) ---- */
+/* ---- ACL VMM 相关本地声明(与 CANN acl_rt.h 对齐, 310P 内存池使用) ----
+ * 对齐版本: CANN 9.1.0 (aarch64-linux/include/acl/acl_rt.h)。
+ * 不直接 include CANN 头以避免构建环境强依赖; 若 CANN 升级改变以下 ABI,
+ * 需同步核对字段布局(与 app/zbal 的 dl_cann_api_def.h 各自独立维护, 见方案文档 TODO)。 */
 enum class aclrtMemHandleType : uint32_t {
     ACL_MEM_HANDLE_TYPE_NONE = 0,
     ACL_MEM_HANDLE_TYPE_POSIX = 2,

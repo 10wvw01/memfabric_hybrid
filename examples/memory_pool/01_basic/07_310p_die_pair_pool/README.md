@@ -85,3 +85,8 @@ export LD_LIBRARY_PATH=$CANN/aarch64-linux/lib64:/usr/local/Ascend/driver/lib64/
 - **Q：join 后为什么还要同步一次才开始拷贝？**
   A：join 为动态成员语义——先 join 的 rank 在组内只有一个成员时立即返回，
   peer 的内存在其 join 完成后才完成 import/映射（对称池地址按算术即时可见，但映射就绪需对端 join）。
+- **Q：上次异常退出后重跑失败怎么办？**
+  A：异常退出（如 kill/段错误）会在 `/dev/shm` 残留 HOST_SHM 段文件（`memfabric_hybrid_*`），
+  该目录默认仅 64MB，残留占满会导致 DRAM 池创建失败并连锁引发 HBM 窗口基址漂移
+  （两进程 `ReserveMemAddress` 基址不再一致，方向校验失败）。清理后重跑：
+  `rm -f /dev/shm/memfabric_hybrid_*`。

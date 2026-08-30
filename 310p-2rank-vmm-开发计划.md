@@ -287,6 +287,29 @@ D2D 为 `AclrtMemcpyAsync` 提交后**立即** `SynchronizeStream`；`DataCopyAs
 4. 验收：e2e 增加异步路径用例（`smem_bm_copy(..., ASYNC_COPY_FLAG)` + `smem_bm_wait` 逐字校验）；
    带宽对比确认多段拷贝场景收益
 
+### TODO-4：8-rank DRAM 大池（8×2GB=16GB）验证与主机共享内存容量配置
+
+**场景**：单机 8 die（4 卡×2 die）全用 HOST_SHM 路径组 16GB DRAM 池（每 rank 2GB）。
+代码层面无障碍（走存量 `HybmHostShmSegment`，非本 PR 的 ACL VMM 路径；worldSize 上限 1024），
+但有两个主机侧前提和一个验证缺口：
+
+1. **共享内存容量上限（硬前提）**：HOST_SHM 优先用 hugetlbfs（`/dev/hugepages`），
+   不可用时回落 `/dev/shm`（tmpfs）。本机现状：hugepages 未挂载（0 页），`/dev/shm`
+   挂载参数 `size=65536k` 仅 64MB——8×2GB 需 16GB，回落路径第一个 rank 建池即失败。
+   需二选一（运维配置，非代码改动）：
+   - 配大页（代码首选路径，性能更优）：`echo 8192 > /proc/sys/vm/nr_hugepages`（8×2GB），
+     并挂载 hugetlbfs 到 `/dev/hugepages`；需系统有足够连续空闲内存
+   - 扩 tmpfs：`mount -o remount,size=20G /dev/shm`（临时）/ 改 `/etc/fstab`（永久）
+   - 顺带检查 `shmall`（总页上限），16GB/4KB≈400 万页
+2. **每进程映射整窗（软前提）**：HOST_SHM 模式每 rank 进程 mmap 整个
+   `rankCnt×size` 窗口并映射全部 8 个分片文件；物理内存实际占 16GB（共享），
+   但每进程虚拟地址空间 + 页表开销 ×8，需确认主机内存余量
+3. **8-rank 实机验证缺口**：本机仅做过 IPC 层探测（能力矩阵 07 号），HOST_SHM 段完整
+   8-rank 建池 + 跨 rank 拷贝未实机验证；且本机组网对启动时序敏感（2-rank 已证），
+   8 进程并发 join 时序窗口更紧。建议先用 8×32MB 小规模验证组网，再放大到 8×2GB
+4. **范围说明**：DRAM 池单独建（HOST_SHM 纯 opType，禁与 SDMA 等混用）；HBM 池
+   8-rank 不在本 TODO 范围（受 P2P 槽位预算限制，见方案文档 8-rank 子方案）
+
 ## 附录：开发流程踩坑记录与规范（防止复犯）
 
 > 本附录固化 V1 开发中实际踩过的流程类问题及其根因、正确做法。**每条都是真实发生过并造成过

@@ -44,6 +44,10 @@ public:
 
 private:
     bool IsSupportedDirection(hybm_data_copy_direction direction) const noexcept;
+    static bool IsD2DDirection(hybm_data_copy_direction direction) noexcept;
+    Result SubmitD2D(void *dest, const void *src, uint64_t length) noexcept;
+    Result SyncStream() noexcept;
+    Result BatchCopyD2D(hybm_batch_copy_params &params) noexcept;
     Result CopyDeviceToDevice(void *dest, const void *src, uint64_t length) noexcept;
     Result CopyByDirection(void *dest, const void *src, uint64_t length,
                            hybm_data_copy_direction direction) noexcept;

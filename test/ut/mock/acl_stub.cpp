@@ -17,10 +17,22 @@ constexpr int32_t RETURN_OK = 0;
 constexpr int32_t RETURN_ERROR = -1;
 constexpr uint64_t START_ADDR = 0x100000000000ULL;
 
+/* UT 失败注入/计数: 非 0 时 aclrtSynchronizeStream 返回错误(stream 自恢复用例) */
+extern "C" {
+int32_t g_stubSyncStreamFail = 0;
+int32_t g_stubSyncStreamCalls = 0;
+int32_t g_stubCreateStreamCalls = 0;
+int32_t g_stubDestroyStreamCalls = 0;
+int32_t g_stubSetCurrentContextFail = 0; // 非 0 时 SetCurrentContext 返回错误(die 对导入防护用例)
+int32_t g_stubSetDeviceFail = 0;         // 非 0 时 SetDevice 返回错误(die 对导入恢复失败用例)
+int32_t g_stubDestroyContextCalls = 0;   // 计数: context 销毁次数(验证失败时跳过销毁)
+}
+
 extern "C" {
 int32_t aclrtSetDevice(int32_t deviceId)
 {
-    return RETURN_OK;
+    (void)deviceId;
+    return g_stubSetDeviceFail != 0 ? RETURN_ERROR : RETURN_OK;
 }
 
 int32_t aclrtGetDevice(int32_t *deviceId)
@@ -38,17 +50,20 @@ int32_t aclrtDeviceEnablePeerAccess(int32_t peerDeviceId, uint32_t flags)
 
 int32_t aclrtCreateStream(void **stream)
 {
+    g_stubCreateStreamCalls++;
     return RETURN_OK;
 }
 
 int32_t aclrtDestroyStream(void *stream)
 {
+    g_stubDestroyStreamCalls++;
     return RETURN_OK;
 }
 
 int32_t aclrtSynchronizeStream(void *stream)
 {
-    return RETURN_OK;
+    g_stubSyncStreamCalls++;
+    return g_stubSyncStreamFail != 0 ? RETURN_ERROR : RETURN_OK;
 }
 
 int32_t aclrtMalloc(void **ptr, size_t count, uint32_t type)
@@ -423,12 +438,13 @@ int32_t aclrtCreateContext(void **context, int32_t deviceId)
 int32_t aclrtSetCurrentContext(void *context)
 {
     (void)context;
-    return RETURN_OK;
+    return g_stubSetCurrentContextFail != 0 ? RETURN_ERROR : RETURN_OK;
 }
 
 int32_t aclrtDestroyContext(void *context)
 {
     (void)context;
+    g_stubDestroyContextCalls++;
     return RETURN_OK;
 }
 

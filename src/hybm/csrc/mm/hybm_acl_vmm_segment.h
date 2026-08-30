@@ -24,6 +24,8 @@
 #include "hybm_mem_segment.h"
 #include "dl_acl_api.h"
 
+#include <unordered_set>
+
 namespace ock {
 namespace mf {
 struct AclVmmExportInfo {
@@ -78,21 +80,29 @@ public:
 
 private:
     Result ExportInner(const MemSlicePtr &slice) noexcept;
+    Result MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_t size, uint64_t allocAddr) noexcept;
+    Result RegisterAndExportSlice(const MemSlicePtr &slice, aclrtDrvMemHandle handle, uint64_t allocAddr,
+                                  uint64_t size) noexcept;
     Result ImportOne(const AclVmmExportInfo &im) noexcept;
+    Result ImportHandleForDiePair(const AclVmmExportInfo &im, aclrtDrvMemHandle &handle) noexcept;
+    Result MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrvMemHandle handle, uint64_t slotAddr) noexcept;
     Result UnmapOne(uint64_t slotAddr, aclrtDrvMemHandle handle) noexcept;
+    bool IsImportInfoValid(const AclVmmExportInfo &info) const noexcept;
     bool IsDiePair(uint32_t peerDevId) const noexcept;
     uint64_t OwnSlotBase() const noexcept;
     uint64_t SlotBase(uint32_t rankId) const noexcept;
     void FillMemProp(aclrtPhysicalMemProp &prop) const noexcept;
 
     std::vector<AclVmmExportInfo> imports_;
-    uint8_t *globalVirtualAddress_{nullptr}; // 对称窗口基址, GVA==DVA==HVA
-    uint64_t totalVirtualSize_{0UL};         // rankCnt * maxSize
+    std::unordered_set<uint64_t> importKeys_; // (rankId<<32)|sliceIndex, Import 去重
+    uint8_t *globalVirtualAddress_{nullptr};  // 对称窗口基址, GVA==DVA==HVA
+    uint64_t totalVirtualSize_{0UL};          // rankCnt * maxSize
     uint64_t allocatedSize_{0UL};
 
     std::map<uint32_t, MemSliceStatus> slices_;              // index -> (slice, own handle)
     std::map<uint32_t, std::string> exportMap_;              // index -> serialized export info
     std::map<uint64_t, aclrtDrvMemHandle> mappedGvaMem_;     // slot addr -> imported handle
+    std::vector<aclrtDrvMemHandle> orphanHandles_;           // unmap 成功但 free 失败的遗留句柄
 };
 } // namespace mf
 } // namespace ock

@@ -11,9 +11,11 @@
  */
 
 /* P3 UT：HostDataOpAclMemcpy(310P aclrtMemcpy 算子) — stub so 集成模式, 不依赖 mockcpp
- * stub 的 aclrtMemcpy/aclrtMemcpyAsync/aclrtSynchronizeStream 为直通实现(见 acl_stub)。
+ * stub 的 aclrtMemcpy/aclrtMemcpyAsync 为直通实现; aclrtSynchronizeStream 支持
+ * g_stubSyncStreamFail 失败注入与调用计数(见 acl_stub), 经 dlsym 获取。
  */
 #include <gtest/gtest.h>
+#include <dlfcn.h>
 
 #define private public
 #define protected public
@@ -25,6 +27,14 @@
 
 namespace ock {
 namespace mf {
+namespace {
+/* stub so 经 DlAclApi dlopen 加载, 测试经 dlsym 取注入标志/计数器 */
+int32_t *StubSym(const char *name)
+{
+    void *h = dlopen("libascendcl.so", RTLD_LAZY);
+    return reinterpret_cast<int32_t *>(dlsym(h, name));
+}
+} // namespace
 
 class HybmDataOpAclMemcpyTest : public testing::Test {
 protected:
@@ -32,9 +42,18 @@ protected:
     {
         Result ret = hybm_init(0, 0);
         ASSERT_EQ(ret, BM_OK) << "hybm_init failed, ret=" << ret;
+        auto *fail = StubSym("g_stubSyncStreamFail");
+        ASSERT_NE(fail, nullptr) << "stub g_stubSyncStreamFail not found";
+        *fail = 0;
     }
     void TearDown() override
     {
+        for (const char *sym : {"g_stubSyncStreamFail", "g_stubSetCurrentContextFail", "g_stubSetDeviceFail"}) {
+            auto *flag = StubSym(sym);
+            if (flag != nullptr) {
+                *flag = 0;
+            }
+        }
         hybm_uninit();
     }
 
@@ -132,6 +151,63 @@ TEST_F(HybmDataOpAclMemcpyTest, TransformVaIsNoop)
     op.TransformVa(src, dst, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE);
     ASSERT_EQ(src, reinterpret_cast<void *>(0x1234));
     ASSERT_EQ(dst, reinterpret_cast<void *>(0x5678));
+}
+
+TEST_F(HybmDataOpAclMemcpyTest, StreamRecoveryAfterSyncFailure)
+{
+    constexpr int64_t kStubNo = 0;
+    constexpr int64_t kStubFail = 1;
+    auto *fail = StubSym("g_stubSyncStreamFail");
+    auto *creates = StubSym("g_stubCreateStreamCalls");
+    auto *destroys = StubSym("g_stubDestroyStreamCalls");
+    ASSERT_NE(creates, nullptr);
+    ASSERT_NE(destroys, nullptr);
+
+    HostDataOpAclMemcpy op(0);
+    ASSERT_EQ(op.Initialize(), BM_OK);
+    uint64_t src[2] = {1, 2};
+    uint64_t dst[2] = {0};
+
+    // 注入同步失败: D2D 返回错误且 stream 被销毁重建(各一次), 算子不残留持久错误态
+    *fail = static_cast<int32_t>(kStubFail);
+    const int32_t createBefore = *creates;
+    const int32_t destroyBefore = *destroys;
+    auto p1 = MakeParams(dst, src, sizeof(src));
+    ASSERT_NE(op.DataCopy(p1, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, {}), BM_OK);
+    ASSERT_EQ(*destroys - destroyBefore, 1);
+    ASSERT_EQ(*creates - createBefore, 1);
+
+    // 恢复注入后同一算子仍可完成 D2D
+    *fail = static_cast<int32_t>(kStubNo);
+    auto p2 = MakeParams(dst, src, sizeof(src));
+    ASSERT_EQ(op.DataCopy(p2, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, {}), BM_OK);
+    op.UnInitialize();
+}
+
+TEST_F(HybmDataOpAclMemcpyTest, BatchD2DUsesSingleSync)
+{
+    auto *syncs = StubSym("g_stubSyncStreamCalls");
+    ASSERT_NE(syncs, nullptr);
+    HostDataOpAclMemcpy op(0);
+    ASSERT_EQ(op.Initialize(), BM_OK);
+
+    constexpr uint32_t kBatchSize = 4;
+    uint64_t src[kBatchSize][2] = {{1, 1}, {2, 2}, {3, 3}, {4, 4}};
+    uint64_t dst[kBatchSize][2] = {{0}, {0}, {0}, {0}};
+    void *srcs[kBatchSize] = {src[0], src[1], src[2], src[3]};
+    void *dsts[kBatchSize] = {dst[0], dst[1], dst[2], dst[3]};
+    uint64_t sizes[kBatchSize] = {sizeof(src[0]), sizeof(src[1]), sizeof(src[2]), sizeof(src[3])};
+    hybm_batch_copy_params bp{};
+    bp.sources = srcs;
+    bp.destinations = dsts;
+    bp.dataSizes = sizes;
+    bp.batchSize = kBatchSize;
+
+    // 两阶段: N 次提交仅 1 次流同步(同一 stream 保序)
+    const int32_t syncBefore = *syncs;
+    ASSERT_EQ(op.BatchDataCopy(bp, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, {}), BM_OK);
+    ASSERT_EQ(*syncs - syncBefore, 1);
+    op.UnInitialize();
 }
 } // namespace mf
 } // namespace ock

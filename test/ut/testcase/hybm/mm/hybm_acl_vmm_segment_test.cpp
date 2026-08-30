@@ -10,8 +10,11 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* P2 UT：HybmAclVmmSegment(310P ACL VMM HBM 段) — stub so 集成模式, 不依赖 mockcpp */
+/* P2 UT：HybmAclVmmSegment(310P ACL VMM HBM 段) — stub so 集成模式, 不依赖 mockcpp
+ * stub 支持 g_stubSetCurrentContextFail/g_stubSetDeviceFail 等失败注入(见 acl_stub),
+ * 经 dlsym 获取。 */
 #include <gtest/gtest.h>
+#include <dlfcn.h>
 
 #if __has_include(<mockcpp/mockcpp.hpp>)
 #define MF_ACL_VMM_UT_HAS_MOCKCPP 1
@@ -32,6 +35,14 @@
 
 namespace ock {
 namespace mf {
+namespace {
+/* stub so 经 DlAclApi dlopen 加载, 测试经 dlsym 取注入标志/计数器 */
+int32_t *StubSym(const char *name)
+{
+    void *h = dlopen("libascendcl.so", RTLD_LAZY);
+    return reinterpret_cast<int32_t *>(dlsym(h, name));
+}
+} // namespace
 
 class HybmAclVmmSegmentTest : public testing::Test {
 protected:
@@ -41,12 +52,23 @@ protected:
         ASSERT_EQ(ret, BM_OK) << "hybm_init failed, ret=" << ret;
         MemSegment::socType_ = AscendSocType::ASCEND_310P;
         HybmVaManager::GetInstance().ClearAll();
+        ResetStubInjections();
     }
     void TearDown() override
     {
+        ResetStubInjections();
         HybmVaManager::GetInstance().ClearAll();
         MemSegment::socType_ = AscendSocType::ASCEND_UNKNOWN;
         hybm_uninit();
+    }
+    static void ResetStubInjections()
+    {
+        for (const char *sym : {"g_stubSetCurrentContextFail", "g_stubSetDeviceFail", "g_stubSyncStreamFail"}) {
+            auto *flag = StubSym(sym);
+            if (flag != nullptr) {
+                *flag = 0;
+            }
+        }
     }
 
     MemSegmentOptions MakeOptions(uint32_t rankId, uint32_t rankCnt, uint64_t size, uint64_t maxSize)
@@ -212,6 +234,105 @@ TEST_F(HybmAclVmmSegmentTest, CreateDispatchesToAclVmmFor310P)
     ASSERT_NE(std::dynamic_pointer_cast<HybmAclVmmSegment>(seg), nullptr);
 }
 #endif
+
+TEST_F(HybmAclVmmSegmentTest, ImportValidationAndDedup)
+{
+    const uint64_t maxSize = 2UL * HYBM_LARGE_PAGE_SIZE;
+    MemSegmentOptions opt0 = MakeOptions(0, 2, maxSize, maxSize);
+    HybmAclVmmSegment seg0(opt0, 0);
+    void *base0 = nullptr;
+    ASSERT_EQ(seg0.ReserveMemorySpace(&base0), BM_OK);
+    MemSlicePtr slice0 = nullptr;
+    ASSERT_EQ(seg0.AllocLocalMemory(HYBM_LARGE_PAGE_SIZE, slice0), BM_OK);
+    std::string exInfo;
+    ASSERT_EQ(seg0.Export(slice0, exInfo), BM_OK);
+
+    MemSegmentOptions opt1 = MakeOptions(1, 2, maxSize, maxSize);
+    opt1.devId = 1;
+    HybmAclVmmSegment seg1(opt1, 1);
+    void *base1 = nullptr;
+    ASSERT_EQ(seg1.ReserveMemorySpace(&base1), BM_OK);
+
+    LiteralExInfoTranslater<AclVmmExportInfo> translator;
+    auto tamper = [&exInfo, &translator](uint32_t sliceIndex, uint32_t rankId, uint64_t size) {
+        AclVmmExportInfo info{};
+        (void)translator.Deserialize(exInfo, info);
+        info.sliceIndex = sliceIndex;
+        info.rankId = rankId;
+        info.size = size;
+        std::string out;
+        (void)translator.Serialize(info, out);
+        return out;
+    };
+
+    // sliceIndex 越出对端 slot 窗口(maxSize/2M-1=1): 拒绝
+    std::vector<std::string> oob{tamper(2U, 0U, HYBM_LARGE_PAGE_SIZE)};
+    ASSERT_EQ(seg1.Import(oob, nullptr), BM_OK);
+    ASSERT_TRUE(seg1.imports_.empty());
+
+    // size 非 2M 对齐: 拒绝
+    std::vector<std::string> unaligned{tamper(0U, 0U, HYBM_LARGE_PAGE_SIZE + 1)};
+    ASSERT_EQ(seg1.Import(unaligned, nullptr), BM_OK);
+    ASSERT_TRUE(seg1.imports_.empty());
+
+    // rankId 越界: 拒绝
+    std::vector<std::string> badRank{tamper(0U, 5U, HYBM_LARGE_PAGE_SIZE)};
+    ASSERT_EQ(seg1.Import(badRank, nullptr), BM_OK);
+    ASSERT_TRUE(seg1.imports_.empty());
+
+    // 同一(rankId, sliceIndex) 重复到达: 去重后仅 1 条
+    std::vector<std::string> dup{exInfo, exInfo};
+    ASSERT_EQ(seg1.Import(dup, nullptr), BM_OK);
+    ASSERT_EQ(seg1.imports_.size(), 1UL);
+
+    (void)seg0.UnReserveMemorySpace();
+    (void)seg1.UnReserveMemorySpace();
+}
+
+TEST_F(HybmAclVmmSegmentTest, DiePairImportContextFailurePaths)
+{
+    const uint64_t maxSize = 2UL * HYBM_LARGE_PAGE_SIZE;
+    MemSegmentOptions opt0 = MakeOptions(0, 2, maxSize, maxSize);
+    HybmAclVmmSegment seg0(opt0, 0);
+    void *base0 = nullptr;
+    ASSERT_EQ(seg0.ReserveMemorySpace(&base0), BM_OK);
+    MemSlicePtr slice0 = nullptr;
+    ASSERT_EQ(seg0.AllocLocalMemory(HYBM_LARGE_PAGE_SIZE, slice0), BM_OK);
+    std::string exInfo;
+    ASSERT_EQ(seg0.Export(slice0, exInfo), BM_OK);
+
+    MemSegmentOptions opt1 = MakeOptions(1, 2, maxSize, maxSize);
+    opt1.devId = 1;
+    HybmAclVmmSegment seg1(opt1, 1);
+    void *base1 = nullptr;
+    ASSERT_EQ(seg1.ReserveMemorySpace(&base1), BM_OK);
+    ASSERT_EQ(seg1.Import({exInfo}, nullptr), BM_OK);
+
+    auto *ctxFail = StubSym("g_stubSetCurrentContextFail");
+    auto *devFail = StubSym("g_stubSetDeviceFail");
+    auto *destroys = StubSym("g_stubDestroyContextCalls");
+    ASSERT_NE(ctxFail, nullptr);
+    ASSERT_NE(devFail, nullptr);
+    ASSERT_NE(destroys, nullptr);
+
+    // ① SetCurrentContext 失败: 不执行 import, Mmap 报错且无映射建立
+    *ctxFail = 1;
+    ASSERT_NE(seg1.Mmap(), BM_OK);
+    ASSERT_EQ(seg1.mappedGvaMem_.size(), 0UL);
+    *ctxFail = 0;
+
+    // ② SetDevice 恢复失败: import 已成功但恢复现场失败——跳过 DestroyContext 防线程上下文悬空
+    *devFail = 1;
+    const int32_t destroyBefore = *destroys;
+    ASSERT_EQ(seg1.Mmap(), BM_OK); // import 本身成功, 映射建立
+    ASSERT_EQ(seg1.mappedGvaMem_.size(), 1UL);
+    ASSERT_EQ(*destroys - destroyBefore, 0); // 关键: 未销毁(宁泄漏不悬空)
+    *devFail = 0;
+
+    ASSERT_EQ(seg1.Unmap(), BM_OK);
+    (void)seg0.UnReserveMemorySpace();
+    (void)seg1.UnReserveMemorySpace();
+}
 
 TEST_F(HybmAclVmmSegmentTest, MemoryInRangeAndLocalRange)
 {

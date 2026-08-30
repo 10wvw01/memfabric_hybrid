@@ -108,7 +108,7 @@ public:
     void TearDown() override;
 
 public:
-    static std::shared_ptr<ock::mf::DataOperator> CreateSdmaDataOperator();
+    static std::shared_ptr<ock::mf::DataOperator> CreateSdmaDataOperator(uint32_t rankId);
     static std::shared_ptr<ock::mf::DataOperator>
     CreateDevRdmaDataOperator(uint32_t rankId, const std::shared_ptr<ock::mf::transport::TransportManager> &tm);
     static std::shared_ptr<ock::mf::DataOperator>
@@ -154,7 +154,7 @@ void HybmComposeDataOpTest::TearDown()
     hostRdmaDataOpMock->Reset();
 }
 
-std::shared_ptr<ock::mf::DataOperator> HybmComposeDataOpTest::CreateSdmaDataOperator()
+std::shared_ptr<ock::mf::DataOperator> HybmComposeDataOpTest::CreateSdmaDataOperator(uint32_t rankId)
 {
     return sdmaDataOpMock;
 }

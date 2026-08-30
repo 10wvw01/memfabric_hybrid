@@ -69,6 +69,47 @@ static void WaitPeerDone(const char *name)
     exit(1);
 }
 
+static void PrepareWorkDir(void)
+{
+    const char *marker = WORK_DIR "/dir_ready";
+    if (g_rank == 0) {
+        /* 仅 rank0 清理/建目录, 消除双进程 rm -rf 与 mkdir 的竞态; 标记写入 PID,
+         * rank1 以内容区分"上一轮旧标记"与"本轮新标记"(rank0 先行场景免白等) */
+        (void)system("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
+        FILE *fp = fopen(marker, "w");
+        if (fp != nullptr) {
+            (void)fprintf(fp, "%d\n", static_cast<int>(getpid()));
+            (void)fclose(fp);
+        }
+        return;
+    }
+    /* rank1: 先等旧标记消失或内容变化(rank0 已开始新一轮清理), 再等新标记出现 */
+    char oldContent[32] = {0};
+    FILE *fp = fopen(marker, "r");
+    if (fp != nullptr) {
+        (void)fgets(oldContent, sizeof(oldContent), fp);
+        (void)fclose(fp);
+    }
+    bool hadMarker = oldContent[0] != '\0';
+    char content[32] = {0};
+    for (int i = 0; i < 30000; i++) {
+        FILE *cur = fopen(marker, "r");
+        bool exists = cur != nullptr;
+        if (exists) {
+            content[0] = '\0';
+            (void)fgets(content, sizeof(content), cur);
+            (void)fclose(cur);
+        }
+        /* 无旧标记: 等出现即可; 有旧标记: 等它消失或变成不同 PID(内容变化即新一轮) */
+        if ((!hadMarker && exists) || (hadMarker && (!exists || strcmp(content, oldContent) != 0))) {
+            return;
+        }
+        usleep(1000);
+    }
+    printf("[r1 FAIL] wait workdir ready timeout\n");
+    exit(1);
+}
+
 static int CopyCheck(smem_bm_t h, void *dst, const void *src, size_t len, smem_bm_copy_type_t t, uint64_t tag,
                      const char *label)
 {
@@ -112,8 +153,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     g_rank = atoi(argv[1]);
-    (void)system("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
-    usleep(200000); /* 等对端清理完成 */
+    PrepareWorkDir(); /* rank0 建目录并放标记, rank1 等标记就绪(代替固定 usleep) */
 
     Step("smem_init", smem_init(0));
     smem_bm_config_t cfg;

@@ -13,8 +13,6 @@
 #include "hybm_data_op_factory.h"
 #include "hybm_compose_data_op.h"
 
-#include "hybm_data_op_acl_memcpy.h"
-
 namespace ock {
 namespace mf {
 HostComposeDataOp::HostComposeDataOp(hybm_options options, transport::TransManagerPtr tm,
@@ -32,13 +30,7 @@ Result HostComposeDataOp::Initialize() noexcept
     }
 
     if (options_.bmDataOpType & HYBM_DOP_TYPE_SDMA) {
-        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
-            // 310P: HostDataOpSDMA 的 paramSpace(HalHostRegister)与 STARS SQE 直投均不可用,
-            // 以 aclrtMemcpy 算子占 sdmaDataOperator_ 槽位(保证 hybm_wait 语义)
-            sdmaDataOperator_ = std::make_shared<HostDataOpAclMemcpy>(options_.rankId);
-        } else {
-            sdmaDataOperator_ = DataOperatorFactory::CreateSdmaDataOperator();
-        }
+        sdmaDataOperator_ = DataOperatorFactory::CreateSdmaDataOperator(options_.rankId);
         auto ret = sdmaDataOperator_->Initialize();
         if (ret != BM_OK) {
             BM_LOG_ERROR("SDMA data operator init failed, ret: " << ret << " rankId: " << options_.rankId

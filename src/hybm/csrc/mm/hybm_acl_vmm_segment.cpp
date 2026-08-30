@@ -12,8 +12,6 @@
 
 #include "hybm_acl_vmm_segment.h"
 
-#include <algorithm>
-
 #include "hybm_ex_info_transfer.h"
 #include "hybm_va_manager.h"
 
@@ -96,6 +94,15 @@ Result HybmAclVmmSegment::UnReserveMemorySpace() noexcept
     }
     exportMap_.clear();
 
+    // 孤立句柄兜底: Unmap 半失败(unmap 成功/free 失败)遗留的句柄在此重试释放
+    for (auto &h : orphanHandles_) {
+        auto freeRet = DlAclApi::AclrtFreePhysical(h);
+        if (freeRet != BM_OK) {
+            BM_LOG_ERROR("orphan AclrtFreePhysical failed, ret:" << freeRet << " rankId:" << options_.rankId);
+        }
+    }
+    orphanHandles_.clear();
+
     if (globalVirtualAddress_ != nullptr) {
         ret = DlAclApi::AclrtReleaseMemAddress(globalVirtualAddress_);
         if (ret != BM_OK) {
@@ -116,6 +123,58 @@ void HybmAclVmmSegment::FillMemProp(aclrtPhysicalMemProp &prop) const noexcept
     prop.memAttr = aclrtMemAttr::ACL_MEM_P2P_HUGE;
     prop.location.id = static_cast<uint32_t>(options_.devId);
     prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+}
+
+Result HybmAclVmmSegment::MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_t size, uint64_t allocAddr) noexcept
+{
+    auto ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(allocAddr), size, 0, handle, 0);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("AclrtMapMem failed, ret:" << ret << " rankId:" << options_.rankId
+                                                << " addr:" << VaToStr(allocAddr) << " size:" << size);
+        return ret;
+    }
+
+    aclrtMemAccessDesc acc{};
+    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    acc.location.id = static_cast<uint32_t>(options_.devId);
+    acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+    ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &acc, 1);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("AclrtMemSetAccess failed, ret:" << ret << " rankId:" << options_.rankId
+                                                      << " addr:" << VaToStr(allocAddr));
+        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+        return ret;
+    }
+    return BM_OK;
+}
+
+Result HybmAclVmmSegment::RegisterAndExportSlice(const MemSlicePtr &slice, aclrtDrvMemHandle handle,
+                                                 uint64_t allocAddr, uint64_t size) noexcept
+{
+    auto vaRet = HybmVaManager::GetInstance().AddVaInfo({{allocAddr, allocAddr, allocAddr}, size,
+                                                         HYBM_MEM_TYPE_DEVICE},
+                                                        options_.rankId);
+    if (vaRet != BM_OK) {
+        BM_LOG_ERROR("AddVaInfo failed, ret:" << vaRet << " rankId:" << options_.rankId
+                                              << " addr:" << VaToStr(allocAddr));
+        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+        (void)DlAclApi::AclrtFreePhysical(handle);
+        return vaRet;
+    }
+
+    slices_.emplace(sliceCount_, MemSliceStatus(slice, handle));
+    auto expRet = ExportInner(slice);
+    if (expRet != BM_OK) {
+        BM_LOG_ERROR("ExportInner failed, ret:" << expRet << " rankId:" << options_.rankId
+                                                << " sliceIndex:" << sliceCount_);
+        slices_.erase(sliceCount_);
+        // 回滚 VA 登记: allocatedSize_ 未推进, 下次 Alloc 复用同地址会因 overlap 拒绝, 段永久不可用
+        HybmVaManager::GetInstance().RemoveOneVaInfo(allocAddr);
+        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+        (void)DlAclApi::AclrtFreePhysical(handle);
+        return expRet;
+    }
+    return BM_OK;
 }
 
 Result HybmAclVmmSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) noexcept
@@ -145,23 +204,8 @@ Result HybmAclVmmSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) no
     }
 
     auto allocAddr = OwnSlotBase() + allocatedSize_;
-    ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(allocAddr), size, 0, handle, 0);
+    ret = MapPhysicalToOwnSlot(handle, size, allocAddr);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtMapMem failed, ret:" << ret << " rankId:" << options_.rankId
-                                                << " addr:" << VaToStr(allocAddr) << " size:" << size);
-        (void)DlAclApi::AclrtFreePhysical(handle);
-        return ret;
-    }
-
-    aclrtMemAccessDesc acc{};
-    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    acc.location.id = static_cast<uint32_t>(options_.devId);
-    acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-    ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &acc, 1);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtMemSetAccess failed, ret:" << ret << " rankId:" << options_.rankId
-                                                      << " addr:" << VaToStr(allocAddr));
-        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
         (void)DlAclApi::AclrtFreePhysical(handle);
         return ret;
     }
@@ -176,26 +220,9 @@ Result HybmAclVmmSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) no
         return BM_MALLOC_FAILED;
     }
 
-    auto vaRet = HybmVaManager::GetInstance().AddVaInfo({{allocAddr, allocAddr, allocAddr}, size,
-                                                         HYBM_MEM_TYPE_DEVICE},
-                                                        options_.rankId);
-    if (vaRet != BM_OK) {
-        BM_LOG_ERROR("AddVaInfo failed, ret:" << vaRet << " rankId:" << options_.rankId
-                                              << " addr:" << VaToStr(allocAddr));
-        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
-        (void)DlAclApi::AclrtFreePhysical(handle);
-        return vaRet;
-    }
-
-    slices_.emplace(sliceCount_, MemSliceStatus(slice, handle));
-    auto expRet = ExportInner(slice);
-    if (expRet != BM_OK) {
-        BM_LOG_ERROR("ExportInner failed, ret:" << expRet << " rankId:" << options_.rankId
-                                                << " sliceIndex:" << sliceCount_);
-        slices_.erase(sliceCount_);
-        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
-        (void)DlAclApi::AclrtFreePhysical(handle);
-        return expRet;
+    ret = RegisterAndExportSlice(slice, handle, allocAddr, size);
+    if (ret != BM_OK) {
+        return ret;
     }
     allocatedSize_ += size;
     sliceCount_++;
@@ -258,6 +285,7 @@ Result HybmAclVmmSegment::ExportInner(const MemSlicePtr &slice) noexcept
     try {
         exportMap_.emplace(static_cast<uint32_t>(slice->index_), exInfo);
     } catch (...) {
+        BM_LOG_ERROR("exportMap_ emplace failed, rankId:" << options_.rankId << " sliceIndex:" << slice->index_);
         return BM_MALLOC_FAILED;
     }
     return BM_OK;
@@ -303,6 +331,26 @@ uint64_t HybmAclVmmSegment::SlotBase(uint32_t rankId) const noexcept
     return reinterpret_cast<uint64_t>(globalVirtualAddress_) + options_.maxSize * rankId;
 }
 
+bool HybmAclVmmSegment::IsImportInfoValid(const AclVmmExportInfo &info) const noexcept
+{
+    // exInfo 经 config store 传输, 用于本地 VA 映射前须防篡改/越界:
+    // sliceIndex 与 size 必须落在对端 rank 的 slot 窗口内且 2M 对齐
+    if (info.rankId >= options_.rankCnt) {
+        BM_LOG_WARN("import info rankId out of range, localRank:" << options_.rankId << " remoteRank:" << info.rankId
+                    << " rankCnt:" << options_.rankCnt << ", skip");
+        return false;
+    }
+    if (info.size == 0 || info.size % HYBM_LARGE_PAGE_SIZE != 0 ||
+        info.sliceIndex > (options_.maxSize / HYBM_LARGE_PAGE_SIZE) - 1U ||
+        info.sliceIndex * HYBM_LARGE_PAGE_SIZE + info.size > options_.maxSize) {
+        BM_LOG_WARN("import info size/sliceIndex invalid, localRank:" << options_.rankId << " remoteRank:"
+                    << info.rankId << " sliceIndex:" << info.sliceIndex << " size:" << info.size
+                    << " maxSize:" << options_.maxSize << ", skip");
+        return false;
+    }
+    return true;
+}
+
 Result HybmAclVmmSegment::Import(const std::vector<std::string> &allExInfo, void *addresses[]) noexcept
 {
     LiteralExInfoTranslater<AclVmmExportInfo> translator;
@@ -313,7 +361,7 @@ Result HybmAclVmmSegment::Import(const std::vector<std::string> &allExInfo, void
             BM_LOG_ERROR("deserialize import info failed, index:" << i << " rankId:" << options_.rankId);
             return BM_INVALID_PARAM;
         }
-        if (info.magic != ACL_VMM_HBM_SLICE_EXPORT_INFO_MAGIC || info.magic == ENTITY_EXPORT_INFO_MAGIC) {
+        if (info.magic != ACL_VMM_HBM_SLICE_EXPORT_INFO_MAGIC) {
             BM_LOG_WARN("import index(" << i << ") rank(" << info.rankId << ") magic(" << std::hex << info.magic
                                         << std::dec << ") mismatch, skip it.");
             continue;
@@ -321,20 +369,19 @@ Result HybmAclVmmSegment::Import(const std::vector<std::string> &allExInfo, void
         if (addresses != nullptr) {
             addresses[i] = reinterpret_cast<void *>(info.gva);
         }
-        if (info.size == 0 || info.rankId >= options_.rankCnt) {
+        if (!IsImportInfoValid(info)) {
             continue;
         }
         // 幂等: join 重试场景下同一(rankId, sliceIndex)可能重复到达, 去重防止二次 import 报错
-        auto dup = std::find_if(imports_.begin(), imports_.end(), [&info](const AclVmmExportInfo &it) {
-            return it.rankId == info.rankId && it.sliceIndex == info.sliceIndex;
-        });
-        if (dup != imports_.end()) {
+        auto key = (static_cast<uint64_t>(info.rankId) << 32U) | info.sliceIndex;
+        if (importKeys_.count(key) != 0U) {
             BM_LOG_INFO("import info duplicated, localRank:" << options_.rankId << " remoteRank:" << info.rankId
                         << " sliceIndex:" << info.sliceIndex << ", skip");
             continue;
         }
         try {
             imports_.emplace_back(info);
+            importKeys_.emplace(key);
         } catch (...) {
             BM_LOG_ERROR("imports_ emplace failed, rankId:" << options_.rankId);
             return BM_MALLOC_FAILED;
@@ -345,42 +392,69 @@ Result HybmAclVmmSegment::Import(const std::vector<std::string> &allExInfo, void
     return BM_OK;
 }
 
+Result HybmAclVmmSegment::ImportHandleForDiePair(const AclVmmExportInfo &im, aclrtDrvMemHandle &handle) noexcept
+{
+    // die 对: 借导出方 ctx 跳过 runtime P2P 前置检查(同芯片 P2P 被内核拒绝)
+    aclrtContext expCtx = nullptr;
+    auto ret = DlAclApi::AclrtCreateContext(&expCtx, static_cast<int32_t>(im.devId));
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("CreateContext(peerDie) failed, ret:" << ret << " peerDevId:" << im.devId
+                                                           << " rankId:" << options_.rankId);
+        return ret;
+    }
+    ret = DlAclApi::AclrtSetCurrentContext(expCtx);
+    if (ret != BM_OK) {
+        // ctx 切换失败则不得在其上执行 import, 直接恢复并放弃本条
+        BM_LOG_ERROR("SetCurrentContext(peerDie) failed, ret:" << ret << " peerDevId:" << im.devId
+                                                               << " rankId:" << options_.rankId);
+        (void)DlAclApi::AclrtDestroyContext(expCtx);
+        return ret;
+    }
+    ret = DlAclApi::AclrtMemImportFromShareableHandle(im.shareableHandle, options_.devId, &handle);
+    if (ret != BM_OK) {
+        // shareableHandle 为内存导入凭据, 不落日志(防泄露), 以 remoteRank/sliceIndex 定位
+        BM_LOG_ERROR("die pair import failed, ret:" << ret << " localRank:" << options_.rankId
+                   << " remoteRank:" << im.rankId << " sliceIndex:" << im.sliceIndex);
+    }
+    // 恢复现场: 回本端 device 成功后线程才离开 expCtx, 此时销毁临时 ctx 才安全
+    auto restoreRet = DlAclApi::AclrtSetDevice(options_.devId);
+    if (restoreRet != BM_OK) {
+        // SetDevice 失败时线程 current ctx 大概率仍是 expCtx, 销毁它会使线程上下文悬空,
+        // 后续任意 ACL 调用随时崩溃; 宁可泄漏一个 ctx(进程退出由驱动回收), 不可摧毁线程现场
+        BM_LOG_WARN("SetDevice(own) restore failed, ret:" << restoreRet << " rankId:" << options_.rankId
+                    << ", skip DestroyContext to avoid dangling current ctx, peerDevId:" << im.devId);
+    } else {
+        (void)DlAclApi::AclrtDestroyContext(expCtx);
+    }
+    return ret;
+}
+
 Result HybmAclVmmSegment::ImportOne(const AclVmmExportInfo &im) noexcept
 {
     aclrtDrvMemHandle handle = nullptr;
     Result ret;
     if (IsDiePair(im.devId)) {
-        // die 对: 借导出方 ctx 跳过 runtime P2P 前置检查(同芯片 P2P 被内核拒绝)
-        aclrtContext expCtx = nullptr;
-        ret = DlAclApi::AclrtCreateContext(&expCtx, static_cast<int32_t>(im.devId));
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("CreateContext(peerDie) failed, ret:" << ret << " peerDevId:" << im.devId
-                                                               << " rankId:" << options_.rankId);
-            return ret;
-        }
-        (void)DlAclApi::AclrtSetCurrentContext(expCtx);
-        ret = DlAclApi::AclrtMemImportFromShareableHandle(im.shareableHandle, options_.devId, &handle);
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("die pair import failed, ret:" << ret << " localRank:" << options_.rankId
-                       << " remoteRank:" << im.rankId << " sh:" << im.shareableHandle);
-            (void)DlAclApi::AclrtSetDevice(options_.devId);
-            (void)DlAclApi::AclrtDestroyContext(expCtx);
-            return ret;
-        }
-        (void)DlAclApi::AclrtSetDevice(options_.devId);
-        (void)DlAclApi::AclrtDestroyContext(expCtx);
+        ret = ImportHandleForDiePair(im, handle);
     } else {
         // 跨卡: 本进程 ctx 直接 import(隐式双向 P2P, 消耗槽位)
         ret = DlAclApi::AclrtMemImportFromShareableHandle(im.shareableHandle, options_.devId, &handle);
         if (ret != BM_OK) {
             BM_LOG_ERROR("cross card import failed, ret:" << ret << " localRank:" << options_.rankId
                        << " remoteRank:" << im.rankId << " peerDevId:" << im.devId);
-            return ret;
         }
+    }
+    if (ret != BM_OK) {
+        return ret;
     }
 
     auto slotAddr = SlotBase(im.rankId) + im.sliceIndex * HYBM_LARGE_PAGE_SIZE;
-    ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(slotAddr), im.size, 0, handle, 0);
+    return MapImportedToSlot(im, handle, slotAddr);
+}
+
+Result HybmAclVmmSegment::MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrvMemHandle handle,
+                                            uint64_t slotAddr) noexcept
+{
+    auto ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(slotAddr), im.size, 0, handle, 0);
     if (ret != BM_OK) {
         BM_LOG_ERROR("AclrtMapMem(imported) failed, ret:" << ret << " rankId:" << options_.rankId
                    << " remoteRank:" << im.rankId << " slotAddr:" << VaToStr(slotAddr) << " size:" << im.size);
@@ -440,6 +514,7 @@ Result HybmAclVmmSegment::Mmap() noexcept
         }
     }
     imports_.clear();
+    importKeys_.clear();
     return BM_OK;
 }
 
@@ -453,8 +528,12 @@ Result HybmAclVmmSegment::UnmapOne(uint64_t slotAddr, aclrtDrvMemHandle handle) 
     }
     ret = DlAclApi::AclrtFreePhysical(handle);
     if (ret != BM_OK) {
+        /* unmap 已成功而 free 失败: VA 登记必须删除、条目必须推进, 否则重试会对已 unmap
+         * 地址再次 UnmapMem 必失败而永久卡死; handle 移入孤立列表, 由 UnReserve 兜底重试 */
         BM_LOG_ERROR("AclrtFreePhysical(imported) failed, ret:" << ret << " rankId:" << options_.rankId
                                                                 << " slotAddr:" << VaToStr(slotAddr));
+        orphanHandles_.emplace_back(handle);
+        HybmVaManager::GetInstance().RemoveOneVaInfo(slotAddr);
         return ret;
     }
     HybmVaManager::GetInstance().RemoveOneVaInfo(slotAddr);
@@ -463,16 +542,20 @@ Result HybmAclVmmSegment::UnmapOne(uint64_t slotAddr, aclrtDrvMemHandle handle) 
 
 Result HybmAclVmmSegment::Unmap() noexcept
 {
-    for (auto &it : mappedGvaMem_) {
-        auto ret = UnmapOne(it.first, it.second);
+    // 成功一项 erase 一项; UnmapOne 半失败(unmap 成功/free 失败)的条目已移入孤立句柄列表,
+    // 同样 erase 推进——重试既不会对已 unmap 地址重复调用, 也不会重复登记孤立句柄
+    for (auto it = mappedGvaMem_.begin(); it != mappedGvaMem_.end();) {
+        auto ret = UnmapOne(it->first, it->second);
         if (ret != BM_OK) {
             BM_LOG_ERROR("Unmap one failed, ret:" << ret << " rankId:" << options_.rankId
-                                                  << " slotAddr:" << VaToStr(it.first));
-            return ret;
+                                                  << " slotAddr:" << VaToStr(it->first));
+            it = mappedGvaMem_.erase(it);
+            continue;
         }
+        it = mappedGvaMem_.erase(it);
     }
-    mappedGvaMem_.clear();
     imports_.clear();
+    importKeys_.clear();
     return BM_OK;
 }
 
@@ -489,18 +572,14 @@ Result HybmAclVmmSegment::RemoveImported(const std::vector<uint32_t> &ranks) noe
     for (auto &rank : ranks) {
         auto slotBegin = SlotBase(rank);
         auto slotEnd = slotBegin + options_.maxSize;
-        for (auto it = mappedGvaMem_.begin(); it != mappedGvaMem_.end();) {
-            if (it->first >= slotBegin && it->first < slotEnd) {
-                auto ret = UnmapOne(it->first, it->second);
-                if (ret != BM_OK) {
-                    BM_LOG_ERROR("RemoveImported UnmapOne failed, ret:" << ret << " rankId:" << options_.rankId
-                               << " removeRank:" << rank);
-                    return ret;
-                }
-                it = mappedGvaMem_.erase(it);
-            } else {
-                ++it;
+        // lower_bound 直达该 rank 的 slot 区间; 失败条目(已入孤立列表)同样 erase 推进防重试卡死
+        for (auto it = mappedGvaMem_.lower_bound(slotBegin); it != mappedGvaMem_.end() && it->first < slotEnd;) {
+            auto ret = UnmapOne(it->first, it->second);
+            if (ret != BM_OK) {
+                BM_LOG_ERROR("RemoveImported UnmapOne failed, ret:" << ret << " rankId:" << options_.rankId
+                           << " removeRank:" << rank);
             }
+            it = mappedGvaMem_.erase(it);
         }
     }
     return BM_OK;
@@ -569,12 +648,8 @@ bool HybmAclVmmSegment::CheckSdmaReaches(uint32_t rankId) const noexcept
     }
     auto slotBegin = SlotBase(rankId);
     auto slotEnd = slotBegin + options_.maxSize;
-    for (auto &it : mappedGvaMem_) {
-        if (it.first >= slotBegin && it.first < slotEnd) {
-            return true;
-        }
-    }
-    return false;
+    auto it = mappedGvaMem_.lower_bound(slotBegin);
+    return it != mappedGvaMem_.end() && it->first < slotEnd;
 }
 } // namespace mf
 } // namespace ock

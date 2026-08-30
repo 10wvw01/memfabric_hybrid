@@ -20,7 +20,7 @@ namespace ock {
 namespace mf {
 class DataOperatorFactory {
 public:
-    static DataOperatorPtr CreateSdmaDataOperator();
+    static DataOperatorPtr CreateSdmaDataOperator(uint32_t rankId); // SOC 分派: 310P 为 AclMemcpy 算子
     static DataOperatorPtr CreateDevRdmaDataOperator(uint32_t rankId, const transport::TransManagerPtr &tm);
     static DataOperatorPtr CreateDevUrmaDataOperator(uint32_t rankId, const transport::TransManagerPtr &tm);
     static DataOperatorPtr CreateHostRdmaDataOperator(uint32_t rankId, const transport::TransManagerPtr &tm);
