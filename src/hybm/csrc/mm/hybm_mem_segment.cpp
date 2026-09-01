@@ -34,6 +34,7 @@ bool MemSegment::deviceInfoReady_{false};
 int MemSegment::deviceId_{-1};
 int MemSegment::logicDeviceId_{-1};
 int MemSegment::devicePhyId_{-1};
+uint32_t MemSegment::physicalChipId_{0};
 uint32_t MemSegment::pid_{0};
 uint32_t MemSegment::sdid_{0};
 uint32_t MemSegment::serverId_{0};
@@ -49,6 +50,7 @@ void MemSegment::ResetDeviceInfoInChild() noexcept
     MemSegment::deviceId_ = -1;
     MemSegment::logicDeviceId_ = -1;
     MemSegment::devicePhyId_ = -1;
+    MemSegment::physicalChipId_ = 0;
     MemSegment::pid_ = 0;
     MemSegment::sdid_ = 0;
     MemSegment::serverId_ = 0;
@@ -80,7 +82,10 @@ MemSegmentPtr MemSegment::Create(const MemSegmentOptions &options, int entityId)
     MemSegmentPtr tmpSeg;
     switch (options.segType) {
         case HYBM_MST_HBM:
-            if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950) {
+            BM_LOG_INFO("HBM segment: gvaVer=" << HybmGetGvaVersion() << " socType=" << socType_
+                         << " → VMM=" << (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_310P3));
+            if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950 ||
+                socType_ == AscendSocType::ASCEND_310P3) {
                 tmpSeg = std::make_shared<HybmVmmBasedSegment>(options, entityId);
             } else {
                 tmpSeg = std::make_shared<HybmDevLegacySegment>(options, entityId);
@@ -209,26 +214,28 @@ Result MemSegment::InitDeviceInfo(int devId)
     int64_t value = 0;
     ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_SDID, &value);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("get sdid failed: " << ret);
-        return BM_DL_FUNCTION_FAILED;
+        BM_LOG_WARN("get sdid failed: " << ret << " deviceId: " << deviceId_ << " — using 0, may affect cross-server logic");
+        sdid_ = 0;
+    } else {
+        sdid_ = static_cast<uint32_t>(value);
     }
 
-    sdid_ = static_cast<uint32_t>(value);
     ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_SERVER_ID, &value);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("get server id failed: " << ret);
-        return BM_DL_FUNCTION_FAILED;
+        BM_LOG_WARN("get server id failed: " << ret << " deviceId: " << deviceId_ << " — using boot id fallback");
+        serverId_ = 0;
+    } else {
+        serverId_ = static_cast<uint32_t>(value);
     }
-    serverId_ = static_cast<uint32_t>(value);
     BM_LOG_DEBUG("local server=0x" << std::hex << serverId_);
 
     ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_SUPER_POD_ID, &value);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("get super pod id failed: " << ret);
-        return BM_DL_FUNCTION_FAILED;
+        BM_LOG_WARN("get super pod id failed: " << ret << " deviceId: " << deviceId_ << " — using invalid fallback");
+        superPodId_ = invalidSuperPodId;
+    } else {
+        superPodId_ = static_cast<uint32_t>(value);
     }
-
-    superPodId_ = static_cast<uint32_t>(value);
     if (superPodId_ == invalidSuperPodId && serverId_ == invalidServerId) {
         if (bootIdHead_ != 0) {
             serverId_ = bootIdHead_;
@@ -243,6 +250,17 @@ Result MemSegment::InitDeviceInfo(int devId)
     }
 
     socType_ = DlAclApi::GetAscendSocType();
+
+    BM_LOG_DEBUG("InitDeviceInfo done: deviceId_=" << deviceId_ << " logicDeviceId_=" << logicDeviceId_
+                                                   << " devicePhyId_=" << devicePhyId_ << " socType=" << static_cast<int>(socType_));
+
+    ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_PHY_CHIP_ID, &value);
+    if (ret == BM_OK) {
+        physicalChipId_ = static_cast<uint32_t>(value);
+    } else {
+        BM_LOG_WARN("get phy chip id failed: " << ret << ", deviceId: " << deviceId_);
+        physicalChipId_ = 0;
+    }
     BM_LOG_DEBUG("local sdid=0x" << std::hex << sdid_ << ", local server=0x" << std::hex << serverId_
                                  << ", spid=" << superPodId_);
     deviceInfoReady_ = true;
@@ -255,13 +273,16 @@ bool MemSegment::CanLocalHostReaches(uint32_t superPodId, uint32_t serverId, uin
     if (superPodId != superPodId_ || serverId != serverId_) {
         return false;
     }
-    return (socType_ != ASCEND_910B) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
+    if (socType_ == ASCEND_310P3) {
+        return true;
+    }
+    return (socType_ != ASCEND_910b) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
 }
 
 bool MemSegment::CanSdmaReaches(uint32_t superPodId, uint32_t serverId, uint32_t deviceId) noexcept
 {
     if (serverId == serverId_) {
-        return (socType_ != ASCEND_910B) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
+        return (socType_ != ASCEND_910b) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
     }
 
     if (superPodId == invalidSuperPodId || superPodId_ == invalidSuperPodId) {
@@ -293,6 +314,21 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
         return BM_OK;
     }
 
+    /* For 310P3 cross-card, bidirectional P2P is required:
+     * local→remote and remote→local. aclrtDeviceEnablePeerAccess is the
+     * ACL wrapper that handles bidirectional enable internally. */
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        Result ret = DlAclApi::AclrtDeviceEnablePeerAccess(remotePhyId, 0);
+        if (ret != 0 && ret != ACL_ERROR_RT_PEER_ALREADY_ENABLED) {
+            BM_LOG_ERROR("AclrtDeviceEnablePeerAccess failed:" << ret << " local_user:" << deviceId_
+                                                                << " remote_phy:" << remotePhyId);
+            return BM_DL_FUNCTION_FAILED;
+        }
+        BM_LOG_DEBUG("310P3 cross-card P2P enabled: local_user:" << deviceId_ << " remote_phy:" << remotePhyId
+                                                                << " ret:" << ret);
+        return BM_OK;
+    }
+
     Result ret = DlAclApi::RtEnableP2P(static_cast<uint32_t>(deviceId_), static_cast<uint32_t>(remotePhyId), 0);
     if (ret != 0) {
         BM_LOG_ERROR("enable device access failed:" << ret << " local_user:" << deviceId_
@@ -302,6 +338,29 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
     BM_LOG_DEBUG("enable device access success local_user:" << deviceId_ << " local_phy:" << devicePhyId_
                                                             << " remote_phy:" << remotePhyId);
     return BM_OK;
+}
+
+bool MemSegment::IsSameCard(uint32_t peerId) noexcept
+{
+    /* Determine whether the peer device is on the same physical card as the local device.
+     * The semantics of peerId differ by SoC:
+     *   - 310P3: peerId is the peer's physical device id (info.devicePhyId).
+     *            Uses deviceId/2 as card index (dev0/dev1→card0, dev2/dev3→card1).
+     *            INFO_TYPE_PHY_CHIP_ID returns per-die values and cannot be used here.
+     *   - Other SoCs: peerId is the peer's physicalChipId (info.physicalChipId).
+     *            Direct comparison with local physicalChipId_.
+     * Callers MUST pass the correct field based on Is310P3AclPath(). */
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        auto peerDevId = static_cast<int32_t>(peerId);
+        bool sameCard = (deviceId_ / 2) == (peerDevId / 2);
+        BM_LOG_DEBUG("310P3 IsSameCard: deviceId_=" << deviceId_ << " peerDevId=" << peerDevId
+                                                    << " sameCard=" << sameCard);
+        return sameCard;
+    }
+    if (physicalChipId_ == 0 || peerId == 0) {
+        return false;
+    }
+    return physicalChipId_ == peerId;
 }
 } // namespace mf
 } // namespace ock

@@ -64,6 +64,30 @@ int32_t hybm_set_log_level(int level);
  */
 const char *hybm_get_error_string(int32_t errCode);
 
+/**
+ * @brief Get Ascend SoC type
+ *
+ * @return SoC type value (0=unknown, 1=910B, 2=910C, 3=950, 4=310P1, 5=310P3)
+ */
+int32_t hybm_get_soc_type(void);
+
+/**
+ * @brief Get device physical chip id
+ *
+ * @param deviceId        [in] device id
+ * @return chip id >= 0 on success, < 0 on failure
+ */
+int32_t hybm_get_phy_chip_id(uint32_t deviceId);
+
+/**
+ * @brief Enable P2P access to a peer device (bidirectional)
+ *
+ * @param localDeviceId   [in] local device id
+ * @param peerDeviceId    [in] peer device id
+ * @return 0 if successful
+ */
+int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDeviceId);
+
 #ifdef __cplusplus
 }
 #endif

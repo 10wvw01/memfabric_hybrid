@@ -216,9 +216,10 @@ static int32_t smem_bm_create2_inner(uint32_t id, const smem_bm_create_option_t 
         return SM_INVALID_PARAM;
     }
     const bool isHostShm = (option->dataOpType & SMEMB_DATA_OP_HOST_SHM) != 0;
-    if (isHostShm && (option->localDRAMSize == 0 || option->localHBMSize != 0)) {
+    if (isHostShm && (option->localDRAMSize == 0 || option->localHBMSize != 0 || option->maxHbmSize != 0)) {
         SM_LOG_AND_SET_LAST_ERROR_CODE(SM_INVALID_PARAM,
-                                       "HOST_SHM op type only supports DRAM shared memory without HBM");
+                                       "HOST_SHM op type only supports DRAM shared memory without HBM, "
+                                       "maxHbmSize must be 0");
         return SM_INVALID_PARAM;
     }
     constexpr uint32_t hostShmConflictMask = SMEMB_DATA_OP_SDMA | SMEMB_DATA_OP_HOST_RDMA | SMEMB_DATA_OP_HOST_URMA |
@@ -227,6 +228,12 @@ static int32_t smem_bm_create2_inner(uint32_t id, const smem_bm_create_option_t 
     if (isHostShm && (option->dataOpType & hostShmConflictMask) != 0) {
         SM_LOG_AND_SET_LAST_ERROR_CODE(SM_INVALID_PARAM,
                                        "HOST_SHM op type does not support mixing with other data op types");
+        return SM_INVALID_PARAM;
+    }
+    /* 310P3: reject DRAM+HBM same handle — must use separate handles */
+    if (option->maxDramSize != 0 && option->maxHbmSize != 0) {
+        SM_LOG_AND_SET_LAST_ERROR_CODE(SM_INVALID_PARAM,
+                                       "DRAM+HBM in same handle is not supported on 310P3, use separate handles");
         return SM_INVALID_PARAM;
     }
     auto ret = manager.CreateEntryById(id, entry);

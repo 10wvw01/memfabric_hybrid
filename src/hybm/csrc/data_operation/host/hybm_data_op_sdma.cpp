@@ -45,8 +45,9 @@ Result HostDataOpSDMA::Initialize() noexcept
         return BM_OK;
     }
 
-    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_950 || !IsArmArch()) {
-        BM_LOG_WARN("A5 or x86 not support batch extend copy now!");
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_950 || !IsArmArch() ||
+        DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        BM_LOG_WARN("A5, x86 or 310P3 not support batch extend copy now!");
     } else {
         auto ret = DlAclApi::AclrtMallocHost(&paramSpace_, HYBM_PARAM_SPACE_SIZE);
         BM_ASSERT_LOG_AND_RETURN(ret == 0 && paramSpace_ != nullptr,
@@ -339,6 +340,10 @@ void HostDataOpSDMA::TransformVa(void *&src, void *&dst, hybm_data_copy_directio
 
 Result HostDataOpSDMA::Wait(int32_t waitId) noexcept
 {
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        /* 310P3: copy operations already synchronized internally via AclrtSynchronizeStream */
+        return BM_OK;
+    }
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_LOG_AND_RETURN(hStream != nullptr, "hStream is nullptr", BM_ERROR);
     return hStream->Synchronize();
@@ -346,7 +351,12 @@ Result HostDataOpSDMA::Wait(int32_t waitId) noexcept
 
 void HostDataOpSDMA::CleanUp() noexcept
 {
-    HybmStreamManager::DestroyAllThreadHybmStream();
+    /* 310P3 uses ACL stream (GetThreadAclStream), not HybmStream (GetThreadHybmStream).
+     * DestroyAllThreadHybmStream would destroy HybmStream that may be shared across
+     * BM entities, causing resource exhaustion in lifecycle tests. */
+    if (DlAclApi::GetAscendSocType() != AscendSocType::ASCEND_310P3) {
+        HybmStreamManager::DestroyAllThreadHybmStream();
+    }
 }
 
 Result HostDataOpSDMA::CopyLH2GH(void *destVA, const void *srcVA, uint64_t length, void *stream) noexcept
@@ -522,11 +532,27 @@ void HostDataOpSDMA::InitG2GStreamTaskV2(StreamTask &task, void *destVA, const v
 Result HostDataOpSDMA::CopyG2G(void *destVA, const void *srcVA, size_t count, uint32_t flags, void *stream) noexcept
 {
     if (flags & COPY_EXTEND_FLAG) {
+        if (paramSpace_ == nullptr) {
+            BM_LOG_ERROR("COPY_EXTEND_FLAG not supported on this platform (paramSpace_ is null)");
+            return BM_NOT_SUPPORTED;
+        }
         void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
         auto ret = DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, count, HYBM_EXTEND_CONCURRENT, st);
         BM_ASSERT_LOG_AND_RETURN(ret == BM_OK, "ret = " << ret, ret);
         ret = DlAclApi::AclrtSynchronizeStream(st);
         BM_VALIDATE_RETURN(ret == BM_OK, "AclrtSynchronizeStream failed:" << ret, BM_ERROR);
+        return BM_OK;
+    }
+
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
+        BM_ASSERT_LOG_AND_RETURN(st != nullptr, "acl stream is nullptr", BM_ERROR);
+        BM_LOG_DEBUG("310P3 CopyG2G: destVA=0x" << std::hex << destVA << " srcVA=0x" << srcVA
+                                               << " count=" << std::dec << count << " stream=" << st);
+        auto ret = DlAclApi::AclrtMemcpyAsync(destVA, count, srcVA, count, ACL_MEMCPY_DEVICE_TO_DEVICE, st);
+        BM_ASSERT_LOG_AND_RETURN(ret == 0, "AclrtMemcpyAsync failed:" << ret, BM_ERROR);
+        ret = DlAclApi::AclrtSynchronizeStream(st);
+        BM_ASSERT_LOG_AND_RETURN(ret == 0, "AclrtSynchronizeStream failed:" << ret, BM_ERROR);
         return BM_OK;
     }
 
@@ -549,9 +575,21 @@ Result HostDataOpSDMA::CopyG2GAsync(void *destVA, const void *srcVA, size_t coun
     BM_LOG_DEBUG("src:" << srcVA << " destVA:" << destVA << " length:" << count << " st:" << stream);
     if (stream != nullptr) { // submit task into acl stream
         if (flags & COPY_EXTEND_FLAG) {
+            if (paramSpace_ == nullptr) {
+                BM_LOG_ERROR("COPY_EXTEND_FLAG not supported on this platform (paramSpace_ is null)");
+                return BM_NOT_SUPPORTED;
+            }
             return DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, count, HYBM_EXTEND_CONCURRENT, stream);
         }
+        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+            return DlAclApi::AclrtMemcpyAsync(destVA, count, srcVA, count, ACL_MEMCPY_DEVICE_TO_DEVICE, stream);
+        }
         return DlAclApi::RtMemcpyAsync(destVA, count, srcVA, count, RT_MEMCPY_DEVICE_TO_DEVICE, stream);
+    }
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        void *st = HybmStreamManager::GetThreadAclStream();
+        BM_ASSERT_LOG_AND_RETURN(st != nullptr, "acl stream is nullptr", BM_ERROR);
+        return DlAclApi::AclrtMemcpyAsync(destVA, count, srcVA, count, ACL_MEMCPY_DEVICE_TO_DEVICE, st);
     }
     StreamTask task{};
     InitG2GStreamTask(task, destVA, srcVA, count);

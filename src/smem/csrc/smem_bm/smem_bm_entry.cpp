@@ -12,10 +12,14 @@
 #include "smem_bm_entry.h"
 
 #include <chrono>
+#include <sstream>
+#include <cstring>
 
 #include "hybm_def.h"
 #include "hybm_big_mem.h"
 #include "hybm_data_op.h"
+#include "hybm_define.h"
+#include "hybm.h"
 #include "mf_env_define.h"
 #include "mf_env_util.h"
 #include "smem_store_factory.h"
@@ -439,9 +443,141 @@ void SmemBmEntry::InvokeEventCb(uint32_t rankId, smem_bm_group_event_t event)
     }
 }
 
+Result SmemBmEntry::TopologyPreflight()
+{
+    /* Only for 310P3 HBM pools; DRAM HOST_SHM and other SoCs skip */
+    if (hybm_get_soc_type() != ock::mf::SOC_TYPE_310P3) {
+        return SM_OK;
+    }
+    if ((coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) == 0U) {
+        return SM_OK;
+    }
+    if (coreOptions_.maxHBMSize == 0) {
+        return SM_OK;
+    }
+
+    const uint32_t rankId = options_.rank;
+    const uint32_t rankSize = options_.rankSize;
+    const uint32_t devId = coreOptions_.devId;
+    const uint32_t p2pSlotsPerCard = 8U;
+    const std::string topoPrefix = "TOPO_";
+
+    SM_LOG_INFO("310P3 topology preflight: rank:" << rankId << " devId:" << devId << " rankSize:" << rankSize);
+
+    /* Query local topology: physicalChipId */
+    int32_t phyChipIdVal = hybm_get_phy_chip_id(devId);
+    if (phyChipIdVal < 0) {
+        SM_LOG_ERROR("hybm_get_phy_chip_id failed, devId:" << devId);
+        return SM_ERROR;
+    }
+    uint32_t phyChipId = static_cast<uint32_t>(phyChipIdVal);
+
+    /* Publish topology record to store */
+    std::string topoKey = topoPrefix + std::to_string(rankId);
+    std::string topoVal;
+    {
+        std::ostringstream oss;
+        oss << rankId << ":" << devId << ":" << phyChipId;
+        topoVal = oss.str();
+    }
+    auto ret = _configStore->Set(topoKey, std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
+    if (ret != 0) {
+        SM_LOG_ERROR("Set topology key failed:" << ret << " rank:" << rankId << " key:" << topoKey);
+        return SM_ERROR;
+    }
+
+    /* Gather all ranks' topology records */
+    std::unordered_map<std::string, std::string> topoMap;
+    const int64_t gatherTimeoutMs = static_cast<int64_t>(options_.controlOperationTimeout) * 1000;
+    auto gatherStart = std::chrono::steady_clock::now();
+    while (true) {
+        topoMap.clear();
+        ret = _configStore->PrefixGet(topoPrefix, topoMap);
+        if (ret != 0) {
+            SM_LOG_ERROR("PrefixGet topology failed:" << ret << " rank:" << rankId);
+            return SM_ERROR;
+        }
+        if (topoMap.size() >= rankSize) {
+            break;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - gatherStart).count();
+        if (elapsed >= gatherTimeoutMs) {
+            SM_LOG_ERROR("topology preflight gather timeout:" << elapsed << "ms rank:" << rankId
+                                                              << " got:" << topoMap.size() << "/" << rankSize);
+            return SM_ERROR;
+        }
+        usleep(100 * 1000); /* 100ms poll */
+    }
+
+    /* Parse all topology records */
+    struct RankTopo {
+        uint32_t rankId;
+        uint32_t devId;
+        uint32_t phyChipId;
+    };
+    std::vector<RankTopo> topos;
+    for (const auto &kv : topoMap) {
+        RankTopo t{};
+        if (sscanf(kv.second.c_str(), "%u:%u:%u", &t.rankId, &t.devId, &t.phyChipId) != 3) {
+            SM_LOG_ERROR("parse topology record failed:" << kv.first << " val:" << kv.second);
+            continue;
+        }
+        topos.push_back(t);
+    }
+    if (topos.size() < rankSize) {
+        SM_LOG_ERROR("topology records incomplete:" << topos.size() << "/" << rankSize);
+        return SM_ERROR;
+    }
+
+    /* Compute P2P budget: count cross-card device pairs per card */
+    std::map<uint32_t, uint32_t> requiredPerCard; /* phyChipId -> cross-card pair count */
+    for (size_t i = 0; i < topos.size(); i++) {
+        for (size_t j = i + 1; j < topos.size(); j++) {
+            if (topos[i].phyChipId != topos[j].phyChipId) {
+                requiredPerCard[topos[i].phyChipId]++;
+                requiredPerCard[topos[j].phyChipId]++;
+            }
+        }
+    }
+
+    bool feasible = true;
+    for (const auto &card : requiredPerCard) {
+        if (card.second > p2pSlotsPerCard) {
+            SM_LOG_ERROR("P2P slot budget exceeded: phyChipId:" << card.first
+                                                               << " required:" << card.second
+                                                               << " limit:" << p2pSlotsPerCard
+                                                               << " poolId:" << options_.id << " worldSize:" << rankSize);
+            feasible = false;
+        }
+    }
+    if (!feasible) {
+        SM_LOG_ERROR("topology preflight FAILED for pool:" << options_.id << " rank:" << rankId
+                                                           << " worldSize:" << rankSize << " zero import will be done");
+        return SM_NO_RESOURCES;
+    }
+
+    SM_LOG_INFO("topology preflight PASS: rank:" << rankId << " worldSize:" << rankSize
+                                                 << " cross-card pairs per card all <= " << p2pSlotsPerCard);
+
+    /* 310P3: pre-enable P2P disabled — p3_store_repro test proved it's not needed.
+     * ACL runtime handles P2P internally during aclrtMemImportFromShareableHandle. */
+
+    return SM_OK;
+}
+
 Result SmemBmEntry::Join(uint32_t flags)
 {
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
+
+    /* 310P3 HBM pool: topology preflight before any store rendezvous */
+    auto topoRet = TopologyPreflight();
+    if (topoRet != SM_OK) {
+        SM_LOG_ERROR("topology preflight failed, pool:" << options_.id << " rank:" << options_.rank
+                                                        << " ret:" << topoRet);
+        return topoRet;
+    }
+
     const uint32_t groupJoinTimeoutSec =
         mf::MfEnvUtil::GetOptionalUintOrDefault(mf::env::MF_GROUP_JOIN_MAX_TIMEOUT, MF_GROUP_JOIN_DEFAULT_TIMEOUT);
     SM_LOG_INFO("group join timeout sec: " << groupJoinTimeoutSec);
@@ -500,6 +636,12 @@ Result SmemBmEntry::Update(uint32_t flags)
 Result SmemBmEntry::Leave(uint32_t flags)
 {
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
+    /* 310P3 HBM pool: reject dynamic leave (shrink not supported in P1) */
+    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P3 &&
+        (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) != 0U && coreOptions_.maxHBMSize > 0) {
+        SM_LOG_ERROR("leave not supported for 310P3 HBM pool, poolId:" << options_.id << " rank:" << options_.rank);
+        return SM_INVALID_PARAM;
+    }
     auto ret = globalGroup_->GroupLeave();
     SM_LOG_ERROR_RETURN_IT_IF_NOT_OK(ret, "leave failed, ret: " << ret);
 
@@ -511,6 +653,12 @@ Result SmemBmEntry::ExtendLocalMem(smem_bm_mem_type memType, uint64_t size)
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
     SM_ASSERT_RETURN(memType == SMEM_MEM_TYPE_DEVICE || memType == SMEM_MEM_TYPE_HOST, SM_INVALID_PARAM);
     SM_ASSERT_RETURN(size > 0, SM_INVALID_PARAM);
+    /* 310P3 HOST_SHM DRAM: localDRAMSize==maxDramSize, no room for extend */
+    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P3 &&
+        (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_HOST_SHM) != 0U && memType == SMEM_MEM_TYPE_HOST) {
+        SM_LOG_ERROR("extend not supported for 310P3 HOST_SHM DRAM pool, poolId:" << options_.id);
+        return SM_INVALID_PARAM;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     // 1.alloc slice
     auto hybmMemType = memType == SMEM_MEM_TYPE_DEVICE ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;

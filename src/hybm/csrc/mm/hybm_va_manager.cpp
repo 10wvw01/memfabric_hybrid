@@ -262,6 +262,7 @@ uint8_t HybmVaManager::ClassifyAddressMask(const uint64_t va)
     auto r = QueryAddr(va);
     // 已 import → 单 GLOBAL
     if (r.inAllocGva && r.importedRankId != INVALID_RANK_ID) {
+        BM_LOG_DEBUG("ClassifyAddr: va=0x" << std::hex << va << " → GLOBAL_DEVICE (importedRankId=" << r.importedRankId << ")");
         return (r.memType == HYBM_MEM_TYPE_DEVICE) ? BIT_GLOBAL_DEVICE : BIT_GLOBAL_HOST;
     }
     // reservedMap_ → GVA，已在 allocatedMap_ 中才设有效位

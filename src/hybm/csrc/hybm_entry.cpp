@@ -131,7 +131,8 @@ HYBM_API void hybm_uninit()
 
     ptracer_uninit();
     auto socType = DlAclApi::GetAscendSocType();
-    if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
+    if ((socType == AscendSocType::ASCEND_950) || (socType == AscendSocType::ASCEND_310P3) ||
+        (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         if (g_baseAddr != 0) {
             auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
             BM_LOG_INFO("unmap meta info res: " << ret);
@@ -193,6 +194,44 @@ HYBM_API const char *hybm_get_error_string(int32_t errCode)
 {
     static thread_local std::string info = std::string("error(").append(std::to_string(errCode)).append(")");
     return info.c_str();
+}
+
+HYBM_API int32_t hybm_get_soc_type(void)
+{
+    return static_cast<int32_t>(DlAclApi::GetAscendSocType());
+}
+
+HYBM_API int32_t hybm_get_phy_chip_id(uint32_t deviceId)
+{
+    int64_t val = 0;
+    auto ret = DlAclApi::RtGetDeviceInfo(deviceId, 0, INFO_TYPE_PHY_CHIP_ID, &val);
+    if (ret != BM_OK) {
+        return -1;
+    }
+    return static_cast<int32_t>(val);
+}
+
+HYBM_API int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDeviceId)
+{
+    if (localDeviceId == peerDeviceId) {
+        return 0;
+    }
+    /* 310P3 Duo: deviceId/2 identifies the physical card.
+     * dev0/dev1 → card0, dev2/dev3 → card1, etc.
+     * Same card = no P2P needed. */
+    if ((localDeviceId / 2) == (peerDeviceId / 2)) {
+        BM_LOG_INFO("hybm_enable_peer_access: same card by deviceId/2, local:" << localDeviceId
+                                                                               << " peer:" << peerDeviceId);
+        return 0;
+    }
+    auto ret = DlAclApi::AclrtDeviceEnablePeerAccess(static_cast<int32_t>(peerDeviceId), 0);
+    if (ret != 0 && ret != ACL_ERROR_RT_PEER_ALREADY_ENABLED) {
+        BM_LOG_ERROR("hybm_enable_peer_access failed:" << ret << " local:" << localDeviceId
+                                                       << " peer:" << peerDeviceId);
+        return ret;
+    }
+    BM_LOG_INFO("hybm_enable_peer_access: local:" << localDeviceId << " peer:" << peerDeviceId << " ret:" << ret);
+    return 0;
 }
 
 HYBM_API int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va)

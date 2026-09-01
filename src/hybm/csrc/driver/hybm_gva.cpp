@@ -116,7 +116,8 @@ int32_t hybm_init_hbm_gva(uint16_t deviceId, uint64_t flags, uint64_t &baseAddre
 
     void *globalMemoryBase = nullptr;
     size_t allocSize = HYBM_DEVICE_INFO_SIZE; // 申请meta空间
-    if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
+    if ((socType == AscendSocType::ASCEND_950) || (socType == AscendSocType::ASCEND_310P3) ||
+        (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         ret = HybmModernInitMetaGva(&globalMemoryBase, allocSize, allocHandle);
     } else {
         ret = HybmLegacyInitMetaGva(&globalMemoryBase, allocSize, flags);
