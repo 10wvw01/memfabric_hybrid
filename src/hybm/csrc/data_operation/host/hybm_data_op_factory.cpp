@@ -14,12 +14,19 @@
 #include "hybm_data_op_device_urma.h"
 #include "hybm_data_op_host_shm.h"
 #include "hybm_data_op_host_rdma.h"
+#include "hybm_data_op_acl_memcpy.h"
 #include "hybm_data_op_factory.h"
+#include "dl_acl_api.h"
 
 namespace ock {
 namespace mf {
-DataOperatorPtr DataOperatorFactory::CreateSdmaDataOperator()
+DataOperatorPtr DataOperatorFactory::CreateSdmaDataOperator(uint32_t rankId)
 {
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+        // 310P: HostDataOpSDMA 的 paramSpace(HalHostRegister)与 STARS SQE 直投均不可用,
+        // 以 aclrtMemcpy 算子占 SDMA 槽位(保证 compose 的 hybm_wait 语义)
+        return std::make_shared<HostDataOpAclMemcpy>(rankId);
+    }
     return std::make_shared<HostDataOpSDMA>();
 }
 

@@ -124,6 +124,9 @@ public:
     /*
      * check whether address range belongs to the local portion of this segment
      * @return true if within the local rank's allocated portion
+     * 契约: 目前仅 HOST 侧 SHM 路径依赖此判定(entity 层 DRAM 段使用);
+     * HBM 段(DevLegacy/VmmBased)默认 false 且无调用方, 勿在 HBM 路径引入依赖,
+     * 如需统一各段行为请与段基类重构一并设计(见 310p 开发计划 TODO)
      */
     virtual bool IsLocalRange(const void *begin, uint64_t size) const noexcept
     {
@@ -148,6 +151,7 @@ protected:
     static bool CanSdmaReaches(uint32_t superPodId, uint32_t serverId, uint32_t deviceId) noexcept;
     static void FillSysBootIdInfo() noexcept;
     static Result EnableRemotePeerAccess(int32_t remotePhyId) noexcept;
+    static Result QueryDeviceInfoSocTolerant(int32_t infoType, const char *name, int64_t &value) noexcept;
 
 protected:
     const MemSegmentOptions options_;

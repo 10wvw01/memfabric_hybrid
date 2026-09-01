@@ -17,10 +17,22 @@ constexpr int32_t RETURN_OK = 0;
 constexpr int32_t RETURN_ERROR = -1;
 constexpr uint64_t START_ADDR = 0x100000000000ULL;
 
+/* UT 失败注入/计数: 非 0 时 aclrtSynchronizeStream 返回错误(stream 自恢复用例) */
+extern "C" {
+int32_t g_stubSyncStreamFail = 0;
+int32_t g_stubSyncStreamCalls = 0;
+int32_t g_stubCreateStreamCalls = 0;
+int32_t g_stubDestroyStreamCalls = 0;
+int32_t g_stubSetCurrentContextFail = 0; // 非 0 时 SetCurrentContext 返回错误(die 对导入防护用例)
+int32_t g_stubSetDeviceFail = 0;         // 非 0 时 SetDevice 返回错误(die 对导入恢复失败用例)
+int32_t g_stubDestroyContextCalls = 0;   // 计数: context 销毁次数(验证失败时跳过销毁)
+}
+
 extern "C" {
 int32_t aclrtSetDevice(int32_t deviceId)
 {
-    return RETURN_OK;
+    (void)deviceId;
+    return g_stubSetDeviceFail != 0 ? RETURN_ERROR : RETURN_OK;
 }
 
 int32_t aclrtGetDevice(int32_t *deviceId)
@@ -38,17 +50,20 @@ int32_t aclrtDeviceEnablePeerAccess(int32_t peerDeviceId, uint32_t flags)
 
 int32_t aclrtCreateStream(void **stream)
 {
+    g_stubCreateStreamCalls++;
     return RETURN_OK;
 }
 
 int32_t aclrtDestroyStream(void *stream)
 {
+    g_stubDestroyStreamCalls++;
     return RETURN_OK;
 }
 
 int32_t aclrtSynchronizeStream(void *stream)
 {
-    return RETURN_OK;
+    g_stubSyncStreamCalls++;
+    return g_stubSyncStreamFail != 0 ? RETURN_ERROR : RETURN_OK;
 }
 
 int32_t aclrtMalloc(void **ptr, size_t count, uint32_t type)
@@ -405,6 +420,134 @@ int32_t aclrtLaunchKernelWithConfig(aclrtFuncHandle funcHandle, uint32_t blockDi
     (void)cfg;
     (void)argsHandle;
     (void)reserved;
+    return RETURN_OK;
+}
+
+/* ---- ACL VMM 符号 stub(310P 内存池, 与 dl_acl_api 本地类型对齐) ---- */
+static uint64_t g_stubVmmBase = 0x12c140000000UL;
+
+int32_t aclrtCreateContext(void **context, int32_t deviceId)
+{
+    (void)deviceId;
+    if (context != nullptr) {
+        *context = reinterpret_cast<void *>(0x2001);
+    }
+    return RETURN_OK;
+}
+
+int32_t aclrtSetCurrentContext(void *context)
+{
+    (void)context;
+    return g_stubSetCurrentContextFail != 0 ? RETURN_ERROR : RETURN_OK;
+}
+
+int32_t aclrtDestroyContext(void *context)
+{
+    (void)context;
+    g_stubDestroyContextCalls++;
+    return RETURN_OK;
+}
+
+int32_t aclrtMallocPhysical(void **handle, size_t size, const void *prop, uint64_t flags)
+{
+    (void)size;
+    (void)prop;
+    (void)flags;
+    if (handle != nullptr) {
+        *handle = reinterpret_cast<void *>(0x2002);
+    }
+    return RETURN_OK;
+}
+
+int32_t aclrtFreePhysical(void *handle)
+{
+    (void)handle;
+    return RETURN_OK;
+}
+
+int32_t aclrtReserveMemAddress(void **virPtr, size_t size, size_t alignment, void *expectPtr, uint64_t flags)
+{
+    (void)size;
+    (void)alignment;
+    (void)flags;
+    if (virPtr == nullptr) {
+        return -1;
+    }
+    if (expectPtr != nullptr) {
+        *virPtr = expectPtr;
+    } else {
+        *virPtr = reinterpret_cast<void *>(g_stubVmmBase);
+    }
+    return RETURN_OK;
+}
+
+int32_t aclrtReleaseMemAddress(void *virPtr)
+{
+    (void)virPtr;
+    return RETURN_OK;
+}
+
+int32_t aclrtMapMem(void *virPtr, size_t size, size_t offset, void *handle, uint64_t flags)
+{
+    (void)virPtr;
+    (void)size;
+    (void)offset;
+    (void)handle;
+    (void)flags;
+    return RETURN_OK;
+}
+
+int32_t aclrtUnmapMem(void *virPtr)
+{
+    (void)virPtr;
+    return RETURN_OK;
+}
+
+int32_t aclrtMemSetAccess(void *virPtr, size_t size, void *desc, size_t count)
+{
+    (void)virPtr;
+    (void)size;
+    (void)desc;
+    (void)count;
+    return RETURN_OK;
+}
+
+int32_t aclrtMemExportToShareableHandle(void *handle, uint32_t handleType, uint64_t flags, uint64_t *shareableHandle)
+{
+    (void)handle;
+    (void)handleType;
+    (void)flags;
+    if (shareableHandle != nullptr) {
+        *shareableHandle = 0x2003UL;
+    }
+    return RETURN_OK;
+}
+
+int32_t aclrtMemImportFromShareableHandle(uint64_t shareableHandle, int32_t deviceId, void **handle)
+{
+    (void)shareableHandle;
+    (void)deviceId;
+    if (handle != nullptr) {
+        *handle = reinterpret_cast<void *>(0x2004);
+    }
+    return RETURN_OK;
+}
+
+int32_t aclrtMemSetPidToShareableHandle(uint64_t shareableHandle, int32_t *pid, size_t pidNum)
+{
+    (void)shareableHandle;
+    (void)pid;
+    (void)pidNum;
+    return RETURN_OK;
+}
+
+int32_t aclrtMemGetAllocationGranularity(void *prop, uint32_t option, size_t *granularity)
+{
+    (void)prop;
+    (void)option;
+    if (granularity != nullptr) {
+        *granularity = 2UL * 1024UL * 1024UL; /* 2MB, 与 310P 实测一致 */
+    }
     return RETURN_OK;
 }
 }
