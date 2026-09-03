@@ -9,11 +9,12 @@
 
 **现象**：310P3 设备在 `hybm_init` 阶段被 VA Manager 拒绝（`ASCEND_UNKNOWN`），所有 segment 创建失败。
 
-**根因**：`AscendSocType` 枚举只有 `ASCEND_910B/910C/950`，`GetAscendSocType()` 用字符串匹配 `aclrtGetSocName()` 返回值，310P3 的 SoC name `Ascend310P3` 不在匹配列表中。
+**根因**：`AscendSocType` 枚举只有 `ASCEND_910b/910C/950`，`GetAscendSocType()` 用字符串匹配 `aclrtGetSocName()` 返回值，310P3 的 SoC name `Ascend310P3` 不在匹配列表中。
 
 **解决方案**：
 - `hybm_define.h`：枚举增加 `ASCEND_310P1`、`ASCEND_310P3`
 - `dl_acl_api.cpp`：`GetAscendSocType()` 增加 `Ascend310P3`/`Ascend310P1` 字符串匹配
+- 同时修复 pre-existing bug：`ASCEND_910B`（大写 B）应为 `ASCEND_910b`（小写 b），原代码依赖 `-fpermissive` 通过编译但运行时 `SOC_TYPE` 恒为 0
 
 ---
 
@@ -186,19 +187,109 @@ if (sameCard) {
 
 ---
 
-## 17. 4-rank 跨卡 import 507899（未解决）
+## 17. 4-rank 跨卡 import 507899（已解决）
 
-**现象**：4-rank HBM 测试中跨卡 `aclrtMemImportFromShareableHandle` 返回 507899。
+**现象**：4-rank HBM 测试中跨卡 `aclrtMemImportFromShareableHandle` 返回 507899（`ACL_ERROR_RT_DRV_INTERNAL_ERROR`）。同卡 import 成功，跨卡 import 全部失败。
 
-**根因**：`JoinHandle` 中同卡 import 的 ctx 技巧（`AclrtSetDevice(exporterDev)`）与跨卡 import 存在 ACL runtime 的 P2P 状态竞争。简化测试（串行 import、同卡优先）全部通过，HYBM 4-rank 异步时序下失败。
+**复现路径**：
+- `310p-p0-verify/p3_min_repro.c`（4-rank 纯 ACL 串行，用 CANN 头文件）→ **PASS**
+- `examples/cross_card_import_test/main.cpp` Phase 1（4-rank 纯 ACL 串行，用魔术数 4）→ **FAIL 507899**
+- 生产代码 `hybm_vmm_based_segment.cpp` 的 BM `MallocFromDevice` → **FAIL 507899**（`hybm_mmap failed, result: -1`）
 
-**已尝试的方案**：
-- imports_ 排序（同卡优先）— 部分有效，但 `JoinHandle` 是 per-peer 的，每次只处理一个 peer
-- `pendingImports_` defer + post-join retry — `GroupJoin` 在 self-join 后返回，无法等待所有 peer JoinHandle 完成
-- 全局 mutex 序列化 — 无效
-- `CreateContext` + `SetCurrentContext` — 无效
-- 直接 `dlsym` 调 `aclrtMemImportFromShareableHandle` — 同进程中仍 507899
+### 根因
 
-**简化测试结论**：纯 ACL API + `hybm_init` + `smem_bm_create2(HBM)` + `smem_bm_join(2-rank sub-pool)` + 同卡 import+map+setaccess → 跨卡 import 全部通过。根因在 HYBM 4-rank `JoinHandle` 的异步并发时序。
+**根因一：示例文件魔术数错误**
 
-**当前状态**：2-rank 同卡完整可用，4-rank 跨卡需进一步排查 ACL runtime 内部 P2P 状态管理。
+`cross_card_import_test/main.cpp:91` 使用了错误的 `memAttr` 魔术数：
+
+```cpp
+prop.memAttr = static_cast<aclrtMemAttr>(4); /* ACL_MEM_P2P_HUGE */
+```
+
+注释标注为 `ACL_MEM_P2P_HUGE`，但实际值 4 是 `ACL_HBM_MEM_HUGE`，**不是** `ACL_MEM_P2P_HUGE`（CANN 头文件值 16）。修复为 `ACL_MEM_P2P_HUGE` 后示例全部 PASS。
+
+**根因二：生产代码自定义枚举与 CANN ABI 不匹配（核心根因）**
+
+`src/hybm/csrc/under_api/dl_acl_api.h:188-193` 自定义了 `aclrtMemAttr` 枚举，跳过了 CANN `acl_rt.h:227-246` 中前面的 `ACL_DDR_MEM*` / `ACL_HBM_MEM*` 成员，从 0 开始编号：
+
+```cpp
+enum class aclrtMemAttr : uint32_t {
+    ACL_MEM_NORMAL = 0,      // CANN 中 = 12
+    ACL_MEM_HUGE = 1,        // CANN 中 = 13
+    ACL_MEM_P2P_NORMAL = 3,  // CANN 中 = 15
+    ACL_MEM_P2P_HUGE = 4,    // CANN 中 = 16  ← 实际传给 ACL 的值是 4，等于 CANN 的 ACL_HBM_MEM_HUGE
+};
+```
+
+生产代码 `hybm_vmm_based_segment.cpp:228` 虽然写的是命名常量：
+
+```cpp
+prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
+```
+
+但因为枚举定义错误，实际传给 ACL runtime 的值是 **4**（= CANN 的 `ACL_HBM_MEM_HUGE`，非 P2P），而不是 **16**（= CANN 的 `ACL_MEM_P2P_HUGE`，P2P）。
+
+### 实测验证（2026-09-03）
+
+在 `p3_store_repro.cpp` 中同时打印 CANN 头文件值和 BM 枚举值（`smem_set_log_level(1)` 开启 INFO 日志），4-rank 运行确认：
+
+```
+[R2] CANN header ACL_MEM_P2P_HUGE=16
+[HYBM hybm_vmm_based_segment.cpp:233] BM enum aclrtMemAttr::ACL_MEM_P2P_HUGE=4 handleType=0 location.id=2 location.type=1
+```
+
+| 来源 | `ACL_MEM_P2P_HUGE` 实际值 | 说明 |
+|------|---------------------------|------|
+| CANN `acl_rt.h:244` | **16** | 正确的 P2P 内存属性 |
+| 项目 `dl_acl_api.h:192` | **4** | 错误，等于 CANN 的 `ACL_HBM_MEM_HUGE` |
+| 示例 `main.cpp:91`（已修复） | **16** | 修复后用 CANN 头文件常量 |
+
+### 失败机制
+
+- `ACL_HBM_MEM_HUGE`（值 4）分配的是**非 P2P 的本地 HBM 内存**。
+- 同卡（如 dev0/dev1 在同一 NPU）共享 HBM，所以同卡 import 成功。
+- 跨卡（如 dev0→dev2 在不同 NPU 上）需要 **P2P 内存属性**才能被 `aclrtMemImportFromShareableHandle` 接受。非 P2P 内存跨卡 import 被驱动拒绝，返回 507899。
+
+### CANN aclrtMemAttr 枚举对照
+
+| 枚举值 | CANN 数值 | 项目自定义值 | 是否匹配 |
+|--------|-----------|-------------|----------|
+| `ACL_DDR_MEM` | 0 | — | — |
+| `ACL_HBM_MEM` | 1 | — | — |
+| `ACL_HBM_MEM_HUGE` | **4** | — | — |
+| `ACL_MEM_NORMAL` | 12 | 0 | ❌ |
+| `ACL_MEM_HUGE` | 13 | 1 | ❌ |
+| `ACL_MEM_P2P_NORMAL` | 15 | 3 | ❌ |
+| `ACL_MEM_P2P_HUGE` | **16** | **4** | ❌ |
+
+### 解决方案
+
+**示例文件**（已修复）：`cross_card_import_test/main.cpp:91` 的 `static_cast<aclrtMemAttr>(4)` 改为 `ACL_MEM_P2P_HUGE`。
+
+**生产代码**（待修复）：`src/hybm/csrc/under_api/dl_acl_api.h:188-193` 的自定义 `aclrtMemAttr` 枚举值改为与 CANN `acl_rt.h` 一致：
+
+```cpp
+enum class aclrtMemAttr : uint32_t {
+    ACL_MEM_NORMAL = 12,
+    ACL_MEM_HUGE = 13,
+    ACL_MEM_P2P_NORMAL = 15,
+    ACL_MEM_P2P_HUGE = 16,
+};
+```
+
+修复后示例所有 5 个 Phase 全部 PASS：
+
+| Phase | 场景 | 修复前 | 修复后 |
+|-------|------|--------|--------|
+| Phase 1 | 主线程，无 smem_bm | FAIL 507899 | ✅ PASS |
+| Phase 2 | smem_bm_init + create2 后 | FAIL 507899 | ✅ PASS |
+| Phase 3 | smem_bm_join 后，主线程 | FAIL 507899 | ✅ PASS |
+| Phase 4 | smem_bm_join 后，子线程 | FAIL 507899 | ✅ PASS |
+| Phase 5 | 预启用 P2P 后，子线程 | FAIL 507899 | ✅ PASS |
+
+### 经验教训
+
+1. CANN 枚举值不要用魔术数，必须用命名常量。
+2. 项目自定义的 CANN 类型/枚举必须与 CANN 头文件完全一致，否则会因 ABI 不匹配导致运行时行为异常。
+3. `aclrtMemAttr` 枚举中 `ACL_HBM_MEM_HUGE`(4) 与 `ACL_MEM_P2P_HUGE`(16) 语义完全不同，前者是本地 HBM，后者才是可跨卡 P2P 内存。
+4. 之前 memory 第 17 节中分析的"异步时序"、"listen 线程竞争"等方向全是误导，根因就是这个枚举值错误。

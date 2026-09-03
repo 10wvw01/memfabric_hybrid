@@ -698,6 +698,14 @@ Result HybmVmmBasedSegment::Mmap() noexcept
      * This ensures ctx trick (same-card) runs before cross-card import,
      * which is required by ACL runtime's P2P state management. */
     if (Is310P3AclPath()) {
+        /* Mmap() runs on the group listen thread (grp_listen_evt), NOT the main
+         * thread. ACL runtime device context is thread-local, so the main
+         * thread's aclrtSetDevice does not apply here. Without setting the
+         * device on this thread, aclrtMemImportFromShareableHandle returns
+         * 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR) for cross-card imports.
+         * Force-set the device on the current thread before any ACL import. */
+        DlAclApi::AclrtSetDevice(deviceId_, true);
+
         auto sameCardFirst = [this](const HostSdmaExportInfo &a, const HostSdmaExportInfo &b) {
             bool aSame = IsSameCard(a.devicePhyId);
             bool bSame = IsSameCard(b.devicePhyId);
@@ -707,15 +715,6 @@ Result HybmVmmBasedSegment::Mmap() noexcept
             return a.rankId < b.rankId; /* then by rankId */
         };
         std::stable_sort(imports_.begin(), imports_.end(), sameCardFirst);
-        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 Mmap: imports_ sorted, count:" << imports_.size()
-                    << " myRankId:" << options_.rankId << " deviceId:" << deviceId_);
-        for (size_t idx = 0; idx < imports_.size(); idx++) {
-            const auto &im = imports_[idx];
-            bool sc = IsSameCard(im.devicePhyId);
-            BM_LOG_INFO("[rank " << options_.rankId << "]   import[" << idx << "] rank:" << im.rankId
-                        << " devicePhyId:" << im.devicePhyId << " sameCard:" << sc
-                        << " gva:" << VaToStr(im.gva) << " size:" << im.size);
-        }
     }
 
     for (auto &im : imports_) {

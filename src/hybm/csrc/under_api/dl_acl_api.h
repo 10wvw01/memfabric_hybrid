@@ -186,15 +186,32 @@ using aclrtLaunchKernelWithConfigFunc = int32_t (*)(aclrtFuncHandle, uint32_t, v
 
 using aclrtDrvMemHandle = void *;
 
+/* Must match aclrtMemAttr in CANN acl_rt.h — members are sequential from 0.
+ * Do NOT assign explicit values; the auto-increment order must match CANN exactly. */
 enum class aclrtMemAttr : uint32_t {
-    ACL_MEM_NORMAL = 0,
-    ACL_MEM_HUGE = 1,
-    ACL_MEM_P2P_NORMAL = 3,
-    ACL_MEM_P2P_HUGE = 4,
+    ACL_DDR_MEM,
+    ACL_HBM_MEM,
+    ACL_DDR_MEM_HUGE,
+    ACL_DDR_MEM_NORMAL,
+    ACL_HBM_MEM_HUGE,
+    ACL_HBM_MEM_NORMAL,
+    ACL_DDR_MEM_P2P_HUGE,
+    ACL_DDR_MEM_P2P_NORMAL,
+    ACL_HBM_MEM_P2P_HUGE,
+    ACL_HBM_MEM_P2P_NORMAL,
+    ACL_HBM_MEM_HUGE1G,
+    ACL_HBM_MEM_P2P_HUGE1G,
+    ACL_MEM_NORMAL,
+    ACL_MEM_HUGE,
+    ACL_MEM_HUGE1G,
+    ACL_MEM_P2P_NORMAL,
+    ACL_MEM_P2P_HUGE,
+    ACL_MEM_P2P_HUGE1G,
 };
 
 enum class aclrtMemHandleType : uint32_t {
     ACL_MEM_HANDLE_TYPE_NONE = 0,
+    ACL_MEM_HANDLE_TYPE_POSIX = 2,
 };
 
 constexpr uint64_t ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION = 1ULL;
