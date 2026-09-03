@@ -16,7 +16,7 @@
  * Based on verified test programs from commit 986eec67 (310p-p0-verify).
  *
  * Tests:
- *   1. HBM pool: L2G / G2L / G2G / G2H (all peer ranks)
+ *   1. HBM pool: round-robin L2G / G2H / G2L / G2G (supports 2-rank and 4-rank)
  *   2. DRAM HOST_SHM pool: H2GH / GH2H (all peer ranks)
  *   3. 100x lifecycle (create -> join -> copy -> destroy)
  *
@@ -78,7 +78,180 @@ int32_t BmInit(int rank, int worldSize, int devId, const char *storeUrl)
     return 0;
 }
 
-/* HBM test: L2G to peer, G2H verify, G2L verify, G2G verify */
+/* HBM L2G phase: writer writes tag pattern to target's GVA */
+void HbmL2gWrite(smem_bm_t handle, int rank, int targetRank, void *targetGva,
+                 uint32_t writerTag, int &nfail)
+{
+    void *localDevBuf = nullptr;
+    aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (localDevBuf == nullptr) {
+        fprintf(stderr, "[rank %d] aclrtMalloc failed for L2G\n", rank);
+        nfail++;
+        return;
+    }
+    std::vector<uint8_t> hbuf(COPY_SIZE);
+    uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
+    for (size_t i = 0; i < COPY_SIZE / 4; i++) {
+        p[i] = Pat(writerTag, i);
+    }
+    aclrtMemcpy(localDevBuf, COPY_SIZE, hbuf.data(), COPY_SIZE, ACL_MEMCPY_HOST_TO_DEVICE);
+
+    printf("[rank %d] L2G: writing tag=0x%08x to targetRank=%d targetGva=%p size=%zu\n",
+           rank, Pat(writerTag, 0), targetRank, targetGva, static_cast<size_t>(COPY_SIZE));
+
+    smem_copy_params_t params{};
+    params.src = localDevBuf;
+    params.dest = targetGva;
+    params.dataSize = COPY_SIZE;
+    params.stream = nullptr;
+    int32_t ret = smem_bm_copy(handle, &params, SMEMB_COPY_L2G, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] L2G(target %d) failed:%d\n", rank, targetRank, ret);
+        nfail++;
+    } else {
+        smem_bm_wait(handle);
+        printf("[rank %d] L2G(target %d) OK\n", rank, targetRank);
+    }
+    aclrtFree(localDevBuf);
+}
+
+/* HBM G2H phase: target reads own GVA, verifies writer's tag pattern */
+void HbmG2hVerify(smem_bm_t handle, int rank, void *localGva,
+                  uint32_t writerTag, int writer, int &nfail)
+{
+    std::vector<uint8_t> hbuf(COPY_SIZE, 0);
+    printf("[rank %d] G2H: reading ownGva=%p expectTag=0x%08x writer=%d\n",
+           rank, localGva, Pat(writerTag, 0), writer);
+    smem_copy_params_t params{};
+    params.src = localGva;
+    params.dest = hbuf.data();
+    params.dataSize = COPY_SIZE;
+    params.stream = nullptr;
+    int32_t ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] G2H(writer %d) failed:%d\n", rank, writer, ret);
+        nfail++;
+        return;
+    }
+    smem_bm_wait(handle);
+    uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
+    bool ok = true;
+    for (size_t i = 0; i < COPY_SIZE / 4; i++) {
+        if (p[i] != Pat(writerTag, i)) {
+            fprintf(stderr, "[rank %d] G2H verify FAIL at word %zu: got 0x%08x want 0x%08x\n",
+                    rank, i, p[i], Pat(writerTag, i));
+            ok = false;
+            break;
+        }
+    }
+    printf("[rank %d] G2H(writer %d) firstWord=0x%08x expected=0x%08x %s\n",
+           rank, writer, p[0], Pat(writerTag, 0), ok ? "OK" : "FAIL");
+    if (!ok) {
+        nfail++;
+    }
+}
+
+/* HBM G2L phase: writer reads target's GVA, verifies own tag pattern */
+void HbmG2lVerify(smem_bm_t handle, int rank, int targetRank, void *targetGva,
+                  uint32_t writerTag, int &nfail)
+{
+    void *localDevBuf = nullptr;
+    aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (localDevBuf == nullptr) {
+        fprintf(stderr, "[rank %d] aclrtMalloc failed for G2L\n", rank);
+        nfail++;
+        return;
+    }
+    printf("[rank %d] G2L: reading targetGva=%p targetRank=%d expectTag=0x%08x\n",
+           rank, targetGva, targetRank, Pat(writerTag, 0));
+    smem_copy_params_t params{};
+    params.src = targetGva;
+    params.dest = localDevBuf;
+    params.dataSize = COPY_SIZE;
+    params.stream = nullptr;
+    int32_t ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2L, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] G2L(target %d) failed:%d\n", rank, targetRank, ret);
+        nfail++;
+        aclrtFree(localDevBuf);
+        return;
+    }
+    smem_bm_wait(handle);
+    std::vector<uint8_t> hbuf(COPY_SIZE);
+    aclrtMemcpy(hbuf.data(), COPY_SIZE, localDevBuf, COPY_SIZE, ACL_MEMCPY_DEVICE_TO_HOST);
+    uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
+    bool ok = true;
+    for (size_t i = 0; i < COPY_SIZE / 4; i++) {
+        if (p[i] != Pat(writerTag, i)) {
+            fprintf(stderr, "[rank %d] G2L verify FAIL at word %zu: got 0x%08x want 0x%08x\n",
+                    rank, i, p[i], Pat(writerTag, i));
+            ok = false;
+            break;
+        }
+    }
+    printf("[rank %d] G2L(target %d) firstWord=0x%08x expected=0x%08x %s\n",
+           rank, targetRank, p[0], Pat(writerTag, 0), ok ? "OK" : "FAIL");
+    if (!ok) {
+        nfail++;
+    }
+    aclrtFree(localDevBuf);
+}
+
+/* HBM G2G phase: target copies writer's GVA to own GVA, verifies match.
+ * Pre-reads writer's GVA first because it may have been modified in previous rounds. */
+void HbmG2gCopy(smem_bm_t handle, int rank, int writer, void *writerGva, void *localGva, int &nfail)
+{
+    std::vector<uint8_t> writerBuf(COPY_SIZE, 0);
+    smem_copy_params_t params{};
+    params.src = writerGva;
+    params.dest = writerBuf.data();
+    params.dataSize = COPY_SIZE;
+    params.stream = nullptr;
+    int32_t ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] G2G pre-read(writer %d) failed:%d\n", rank, writer, ret);
+        nfail++;
+        return;
+    }
+    smem_bm_wait(handle);
+
+    printf("[rank %d] G2G: src=writerGva=%p dst=localGva=%p writer=%d\n", rank, writerGva, localGva, writer);
+    params.src = writerGva;
+    params.dest = localGva;
+    ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2G, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] G2G(writer %d) failed:%d\n", rank, writer, ret);
+        nfail++;
+        return;
+    }
+    smem_bm_wait(handle);
+
+    std::vector<uint8_t> ownBuf(COPY_SIZE, 0);
+    params.src = localGva;
+    params.dest = ownBuf.data();
+    smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
+    smem_bm_wait(handle);
+
+    uint32_t *w = reinterpret_cast<uint32_t *>(writerBuf.data());
+    uint32_t *o = reinterpret_cast<uint32_t *>(ownBuf.data());
+    bool ok = true;
+    for (size_t i = 0; i < COPY_SIZE / 4; i++) {
+        if (o[i] != w[i]) {
+            fprintf(stderr, "[rank %d] G2G verify FAIL at word %zu: got 0x%08x want 0x%08x\n",
+                    rank, i, o[i], w[i]);
+            ok = false;
+            break;
+        }
+    }
+    printf("[rank %d] G2G(writer %d) firstWord=0x%08x expected=0x%08x %s\n",
+           rank, writer, o[0], w[0], ok ? "OK" : "FAIL");
+    if (!ok) {
+        nfail++;
+    }
+}
+
+/* HBM test: round-robin L2G/G2H/G2L/G2G to avoid concurrent write races.
+ * For each target rank, one designated writer writes to it, then target verifies. */
 int32_t TestHbm(int rank, int worldSize)
 {
     printf("\n========== HBM Pool Test (rankSize=%d) ==========\n", worldSize);
@@ -111,174 +284,58 @@ int32_t TestHbm(int rank, int worldSize)
         return 1;
     }
 
+    /* Initialize: each rank writes own tag pattern to own GVA so that G2G
+     * can copy meaningful content from writer's GVA in later rounds. */
     int nfail = 0;
-    for (int peerRank = 0; peerRank < worldSize; peerRank++) {
-        if (peerRank == rank) {
-            continue;
-        }
-        void *peerGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE, static_cast<uint16_t>(peerRank));
-        if (peerGva == nullptr) {
-            fprintf(stderr, "[rank %d] ptr_by_mem_type(DEVICE, peer:%d) failed\n", rank, peerRank);
-            nfail++;
-            continue;
-        }
-        printf("[rank %d] peerRank:%d localGva:%p peerGva:%p\n", rank, peerRank, localGva, peerGva);
+    uint32_t myInitTag = 0xA0U | static_cast<uint32_t>(rank);
+    HbmL2gWrite(handle, rank, rank, localGva, myInitTag, nfail);
+    MpBarrier();
 
-        uint32_t myTag = 0xA0U | static_cast<uint32_t>(rank);
-        uint32_t peerTag = 0xA0U | static_cast<uint32_t>(peerRank);
+    for (int targetRank = 0; targetRank < worldSize; targetRank++) {
+        int writer = (targetRank + 1) % worldSize;
+        uint32_t writerTag = 0xA0U | static_cast<uint32_t>(writer);
+        printf("[rank %d] round targetRank=%d writer=%d writerTag=0x%02x\n",
+               rank, targetRank, writer, writerTag);
 
-        /* L2G: local device buffer -> peer GVA */
-        void *localDevBuf = nullptr;
-        aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-        if (localDevBuf == nullptr) {
-            fprintf(stderr, "[rank %d] aclrtMalloc failed for L2G\n", rank);
-            nfail++;
-            continue;
-        }
-        {
-            std::vector<uint8_t> hbuf(COPY_SIZE);
-            uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
-            for (size_t i = 0; i < COPY_SIZE / 4; i++) {
-                p[i] = Pat(myTag, i);
-            }
-            aclrtMemcpy(localDevBuf, COPY_SIZE, hbuf.data(), COPY_SIZE, ACL_MEMCPY_HOST_TO_DEVICE);
-
-            smem_copy_params_t params{};
-            params.src = localDevBuf;
-            params.dest = peerGva;
-            params.dataSize = COPY_SIZE;
-            params.stream = nullptr;
-            ret = smem_bm_copy(handle, &params, SMEMB_COPY_L2G, 0);
-            if (ret != 0) {
-                fprintf(stderr, "[rank %d] L2G(peer %d) failed:%d\n", rank, peerRank, ret);
+        if (rank == writer) {
+            void *targetGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE,
+                                                       static_cast<uint16_t>(targetRank));
+            if (targetGva == nullptr) {
+                fprintf(stderr, "[rank %d] ptr_by_mem_type(DEVICE, target:%d) failed\n", rank, targetRank);
                 nfail++;
             } else {
-                smem_bm_wait(handle);
-                printf("[rank %d] L2G(peer %d) OK\n", rank, peerRank);
+                HbmL2gWrite(handle, rank, targetRank, targetGva, writerTag, nfail);
             }
         }
-        aclrtFree(localDevBuf);
-
         MpBarrier();
 
-        /* G2H: read own GVA (peer wrote into it via L2G) -> host buffer, verify */
-        {
-            std::vector<uint8_t> hbuf(COPY_SIZE, 0);
-            smem_copy_params_t params{};
-            params.src = localGva;
-            params.dest = hbuf.data();
-            params.dataSize = COPY_SIZE;
-            params.stream = nullptr;
-            ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
-            if (ret != 0) {
-                fprintf(stderr, "[rank %d] G2H(peer %d) failed:%d\n", rank, peerRank, ret);
-                nfail++;
-            } else {
-                smem_bm_wait(handle);
-                uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
-                bool ok = true;
-                for (size_t i = 0; i < COPY_SIZE / 4; i++) {
-                    if (p[i] != Pat(peerTag, i)) {
-                        fprintf(stderr, "[rank %d] G2H verify FAIL at word %zu: got 0x%08x want 0x%08x\n",
-                                rank, i, p[i], Pat(peerTag, i));
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) {
-                    printf("[rank %d] G2H(peer %d) verify OK\n", rank, peerRank);
-                } else {
-                    nfail++;
-                }
-            }
+        if (rank == targetRank) {
+            HbmG2hVerify(handle, rank, localGva, writerTag, writer, nfail);
         }
-
         MpBarrier();
 
-        /* G2L: peer GVA -> local device buffer, verify own pattern (peerGva has my L2G data) */
-        {
-            void *localDevBuf = nullptr;
-            aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-            if (localDevBuf == nullptr) {
-                fprintf(stderr, "[rank %d] aclrtMalloc failed for G2L\n", rank);
-                nfail++;
-                continue;
-            }
-            smem_copy_params_t params{};
-            params.src = peerGva;
-            params.dest = localDevBuf;
-            params.dataSize = COPY_SIZE;
-            params.stream = nullptr;
-            ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2L, 0);
-            if (ret != 0) {
-                fprintf(stderr, "[rank %d] G2L(peer %d) failed:%d\n", rank, peerRank, ret);
+        if (rank == writer) {
+            void *targetGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE,
+                                                       static_cast<uint16_t>(targetRank));
+            if (targetGva == nullptr) {
+                fprintf(stderr, "[rank %d] ptr_by_mem_type(DEVICE, target:%d) for G2L failed\n", rank, targetRank);
                 nfail++;
             } else {
-                smem_bm_wait(handle);
-                std::vector<uint8_t> hbuf(COPY_SIZE);
-                aclrtMemcpy(hbuf.data(), COPY_SIZE, localDevBuf, COPY_SIZE, ACL_MEMCPY_DEVICE_TO_HOST);
-                uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
-                bool ok = true;
-                for (size_t i = 0; i < COPY_SIZE / 4; i++) {
-                    if (p[i] != Pat(myTag, i)) {
-                        fprintf(stderr, "[rank %d] G2L verify FAIL at word %zu\n", rank, i);
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) {
-                    printf("[rank %d] G2L(peer %d) verify OK\n", rank, peerRank);
-                } else {
-                    nfail++;
-                }
+                HbmG2lVerify(handle, rank, targetRank, targetGva, writerTag, nfail);
             }
-            aclrtFree(localDevBuf);
         }
-
         MpBarrier();
 
-        /* G2G: peer GVA -> own GVA (serial to avoid read-write race), then G2H verify */
-        for (int r = 0; r < worldSize; r++) {
-            if (rank != r) {
-                MpBarrier();
-                continue;
-            }
-            smem_copy_params_t params{};
-            params.src = peerGva;
-            params.dest = localGva;
-            params.dataSize = COPY_SIZE;
-            params.stream = nullptr;
-            ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2G, 0);
-            if (ret != 0) {
-                fprintf(stderr, "[rank %d] G2G(peer %d) failed:%d\n", rank, peerRank, ret);
+        if (rank == targetRank) {
+            void *writerGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE,
+                                                       static_cast<uint16_t>(writer));
+            if (writerGva == nullptr) {
+                fprintf(stderr, "[rank %d] ptr_by_mem_type(DEVICE, writer:%d) for G2G failed\n", rank, writer);
                 nfail++;
             } else {
-                smem_bm_wait(handle);
-                std::vector<uint8_t> hbuf(COPY_SIZE, 0);
-                params.src = localGva;
-                params.dest = hbuf.data();
-                smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
-                smem_bm_wait(handle);
-                /* Serial G2G: rank0 overwrites own GVA first, then rank1 reads rank0's GVA.
-                 * After serial G2G, all ranks' localGva have rank0's original L2G pattern. */
-                uint32_t g2gTag = 0xA0U;
-                uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
-                bool ok = true;
-                for (size_t i = 0; i < COPY_SIZE / 4; i++) {
-                    if (p[i] != Pat(g2gTag, i)) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) {
-                    printf("[rank %d] G2G(peer %d) verify OK\n", rank, peerRank);
-                } else {
-                    nfail++;
-                }
+                HbmG2gCopy(handle, rank, writer, writerGva, localGva, nfail);
             }
-            MpBarrier();
         }
-
         MpBarrier();
     }
 
@@ -404,14 +461,14 @@ int32_t TestDram(int rank, int worldSize)
     return nfail;
 }
 
-/* 100x lifecycle: create -> join -> L2G to peer -> G2H verify -> destroy */
+/* 100x lifecycle: create -> join -> round-robin L2G/G2H -> destroy.
+ * Each loop designates one writer→target pair (writer=loop%worldSize, target=(writer+1)%worldSize)
+ * to avoid concurrent write races. Over 100 loops every rank is writer and target multiple times. */
 int32_t TestLifecycle(int rank, int worldSize)
 {
     printf("\n========== 100x Lifecycle Test (HBM, rankSize=%d) ==========\n", worldSize);
 
     int nfail = 0;
-    int peerRank = (rank == 0) ? 1 : 0;
-
     for (int loop = 0; loop < LOOPS; loop++) {
         smem_bm_create_option_t opt{};
         opt.maxHbmSize = HBM_SIZE;
@@ -425,7 +482,6 @@ int32_t TestLifecycle(int rank, int worldSize)
             MpBarrier();
             continue;
         }
-
         int32_t ret = smem_bm_join(handle, 0);
         if (ret != 0) {
             fprintf(stderr, "[rank %d] loop %d join failed:%d\n", rank, loop, ret);
@@ -437,70 +493,30 @@ int32_t TestLifecycle(int rank, int worldSize)
         MpBarrier();
         sleep(1);
 
-        void *peerGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE, static_cast<uint16_t>(peerRank));
-        void *localGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE, static_cast<uint16_t>(rank));
-        if (peerGva == nullptr || localGva == nullptr) {
-            smem_bm_destroy(handle);
-            nfail++;
-            MpBarrier();
-            continue;
-        }
+        int writer = loop % worldSize;
+        int target = (writer + 1) % worldSize;
+        uint32_t writerTag = 0x80U | static_cast<uint32_t>(loop & 0x3F);
 
-        /* L2G: write to peer */
-        void *localDevBuf = nullptr;
-        aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-        if (localDevBuf != nullptr) {
-            std::vector<uint8_t> hbuf(COPY_SIZE);
-            uint32_t myTag = 0x80U | static_cast<uint32_t>(loop & 0x3F);
-            uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
-            for (size_t i = 0; i < COPY_SIZE / 4; i++) {
-                p[i] = Pat(myTag, i);
-            }
-            aclrtMemcpy(localDevBuf, COPY_SIZE, hbuf.data(), COPY_SIZE, ACL_MEMCPY_HOST_TO_DEVICE);
-
-            smem_copy_params_t params{};
-            params.src = localDevBuf;
-            params.dest = peerGva;
-            params.dataSize = COPY_SIZE;
-            params.stream = nullptr;
-            ret = smem_bm_copy(handle, &params, SMEMB_COPY_L2G, 0);
-            if (ret != 0) {
-                fprintf(stderr, "[rank %d] loop %d L2G failed:%d\n", rank, loop, ret);
-                nfail++;
-            }
-            smem_bm_wait(handle);
-            aclrtFree(localDevBuf);
-        }
-
-        MpBarrier();
-
-        /* G2H: verify peer wrote to us */
-        {
-            std::vector<uint8_t> hbuf(COPY_SIZE, 0);
-            smem_copy_params_t params{};
-            params.src = localGva;
-            params.dest = hbuf.data();
-            params.dataSize = COPY_SIZE;
-            params.stream = nullptr;
-            ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
-            if (ret != 0) {
-                fprintf(stderr, "[rank %d] loop %d G2H failed:%d\n", rank, loop, ret);
+        if (rank == writer) {
+            void *targetGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE,
+                                                       static_cast<uint16_t>(target));
+            if (targetGva == nullptr) {
+                fprintf(stderr, "[rank %d] loop %d ptr(target:%d) failed\n", rank, loop, target);
                 nfail++;
             } else {
-                smem_bm_wait(handle);
-                uint32_t expectedTag = 0x80U | static_cast<uint32_t>(loop & 0x3F);
-                uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
-                bool ok = true;
-                for (size_t i = 0; i < COPY_SIZE / 4; i++) {
-                    if (p[i] != Pat(expectedTag, i)) {
-                        fprintf(stderr, "[rank %d] loop %d verify FAIL at word %zu\n", rank, loop, i);
-                        ok = false;
-                        break;
-                    }
-                }
-                if (!ok) {
-                    nfail++;
-                }
+                HbmL2gWrite(handle, rank, target, targetGva, writerTag, nfail);
+            }
+        }
+        MpBarrier();
+
+        if (rank == target) {
+            void *localGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE,
+                                                      static_cast<uint16_t>(rank));
+            if (localGva == nullptr) {
+                fprintf(stderr, "[rank %d] loop %d ptr(self) failed\n", rank, loop);
+                nfail++;
+            } else {
+                HbmG2hVerify(handle, rank, localGva, writerTag, writer, nfail);
             }
         }
 

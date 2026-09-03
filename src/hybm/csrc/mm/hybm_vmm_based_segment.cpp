@@ -360,10 +360,12 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         return BM_DL_FUNCTION_FAILED;
     }
     if (Is310P3AclPath() && options_.segType == HYBM_MST_HBM) {
-        /* 310P3: SetAccess(RW) on local HBM for ALL devices (local + all peers).
-         * This allows cross-card peers to import and access this memory. */
-        for (uint32_t dev = 0; dev < options_.rankCnt * 2; dev++) {
+        /* 310P3: SetAccess(RW) on local HBM for all peer devices (cross-card).
+         * Same-card peers share the P2P domain and don't need SetAccess.
+         * deviceId equals rankId on 310P3 Duo, so rankCnt is the total device count. */
+        for (uint32_t dev = 0; dev < options_.rankCnt; dev++) {
             if (dev == static_cast<uint32_t>(deviceId_)) { continue; }
+            if (dev / 2U == static_cast<uint32_t>(deviceId_) / 2U) { continue; }
             aclrtMemAccessDesc desc{};
             desc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
             desc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;

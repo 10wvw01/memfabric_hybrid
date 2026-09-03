@@ -3,7 +3,7 @@
 #
 # Usage: ./run.sh <mode> [rank_size] [store_ip] [store_port]
 #   mode:       hbm | dram | lifecycle (default: hbm)
-#   rank_size:  number of ranks (default: 2; HBM: 2 same-card; DRAM: 2/4/8)
+#   rank_size:  number of ranks (default: 2; HBM: 2/4; DRAM: 2/4/8)
 #   store_ip:   rank0 IP (default: 127.0.0.1)
 #   store_port: TCP port (default: 24000)
 #
@@ -11,7 +11,7 @@
 #   - MemFabric built and installed (bash script/build_and_pack_run.sh)
 #   - ASCEND_HOME_PATH set to CANN installation
 #   - MPI installed (mpirun)
-#   - For HBM test: dev0+dev1 on same card (310P3 Duo)
+#   - For HBM test: dev0+dev1 (2-rank same-card) or dev0..dev3 (4-rank cross-card)
 
 set -e
 

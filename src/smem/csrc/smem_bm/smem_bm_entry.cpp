@@ -548,13 +548,27 @@ Result SmemBmEntry::TopologyPreflight()
                     << " phyChipId:" << t.phyChipId << (isLocal ? " (local)" : " (peer)"));
     }
 
-    /* Compute P2P budget: count cross-card device pairs per card */
-    std::map<uint32_t, uint32_t> requiredPerCard; /* phyChipId -> cross-card pair count */
+    /* Compute P2P budget: count inbound cross-card connections per card.
+     * On 310P3 Duo, devId/2 identifies the physical card (dev0/dev1 -> card0, etc.).
+     * Same-card devices share the P2P domain and don't need cross-card connections.
+     *
+     * HAL constraint (ascend_hal_base.h): the two dies of a 310P Duo card share
+     * 8 MAX enable-number (inbound P2P authorization slots). Each cross-card
+     * enable(local->remote) consumes one inbound slot on remote's card.
+     * VMM import internally calls halDeviceEnableP2P, consuming the same quota.
+     *
+     * Full-mesh N-rank with 2 ranks per card: each card has 2 dies, each die
+     * connects to (N-2) cross-card peers → 2×(N-2) inbound slots per card.
+     *   N=4: 2×2=4 ≤ 8  ✅    N=6: 2×4=8 ≤ 8  ✅(saturated)    N=8: 2×6=12 > 8  ❌
+     */
+    std::map<uint32_t, uint32_t> requiredPerCard; /* cardId(devId/2) -> inbound cross-card count */
     for (size_t i = 0; i < topos.size(); i++) {
-        for (size_t j = i + 1; j < topos.size(); j++) {
-            if (topos[i].phyChipId != topos[j].phyChipId) {
-                requiredPerCard[topos[i].phyChipId]++;
-                requiredPerCard[topos[j].phyChipId]++;
+        uint32_t cardI = topos[i].devId / 2U;
+        for (size_t j = 0; j < topos.size(); j++) {
+            if (i == j) { continue; }
+            uint32_t cardJ = topos[j].devId / 2U;
+            if (cardI != cardJ) {
+                requiredPerCard[cardI]++;
             }
         }
     }
@@ -562,10 +576,10 @@ Result SmemBmEntry::TopologyPreflight()
     bool feasible = true;
     for (const auto &card : requiredPerCard) {
         if (card.second > p2pSlotsPerCard) {
-            SM_LOG_ERROR("P2P slot budget exceeded: phyChipId:" << card.first
-                                                               << " required:" << card.second
-                                                               << " limit:" << p2pSlotsPerCard
-                                                               << " poolId:" << options_.id << " worldSize:" << rankSize);
+            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first
+                                                             << " required:" << card.second
+                                                             << " limit:" << p2pSlotsPerCard
+                                                             << " poolId:" << options_.id << " worldSize:" << rankSize);
             feasible = false;
         }
     }
@@ -576,7 +590,7 @@ Result SmemBmEntry::TopologyPreflight()
     }
 
     SM_LOG_INFO("topology preflight PASS: rank:" << rankId << " worldSize:" << rankSize
-                                                 << " cross-card pairs per card all <= " << p2pSlotsPerCard);
+                                                 << " inbound cross-card slots per card all <= " << p2pSlotsPerCard);
 
     /* 310P3: pre-enable P2P disabled — p3_store_repro test proved it's not needed.
      * ACL runtime handles P2P internally during aclrtMemImportFromShareableHandle. */
