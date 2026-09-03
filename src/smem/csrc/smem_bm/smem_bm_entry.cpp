@@ -318,17 +318,23 @@ Result SmemBmEntry::JoinHandle(uint32_t rk)
     }
 
     if (!entityInfos.empty()) {
+        SM_LOG_INFO("[rank " << options_.rank << "] JoinHandle: hybm_import entity, count:" << entityInfos.size()
+                    << " recv_rank:" << rk);
         ret = hybm_import(entity_, entityInfos.data(), entityInfos.size(), nullptr, HYBM_FLAG_EXPORT_ENTITY);
         if (ret != SM_OK) {
-            SM_LOG_ERROR("hybm import entity failed, result: " << ret << " local_rank:" << options_.rank);
+            SM_LOG_ERROR("hybm import entity failed, result: " << ret << " local_rank:" << options_.rank
+                                                               << " recv_rank:" << rk);
             goto join_exit;
         }
     }
 
     if (!sliceInfos.empty()) {
+        SM_LOG_INFO("[rank " << options_.rank << "] JoinHandle: hybm_import slice, count:" << sliceInfos.size()
+                    << " recv_rank:" << rk);
         ret = hybm_import(entity_, sliceInfos.data(), sliceInfos.size(), nullptr, 0);
         if (ret != SM_OK) {
-            SM_LOG_ERROR("hybm import slice failed, result: " << ret << " local_rank:" << options_.rank);
+            SM_LOG_ERROR("hybm import slice failed, result: " << ret << " local_rank:" << options_.rank
+                                                              << " recv_rank:" << rk);
             goto join_exit;
         }
     }
@@ -339,10 +345,13 @@ Result SmemBmEntry::JoinHandle(uint32_t rk)
     }
 
     FIP_START(MMAP, &ret)
+    SM_LOG_INFO("[rank " << options_.rank << "] JoinHandle: hybm_mmap start, recv_rank:" << rk);
     ret = hybm_mmap(entity_, 0);
     FIP_END;
     if (ret != SM_OK) {
-        SM_LOG_ERROR("hybm mmap failed, result: " << ret);
+        SM_LOG_ERROR("[rank " << options_.rank << "] hybm mmap failed, result: " << ret << " recv_rank:" << rk);
+    } else {
+        SM_LOG_INFO("[rank " << options_.rank << "] JoinHandle: hybm_mmap OK, recv_rank:" << rk);
     }
 
 join_exit:
@@ -462,7 +471,8 @@ Result SmemBmEntry::TopologyPreflight()
     const uint32_t p2pSlotsPerCard = 8U;
     const std::string topoPrefix = "TOPO_";
 
-    SM_LOG_INFO("310P3 topology preflight: rank:" << rankId << " devId:" << devId << " rankSize:" << rankSize);
+    SM_LOG_INFO("[rank " << rankId << "] 310P3 topology preflight: devId:" << devId
+                << " rankSize:" << rankSize);
 
     /* Query local topology: physicalChipId */
     int32_t phyChipIdVal = hybm_get_phy_chip_id(devId);
@@ -471,6 +481,7 @@ Result SmemBmEntry::TopologyPreflight()
         return SM_ERROR;
     }
     uint32_t phyChipId = static_cast<uint32_t>(phyChipIdVal);
+    SM_LOG_INFO("[rank " << rankId << "] 310P3 topology preflight: phyChipId:" << phyChipId);
 
     /* Publish topology record to store */
     std::string topoKey = topoPrefix + std::to_string(rankId);
@@ -528,6 +539,13 @@ Result SmemBmEntry::TopologyPreflight()
     if (topos.size() < rankSize) {
         SM_LOG_ERROR("topology records incomplete:" << topos.size() << "/" << rankSize);
         return SM_ERROR;
+    }
+
+    /* Log topology summary */
+    for (const auto &t : topos) {
+        bool isLocal = (t.rankId == rankId);
+        SM_LOG_INFO("[rank " << rankId << "] topology record: rank:" << t.rankId << " devId:" << t.devId
+                    << " phyChipId:" << t.phyChipId << (isLocal ? " (local)" : " (peer)"));
     }
 
     /* Compute P2P budget: count cross-card device pairs per card */
