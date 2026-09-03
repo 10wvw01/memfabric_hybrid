@@ -138,6 +138,7 @@ using aclrtSetDeviceFunc = int32_t (*)(int32_t);
 using aclrtGetDeviceFunc = int32_t (*)(int32_t *);
 using aclrtDeviceEnablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
 using aclrtDeviceDisablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
+using aclrtDeviceCanAccessPeerFunc = int32_t (*)(int32_t *, int32_t, int32_t);
 using aclrtCreateStreamFunc = int (*)(void **);
 using aclrtCreateStreamWithConfigFunc = int (*)(void **, int32_t, uint32_t);
 using aclrtStreamGetIdFunc = int (*)(void *, int32_t *);
@@ -198,8 +199,10 @@ enum class aclrtMemHandleType : uint32_t {
 
 constexpr uint64_t ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION = 1ULL;
 
-/* ACL runtime error code indicating P2P peer access is already enabled (non-fatal) */
-constexpr int32_t ACL_ERROR_RT_PEER_ALREADY_ENABLED = 507899;
+/* ACL runtime error: driver internal error (e.g. P2P enable ioctl failed on same-card dies).
+ * In 310P3 same-card cross-die scenarios, halDeviceEnableP2P returns this when P2P is
+ * already configured or not needed — treat as non-fatal in EnableRemotePeerAccess. */
+constexpr int32_t ACL_ERROR_RT_DRV_INTERNAL_ERROR = 507899;
 
 /* aclrtMemAccessDesc.flags bit field: read + write access */
 constexpr uint32_t ACL_RT_MEM_ACCESS_FLAGS_READWRITE = 0x3U;
@@ -273,6 +276,14 @@ public:
             return BM_UNDER_API_UNLOAD;
         }
         return pAclrtDeviceDisablePeerAccess(peerDeviceId, flags);
+    }
+
+    static inline Result AclrtDeviceCanAccessPeer(int32_t *canAccessPeer, int32_t deviceId, int32_t peerDeviceId)
+    {
+        if (pAclrtDeviceCanAccessPeer == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtDeviceCanAccessPeer(canAccessPeer, deviceId, peerDeviceId);
     }
 
     static inline Result AclrtCreateStream(void **stream)
@@ -720,6 +731,7 @@ private:
     static aclrtGetDeviceFunc pAclrtGetDevice;
     static aclrtDeviceEnablePeerAccessFunc pAclrtDeviceEnablePeerAccess;
     static aclrtDeviceDisablePeerAccessFunc pAclrtDeviceDisablePeerAccess;
+    static aclrtDeviceCanAccessPeerFunc pAclrtDeviceCanAccessPeer;
     static aclrtCreateStreamFunc pAclrtCreateStream;
     static aclrtCreateStreamWithConfigFunc pAclrtCreateStreamWithConfig;
     static aclrtStreamGetIdFunc pAclrtStreamGetId;

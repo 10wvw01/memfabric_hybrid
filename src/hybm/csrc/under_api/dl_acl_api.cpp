@@ -23,6 +23,7 @@ aclrtGetDeviceFunc DlAclApi::pAclrtGetDevice = nullptr;
 aclrtSetDeviceFunc DlAclApi::pAclrtSetDevice = nullptr;
 aclrtDeviceEnablePeerAccessFunc DlAclApi::pAclrtDeviceEnablePeerAccess = nullptr;
 aclrtDeviceDisablePeerAccessFunc DlAclApi::pAclrtDeviceDisablePeerAccess = nullptr;
+aclrtDeviceCanAccessPeerFunc DlAclApi::pAclrtDeviceCanAccessPeer = nullptr;
 aclrtCreateStreamFunc DlAclApi::pAclrtCreateStream = nullptr;
 aclrtCreateStreamWithConfigFunc DlAclApi::pAclrtCreateStreamWithConfig = nullptr;
 
@@ -104,6 +105,8 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pAclrtDeviceEnablePeerAccess, aclrtDeviceEnablePeerAccessFunc, rtHandle, "aclrtDeviceEnablePeerAccess");
     DL_LOAD_SYM_OPTIONAL(pAclrtDeviceDisablePeerAccess, aclrtDeviceDisablePeerAccessFunc, rtHandle,
                          "aclrtDeviceDisablePeerAccess");
+    DL_LOAD_SYM_OPTIONAL(pAclrtDeviceCanAccessPeer, aclrtDeviceCanAccessPeerFunc, rtHandle,
+                         "aclrtDeviceCanAccessPeer");
     DL_LOAD_SYM(pAclrtCreateStream, aclrtCreateStreamFunc, rtHandle, "aclrtCreateStream");
     DL_LOAD_SYM(pAclrtCreateStreamWithConfig, aclrtCreateStreamWithConfigFunc, rtHandle, "aclrtCreateStreamWithConfig");
     DL_LOAD_SYM(pAclrtStreamGetId, aclrtStreamGetIdFunc, rtHandle, "aclrtStreamGetId");
@@ -209,6 +212,7 @@ void DlAclApi::CleanupLibrary()
     pAclrtSetDevice = nullptr;
     pAclrtDeviceEnablePeerAccess = nullptr;
     pAclrtDeviceDisablePeerAccess = nullptr;
+    pAclrtDeviceCanAccessPeer = nullptr;
     pAclrtCreateStream = nullptr;
     pAclrtCreateStreamWithConfig = nullptr;
     pAclrtDestroyStream = nullptr;

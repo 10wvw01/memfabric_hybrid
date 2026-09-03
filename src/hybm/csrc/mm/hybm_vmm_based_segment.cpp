@@ -782,6 +782,15 @@ Result HybmVmmBasedSegment::Mmap() noexcept
                             << im.devicePhyId << ") for rank:" << im.rankId);
                 DlAclApi::AclrtSetDevice(static_cast<int32_t>(im.devicePhyId), true);
             }
+            /* Check P2P accessibility before import */
+            {
+                int32_t canAccess = -1;
+                auto canRet = DlAclApi::AclrtDeviceCanAccessPeer(&canAccess, deviceId_,
+                    static_cast<int32_t>(im.devicePhyId));
+                BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 CanAccessPeer: ret:" << canRet
+                            << " canAccess:" << canAccess << " local:" << deviceId_
+                            << " peer:" << im.devicePhyId << " sameCard:" << sameCard);
+            }
             aclrtDrvMemHandle aclHandle = nullptr;
             ret = DlAclApi::AclrtMemImportFromShareableHandle(shareable, deviceId_, &aclHandle);
             BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step2: AclrtMemImportFromShareableHandle"

@@ -225,7 +225,7 @@ HYBM_API int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDe
         return 0;
     }
     auto ret = DlAclApi::AclrtDeviceEnablePeerAccess(static_cast<int32_t>(peerDeviceId), 0);
-    if (ret != 0 && ret != ACL_ERROR_RT_PEER_ALREADY_ENABLED) {
+    if (ret != 0) {
         BM_LOG_ERROR("hybm_enable_peer_access failed:" << ret << " local:" << localDeviceId
                                                        << " peer:" << peerDeviceId);
         return ret;

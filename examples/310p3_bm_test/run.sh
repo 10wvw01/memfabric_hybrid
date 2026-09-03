@@ -28,7 +28,7 @@ export MEMFABRIC_HYBRID_HOME_PATH="${MF_HOME}"
 
 export LD_LIBRARY_PATH="${MF_HOME}/smem/lib64:${MF_HOME}/hybm/lib64:${LD_LIBRARY_PATH:-}"
 export ASCEND_MF_STORE_URL="${STORE_URL}"
-export ASCEND_MF_LOG_LEVEL=2
+export MF_LOG_LEVEL=1
 
 echo "[run] mode=${MODE} rankSize=${RANK_SIZE} storeUrl=${STORE_URL}"
 echo "[run] LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
@@ -43,7 +43,7 @@ fi
 # Each rank defaults deviceId = mpi rank (dev0, dev1, dev2, ...)
 mpirun --allow-run-as-root -np ${RANK_SIZE} \
     -x ASCEND_MF_STORE_URL \
-    -x ASCEND_MF_LOG_LEVEL \
+    -x MF_LOG_LEVEL \
     -x LD_LIBRARY_PATH \
     -x MEMFABRIC_HYBRID_HOME_PATH \
     -x ASCEND_HOME_PATH \

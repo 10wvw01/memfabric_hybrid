@@ -58,6 +58,7 @@ void MpBarrier()
 
 int32_t BmInit(int rank, int worldSize, int devId, const char *storeUrl)
 {
+    smem_set_log_level(1); /* INFO */
     smem_bm_config_t config;
     smem_bm_config_init(&config);
     config.startConfigStoreServer = (rank == 0);

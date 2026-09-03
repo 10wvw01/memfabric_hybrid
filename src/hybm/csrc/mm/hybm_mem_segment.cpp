@@ -314,18 +314,27 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
         return BM_OK;
     }
 
-    /* For 310P3 cross-card, bidirectional P2P is required:
-     * local→remote and remote→local. aclrtDeviceEnablePeerAccess is the
-     * ACL wrapper that handles bidirectional enable internally. */
+    /* For 310P3, aclrtDeviceEnablePeerAccess handles P2P enable internally.
+     * Test verified: cross-card (dev0->dev2/dev3) returns 0 (SUCCESS), repeat calls also return 0.
+     * Same-card cross-die (dev0->dev1) returns 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR) because
+     * kernel driver rejects P2P on same-card dies (shared PCIe). This is expected and safe to ignore
+     * for same-card, but cross-card 507899 indicates a real P2P failure. */
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
         Result ret = DlAclApi::AclrtDeviceEnablePeerAccess(remotePhyId, 0);
-        if (ret != 0 && ret != ACL_ERROR_RT_PEER_ALREADY_ENABLED) {
-            BM_LOG_ERROR("AclrtDeviceEnablePeerAccess failed:" << ret << " local_user:" << deviceId_
-                                                                << " remote_phy:" << remotePhyId);
-            return BM_DL_FUNCTION_FAILED;
+        bool sameCard = (deviceId_ / 2) == (remotePhyId / 2);
+        if (ret != 0) {
+            if (ret == ACL_ERROR_RT_DRV_INTERNAL_ERROR && sameCard) {
+                BM_LOG_INFO("[rank " << "] same-card cross-die P2P rejected (507899), safe to ignore."
+                            << " local_user:" << deviceId_ << " remote_phy:" << remotePhyId);
+            } else {
+                BM_LOG_ERROR("AclrtDeviceEnablePeerAccess failed:" << ret << " local_user:" << deviceId_
+                                                                    << " remote_phy:" << remotePhyId
+                                                                    << " sameCard:" << sameCard);
+                return BM_DL_FUNCTION_FAILED;
+            }
         }
-        BM_LOG_DEBUG("310P3 cross-card P2P enabled: local_user:" << deviceId_ << " remote_phy:" << remotePhyId
-                                                                << " ret:" << ret);
+        BM_LOG_DEBUG("310P3 P2P enabled: local_user:" << deviceId_ << " remote_phy:" << remotePhyId
+                                                       << " ret:" << ret << " sameCard:" << sameCard);
         return BM_OK;
     }
 
