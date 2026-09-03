@@ -178,7 +178,7 @@ AscendSocType DlAclApi::GetAscendSocType()
         BM_LOG_DEBUG("success get soc name: " << name);
         std::string socName{name};
         if (socName.find("Ascend910B") != std::string::npos) {
-            return AscendSocType::ASCEND_910b;
+            return AscendSocType::ASCEND_910B;
         } else if (socName.find("Ascend910_93") != std::string::npos) {
             return AscendSocType::ASCEND_910C;
         } else if (socName.find("Ascend910_95") != std::string::npos ||

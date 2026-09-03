@@ -276,13 +276,13 @@ bool MemSegment::CanLocalHostReaches(uint32_t superPodId, uint32_t serverId, uin
     if (socType_ == ASCEND_310P3) {
         return true;
     }
-    return (socType_ != ASCEND_910b) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
+    return (socType_ != ASCEND_910B) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
 }
 
 bool MemSegment::CanSdmaReaches(uint32_t superPodId, uint32_t serverId, uint32_t deviceId) noexcept
 {
     if (serverId == serverId_) {
-        return (socType_ != ASCEND_910b) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
+        return (socType_ != ASCEND_910B) || ((deviceId / ASC910B_CONN_RANKS) == (deviceId_ / ASC910B_CONN_RANKS));
     }
 
     if (superPodId == invalidSuperPodId || superPodId_ == invalidSuperPodId) {

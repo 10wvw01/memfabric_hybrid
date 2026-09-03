@@ -98,7 +98,7 @@ inline bool IsArmArch()
 
 enum AscendSocType {
     ASCEND_UNKNOWN = 0,
-    ASCEND_910b,
+    ASCEND_910B,
     ASCEND_910C,
     ASCEND_950,
     ASCEND_310P1,

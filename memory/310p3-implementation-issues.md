@@ -9,12 +9,11 @@
 
 **现象**：310P3 设备在 `hybm_init` 阶段被 VA Manager 拒绝（`ASCEND_UNKNOWN`），所有 segment 创建失败。
 
-**根因**：`AscendSocType` 枚举只有 `ASCEND_910b/910C/950`，`GetAscendSocType()` 用字符串匹配 `aclrtGetSocName()` 返回值，310P3 的 SoC name `Ascend310P3` 不在匹配列表中。
+**根因**：`AscendSocType` 枚举只有 `ASCEND_910B/910C/950`，`GetAscendSocType()` 用字符串匹配 `aclrtGetSocName()` 返回值，310P3 的 SoC name `Ascend310P3` 不在匹配列表中。
 
 **解决方案**：
 - `hybm_define.h`：枚举增加 `ASCEND_310P1`、`ASCEND_310P3`
 - `dl_acl_api.cpp`：`GetAscendSocType()` 增加 `Ascend310P3`/`Ascend310P1` 字符串匹配
-- 同时修复 pre-existing bug：`ASCEND_910B`（大写 B）应为 `ASCEND_910b`（小写 b），原代码依赖 `-fpermissive` 通过编译但运行时 `SOC_TYPE` 恒为 0
 
 ---
 
