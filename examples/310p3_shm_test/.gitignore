@@ -1,0 +1,6 @@
+build/
+build_kernel/
+310p3_shm_test
+310p3_shm_kernel_test
+libshm_kernel_test.so
+CMakeLists_host.txt.bak

@@ -293,3 +293,164 @@ enum class aclrtMemAttr : uint32_t {
 2. 项目自定义的 CANN 类型/枚举必须与 CANN 头文件完全一致，否则会因 ABI 不匹配导致运行时行为异常。
 3. `aclrtMemAttr` 枚举中 `ACL_HBM_MEM_HUGE`(4) 与 `ACL_MEM_P2P_HUGE`(16) 语义完全不同，前者是本地 HBM，后者才是可跨卡 P2P 内存。
 4. 之前 memory 第 17 节中分析的"异步时序"、"listen 线程竞争"等方向全是误导，根因就是这个枚举值错误。
+
+---
+
+## 18. BM TopologyPreflight 配对算法错误
+
+**现象**：8-rank HBM 测试 preflight 计算每卡 P2P slot 数为 16，但实际应为 12。4-rank 碰巧通过（4≤8）。
+
+**根因**：原算法用 `phyChipId`（per-die 编号 0/1）分组配对，跨组配对数 = 4×4 = 16。但 `phyChipId` 不是卡标识，只是 chip 在卡内编号。
+
+**修正一：改用 `devId/2` 判断同卡**（与 `hybm_entry.cpp:222` 的 `hybm_enable_peer_access` 一致）。
+
+**修正二：计费模型从"跨组配对总数"改为"每卡入向 P2P 连接数"**。HAL 文档（`ascend_hal_base.h:1665-1715`）明确：310P3 Duo 两 die **共享 8 个入向 P2P 授权槽位**（per-card inbound），不是 per-device。
+
+正确算法：对每个 rank 的 devId，计算跨卡连接数（其他卡的设备数之和），累加到该卡。全连接 N-rank、每卡 2 die：
+```
+每卡入向 = 2 × (N - 2)    （同卡 2 个 die 各连接 N-2 个跨卡 peer）
+N=4: 2×2=4 ≤ 8  ✅     N=6: 2×4=8 ≤ 8  ✅(饱和)     N=8: 2×6=12 > 8  ❌
+```
+
+与 `310p-capability_matrix/07_d2d_matrix` 实测数据完全吻合：`T20/07: r0 六个 PEER + r1 六个 PEER = 12 > 8`。
+
+---
+
+## 19. AllocLocalMemory 循环越界（`rankCnt * 2`）
+
+**现象**：8-rank HBM 测试 `AclrtMemSetAccess(RW) dev:8~15 failed:507899`，这些设备不存在。
+
+**根因**：`hybm_vmm_based_segment.cpp:365` 原代码 `for (uint32_t dev = 0; dev < options_.rankCnt * 2; dev++)`，310P3 Duo 上 `rankCnt` 已等于设备数（deviceId = rankId），`* 2` 导致遍历不存在的设备 8~15。
+
+**解决方案**：
+1. `rankCnt * 2` → `rankCnt`（去掉多余的乘 2）
+2. 新增 `dev / 2U == deviceId_ / 2U` 同卡跳过（同卡 die 不需要 SetAccess）
+
+---
+
+## 20. BM TestHbm 多写者并发竞态
+
+**现象**：4-rank HBM 测试数据验证失败（G2H/G2L verify FAIL at word 0）。
+
+**根因**：原测试逻辑每个 rank 遍历所有 peer 并发执行 L2G 写入同一目标 GVA，多个 rank 同时写同一地址导致最后写入者覆盖前面的数据。2-rank 恰好 1:1 配对无竞态，4-rank 有 N-1 个 rank 同时写同一 GVA。
+
+**解决方案**：改为 round-robin 串行化（参考 `TestDram` 的模式）：每轮指定一个 writer 写一个 target，4 个 phase 串行执行（L2G → G2H → G2L → G2G）。循环前每个 rank 先用 L2G 初始化自己的 GVA，确保 G2G 阶段 writer 的 GVA 有真实数据。
+
+---
+
+## 21. SHM 元数据初始化失败（`HalMemCreate` 不支持 310P3）
+
+**现象**：`smem_shm_init` 调用 `hybm_init` 设置 `HYBM_FLAG_INIT_SHMEM_META`，触发 `HybmModernInitMetaGva` → `HalMemCreate` 返回错误 6（`DRV_ERROR_NOT_SUPPORT`）。
+
+**根因**：SHM 模式在 `smem_shm_init` 时设置 `HYBM_FLAG_INIT_SHMEM_META`（bit 63），初始化设备侧元数据区域（32MB，位于 `SVM_END_ADDR - 1GB` 处）。该区域用于存储 rank/rankSize/symmetricSize/QP/extra context 等信息，供 device kernel 通过固定地址读取。
+
+原始 `HybmModernInitMetaGva` 用 HAL 层 API 分配设备 HBM 物理内存：
+```
+HalMemAddressReserve  → 预留 VA（1GB）
+HalMemCreate(MEM_HBM_TYPE)  → 分配物理内存
+HalMemMap              → 映射 VA→物理内存
+```
+
+310P3 的 HAL 层 `halMemCreate` 不支持 `MEM_DEV_SIDE + MEM_HBM_TYPE` 组合（与第 4 节同一根因），返回错误 6。BM 模式不设置 `HYBM_FLAG_INIT_SHMEM_META`，跳过此路径，所以不受影响。
+
+**解决方案**：`HybmModernInitMetaGva` 增加 310P3 ACL VMM 路径分支：
+
+| 操作 | 原路径（HAL） | 310P3 路径（ACL VMM） |
+|------|-------------|---------------------|
+| 预留 VA | `HalMemAddressReserve` | `AclrtReserveMemAddress` |
+| 分配物理内存 | `HalMemCreate(MEM_HBM_TYPE)` | `AclrtMallocPhysical(ACL_MEM_P2P_HUGE)` |
+| 映射 | `HalMemMap` | `AclrtMapMem` |
+| 取消映射 | `HalMemUnmap` | `AclrtUnmapMem` |
+| 释放物理 | `HalMemRelease` | `AclrtFreePhysical` |
+| 释放 VA | `HalMemAddressFree` | `AclrtReleaseMemAddress` |
+
+`ACL_MEM_P2P_HUGE`（值 16，2MB 粒度）是能力矩阵实测验证过的唯一可用 memAttr（与第 4/17 节一致）。
+
+`hybm_uninit` 的清理路径同步修改：310P3 用 `AclrtUnmapMem` + `AclrtFreePhysical` + `AclrtReleaseMemAddress`，其他 SoC 仍用 HAL 路径。
+
+---
+
+## 22. SHM GVA 不能用 host 侧 `aclrtMemcpy` 直接访问
+
+**现象**：SHM `smem_shm_create` 成功返回 GVA `0x280040000000`，但 `aclrtMemcpy(gva, ...)` SIGSEGV（段错误）。
+
+**根因**：SHM 返回的 GVA 是 **fabric 全局地址**，不是设备 VA。310P3 上 GVA 和设备 VA 是不同地址空间：
+
+```
+GVA (fabric):       0x280040000000  ← smem_shm_create 返回的
+deviceVa (本地):     0x17ffc0000000  ← AclrtReserveMemAddress 预留的
+imported deviceVa:   0x12c140000000  ← AclrtMapMem 映射的 peer HBM
+```
+
+`aclrtMemcpy` 需要设备 VA，不认识 GVA。GVA→DVA 翻译由 VaManager 管理，`aclrtMemcpy` 不做这个翻译。
+
+在 910B/GVA V4 上 GVA 可能直接映射到设备 VA 空间（host 可寻址），但 310P3 的 GVA 是独立的 fabric 地址空间，只有 AI core MTE 引擎（通过设备 kernel 内的 `DataCopyPad`）才能直接用 GVA 寻址。
+
+**结论**：SHM 的数据访问验证需要 device kernel（MTE `DataCopyPad`），不能用 host 侧 `aclrtMemcpy`。当前测试验证 SHM 的 **生命周期和控制操作**（create/destroy/barrier/topology/extra_context），数据验证留给后续 device kernel 测试。
+
+---
+
+## 23. SHM `topology_can_reach` 返回 MTE 不可达
+
+**现象**：SHM 2-rank/4-rank 测试中 `smem_shm_topology_can_reach` 返回 `reachInfo=0x0`（MTE=no）。
+
+**根因**：`smem_shm_entry.cpp:299-331` 的 `GetReachInfo` 调用 `hybm_entity_reach_types`，该函数查询 entity 的可达性。310P3 上 entity 初始化时 `bmDataOpType=1`（MTE），但 `hybm_entity_reach_types` 内部可能依赖 transport/SDMA 等下层能力判断，而 SHM 模式不初始化 transport 和 data operator（`InitDataOperator` 跳过 AI_CORE_INITIATE 类型）。
+
+**状态**：待排查。不影响 pool 生命周期和控制操作，只影响 `topology_can_reach` 查询结果。
+
+---
+
+## 24. SHM `topology_can_reach` 返回 MTE 不可达（已解决）
+
+**现象**：SHM 2-rank/4-rank 测试中 `smem_shm_topology_can_reach` 返回 `reachInfo=0x0`（MTE=no）。
+
+**根因**：`CanReachDataOperators`（`hybm_entity_default.cpp:1300`）中 MTE 可达性绑定在 `HYBM_DOP_TYPE_SDMA` 分支内。SHM 模式 `bmDataOpType` 只配 `HYBM_DOP_TYPE_MTE`（不含 SDMA），所以不进入该分支。这是原始设计逻辑（非 310P3 回归）：MTE 可达性在所有平台都依赖 SDMA 标志。
+
+**解决方案**：`smem_shm_create` 中对 310P3 额外设置 `HYBM_DOP_TYPE_SDMA`，让现有判断逻辑生效。`bmDataOpType = HYBM_DOP_TYPE_MTE | HYBM_DOP_TYPE_SDMA`。
+
+无副作用验证：
+- `InitDataOperator`：`AI_CORE_INITIATE` 类型直接跳过
+- `InitTransManager`：`composeTransFlags` 不含 `HYBM_DOP_TYPE_SDMA`，不会触发 transport 初始化
+- `LoadExtendLibrary`：只检查 `HYBM_DOP_TYPE_AIV_SDMA`，不检查 `HYBM_DOP_TYPE_SDMA`
+
+修复后 `topology_can_reach` 返回 `reachInfo=0x3 (MTE=yes)`。
+
+---
+
+## 25. SHM device kernel `DataCopyPad` 在 310P3 不支持
+
+**现象**：编译 SHM device kernel（`shm_kernel.cpp`）时，CANN 编译器报 `DataCopyPad is an unsupported API on current device`。
+
+**根因**：310P3 是 dav-m200 架构（推理卡），`DataCopyPad` 是 dav-m220（训练卡 910B）的 MTE API。`smem_shm_aicore_base_copy.h` 全部使用 `DataCopyPad`，310P3 不支持。
+
+**解决方案**：kernel 改用 `AscendC::DataCopy`（非 Pad 版本），`DataCopy` 在 310P3 上可用。
+
+---
+
+## 26. SHM device kernel `DataCopy` 无法通过 GVA 跨 rank 访问（核心限制）
+
+**现象**：kernel 编译运行成功，但 `DataCopy` 操作 GVA 地址（`gva + symSize * targetRank`）时，数据未到达 peer rank——output 读取到的是自己的数据，不是 peer 写来的数据。
+
+**根因**：310P3 上 GVA 和 device VA 是**完全分离的地址空间**：
+
+```
+rank 0 local:  GVA=0x280040000000  deviceVa=0x17ffc0000000
+rank 1 local:  GVA=0x280080000000  deviceVa=0x17ffc0000000  (相同 deviceVa，不同进程)
+rank 0 import rank1: GVA=0x280080000000  deviceVa=0x12c140000000 (imported)
+```
+
+- 910B（GVA V4）：`ReserveMemorySpace` 用 `HalMemAddressReserve` 预留 `totalLvaSize`（所有 rank 的 GVA 窗口），GVA 直接映射到 device VA 空间，kernel `DataCopy` 可以直接用 GVA
+- 310P3：每个 rank 的 local VA 只预留 `maxSize`（自己的），imported peer 的 VA 是独立的 `AclrtReserveMemAddress` 块。GVA (`0x2800...`) 与 device VA (`0x17ffc...`/`0x12c14...`) 完全分离。device kernel 的 `DataCopy` 只认识 device VA，不认识 fabric GVA
+
+**影响**：SHM 模式的核心价值是 device kernel（MTE/AIV）通过 GVA 直接访问远端 HBM。310P3 上 GVA 无法被 device kernel 直接寻址，SHM 的设备侧数据访问能力受限。
+
+**当前验证状态**：
+- SHM pool 生命周期（create/destroy）：PASS
+- 控制操作（barrier/topology_can_reach/extra_context）：PASS
+- P2P preflight：PASS
+- Device kernel 通过 GVA 跨 rank 数据访问：**不支持**（GVA ≠ device VA）
+
+**潜在解决方向**（未验证）：
+1. Device kernel 中使用 imported device VA 而非 GVA（需要将 imported DVA 传入 kernel，破坏 GVA 对称性）
+2. 探索 310P3 是否有 fabric address translation 机制让 device kernel 直接寻址 GVA
+3. 使用 BM 模式的 host-initiated SDMA（已验证可用）替代 SHM 的 device-initiated MTE
