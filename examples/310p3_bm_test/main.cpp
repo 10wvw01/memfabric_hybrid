@@ -13,7 +13,9 @@
 /*
  * 310P3 BM Functional Verification Demo
  *
- * Based on verified test programs from commit 986eec67 (310p-p0-verify).
+ * BM 模式：rank 间 HBM/DRAM GVA 池，smem_bm_copy 通过 SDMA 跨 rank 传输。
+ * 310P3 上 HBM segment 走 ACL VMM 路径（AclrtReserveMemAddress + AclrtMapMem），
+ * 数据拷贝走 AclrtMemcpyAsync(D2D) + AclrtSynchronizeStream（sync D2D 不可用）。
  *
  * Tests:
  *   1. HBM pool: round-robin L2G / G2H / G2L / G2G (supports 2-rank and 4-rank)
@@ -251,6 +253,8 @@ void HbmG2gCopy(smem_bm_t handle, int rank, int writer, void *writerGva, void *l
 }
 
 /* HBM test: round-robin L2G/G2H/G2L/G2G to avoid concurrent write races.
+ * 310P3 上 GVA ≠ device VA，smem_bm_copy 内部通过 TransformVa(GVA→DVA) 翻译后
+ * 调用 AclrtMemcpyAsync 完成跨 rank D2D 拷贝。
  * For each target rank, one designated writer writes to it, then target verifies. */
 int32_t TestHbm(int rank, int worldSize)
 {
@@ -344,7 +348,9 @@ int32_t TestHbm(int rank, int worldSize)
     return nfail;
 }
 
-/* DRAM HOST_SHM test: H2GH to peer, GH2H verify */
+/* DRAM HOST_SHM test: H2GH to peer, GH2H verify.
+ * 310P3 不支持 aclrtHostRegister（设备无法直接访问 host 内存），
+ * DRAM 池走 HOST_SHM 路径：POSIX shm 跨进程共享 + CPU 发起 aclrtMemcpy(H2D/D2H)。 */
 int32_t TestDram(int rank, int worldSize)
 {
     printf("\n========== DRAM HOST_SHM Pool Test (rankSize=%d) ==========\n", worldSize);

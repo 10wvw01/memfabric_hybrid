@@ -454,3 +454,44 @@ rank 0 import rank1: GVA=0x280080000000  deviceVa=0x12c140000000 (imported)
 1. Device kernel 中使用 imported device VA 而非 GVA（需要将 imported DVA 传入 kernel，破坏 GVA 对称性）
 2. 探索 310P3 是否有 fabric address translation 机制让 device kernel 直接寻址 GVA
 3. 使用 BM 模式的 host-initiated SDMA（已验证可用）替代 SHM 的 device-initiated MTE
+
+---
+
+## 27. TRANS 模式 external HBM 共享路径验证
+
+> 日期：2026-09-04
+> 验证文件：`310p-capability_matrix/17_trans_verify/`
+
+**背景**：TRANS 模式注册用户已分配的 `aclrtMalloc` 设备内存进行跨进程传输。当前使用 `HybmDevUserLegacySegment`（runtime IPC：`RtIpcSetMemoryName`/`RtIpcOpenMemory`），310P3 同卡 die import 返回 507899。
+
+**根因**：runtime 层 IPC `RtIpcOpenMemory` 内部调用 `EnableP2PWithOtherDevice`，同卡 die 被 `devdrv_p2p_para_check` 拒绝（507899）。ACL 层 IPC `aclrtIpcMemImportByKey(DEFAULT)` 不触发 P2P 前置检查。
+
+**验证三条路径**：
+
+| 路径 | Export API | Import API | 结果 |
+|------|-----------|-----------|------|
+| A. ACL IPC | `aclrtIpcMemGetExportKey` | `aclrtIpcMemImportByKey(DEFAULT)` | ✅ PASS — 直接接受 `aclrtMalloc` VA，同卡 die 不触发 P2P |
+| B. VMM export | `aclrtMemExportToShareableHandle` | — | ❌ 不可用 — 需要 `aclrtDrvMemHandle`，`aclrtMalloc` 不返回句柄 |
+| C. VMM baseline | `aclrtMallocPhysical` + Export | `ImportFromShareableHandle(ctx trick)` | ✅ PASS — 但需重新分配内存，破坏 TRANS "注册外部内存"语义 |
+
+**结论**：TRANS 在 310P3 上应改用 ACL 层 IPC API（`aclrtIpcMemGetExportKey`/`aclrtIpcMemImportByKey`），替代 runtime 层 `RtIpcSetMemoryName`/`RtIpcOpenMemory`。跨卡场景用 `ENABLE_PEER_ACCESS` flag（自动建立双向 P2P）。
+
+**实施方案**：修改 `HybmDevUserLegacySegment`，310P3 分支：
+- Export：`AclrtIpcMemGetExportKey` 替代 `RtIpcSetMemoryName`（DISABLE_PID_VALIDATION）
+- Import：`AclrtIpcMemImportByKey` 替代 `RtIpcOpenMemory`（同卡 DEFAULT / 跨卡 PEER_ACCESS）
+- Close：`AclrtIpcMemClose` 替代 `RtIpcCloseMemory`
+- 跳过 `RtSetIpcMemorySuperPodPid`（ACL IPC DISABLE_PID_VALIDATION 已处理）
+- 跳过 `RtIpcDestroyMemoryName`（ACL IPC key 不需要显式销毁）
+
+**验证结果**（2026-09-04）：
+- 2-rank 同卡 die 对（dev0/dev1）：**ALL TESTS PASS**
+  - 同步 write + verify：PASS
+  - 异步 write_submit + stream sync + verify：PASS
+  - deregister_mem：PASS
+- TopologyPreflight：PASS（P2P 槽位 0 ≤ 8）
+- ACL IPC import 成功，同卡 die 不触发 P2P 前置检查
+
+**额外修复**：
+1. `dl_acl_api.h/cpp`：新增 ACL IPC API 封装（`AclrtIpcMemGetExportKey`/`AclrtIpcMemImportByKey`/`AclrtIpcMemClose`）
+2. `hybm_entity_tag_info.cpp`：`AddRankTag` 空 tag 使用默认 tag `HYBM_DEFAULT_TAG_FOR_EMPTY`（TRANS 场景 tag 为空导致 `GetRank2RankOpType` 返回 0）
+3. `smem_trans_entry.cpp`：`JoinImport` entity import 条件增加 `config_.role == SMEM_TRANS_BOTH`（BOTH 角色两端 role 相同导致 entity import 被跳过）

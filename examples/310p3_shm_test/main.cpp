@@ -13,18 +13,17 @@
 /*
  * 310P3 SHM Functional Verification Demo
  *
- * Verifies SHM (AI-core-initiated symmetric HBM pool) on 310P3.
+ * SHM 模式：对称 HBM 池，device kernel（MTE）通过 GVA 直接访问远端 rank 内存。
+ *
+ * 310P3 限制：GVA ≠ device VA（AclrtReserveMemAddress 不支持指定地址），
+ * device kernel 的 DataCopy 无法通过 GVA 跨 rank 访问。
+ * 因此本测试只验证 pool 生命周期和控制面操作，不验证数据传输。
  *
  * Tests:
  *   1. SHM create: smem_shm_init + smem_shm_create (VMM symmetric GVA pool)
  *   2. Control ops: smem_shm_control_barrier, smem_shm_topology_can_reach
  *   3. Extra context: smem_shm_set_extra_context
  *   4. Lifecycle: 10x create -> barrier -> destroy
- *
- * Note: SHM GVA is a fabric-level address for AI core (MTE) device-side access.
- * On 310P3, aclrtMemcpy cannot use GVA directly (different VA space).
- * Data verification requires device kernel (MTE DataCopyPad), which is
- * beyond this test's scope. This test validates pool lifecycle and control ops.
  *
  * Usage:
  *   mpirun -np <rankSize> ./310p3_shm_test <store_url> <rankSize>
@@ -74,7 +73,10 @@ int32_t ShmInit(int rank, int worldSize, int devId, const char *storeUrl)
     return 0;
 }
 
-/* Test SHM create + control ops (barrier, topology, extra_context) + destroy */
+/* Test SHM create + control ops (barrier, topology, extra_context) + destroy.
+ * 310P3 上 SHM create 走 ACL VMM 路径：AclrtMallocPhysical + AclrtMapMem +
+ * AclrtMemExportToShareableHandle + ImportFromShareableHandle(ctx 技巧)。
+ * topology_can_reach 需要 bmDataOpType 同时设置 MTE | SDMA 标志才能返回可达。 */
 int32_t TestShmCreate(int rank, int worldSize)
 {
     printf("\n========== SHM Create + Control Ops Test (rankSize=%d) ==========\n", worldSize);

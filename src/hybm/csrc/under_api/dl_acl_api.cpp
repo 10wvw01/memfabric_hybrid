@@ -61,6 +61,9 @@ rtIpcDestroyMemoryNameFunc DlAclApi::pRtIpcDestroyMemoryName = nullptr;
 rtIpcSetMemoryNameFunc DlAclApi::pRtIpcSetMemoryName = nullptr;
 rtIpcOpenMemoryFunc DlAclApi::pRtIpcOpenMemory = nullptr;
 rtIpcCloseMemoryFunc DlAclApi::pRtIpcCloseMemory = nullptr;
+aclrtIpcMemGetExportKeyFunc DlAclApi::pAclrtIpcMemGetExportKey = nullptr;
+aclrtIpcMemImportByKeyFunc DlAclApi::pAclrtIpcMemImportByKey = nullptr;
+aclrtIpcMemCloseFunc DlAclApi::pAclrtIpcMemClose = nullptr;
 aclrtGetSocNameFunc DlAclApi::pAclrtGetSocName = nullptr;
 rtEnableP2PFunc DlAclApi::pRtEnableP2P = nullptr;
 rtDisableP2PFunc DlAclApi::pRtDisableP2P = nullptr;
@@ -144,6 +147,9 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pRtIpcDestroyMemoryName, rtIpcDestroyMemoryNameFunc, rtHandle, "rtIpcDestroyMemoryName");
     DL_LOAD_SYM(pRtIpcOpenMemory, rtIpcOpenMemoryFunc, rtHandle, "rtIpcOpenMemory");
     DL_LOAD_SYM(pRtIpcCloseMemory, rtIpcCloseMemoryFunc, rtHandle, "rtIpcCloseMemory");
+    DL_LOAD_SYM(pAclrtIpcMemGetExportKey, aclrtIpcMemGetExportKeyFunc, rtHandle, "aclrtIpcMemGetExportKey");
+    DL_LOAD_SYM(pAclrtIpcMemImportByKey, aclrtIpcMemImportByKeyFunc, rtHandle, "aclrtIpcMemImportByKey");
+    DL_LOAD_SYM(pAclrtIpcMemClose, aclrtIpcMemCloseFunc, rtHandle, "aclrtIpcMemClose");
     DL_LOAD_SYM(pAclrtGetSocName, aclrtGetSocNameFunc, rtHandle, "aclrtGetSocName");
     DL_LOAD_SYM(pRtEnableP2P, rtEnableP2PFunc, rtHandle, "rtEnableP2P");
     DL_LOAD_SYM(pRtDisableP2P, rtDisableP2PFunc, rtHandle, "rtDisableP2P");
@@ -259,6 +265,9 @@ void DlAclApi::CleanupLibrary()
     pAclrtMemImportFromShareableHandle = nullptr;
     pAclrtMemSetAccess = nullptr;
     pAclrtMemGetAllocationGranularity = nullptr;
+    pAclrtIpcMemGetExportKey = nullptr;
+    pAclrtIpcMemImportByKey = nullptr;
+    pAclrtIpcMemClose = nullptr;
 
     if (rtHandle != nullptr) {
         dlclose(rtHandle);

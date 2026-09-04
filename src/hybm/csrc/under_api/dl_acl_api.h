@@ -172,6 +172,13 @@ using rtGetLogicDevIdByUserDevIdFunc = int32_t (*)(const int32_t, int32_t *const
 using aclrtGetPhyDevIdByLogicDevIdFunc = int32_t (*)(const int32_t, int32_t *const);
 using rtIpcOpenMemoryFunc = int32_t (*)(void **, const char *);
 using rtIpcCloseMemoryFunc = int32_t (*)(const void *);
+using aclrtIpcMemGetExportKeyFunc = int32_t (*)(void *, uint64_t, char *, uint64_t, uint64_t);
+using aclrtIpcMemImportByKeyFunc = int32_t (*)(void **, const char *, uint64_t);
+using aclrtIpcMemCloseFunc = int32_t (*)(const char *);
+
+constexpr uint64_t ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION = 1ULL;
+constexpr uint64_t ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT = 0ULL;
+constexpr uint64_t ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS = 1ULL;
 using rtMemcpyAsyncFunc = int32_t (*)(void *, size_t, const void *, size_t, uint32_t, void *);
 using aclrtGetSocNameFunc = const char *(*)();
 using aclrtMemcpyBatchFunc = int32_t (*)(void **, size_t *, void **, size_t *, size_t, aclrtMemcpyBatchAttr *, size_t *,
@@ -601,6 +608,31 @@ public:
         return pRtIpcCloseMemory(ptr);
     }
 
+    static inline Result AclrtIpcMemGetExportKey(void *devPtr, uint64_t size, char *key, uint64_t keyLen,
+                                                  uint64_t flags)
+    {
+        if (pAclrtIpcMemGetExportKey == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtIpcMemGetExportKey(devPtr, size, key, keyLen, flags);
+    }
+
+    static inline Result AclrtIpcMemImportByKey(void **devPtr, const char *key, uint64_t flags)
+    {
+        if (pAclrtIpcMemImportByKey == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtIpcMemImportByKey(devPtr, key, flags);
+    }
+
+    static inline Result AclrtIpcMemClose(const char *key)
+    {
+        if (pAclrtIpcMemClose == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtIpcMemClose(key);
+    }
+
     static inline const char *AclrtGetSocName()
     {
 #ifdef NO_XPU
@@ -785,6 +817,9 @@ private:
     static rtIpcDestroyMemoryNameFunc pRtIpcDestroyMemoryName;
     static rtIpcOpenMemoryFunc pRtIpcOpenMemory;
     static rtIpcCloseMemoryFunc pRtIpcCloseMemory;
+    static aclrtIpcMemGetExportKeyFunc pAclrtIpcMemGetExportKey;
+    static aclrtIpcMemImportByKeyFunc pAclrtIpcMemImportByKey;
+    static aclrtIpcMemCloseFunc pAclrtIpcMemClose;
     static aclrtGetSocNameFunc pAclrtGetSocName;
     static rtEnableP2PFunc pRtEnableP2P;
     static rtDisableP2PFunc pRtDisableP2P;

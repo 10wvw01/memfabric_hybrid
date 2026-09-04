@@ -24,6 +24,7 @@
 #include "hybm.h"
 #include "hybm_big_mem.h"
 #include "hybm_data_op.h"
+#include "hybm_define.h"
 #include "mf_env_define.h"
 #include "mf_env_util.h"
 #include "smem_net_common.h"
@@ -74,6 +75,11 @@ SmemTransEntry::~SmemTransEntry()
 int32_t SmemTransEntry::Initialize()
 {
     SM_VALIDATE_RETURN(rankId_ < SMEM_TRANS_RANK_COUNT_MAX, "rankId:" << rankId_ << " is too large.", SM_INVALID_PARAM);
+    auto socType = hybm_get_soc_type();
+    if (socType == ock::mf::SOC_TYPE_310P1) {
+        SM_LOG_ERROR("310P1 is not supported for TRANS mode, socType:" << socType);
+        return SM_ERROR;
+    }
     if (!ParseTransName(name_, workerUniqueId_.address, workerUniqueId_.port)) {
         return SM_INVALID_PARAM;
     }
@@ -202,7 +208,7 @@ void SmemTransEntry::AddRemoteInfo(uint32_t rk, smem_trans_role_t role, WorkerId
     rankToWorkerId_[rk] = id;
     ranksRole_[rk] = role;
 
-    if (role == config_.role) { // same role, skip record
+    if (config_.role != SMEM_TRANS_BOTH && role == config_.role) { // same role, skip record
         return;
     }
     for (auto i = 0U; i < global.size(); i++) {
@@ -266,7 +272,7 @@ Result SmemTransEntry::JoinImport(std::unordered_map<uint32_t, std::string> &all
                 info.u.session.reserved = 0U;
                 WorkerIdUnion workerId{info.u.session};
                 id = workerId.workerId;
-                if (isEntity && role != config_.role) {
+                if (isEntity && (config_.role == SMEM_TRANS_BOTH || role != config_.role)) {
                     int ret = hybm_import(entity_, &info.hybmInfo, 1U, nullptr, HYBM_FLAG_EXPORT_ENTITY);
                     if (ret != SM_OK) {
                         SM_LOG_ERROR("hybm import entity failed, result: " << ret << " remote_rank:" << it.first
@@ -283,7 +289,7 @@ Result SmemTransEntry::JoinImport(std::unordered_map<uint32_t, std::string> &all
             }
         }
 
-        if (!hybmInfos.empty() && role != config_.role) {
+        if (!hybmInfos.empty() && (config_.role == SMEM_TRANS_BOTH || role != config_.role)) {
             global = std::vector<void *>(hybmInfos.size(), nullptr);
             int ret = hybm_import(entity_, hybmInfos.data(), hybmInfos.size(), global.data(), 0);
             if (ret != SM_OK) {
@@ -367,7 +373,7 @@ Result SmemTransEntry::UpdateHandle(uint32_t rk)
     int32_t ret = globalGroup_->GroupBarrierPrefixKey(rk, xinfo);
     SM_VALIDATE_RETURN(ret == SM_OK, "barrier prefix info failed, ret:" << ret, ret);
     auto role = (rk == rankId_) ? config_.role : QueryRole(rk);
-    if (rk != rankId_ && (role != SMEM_TRANS_BUTT && role != config_.role)) {
+    if (rk != rankId_ && (role != SMEM_TRANS_BUTT && (config_.role == SMEM_TRANS_BOTH || role != config_.role))) {
         SmemTransExchangeInfo info;
         std::vector<LocalMapAddress> local;
         std::vector<hybm_exchange_info> hybmInfos;
@@ -554,6 +560,12 @@ Result SmemTransEntry::RegisterLocalMemories(const std::vector<std::pair<const v
             return ret;
         }
     }
+    auto topoRet = TopologyPreflight();
+    if (topoRet != SM_OK) {
+        SM_LOG_ERROR("topology preflight failed, rank:" << rankId_ << " ret:" << topoRet);
+        registedInfo_.clear();
+        return topoRet;
+    }
     auto ret = Update(0);
     registedInfo_.clear();
     SM_VALIDATE_RETURN(ret == SM_OK, "update failed, rk:" << rankId_ << " ret:" << ret, ret);
@@ -650,6 +662,11 @@ Result SmemTransEntry::BatchQuantTransfer(smem_trans_quant_copy_param_t *params,
     SM_VALIDATE_RETURN(params->remoteAddrs != nullptr, "invalid remoteAddrs, which is null", SM_INVALID_PARAM);
     SM_VALIDATE_RETURN(params->dataSizes != nullptr, "invalid dataSizes, which is null", SM_INVALID_PARAM);
     SM_VALIDATE_RETURN(params->batchSize != 0, "invalid batchSize, which is 0", SM_INVALID_PARAM);
+    auto quantSocType = hybm_get_soc_type();
+    if (quantSocType == ock::mf::SOC_TYPE_310P3 || quantSocType == ock::mf::SOC_TYPE_310P1) {
+        SM_LOG_ERROR("quant write is not supported on 310P, socType:" << quantSocType);
+        return SM_ERROR;
+    }
     for (auto i = 0U; i < params->batchSize; i++) {
         SM_VALIDATE_RETURN(params->localAddrs[i] != nullptr, "localAddrs, which is null", SM_INVALID_PARAM);
         SM_VALIDATE_RETURN(params->remoteAddrs[i] != nullptr, "remoteAddrs, which is null", SM_INVALID_PARAM);
@@ -828,6 +845,161 @@ Result SmemTransEntry::RegisterOneMemory(const void *address, uint64_t size, uin
 
     info.u.address = LocalMapAddress(const_cast<void *>(address), size);
     registedInfo_.emplace_back(info);
+    registeredSlices_[address] = RegisteredSliceInfo{slice, size};
+    return SM_OK;
+}
+
+Result SmemTransEntry::DeregisterLocalMemory(const void *address)
+{
+    if (entity_ == nullptr) {
+        SM_LOG_ERROR("not create entity, address:" << address);
+        return SM_ERROR;
+    }
+    if (address == nullptr) {
+        SM_LOG_ERROR("invalid address, which is null");
+        return SM_INVALID_PARAM;
+    }
+
+    constexpr auto NPU_PAGE_SIZE = 2UL * 1024UL * 1024UL;
+    constexpr auto NPU_PAGE_MASK = ~(NPU_PAGE_SIZE - 1UL);
+    auto pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
+    auto alignedAddr = reinterpret_cast<const void *>(pointer & NPU_PAGE_MASK);
+
+    std::unique_lock<std::mutex> uniqueLock{memMutex_};
+    auto it = registeredSlices_.find(alignedAddr);
+    if (it == registeredSlices_.end()) {
+        SM_LOG_ERROR("address not found in registered slices, address:" << address
+                                                                          << " alignedAddr:" << alignedAddr);
+        return SM_INVALID_PARAM;
+    }
+
+    auto ret = hybm_free_local_memory(entity_, it->second.slice, 1, 0);
+    if (ret != 0) {
+        SM_LOG_ERROR("hybm_free_local_memory failed, address:" << alignedAddr
+                                                               << " size:" << it->second.size << " ret:" << ret);
+        return SM_ERROR;
+    }
+
+    SM_LOG_INFO("deregistered memory, address:" << alignedAddr << " size:" << it->second.size
+                                                << " rank:" << rankId_);
+    registeredSlices_.erase(it);
+    return SM_OK;
+}
+
+Result SmemTransEntry::TopologyPreflight()
+{
+    if (hybm_get_soc_type() != ock::mf::SOC_TYPE_310P3) {
+        return SM_OK;
+    }
+    if ((config_.dataOpType & SMEMB_DATA_OP_SDMA) == 0U) {
+        return SM_OK;
+    }
+
+    const uint32_t rankSize = globalGroup_ != nullptr ? globalGroup_->GetRankSize() : 0U;
+    if (rankSize <= 1U) {
+        return SM_OK;
+    }
+
+    SM_LOG_INFO("[rank " << rankId_ << "] 310P3 TRANS topology preflight: devId:" << config_.deviceId
+                         << " rankSize:" << rankSize);
+
+    std::vector<std::pair<uint32_t, uint32_t>> rankTopos;
+    auto ret = GatherTopologyRecords(rankSize, rankTopos);
+    if (ret != SM_OK) {
+        return ret;
+    }
+    return CheckP2PSlotBudget(rankTopos, rankSize);
+}
+
+Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize,
+                                              std::vector<std::pair<uint32_t, uint32_t>> &rankTopos)
+{
+    const std::string topoPrefix = "TOPO_";
+    std::string topoVal = std::to_string(rankId_) + ":" + std::to_string(config_.deviceId);
+    auto ret = store_->Set(topoPrefix + std::to_string(rankId_),
+                           std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
+    if (ret != 0) {
+        SM_LOG_ERROR("Set topology key failed, ret:" << ret << " rank:" << rankId_);
+        return SM_ERROR;
+    }
+
+    std::unordered_map<std::string, std::string> topoMap;
+    const int64_t gatherTimeoutMs = static_cast<int64_t>(config_.initTimeout) * SECOND_TO_MILLSEC;
+    auto gatherStart = std::chrono::steady_clock::now();
+    while (true) {
+        topoMap.clear();
+        ret = store_->PrefixGet(topoPrefix, topoMap);
+        if (ret != 0) {
+            SM_LOG_ERROR("PrefixGet topology failed, ret:" << ret << " rank:" << rankId_);
+            return SM_ERROR;
+        }
+        if (topoMap.size() >= rankSize) {
+            break;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - gatherStart).count();
+        if (elapsed >= gatherTimeoutMs) {
+            SM_LOG_ERROR("topology gather timeout:" << elapsed << "ms rank:" << rankId_
+                                                    << " got:" << topoMap.size() << "/" << rankSize);
+            return SM_ERROR;
+        }
+        usleep(100 * 1000);
+    }
+
+    for (const auto &kv : topoMap) {
+        uint32_t r = 0;
+        uint32_t d = 0;
+        if (sscanf(kv.second.c_str(), "%u:%u", &r, &d) != 2) {
+            SM_LOG_ERROR("parse topology record failed:" << kv.first << " val:" << kv.second);
+            continue;
+        }
+        rankTopos.emplace_back(r, d);
+    }
+    if (rankTopos.size() < rankSize) {
+        SM_LOG_ERROR("topology records incomplete:" << rankTopos.size() << "/" << rankSize
+                                                     << " rank:" << rankId_);
+        return SM_ERROR;
+    }
+    return SM_OK;
+}
+
+Result SmemTransEntry::CheckP2PSlotBudget(const std::vector<std::pair<uint32_t, uint32_t>> &rankTopos,
+                                           uint32_t rankSize)
+{
+    constexpr uint32_t p2pSlotsPerCard = 8U;
+    std::map<uint32_t, uint32_t> requiredPerCard;
+    for (size_t i = 0; i < rankTopos.size(); i++) {
+        uint32_t cardI = rankTopos[i].second / 2U;
+        for (size_t j = 0; j < rankTopos.size(); j++) {
+            if (i == j) {
+                continue;
+            }
+            uint32_t cardJ = rankTopos[j].second / 2U;
+            if (cardI != cardJ) {
+                requiredPerCard[cardI]++;
+            }
+        }
+    }
+
+    bool feasible = true;
+    for (const auto &card : requiredPerCard) {
+        if (card.second > p2pSlotsPerCard) {
+            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first
+                                                             << " required:" << card.second
+                                                             << " limit:" << p2pSlotsPerCard
+                                                             << " rank:" << rankId_
+                                                             << " worldSize:" << rankSize);
+            feasible = false;
+        }
+    }
+    if (!feasible) {
+        SM_LOG_ERROR("topology preflight FAILED for TRANS rank:" << rankId_
+                                                                 << " worldSize:" << rankSize);
+        return SM_NO_RESOURCES;
+    }
+
+    SM_LOG_INFO("topology preflight PASS: rank:" << rankId_ << " worldSize:" << rankSize
+                                                << " cross-card slots per card all <= " << p2pSlotsPerCard);
     return SM_OK;
 }
 
