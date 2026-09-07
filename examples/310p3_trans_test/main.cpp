@@ -124,27 +124,30 @@ smem_trans_t TransCreate(int rank, const char *storeUrl)
     return handle;
 }
 
+int32_t FillDevMem(int rank, void *devMem, uint32_t tag)
+{
+    std::vector<uint32_t> hostBuf(COPY_SIZE / sizeof(uint32_t));
+    for (size_t i = 0; i < hostBuf.size(); i++) {
+        hostBuf[i] = Pat(tag, i);
+    }
+    auto ret = aclrtMemcpy(devMem, ALLOC_SIZE, hostBuf.data(), hostBuf.size() * sizeof(uint32_t),
+                           ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] aclrtMemcpy H2D failed:%d\n", rank, ret);
+        return ret;
+    }
+    return 0;
+}
+
 int32_t RegisterAndFill(int rank, smem_trans_t handle, void *devMem, uint32_t tag)
 {
-    /* 注册用户已分配的 aclrtMalloc 内存到 TRANS entity，内部通过 ACL IPC 导出 key */
     int32_t ret = smem_trans_register_mem(handle, devMem, ALLOC_SIZE, 0);
     if (ret != 0) {
         fprintf(stderr, "[rank %d] register_mem failed:%d addr:%p size:%lu\n", rank, ret, devMem, ALLOC_SIZE);
         return ret;
     }
     printf("[rank %d] register_mem OK addr:%p size:%lu\n", rank, devMem, ALLOC_SIZE);
-
-    std::vector<uint32_t> hostBuf(COPY_SIZE / sizeof(uint32_t));
-    for (size_t i = 0; i < hostBuf.size(); i++) {
-        hostBuf[i] = Pat(tag, i);
-    }
-    ret = aclrtMemcpy(devMem, ALLOC_SIZE, hostBuf.data(), hostBuf.size() * sizeof(uint32_t),
-                       ACL_MEMCPY_HOST_TO_DEVICE);
-    if (ret != 0) {
-        fprintf(stderr, "[rank %d] aclrtMemcpy H2D failed:%d\n", rank, ret);
-        return ret;
-    }
-    return 0;
+    return FillDevMem(rank, devMem, tag);
 }
 
 int32_t VerifyData(int rank, void *devMem, uint32_t expectedTag)
@@ -186,38 +189,28 @@ int32_t TestSyncWriteRead(int rank, int worldSize, smem_trans_t handle, void *de
     }
     MpBarrier();
 
-    int nextRank = (rank + 1) % worldSize;
-    std::string peerId = PeerUniqueId(nextRank, worldSize);
-
-    /* 串行 round-robin：rank0 先写，对端 verify 后再反向写，避免并发写同一地址 */
-    if (rank == 0) {
-        ret = smem_trans_write(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, 0);
-        if (ret != 0) {
-            fprintf(stderr, "[rank %d] trans_write to rank:%d failed:%d\n", rank, nextRank, ret);
-            return ret;
+    for (int writer = 0; writer < worldSize; writer++) {
+        int receiver = (writer + 1) % worldSize;
+        if (rank == writer) {
+            FillDevMem(rank, devMem, myTag);
+            std::string peerId = PeerUniqueId(receiver, worldSize);
+            ret = smem_trans_write(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, 0);
+            if (ret != 0) {
+                fprintf(stderr, "[rank %d] trans_write to rank:%d failed:%d\n", rank, receiver, ret);
+                return ret;
+            }
+            printf("[rank %d] trans_write to rank:%d OK size:%lu\n", rank, receiver, COPY_SIZE);
         }
-        printf("[rank %d] trans_write to rank:%d OK size:%lu\n", rank, nextRank, COPY_SIZE);
-    }
-    MpBarrier();
-
-    uint32_t prevTag = static_cast<uint32_t>(nextRank + 1) << 4;
-    if (rank != 0) {
-        ret = VerifyData(rank, devMem, prevTag);
-        if (ret != 0) {
-            return ret;
+        MpBarrier();
+        if (rank == receiver) {
+            uint32_t expectedTag = static_cast<uint32_t>(writer + 1) << 4;
+            ret = VerifyData(rank, devMem, expectedTag);
+            if (ret != 0) {
+                return ret;
+            }
         }
+        MpBarrier();
     }
-    MpBarrier();
-
-    if (rank != 0) {
-        ret = smem_trans_write(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, 0);
-        if (ret != 0) {
-            fprintf(stderr, "[rank %d] trans_write to rank:%d failed:%d\n", rank, nextRank, ret);
-            return ret;
-        }
-        printf("[rank %d] trans_write to rank:%d OK size:%lu\n", rank, nextRank, COPY_SIZE);
-    }
-    MpBarrier();
     return 0;
 }
 
@@ -225,19 +218,12 @@ int32_t TestAsyncSubmit(int rank, int worldSize, smem_trans_t handle, void *devM
 {
     printf("[rank %d] === TestAsyncSubmit ===\n", rank);
     uint32_t myTag = static_cast<uint32_t>(rank + 1) << 8;
-    std::vector<uint32_t> hostBuf(COPY_SIZE / sizeof(uint32_t));
-    for (size_t i = 0; i < hostBuf.size(); i++) {
-        hostBuf[i] = Pat(myTag, i);
-    }
-    int32_t ret = aclrtMemcpy(devMem, ALLOC_SIZE, hostBuf.data(), hostBuf.size() * sizeof(uint32_t),
-                              ACL_MEMCPY_HOST_TO_DEVICE);
+    int32_t ret = FillDevMem(rank, devMem, myTag);
     if (ret != 0) {
-        fprintf(stderr, "[rank %d] H2D fill failed:%d\n", rank, ret);
         return ret;
     }
+    MpBarrier();
 
-    int nextRank = (rank + 1) % worldSize;
-    std::string peerId = PeerUniqueId(nextRank, worldSize);
     aclrtStream stream = nullptr;
     ret = aclrtCreateStream(&stream);
     if (ret != 0) {
@@ -245,49 +231,37 @@ int32_t TestAsyncSubmit(int rank, int worldSize, smem_trans_t handle, void *devM
         return ret;
     }
 
-    if (rank == 0) {
-        ret = smem_trans_write_submit(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, stream, 0);
-        if (ret != 0) {
-            fprintf(stderr, "[rank %d] write_submit to rank:%d failed:%d\n", rank, nextRank, ret);
-            aclrtDestroyStream(stream);
-            return ret;
+    for (int writer = 0; writer < worldSize; writer++) {
+        int receiver = (writer + 1) % worldSize;
+        if (rank == writer) {
+            FillDevMem(rank, devMem, myTag);
+            std::string peerId = PeerUniqueId(receiver, worldSize);
+            ret = smem_trans_write_submit(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, stream, 0);
+            if (ret != 0) {
+                fprintf(stderr, "[rank %d] write_submit to rank:%d failed:%d\n", rank, receiver, ret);
+                aclrtDestroyStream(stream);
+                return ret;
+            }
+            ret = aclrtSynchronizeStream(stream);
+            if (ret != 0) {
+                fprintf(stderr, "[rank %d] sync stream failed:%d\n", rank, ret);
+                aclrtDestroyStream(stream);
+                return ret;
+            }
+            printf("[rank %d] write_submit to rank:%d OK\n", rank, receiver);
         }
-        ret = aclrtSynchronizeStream(stream);
-        if (ret != 0) {
-            fprintf(stderr, "[rank %d] sync stream failed:%d\n", rank, ret);
-            aclrtDestroyStream(stream);
-            return ret;
+        MpBarrier();
+        if (rank == receiver) {
+            uint32_t expectedTag = static_cast<uint32_t>(writer + 1) << 8;
+            ret = VerifyData(rank, devMem, expectedTag);
+            if (ret != 0) {
+                aclrtDestroyStream(stream);
+                return ret;
+            }
         }
-        printf("[rank %d] write_submit to rank:%d OK\n", rank, nextRank);
+        MpBarrier();
     }
-    MpBarrier();
-
-    uint32_t prevTag = static_cast<uint32_t>(nextRank + 1) << 8;
-    if (rank != 0) {
-        ret = VerifyData(rank, devMem, prevTag);
-        if (ret != 0) {
-            aclrtDestroyStream(stream);
-            return ret;
-        }
-    }
-    MpBarrier();
-
-    if (rank != 0) {
-        ret = smem_trans_write_submit(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, stream, 0);
-        if (ret != 0) {
-            fprintf(stderr, "[rank %d] write_submit to rank:%d failed:%d\n", rank, nextRank, ret);
-            aclrtDestroyStream(stream);
-            return ret;
-        }
-        ret = aclrtSynchronizeStream(stream);
-        if (ret != 0) {
-            fprintf(stderr, "[rank %d] sync stream failed:%d\n", rank, ret);
-            aclrtDestroyStream(stream);
-            return ret;
-        }
-        printf("[rank %d] write_submit to rank:%d OK\n", rank, nextRank);
-    }
-    MpBarrier();
+    aclrtDestroyStream(stream);
     return 0;
 }
 
@@ -352,15 +326,15 @@ int main(int argc, char *argv[])
     sleep(1);
 
     void *devMem = nullptr;
-    ret = aclrtMalloc(&devMem, ALLOC_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-    if (ret != 0) {
-        fprintf(stderr, "[rank %d] aclrtMalloc failed:%d size:%lu\n", rank, ret, ALLOC_SIZE);
+    devMem = hybm_alloc_vmm_buffer(static_cast<uint32_t>(devId), static_cast<uint32_t>(worldSize), ALLOC_SIZE);
+    if (devMem == nullptr) {
+        fprintf(stderr, "[rank %d] hybm_alloc_vmm_buffer failed size:%lu\n", rank, ALLOC_SIZE);
         smem_trans_destroy(handle, 0);
         smem_trans_uninit(0);
         MPI_Finalize();
-        return ret;
+        return -1;
     }
-    printf("[rank %d] aclrtMalloc OK addr:%p size:%lu\n", rank, devMem, ALLOC_SIZE);
+    printf("[rank %d] aclrtMalloc(VMM) OK addr:%p size:%lu\n", rank, devMem, ALLOC_SIZE);
 
     ret = TestSyncWriteRead(rank, worldSize, handle, devMem);
     if (ret != 0) {
@@ -381,7 +355,7 @@ int main(int argc, char *argv[])
 
 cleanup:
     if (devMem != nullptr) {
-        aclrtFree(devMem);
+        hybm_free_vmm_buffer(devMem, ALLOC_SIZE);
     }
     smem_trans_destroy(handle, 0);
     smem_trans_uninit(0);

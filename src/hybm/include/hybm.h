@@ -88,6 +88,26 @@ int32_t hybm_get_phy_chip_id(uint32_t deviceId);
  */
 int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDeviceId);
 
+/**
+ * @brief Allocate VMM-backed device buffer (aclrtMallocPhysical + aclrtMapMem).
+ *        The returned pointer can be registered with TRANS mode for cross-card
+ *        shareable handle export on 310P3.
+ *
+ * @param deviceId        [in] logical device id
+ * @param worldSize       [in] total rank count (for cross-card SetAccess)
+ * @param size            [in] buffer size in bytes
+ * @return non-NULL mapped device VA on success, NULL on failure
+ */
+void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size_t size);
+
+/**
+ * @brief Free VMM-backed device buffer allocated by hybm_alloc_vmm_buffer.
+ *
+ * @param addr            [in] mapped device VA returned by hybm_alloc_vmm_buffer
+ * @param size            [in] buffer size in bytes
+ */
+void hybm_free_vmm_buffer(void *addr, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

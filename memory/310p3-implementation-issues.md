@@ -490,8 +490,119 @@ rank 0 import rank1: GVA=0x280080000000  deviceVa=0x12c140000000 (imported)
   - deregister_mem：PASS
 - TopologyPreflight：PASS（P2P 槽位 0 ≤ 8）
 - ACL IPC import 成功，同卡 die 不触发 P2P 前置检查
+- **4-rank 跨卡（dev0-3）：FAIL** — `AclrtIpcMemImportByKey(ENABLE_PEER_ACCESS)` 对 `aclrtMalloc` 外部内存返回 507899（`devdrv_p2p_para_check` 拒绝跨卡 P2P）
 
 **额外修复**：
 1. `dl_acl_api.h/cpp`：新增 ACL IPC API 封装（`AclrtIpcMemGetExportKey`/`AclrtIpcMemImportByKey`/`AclrtIpcMemClose`）
 2. `hybm_entity_tag_info.cpp`：`AddRankTag` 空 tag 使用默认 tag `HYBM_DEFAULT_TAG_FOR_EMPTY`（TRANS 场景 tag 为空导致 `GetRank2RankOpType` 返回 0）
 3. `smem_trans_entry.cpp`：`JoinImport` entity import 条件增加 `config_.role == SMEM_TRANS_BOTH`（BOTH 角色两端 role 相同导致 entity import 被跳过）
+
+---
+
+## 28. TRANS 4-rank 跨卡：VMM baseline 路径实现
+
+> 日期：2026-09-04
+> 验证文件：`examples/310p3_trans_test/`
+
+**背景**：ACL IPC 路径（§27）在 2-rank 同卡 die 场景 PASS，但 4-rank 跨卡场景 `AclrtIpcMemImportByKey(ENABLE_PEER_ACCESS)` 对 `aclrtMalloc` 外部内存返回 507899。BM 模式 4-rank 跨卡能 PASS 是因为 VMM 路径（`AclrtMemImportFromShareableHandle` + `AclrtMemSetAccess`）正确处理跨卡 P2P。
+
+**根因**：`aclrtMalloc` 分配的内存不返回 `aclrtDrvMemHandle`，无法通过 `AclrtMemExportToShareableHandle` 导出 shareable handle。跨卡 P2P 需要 VMM 层的 `AclrtMemSetAccess` 为每个远端 device 授权访问权限，ACL IPC 路径不提供这一机制。
+
+**方案**：VMM baseline 路径 — 用户通过 `hybm_alloc_vmm_buffer` 分配 VMM 内存（`AclrtMallocPhysical` + `AclrtMapMem` + `AclrtMemSetAccess`），`RegisterMemory` 检测到 VMM handle 时走 `AclrtMemExportToShareableHandle` 导出，`ImportSliceInfo` 检测到 shareable handle 时走 `AclrtMemImportFromShareableHandle` + `AclrtMapMem` + ctx trick 导入。
+
+**新增 API**：
+
+| API | 位置 | 说明 |
+|-----|------|------|
+| `hybm_alloc_vmm_buffer` | `hybm.h` / `hybm_entry.cpp` | VMM 设备内存分配（`AclrtMallocPhysical` + `AclrtReserveMemAddress` + `AclrtMapMem` + `AclrtMemSetAccess` 为所有跨卡 device 授权） |
+| `hybm_free_vmm_buffer` | `hybm.h` / `hybm_entry.cpp` | VMM 设备内存释放（`AclrtUnmapMem` + `AclrtReleaseMemAddress` + `AclrtFreePhysical`） |
+
+**修改的文件**：
+
+| 文件 | 修改内容 |
+|------|---------|
+| `hybm.h` | 新增 `hybm_alloc_vmm_buffer` / `hybm_free_vmm_buffer` 公共 API 声明 |
+| `hybm_entry.cpp` | 实现 VMM buffer 分配/释放 + 全局 handle 注册表 `g_vmmHandleMap` + `HybmLookupVmmHandle` 查找函数 |
+| `hybm_dev_user_legacy_segment.h` | `RegisterSlice` 增加 `shareableHandle` 字段；`UserHbmExportSliceInfo` 增加 `shareableHandle` 字段（8B，重新排列 padding 保持 200B）；新增 `ImportedVmmInfo` 结构和 `importedVmmInfo_` map；新增 `ImportVmmSlice`/`CleanupImportedVmm` 方法声明 |
+| `hybm_dev_user_legacy_segment.cpp` | `RegisterMemory`：检测 VMM handle → `AclrtMemExportToShareableHandle` 导出；`ImportSliceInfo`：检测 shareableHandle ≠ 0 → `ImportVmmSlice`（`AclrtReserveMemAddress` + ctx trick + `AclrtMemImportFromShareableHandle` + `AclrtMapMem` + `AclrtMemSetAccess`）；`ReleaseSliceMemory`/`RemoveSliceInfo`/`CloseMemory`：VMM 路径 cleanup；`Mmap`/`Unmap`：310P3 返回 OK |
+
+**数据流**（VMM baseline 路径）：
+
+```
+Export side:
+  hybm_alloc_vmm_buffer(devId, worldSize, size)
+    → AclrtMallocPhysical(prop{NONE,PINNED,DEVICE,P2P_HUGE}) → aclrtDrvMemHandle
+    → AclrtReserveMemAddress → lva
+    → AclrtMapMem(lva, size, 0, handle)
+    → AclrtMemSetAccess(lva, RW, {dev}) for local + all cross-card devs
+    → g_vmmHandleMap[lva] = handle
+
+  smem_trans_register_mem(handle, lva, size)
+    → HybmDevUserLegacySegment::RegisterMemory
+    → HybmLookupVmmHandle(lva) → drvHandle
+    → AclrtMemExportToShareableHandle(drvHandle, NONE, DISABLE_PID_VALIDATION) → uint64 shareable
+    → MemSlice{gva, vAddress=lva, size}
+    → HybmVaManager::AddVaInfo(gva, lva, lva, size, onlyGva=true)
+    → registerSlices_[idx] = {slice, name="", shareableHandle}
+
+  Export(slice, exInfo)
+    → UserHbmExportSliceInfo{gvaOffset, address=lva, size, shareableHandle}
+    → serialize → 200B blob
+
+Import side:
+  ImportSliceInfo(info)
+    → deserialize → UserHbmExportSliceInfo{shareableHandle != 0}
+    → ImportVmmSlice(sliceInfo, address)
+      → AclrtSetDevice(localDev, force=true)  // thread-local ctx
+      → AclrtReserveMemAddress → lva
+      → if sameCard: AclrtSetDevice(exporterDev, force=true)  // ctx trick
+      → AclrtMemImportFromShareableHandle(shareable, localDev, &aclHandle)
+      → if sameCard: AclrtSetDevice(localDev)  // restore
+      → AclrtMapMem(lva, size, 0, aclHandle)
+      → AclrtMemSetAccess(lva, RW, {localDev})
+      → importedVmmInfo_[name] = {lva, aclHandle}
+    → MemSlice{gva, vAddress=lva, size}
+    → HybmVaManager::AddVaInfoFromExternal(gva, lva, 0, size, rankId, importedRankId)
+
+Copy path (unchanged):
+  smem_trans_write(handle, localAddr, peerName, remoteAddr, size)
+    → TransformAddr: remoteAddr → peerGVA (via remoteSlices_)
+    → ClassifyAddressMask: localAddr=LOCAL_DEVICE, peerGVA=GLOBAL_DEVICE
+    → direction = LOCAL_DEVICE_TO_GLOBAL_DEVICE
+    → TransformVa(GVA→DVA): peerGVA → importedLva
+    → aclrtMemcpyAsync(importedLva, size, localAddr, D2D, stream)
+```
+
+**验证结果**（2026-09-04）：
+
+| 测试 | rankSize | 拓扑 | 结果 |
+|------|----------|------|------|
+| TestSyncWriteRead | 2 | 同卡 die 对 (dev0/dev1) | **PASS** — 4 轮 write+verify 全通过 |
+| TestAsyncSubmit | 2 | 同卡 die 对 | **PASS** — async write_submit + stream sync + verify |
+| TestDeregister | 2 | 同卡 die 对 | **PASS** |
+| TestSyncWriteRead | 4 | 跨卡 2 卡 (dev0-3) | **PASS** — 4 轮 write+verify 全通过（同卡+跨卡混合） |
+| TestAsyncSubmit | 4 | 跨卡 2 卡 | **PASS** — async write_submit + stream sync + verify |
+| TestDeregister | 4 | 跨卡 2 卡 | **PASS** |
+
+- TopologyPreflight：PASS（跨卡 P2P 槽位 4 ≤ 8）
+- VMM import：同卡 die 走 ctx trick（`SetDevice(exporter)` + `ImportFromShareableHandle` + `SetDevice(local)` restore），跨卡走 `CanAccessPeer` + `ImportFromShareableHandle`，均成功
+- `AclrtMemSetAccess` 在 `hybm_alloc_vmm_buffer` 时为所有跨卡 device 预授权，import 时为 local device 授权
+
+**与 ACL IPC 路径的对比**：
+
+| 维度 | ACL IPC 路径（§27） | VMM baseline 路径（§28） |
+|------|-------------------|------------------------|
+| 内存分配 | `aclrtMalloc`（用户自由分配） | `hybm_alloc_vmm_buffer`（需用专用 API） |
+| Export | `AclrtIpcMemGetExportKey` → IPC key (64B string) | `AclrtMemExportToShareableHandle` → uint64 shareable |
+| Import (同卡) | `AclrtIpcMemImportByKey(DEFAULT)` | `AclrtMemImportFromShareableHandle` + ctx trick |
+| Import (跨卡) | `AclrtIpcMemImportByKey(ENABLE_PEER_ACCESS)` → **507899 FAIL** | `AclrtMemImportFromShareableHandle` → **PASS** |
+| P2P 授权 | ACL IPC 内部处理（跨卡失败） | `AclrtMemSetAccess` 显式授权（成功） |
+| 2-rank 同卡 | ✅ PASS | ✅ PASS |
+| 4-rank 跨卡 | ❌ FAIL | ✅ PASS |
+| 外部内存语义 | 保留（注册用户 `aclrtMalloc` 内存） | 需改用 `hybm_alloc_vmm_buffer` 分配 |
+
+**注意事项**：
+1. `hybm_alloc_vmm_buffer` 分配的内存地址必须用于 `smem_trans_register_mem` 注册，不能混用 `aclrtMalloc` 和 `hybm_alloc_vmm_buffer`
+2. `AclrtMemSetAccess` 在分配时为所有 `worldSize` 个 device 预授权，需要传入正确的 `worldSize`
+3. VMM baseline 路径和 ACL IPC 路径共存：`RegisterMemory` 通过 `HybmLookupVmmHandle` 检测地址是否为 VMM 内存，自动选择路径
+4. ctx trick（同卡 die import 时切换到 exporter device context）是必须的，否则 `AclrtMemImportFromShareableHandle` 返回 507899
