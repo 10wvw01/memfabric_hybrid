@@ -364,13 +364,13 @@ Result HostDataOpSDMA::DataCopyAsync(hybm_copy_params &params, hybm_data_copy_di
         }
         case HYBM_LOCAL_DEVICE_TO_GLOBAL_HOST: {
             TP_TRACE_BEGIN(TP_HYBM_SDMA_LD_TO_GH_ASYNC);
-            ret = CopyG2GAsync(params.dest, params.src, params.dataSize, options.flags, options.stream);
+            ret = CopyGD2LH(params.dest, params.src, params.dataSize, options.stream);
             TP_TRACE_END(TP_HYBM_SDMA_LD_TO_GH_ASYNC, ret);
             break;
         }
         case HYBM_GLOBAL_HOST_TO_LOCAL_DEVICE: {
             TP_TRACE_BEGIN(TP_HYBM_SDMA_GH_TO_LD_ASYNC);
-            ret = CopyG2GAsync(params.dest, params.src, params.dataSize, options.flags, options.stream);
+            ret = CopyLH2GD(params.dest, params.src, params.dataSize, options.stream);
             TP_TRACE_END(TP_HYBM_SDMA_GH_TO_LD_ASYNC, ret);
             break;
         }
@@ -404,8 +404,16 @@ void HostDataOpSDMA::TransformVa(void *&src, void *&dst, hybm_data_copy_directio
 Result HostDataOpSDMA::Wait(int32_t waitId) noexcept
 {
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
-        /* 310P3: copy operations already synchronized internally via AclrtSynchronizeStream */
-        return BM_OK;
+        void *st = HybmStreamManager::GetThreadAclStream();
+        if (st == nullptr) {
+            return BM_OK;
+        }
+        auto ret = DlAclApi::AclrtSynchronizeStream(st);
+        if (ret != 0) {
+            BM_LOG_WARN("Wait sync acl stream failed, ret:" << ret);
+            HybmStreamManager::ResetThreadAclStream();
+        }
+        return ret;
     }
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_LOG_AND_RETURN(hStream != nullptr, "hStream is nullptr", BM_ERROR);
@@ -893,13 +901,15 @@ Result HostDataOpSDMA::BatchDataCopy(hybm_batch_copy_params &params, hybm_data_c
         }
         case HYBM_LOCAL_DEVICE_TO_GLOBAL_HOST: {
             TP_TRACE_BEGIN(TP_HYBM_SDMA_BATCH_LD_TO_GH);
-            ret = BatchCopyG2G(params, options);
+            ret =
+                BatchCopyGD2LH(params.destinations, params.sources, params.dataSizes, params.batchSize, options.stream);
             TP_TRACE_END(TP_HYBM_SDMA_BATCH_LD_TO_GH, ret);
             break;
         }
         case HYBM_GLOBAL_HOST_TO_LOCAL_DEVICE: {
             TP_TRACE_BEGIN(TP_HYBM_SDMA_BATCH_GH_TO_LD);
-            ret = BatchCopyG2G(params, options);
+            ret =
+                BatchCopyLH2GD(params.destinations, params.sources, params.dataSizes, params.batchSize, options.stream);
             TP_TRACE_END(TP_HYBM_SDMA_BATCH_GH_TO_LD, ret);
             break;
         }

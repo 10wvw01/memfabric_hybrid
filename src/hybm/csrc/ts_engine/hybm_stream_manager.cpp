@@ -82,11 +82,12 @@ int HybmStreamManager::SetDevice(uint32_t devId)
     return BM_OK;
 }
 
+static thread_local AclrtStream g_threadAclStream;
+
 void *HybmStreamManager::GetThreadAclStream()
 {
-    static thread_local AclrtStream aclrtStream_;
-    if (aclrtStream_.Get() != nullptr) {
-        return aclrtStream_.Get();
+    if (g_threadAclStream.Get() != nullptr) {
+        return g_threadAclStream.Get();
     }
 #if defined(ASCEND_NPU)
     void *stream = nullptr;
@@ -97,19 +98,18 @@ void *HybmStreamManager::GetThreadAclStream()
         BM_LOG_ERROR("create stream failed: " << ret);
         return nullptr;
     }
-    aclrtStream_.Reset(stream);
+    g_threadAclStream.Reset(stream);
 #endif
-    return aclrtStream_.Get();
+    return g_threadAclStream.Get();
 }
 
 void HybmStreamManager::ResetThreadAclStream()
 {
-    static thread_local AclrtStream aclrtStream_;
-    if (aclrtStream_.Get() == nullptr) {
+    if (g_threadAclStream.Get() == nullptr) {
         return;
     }
-    DlAclApi::AclrtDestroyStream(aclrtStream_.Get());
-    aclrtStream_.Reset(nullptr);
+    DlAclApi::AclrtDestroyStream(g_threadAclStream.Get());
+    g_threadAclStream.Reset(nullptr);
 }
 } // namespace mf
 } // namespace ock
