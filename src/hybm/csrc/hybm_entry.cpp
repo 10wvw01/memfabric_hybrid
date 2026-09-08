@@ -149,15 +149,25 @@ HYBM_API void hybm_uninit()
     if ((socType == AscendSocType::ASCEND_950) || (socType == AscendSocType::ASCEND_310P3) ||
         (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         if (g_baseAddr != 0) {
-            auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
-            BM_LOG_INFO("unmap meta info res: " << ret);
-            if (g_allocHandle != nullptr) {
-                ret = DlHalApi::HalMemRelease((drv_mem_handle_t *)g_allocHandle);
-                g_allocHandle = nullptr;
-                BM_LOG_INFO("release meta memory handle res: " << ret);
+            if (socType == AscendSocType::ASCEND_310P3) {
+                DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(g_baseAddr));
+                if (g_allocHandle != nullptr) {
+                    DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
+                    g_allocHandle = nullptr;
+                }
+                DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
+            } else {
+                auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("unmap meta info res: " << ret);
+                if (g_allocHandle != nullptr) {
+                    ret = DlHalApi::HalMemRelease((drv_mem_handle_t *)g_allocHandle);
+                    g_allocHandle = nullptr;
+                    BM_LOG_INFO("release meta memory handle res: " << ret);
+                }
+                ret = DlHalApi::HalMemAddressFree(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("free meta memory res: " << ret);
             }
-            ret = DlHalApi::HalMemAddressFree(reinterpret_cast<void *>(g_baseAddr));
-            BM_LOG_INFO("free meta memory res: " << ret);
+            g_baseAddr = 0ULL;
         }
     } else {
         if (g_baseAddr != 0) {
