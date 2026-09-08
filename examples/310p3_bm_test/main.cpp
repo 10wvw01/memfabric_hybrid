@@ -18,7 +18,7 @@
  * 数据拷贝走 AclrtMemcpyAsync(D2D) + AclrtSynchronizeStream（sync D2D 不可用）。
  *
  * Tests:
- *   1. HBM pool: round-robin L2G / G2H / G2L / G2G (supports 2-rank and 4-rank)
+ *   1. HBM pool: round-robin L2G / G2H / G2L / G2G / H2G (supports 2-rank and 4-rank)
  *   2. DRAM HOST_SHM pool: H2GH / GH2H (all peer ranks)
  *   3. 100x lifecycle (create -> join -> copy -> destroy)
  *
@@ -76,6 +76,11 @@ int32_t BmInit(int rank, int worldSize, int devId, const char *storeUrl)
         return ret;
     }
     int32_t socType = hybm_get_soc_type();
+    if (socType != 5) {
+        fprintf(stderr, "[rank %d] SoC type mismatch: got %d, expected 5 (310P3). This test targets 310P3 only.\n",
+                rank, socType);
+        return -1;
+    }
     printf("[rank %d] smem_bm_init OK socType=%d devId=%d worldSize=%d\n", rank, socType, devId, worldSize);
     return 0;
 }
@@ -85,9 +90,9 @@ void HbmL2gWrite(smem_bm_t handle, int rank, int targetRank, void *targetGva,
                  uint32_t writerTag, int &nfail)
 {
     void *localDevBuf = nullptr;
-    aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-    if (localDevBuf == nullptr) {
-        fprintf(stderr, "[rank %d] aclrtMalloc failed for L2G\n", rank);
+    int32_t mcRet = aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (mcRet != 0 || localDevBuf == nullptr) {
+        fprintf(stderr, "[rank %d] aclrtMalloc failed for L2G ret:%d\n", rank, mcRet);
         nfail++;
         return;
     }
@@ -96,7 +101,13 @@ void HbmL2gWrite(smem_bm_t handle, int rank, int targetRank, void *targetGva,
     for (size_t i = 0; i < COPY_SIZE / 4; i++) {
         p[i] = Pat(writerTag, i);
     }
-    aclrtMemcpy(localDevBuf, COPY_SIZE, hbuf.data(), COPY_SIZE, ACL_MEMCPY_HOST_TO_DEVICE);
+    mcRet = aclrtMemcpy(localDevBuf, COPY_SIZE, hbuf.data(), COPY_SIZE, ACL_MEMCPY_HOST_TO_DEVICE);
+    if (mcRet != 0) {
+        fprintf(stderr, "[rank %d] aclrtMemcpy(H2D) failed for L2G ret:%d targetRank:%d\n", rank, mcRet, targetRank);
+        nfail++;
+        aclrtFree(localDevBuf);
+        return;
+    }
 
     printf("[rank %d] L2G: writing tag=0x%08x to targetRank=%d targetGva=%p size=%zu\n",
            rank, Pat(writerTag, 0), targetRank, targetGva, static_cast<size_t>(COPY_SIZE));
@@ -158,9 +169,9 @@ void HbmG2lVerify(smem_bm_t handle, int rank, int targetRank, void *targetGva,
                   uint32_t writerTag, int &nfail)
 {
     void *localDevBuf = nullptr;
-    aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-    if (localDevBuf == nullptr) {
-        fprintf(stderr, "[rank %d] aclrtMalloc failed for G2L\n", rank);
+    int32_t mcRet = aclrtMalloc(&localDevBuf, COPY_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (mcRet != 0 || localDevBuf == nullptr) {
+        fprintf(stderr, "[rank %d] aclrtMalloc failed for G2L ret:%d\n", rank, mcRet);
         nfail++;
         return;
     }
@@ -180,7 +191,13 @@ void HbmG2lVerify(smem_bm_t handle, int rank, int targetRank, void *targetGva,
     }
     smem_bm_wait(handle);
     std::vector<uint8_t> hbuf(COPY_SIZE);
-    aclrtMemcpy(hbuf.data(), COPY_SIZE, localDevBuf, COPY_SIZE, ACL_MEMCPY_DEVICE_TO_HOST);
+    mcRet = aclrtMemcpy(hbuf.data(), COPY_SIZE, localDevBuf, COPY_SIZE, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (mcRet != 0) {
+        fprintf(stderr, "[rank %d] aclrtMemcpy(D2H) failed for G2L ret:%d targetRank:%d\n", rank, mcRet, targetRank);
+        nfail++;
+        aclrtFree(localDevBuf);
+        return;
+    }
     uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
     bool ok = true;
     for (size_t i = 0; i < COPY_SIZE / 4; i++) {
@@ -200,7 +217,8 @@ void HbmG2lVerify(smem_bm_t handle, int rank, int targetRank, void *targetGva,
 }
 
 /* HBM G2G phase: target copies writer's GVA to own GVA, verifies match.
- * Pre-reads writer's GVA first because it may have been modified in previous rounds. */
+ * Pre-reads writer's GVA first because it may have been modified in previous rounds.
+ * Overwrites localGva with a sentinel pattern (0xDE) before G2G to detect no-op copies. */
 void HbmG2gCopy(smem_bm_t handle, int rank, int writer, void *writerGva, void *localGva, int &nfail)
 {
     std::vector<uint8_t> writerBuf(COPY_SIZE, 0);
@@ -217,6 +235,12 @@ void HbmG2gCopy(smem_bm_t handle, int rank, int writer, void *writerGva, void *l
     }
     smem_bm_wait(handle);
 
+    int nfailBefore = nfail;
+    HbmL2gWrite(handle, rank, rank, localGva, 0xDEU, nfail);
+    if (nfail > nfailBefore) {
+        return;
+    }
+
     printf("[rank %d] G2G: src=writerGva=%p dst=localGva=%p writer=%d\n", rank, writerGva, localGva, writer);
     params.src = writerGva;
     params.dest = localGva;
@@ -231,7 +255,12 @@ void HbmG2gCopy(smem_bm_t handle, int rank, int writer, void *writerGva, void *l
     std::vector<uint8_t> ownBuf(COPY_SIZE, 0);
     params.src = localGva;
     params.dest = ownBuf.data();
-    smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
+    ret = smem_bm_copy(handle, &params, SMEMB_COPY_G2H, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] G2G post-read(writer %d) failed:%d\n", rank, writer, ret);
+        nfail++;
+        return;
+    }
     smem_bm_wait(handle);
 
     uint32_t *w = reinterpret_cast<uint32_t *>(writerBuf.data());
@@ -252,7 +281,36 @@ void HbmG2gCopy(smem_bm_t handle, int rank, int writer, void *writerGva, void *l
     }
 }
 
-/* HBM test: round-robin L2G/G2H/G2L/G2G to avoid concurrent write races.
+/* HBM H2G phase: writer writes host buffer to target's GVA.
+ * 310P3 走 CopyLH2GD 路径：AclrtMalloc(temp) → AclrtMemcpy(H2D) → CopyG2G → AclrtFree。 */
+void HbmH2gWrite(smem_bm_t handle, int rank, int targetRank, void *targetGva,
+                 uint32_t writerTag, int &nfail)
+{
+    std::vector<uint8_t> hbuf(COPY_SIZE);
+    uint32_t *p = reinterpret_cast<uint32_t *>(hbuf.data());
+    for (size_t i = 0; i < COPY_SIZE / 4; i++) {
+        p[i] = Pat(writerTag, i);
+    }
+
+    printf("[rank %d] H2G: writing tag=0x%08x to targetRank=%d targetGva=%p size=%zu\n",
+           rank, Pat(writerTag, 0), targetRank, targetGva, static_cast<size_t>(COPY_SIZE));
+
+    smem_copy_params_t params{};
+    params.src = hbuf.data();
+    params.dest = targetGva;
+    params.dataSize = COPY_SIZE;
+    params.stream = nullptr;
+    int32_t ret = smem_bm_copy(handle, &params, SMEMB_COPY_H2G, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] H2G(target %d) failed:%d\n", rank, targetRank, ret);
+        nfail++;
+    } else {
+        smem_bm_wait(handle);
+        printf("[rank %d] H2G(target %d) OK\n", rank, targetRank);
+    }
+}
+
+/* HBM test: round-robin L2G/G2H/G2L/G2G/H2G to avoid concurrent write races.
  * 310P3 上 GVA ≠ device VA，smem_bm_copy 内部通过 TransformVa(GVA→DVA) 翻译后
  * 调用 AclrtMemcpyAsync 完成跨 rank D2D 拷贝。
  * For each target rank, one designated writer writes to it, then target verifies. */
@@ -339,6 +397,26 @@ int32_t TestHbm(int rank, int worldSize)
             } else {
                 HbmG2gCopy(handle, rank, writer, writerGva, localGva, nfail);
             }
+        }
+        MpBarrier();
+
+        /* H2G phase: writer writes host data to target's GVA, target verifies via G2H.
+         * Uses 0xB0 tag prefix to distinguish from L2G's 0xA0 prefix. */
+        uint32_t h2gTag = 0xB0U | static_cast<uint32_t>(writer);
+        if (rank == writer) {
+            void *targetGva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_DEVICE,
+                                                       static_cast<uint16_t>(targetRank));
+            if (targetGva == nullptr) {
+                fprintf(stderr, "[rank %d] ptr_by_mem_type(DEVICE, target:%d) for H2G failed\n", rank, targetRank);
+                nfail++;
+            } else {
+                HbmH2gWrite(handle, rank, targetRank, targetGva, h2gTag, nfail);
+            }
+        }
+        MpBarrier();
+
+        if (rank == targetRank) {
+            HbmG2hVerify(handle, rank, localGva, h2gTag, writer, nfail);
         }
         MpBarrier();
     }

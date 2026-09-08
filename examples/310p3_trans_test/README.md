@@ -8,9 +8,17 @@
 
 | 测试项 | 说明 |
 |--------|------|
-| TestSyncWriteRead | 同步 write 到 peer + verify 数据完整性 |
-| TestAsyncSubmit | 异步 write_submit + stream sync + verify |
+| TestSyncWriteRead | 同步 write 到 peer + verify 数据完整性（L2G） |
+| TestAsyncSubmit | 异步 write_submit + stream sync + verify（L2G） |
+| TestSyncRead | 同步 read 从 peer 读取 + verify 数据完整性（G2L） |
+| TestAsyncReadSubmit | 异步 read_submit + stream sync + verify（G2L） |
 | TestDeregister | deregister_mem 释放已注册内存 |
+
+## VA 交换
+
+各 rank 通过 `MPI_Allgather` 交换 `hybm_alloc_vmm_buffer` 返回的设备内存虚拟地址，
+write/read 的 `remoteAddr` 参数使用对端真实 VA，不依赖同地址空间假设。
+交换后通过 `assert` 断言所有 rank 的 VA 相同。
 
 ## 运行方法
 

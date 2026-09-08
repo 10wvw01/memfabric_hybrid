@@ -13,7 +13,7 @@
 /*
  * 310P3 TRANS Mode Functional Verification
  *
- * TRANS 注册用户已分配的 aclrtMalloc 设备内存，通过 config store 交换 IPC key，
+ * TRANS 注册 hybm_alloc_vmm_buffer 分配的 VMM 设备内存，通过 config store 交换 IPC key，
  * 对端 import 后用 aclrtMemcpyAsync(D2D) 跨 rank 传输。
  *
  * 310P3 关键路径（与 910B 的差异）：
@@ -26,7 +26,13 @@
  * Tests:
  *   1. register_mem -> sync write -> verify（串行 round-robin 避免并发写竞争）
  *   2. async write_submit + stream sync -> verify
- *   3. deregister_mem
+ *   3. sync read -> verify（G2L 方向，receiver 主动从 writer 读取）
+ *   4. async read_submit + stream sync -> verify
+ *   5. deregister_mem
+ *
+ * VA exchange:
+ *   各 rank 通过 MPI_Allgather 交换 devMem 虚拟地址，
+ *   write/read 的 remoteAddr 使用对端真实 VA，不依赖同地址空间假设。
  *
  * Usage:
  *   mpirun -np <rankSize> ./310p3_trans_test <store_url>
@@ -34,6 +40,7 @@
  *   rankSize: 2 or 4 (2-rank: same-card die pair; 4-rank: cross-card)
  */
 
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +91,19 @@ std::string PeerUniqueId(int rank, int worldSize)
     return std::string(buf);
 }
 
+std::vector<void *> ExchangeDevMemAddrs(int rank, void *devMem)
+{
+    int worldSize = MpSize();
+    std::vector<void *> addrs(worldSize, nullptr);
+    MPI_Allgather(&devMem, static_cast<int>(sizeof(void *)), MPI_BYTE,
+                  addrs.data(), static_cast<int>(sizeof(void *)), MPI_BYTE, MPI_COMM_WORLD);
+    for (int i = 0; i < worldSize; i++) {
+        assert(addrs[i] == devMem && "remote VA differs from local VA, same address space assumption broken");
+    }
+    printf("[rank %d] VA exchange OK all ranks share VA:%p\n", rank, devMem);
+    return addrs;
+}
+
 int32_t TransInit(int rank, int devId)
 {
     smem_set_log_level(1);
@@ -100,17 +120,19 @@ int32_t TransInit(int rank, int devId)
         return ret;
     }
     int32_t socType = hybm_get_soc_type();
+    constexpr int32_t SOC_TYPE_310P3 = 5;
+    assert(socType == SOC_TYPE_310P3 && "this test is only for 310P3, actual socType mismatch");
     printf("[rank %d] smem_trans_init OK socType=%d devId=%d\n", rank, socType, devId);
     return 0;
 }
 
-smem_trans_t TransCreate(int rank, const char *storeUrl)
+smem_trans_t TransCreate(int rank, int devId, const char *storeUrl)
 {
     std::string uniqueId = PeerUniqueId(rank, MpSize());
     smem_trans_config_t config;
     smem_trans_config_init(&config);
     config.role = SMEM_TRANS_BOTH;
-    config.deviceId = static_cast<uint32_t>(rank);
+    config.deviceId = static_cast<uint32_t>(devId);
     config.initTimeout = 300;
     config.dataOpType = SMEMB_DATA_OP_SDMA;
 
@@ -179,7 +201,8 @@ int32_t VerifyData(int rank, void *devMem, uint32_t expectedTag)
     return 0;
 }
 
-int32_t TestSyncWriteRead(int rank, int worldSize, smem_trans_t handle, void *devMem)
+int32_t TestSyncWriteRead(int rank, int worldSize, smem_trans_t handle, void *devMem,
+                         const std::vector<void *> &devAddrs)
 {
     printf("[rank %d] === TestSyncWriteRead ===\n", rank);
     uint32_t myTag = static_cast<uint32_t>(rank + 1) << 4;
@@ -194,7 +217,7 @@ int32_t TestSyncWriteRead(int rank, int worldSize, smem_trans_t handle, void *de
         if (rank == writer) {
             FillDevMem(rank, devMem, myTag);
             std::string peerId = PeerUniqueId(receiver, worldSize);
-            ret = smem_trans_write(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, 0);
+            ret = smem_trans_write(handle, devMem, peerId.c_str(), devAddrs[receiver], COPY_SIZE, 0);
             if (ret != 0) {
                 fprintf(stderr, "[rank %d] trans_write to rank:%d failed:%d\n", rank, receiver, ret);
                 return ret;
@@ -214,7 +237,8 @@ int32_t TestSyncWriteRead(int rank, int worldSize, smem_trans_t handle, void *de
     return 0;
 }
 
-int32_t TestAsyncSubmit(int rank, int worldSize, smem_trans_t handle, void *devMem)
+int32_t TestAsyncSubmit(int rank, int worldSize, smem_trans_t handle, void *devMem,
+                        const std::vector<void *> &devAddrs)
 {
     printf("[rank %d] === TestAsyncSubmit ===\n", rank);
     uint32_t myTag = static_cast<uint32_t>(rank + 1) << 8;
@@ -236,7 +260,8 @@ int32_t TestAsyncSubmit(int rank, int worldSize, smem_trans_t handle, void *devM
         if (rank == writer) {
             FillDevMem(rank, devMem, myTag);
             std::string peerId = PeerUniqueId(receiver, worldSize);
-            ret = smem_trans_write_submit(handle, devMem, peerId.c_str(), devMem, COPY_SIZE, stream, 0);
+            ret = smem_trans_write_submit(handle, devMem, peerId.c_str(), devAddrs[receiver], COPY_SIZE,
+                                          stream, 0);
             if (ret != 0) {
                 fprintf(stderr, "[rank %d] write_submit to rank:%d failed:%d\n", rank, receiver, ret);
                 aclrtDestroyStream(stream);
@@ -253,6 +278,96 @@ int32_t TestAsyncSubmit(int rank, int worldSize, smem_trans_t handle, void *devM
         MpBarrier();
         if (rank == receiver) {
             uint32_t expectedTag = static_cast<uint32_t>(writer + 1) << 8;
+            ret = VerifyData(rank, devMem, expectedTag);
+            if (ret != 0) {
+                aclrtDestroyStream(stream);
+                return ret;
+            }
+        }
+        MpBarrier();
+    }
+    aclrtDestroyStream(stream);
+    return 0;
+}
+
+int32_t TestSyncRead(int rank, int worldSize, smem_trans_t handle, void *devMem,
+                     const std::vector<void *> &devAddrs)
+{
+    printf("[rank %d] === TestSyncRead ===\n", rank);
+    uint32_t myTag = static_cast<uint32_t>(rank + 1) << 12;
+    int32_t ret = FillDevMem(rank, devMem, myTag);
+    if (ret != 0) {
+        return ret;
+    }
+    MpBarrier();
+
+    for (int writer = 0; writer < worldSize; writer++) {
+        int receiver = (writer + 1) % worldSize;
+        if (rank == writer) {
+            FillDevMem(rank, devMem, myTag);
+        }
+        MpBarrier();
+        if (rank == receiver) {
+            std::string peerId = PeerUniqueId(writer, worldSize);
+            ret = smem_trans_read(handle, devMem, peerId.c_str(), devAddrs[writer], COPY_SIZE, 0);
+            if (ret != 0) {
+                fprintf(stderr, "[rank %d] trans_read from rank:%d failed:%d remoteAddr:%p\n",
+                        rank, writer, ret, devAddrs[writer]);
+                return ret;
+            }
+            printf("[rank %d] trans_read from rank:%d OK size:%lu\n", rank, writer, COPY_SIZE);
+            uint32_t expectedTag = static_cast<uint32_t>(writer + 1) << 12;
+            ret = VerifyData(rank, devMem, expectedTag);
+            if (ret != 0) {
+                return ret;
+            }
+        }
+        MpBarrier();
+    }
+    return 0;
+}
+
+int32_t TestAsyncReadSubmit(int rank, int worldSize, smem_trans_t handle, void *devMem,
+                            const std::vector<void *> &devAddrs)
+{
+    printf("[rank %d] === TestAsyncReadSubmit ===\n", rank);
+    uint32_t myTag = static_cast<uint32_t>(rank + 1) << 16;
+    int32_t ret = FillDevMem(rank, devMem, myTag);
+    if (ret != 0) {
+        return ret;
+    }
+    MpBarrier();
+
+    aclrtStream stream = nullptr;
+    ret = aclrtCreateStream(&stream);
+    if (ret != 0) {
+        fprintf(stderr, "[rank %d] create stream failed:%d\n", rank, ret);
+        return ret;
+    }
+
+    for (int writer = 0; writer < worldSize; writer++) {
+        int receiver = (writer + 1) % worldSize;
+        if (rank == writer) {
+            FillDevMem(rank, devMem, myTag);
+        }
+        MpBarrier();
+        if (rank == receiver) {
+            std::string peerId = PeerUniqueId(writer, worldSize);
+            ret = smem_trans_read_submit(handle, devMem, peerId.c_str(), devAddrs[writer], COPY_SIZE, stream, 0);
+            if (ret != 0) {
+                fprintf(stderr, "[rank %d] read_submit from rank:%d failed:%d remoteAddr:%p\n",
+                        rank, writer, ret, devAddrs[writer]);
+                aclrtDestroyStream(stream);
+                return ret;
+            }
+            ret = aclrtSynchronizeStream(stream);
+            if (ret != 0) {
+                fprintf(stderr, "[rank %d] sync stream failed:%d\n", rank, ret);
+                aclrtDestroyStream(stream);
+                return ret;
+            }
+            printf("[rank %d] read_submit from rank:%d OK\n", rank, writer);
+            uint32_t expectedTag = static_cast<uint32_t>(writer + 1) << 16;
             ret = VerifyData(rank, devMem, expectedTag);
             if (ret != 0) {
                 aclrtDestroyStream(stream);
@@ -316,7 +431,7 @@ int main(int argc, char *argv[])
         return ret;
     }
 
-    smem_trans_t handle = TransCreate(rank, storeUrl);
+    smem_trans_t handle = TransCreate(rank, devId, storeUrl);
     if (handle == nullptr) {
         smem_trans_uninit(0);
         MPI_Finalize();
@@ -336,12 +451,24 @@ int main(int argc, char *argv[])
     }
     printf("[rank %d] aclrtMalloc(VMM) OK addr:%p size:%lu\n", rank, devMem, ALLOC_SIZE);
 
-    ret = TestSyncWriteRead(rank, worldSize, handle, devMem);
+    std::vector<void *> devAddrs = ExchangeDevMemAddrs(rank, devMem);
+
+    ret = TestSyncWriteRead(rank, worldSize, handle, devMem, devAddrs);
     if (ret != 0) {
         goto cleanup;
     }
 
-    ret = TestAsyncSubmit(rank, worldSize, handle, devMem);
+    ret = TestAsyncSubmit(rank, worldSize, handle, devMem, devAddrs);
+    if (ret != 0) {
+        goto cleanup;
+    }
+
+    ret = TestSyncRead(rank, worldSize, handle, devMem, devAddrs);
+    if (ret != 0) {
+        goto cleanup;
+    }
+
+    ret = TestAsyncReadSubmit(rank, worldSize, handle, devMem, devAddrs);
     if (ret != 0) {
         goto cleanup;
     }

@@ -24,7 +24,7 @@ MF_HOME="${MEMFABRIC_HYBRID_HOME_PATH:-$(cd ${CURRENT_DIR}/../.. && pwd)/output}
 export MEMFABRIC_HYBRID_HOME_PATH="${MF_HOME}"
 
 export LD_LIBRARY_PATH="${MF_HOME}/smem/lib64:${MF_HOME}/hybm/lib64:${LD_LIBRARY_PATH:-}"
-export ASCEND_MF_STORE_URL="${STORE_URL}"
+export MF_CONFIG_STORE_URL="${STORE_URL}"
 export MF_LOG_LEVEL=1
 
 echo "[run] rankSize=${RANK_SIZE} storeUrl=${STORE_URL}"
@@ -37,7 +37,7 @@ if [ ! -f "${BIN}" ]; then
 fi
 
 mpirun --allow-run-as-root -np ${RANK_SIZE} \
-    -x ASCEND_MF_STORE_URL \
+    -x MF_CONFIG_STORE_URL \
     -x MF_LOG_LEVEL \
     -x LD_LIBRARY_PATH \
     -x MEMFABRIC_HYBRID_HOME_PATH \

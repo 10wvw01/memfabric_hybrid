@@ -85,6 +85,7 @@ Usage: `./run.sh <mode> [rank_size] [store_ip] [store_port]`
 [rank 0] G2H(writer 1) verify OK
 [rank 0] G2L(target 1) verify OK
 [rank 0] G2G(writer 1) verify OK
+[rank 0] H2G(target 1) OK
 [rank 0] HBM test PASS
 [rank 0] ALL TESTS PASSED
 ```
@@ -106,7 +107,8 @@ Usage: `./run.sh <mode> [rank_size] [store_ip] [store_port]`
 
 ```
    Round-robin: for each target rank, one designated writer writes to it,
-   then target verifies via G2H, writer verifies via G2L, target does G2G.
+   then target verifies via G2H, writer verifies via G2L, target does G2G,
+   finally writer writes host data via H2G and target verifies via G2H.
 
      target=0  writer=1     target=1  writer=2     target=2  writer=3     target=3  writer=0
      ┌──────┐               ┌──────┐               ┌──────┐               ┌──────┐
@@ -114,7 +116,11 @@ Usage: `./run.sh <mode> [rank_size] [store_ip] [store_port]`
      │GVA   │←G2H           │GVA   │←G2H           │GVA   │←G2H           │GVA   │←G2H
      └──────┘  G2L→         └──────┘  G2L→         └──────┘  G2L→         └──────┘  G2L→
                ↑G2G                   ↑G2G                   ↑G2G                   ↑G2G
+               H2G→                   H2G→                   H2G→                   H2G→
+               ←G2H                   ←G2H                   ←G2H                   ←G2H
 
    Each rank initializes its own GVA with its tag before the round-robin loop,
    so G2G copies meaningful content from the writer's GVA.
+   G2G overwrites localGva with a sentinel (0xDE) before copy to detect no-op.
+   H2G uses 0xB0 tag prefix to distinguish from L2G's 0xA0 prefix.
 ```
