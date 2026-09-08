@@ -11,6 +11,7 @@
 */
 #include "hybm_data_op_sdma.h"
 
+#include "hybm_define.h"
 #include "hybm_logger.h"
 #include "dl_acl_api.h"
 #include "dl_hal_api.h"
@@ -31,6 +32,39 @@ constexpr uint64_t HYBM_PARAM_SPACE_META_OFFSET = HYBM_SINGLE_PARAM_SIZE * HYBM_
 constexpr uint64_t HYBM_PARAM_META_IDX_BASE = 8; // 8 * 8B = 64B, aicore cacheline is 64B
 constexpr uint32_t HYBM_EXTEND_CONCURRENT = 32;
 constexpr uint32_t HYBM_QUANT_COPY_PARAM_SIZE = 40; // 5 param: src, dest, len, scale, offset
+
+// clang-format off
+static hybm_mem_type HybmSdmaDirectionSrcMemType[HYBM_DATA_COPY_DIRECTION_BUTT] = {
+    HYBM_MEM_TYPE_HOST,   // 0  LH2GH
+    HYBM_MEM_TYPE_HOST,   // 1  LH2GD
+    HYBM_MEM_TYPE_DEVICE, // 2  LD2GH
+    HYBM_MEM_TYPE_DEVICE, // 3  LD2GD
+    HYBM_MEM_TYPE_HOST,   // 4  GH2GH
+    HYBM_MEM_TYPE_HOST,   // 5  GH2GD
+    HYBM_MEM_TYPE_HOST,   // 6  GH2LH
+    HYBM_MEM_TYPE_HOST,   // 7  GH2LD
+    HYBM_MEM_TYPE_DEVICE, // 8  GD2GH
+    HYBM_MEM_TYPE_DEVICE, // 9  GD2GD
+    HYBM_MEM_TYPE_DEVICE, // 10 GD2LH
+    HYBM_MEM_TYPE_DEVICE, // 11 GD2LD
+    HYBM_MEM_TYPE_BUTT
+};
+static hybm_mem_type HybmSdmaDirectionDestMemType[HYBM_DATA_COPY_DIRECTION_BUTT] = {
+    HYBM_MEM_TYPE_HOST,   // 0  LH2GH
+    HYBM_MEM_TYPE_DEVICE, // 1  LH2GD
+    HYBM_MEM_TYPE_HOST,   // 2  LD2GH
+    HYBM_MEM_TYPE_DEVICE, // 3  LD2GD
+    HYBM_MEM_TYPE_HOST,   // 4  GH2GH
+    HYBM_MEM_TYPE_DEVICE, // 5  GH2GD
+    HYBM_MEM_TYPE_HOST,   // 6  GH2LH
+    HYBM_MEM_TYPE_DEVICE, // 7  GH2LD
+    HYBM_MEM_TYPE_HOST,   // 8  GD2GH
+    HYBM_MEM_TYPE_DEVICE, // 9  GD2GD
+    HYBM_MEM_TYPE_HOST,   // 10 GD2LH
+    HYBM_MEM_TYPE_DEVICE, // 11 GD2LD
+    HYBM_MEM_TYPE_BUTT
+};
+// clang-format on
 
 HostDataOpSDMA::HostDataOpSDMA() noexcept {};
 
@@ -182,6 +216,18 @@ Result HostDataOpSDMA::DataCopy(hybm_copy_params &params, hybm_data_copy_directi
 
 Result HostDataOpSDMA::CopyLH2GD(void *gvaAddr, const void *hostAddr, size_t count, void *stream) noexcept
 {
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
+        BM_ASSERT_LOG_AND_RETURN(st != nullptr, "acl stream is nullptr", BM_ERROR);
+        auto ret = DlAclApi::AclrtMemcpyAsync(gvaAddr, count, hostAddr, count, ACL_MEMCPY_HOST_TO_DEVICE, st);
+        if (ret != 0 || DlAclApi::AclrtSynchronizeStream(st) != 0) {
+            BM_LOG_WARN("CopyLH2GD async failed, retry sync");
+            if (stream == nullptr) { HybmStreamManager::ResetThreadAclStream(); }
+            ret = DlAclApi::AclrtMemcpy(gvaAddr, count, hostAddr, count, ACL_MEMCPY_HOST_TO_DEVICE);
+            BM_ASSERT_LOG_AND_RETURN(ret == 0, "CopyLH2GD sync failed:" << ret, BM_ERROR);
+        }
+        return BM_OK;
+    }
     void *copyDevice;
     auto ret = DlAclApi::AclrtMalloc(&copyDevice, count, 0);
     if (ret != 0) {
@@ -211,6 +257,21 @@ Result HostDataOpSDMA::CopyLH2GD(void *gvaAddr, const void *hostAddr, size_t cou
 
 Result HostDataOpSDMA::CopyGD2LH(void *hostAddr, const void *gvaAddr, size_t count, void *stream) noexcept
 {
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        if (stream == nullptr) {
+            auto ret = DlAclApi::AclrtMemcpy(hostAddr, count, gvaAddr, count, ACL_MEMCPY_DEVICE_TO_HOST);
+            BM_ASSERT_LOG_AND_RETURN(ret == 0, "CopyGD2LH sync failed:" << ret, BM_ERROR);
+            return BM_OK;
+        }
+        auto ret = DlAclApi::AclrtMemcpyAsync(hostAddr, count, gvaAddr, count, ACL_MEMCPY_DEVICE_TO_HOST, stream);
+        if (ret != 0 || DlAclApi::AclrtSynchronizeStream(stream) != 0) {
+            BM_LOG_WARN("CopyGD2LH async failed, retry sync");
+            HybmStreamManager::ResetThreadAclStream();
+            ret = DlAclApi::AclrtMemcpy(hostAddr, count, gvaAddr, count, ACL_MEMCPY_DEVICE_TO_HOST);
+            BM_ASSERT_LOG_AND_RETURN(ret == 0, "CopyGD2LH sync failed:" << ret, BM_ERROR);
+        }
+        return BM_OK;
+    }
     void *copyDevice;
     auto ret = DlAclApi::AclrtMalloc(&copyDevice, count, 0);
     if (ret != 0) {
@@ -326,14 +387,16 @@ Result HostDataOpSDMA::DataCopyAsync(hybm_copy_params &params, hybm_data_copy_di
 
 void HostDataOpSDMA::TransformVa(void *&src, void *&dst, hybm_data_copy_direction direction) noexcept
 {
-    uint64_t out;
+    uint32_t srcType = (HybmSdmaDirectionSrcMemType[direction] == HYBM_MEM_TYPE_HOST) ? HVM_HVA : HVM_DVA;
+    uint32_t dstType = (HybmSdmaDirectionDestMemType[direction] == HYBM_MEM_TYPE_HOST) ? HVM_HVA : HVM_DVA;
+
     if (src != nullptr) {
-        out = HybmVaManager::GetInstance().TransformVa(reinterpret_cast<uint64_t>(src), HVM_GVA, HVM_DVA);
+        auto out = HybmVaManager::GetInstance().TransformVa(reinterpret_cast<uint64_t>(src), HVM_GVA, srcType);
         src = (out != 0) ? reinterpret_cast<void *>(out) : src;
     }
 
     if (dst != nullptr) {
-        out = HybmVaManager::GetInstance().TransformVa(reinterpret_cast<uint64_t>(dst), HVM_GVA, HVM_DVA);
+        auto out = HybmVaManager::GetInstance().TransformVa(reinterpret_cast<uint64_t>(dst), HVM_GVA, dstType);
         dst = (out != 0) ? reinterpret_cast<void *>(out) : dst;
     }
 }
@@ -361,6 +424,18 @@ void HostDataOpSDMA::CleanUp() noexcept
 
 Result HostDataOpSDMA::CopyLH2GH(void *destVA, const void *srcVA, uint64_t length, void *stream) noexcept
 {
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
+        BM_ASSERT_LOG_AND_RETURN(st != nullptr, "acl stream is nullptr", BM_ERROR);
+        auto ret = DlAclApi::AclrtMemcpyAsync(destVA, length, srcVA, length, ACL_MEMCPY_HOST_TO_DEVICE, st);
+        if (ret != 0 || DlAclApi::AclrtSynchronizeStream(st) != 0) {
+            BM_LOG_WARN("CopyLH2GH async failed, retry sync");
+            if (stream == nullptr) { HybmStreamManager::ResetThreadAclStream(); }
+            ret = DlAclApi::AclrtMemcpy(destVA, length, srcVA, length, ACL_MEMCPY_HOST_TO_DEVICE);
+            BM_ASSERT_LOG_AND_RETURN(ret == 0, "CopyLH2GH sync failed:" << ret, BM_ERROR);
+        }
+        return BM_OK;
+    }
     // local host到dram池的拷贝
     void *copyDevice;
     auto ret = DlAclApi::AclrtMalloc(&copyDevice, length, 0);
@@ -388,6 +463,18 @@ Result HostDataOpSDMA::CopyLH2GH(void *destVA, const void *srcVA, uint64_t lengt
 
 Result HostDataOpSDMA::CopyGH2LH(void *destVA, const void *srcVA, uint64_t length, void *stream) noexcept
 {
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
+        void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
+        BM_ASSERT_LOG_AND_RETURN(st != nullptr, "acl stream is nullptr", BM_ERROR);
+        auto ret = DlAclApi::AclrtMemcpyAsync(destVA, length, srcVA, length, ACL_MEMCPY_DEVICE_TO_HOST, st);
+        if (ret != 0 || DlAclApi::AclrtSynchronizeStream(st) != 0) {
+            BM_LOG_WARN("CopyGH2LH async failed, retry sync");
+            if (stream == nullptr) { HybmStreamManager::ResetThreadAclStream(); }
+            ret = DlAclApi::AclrtMemcpy(destVA, length, srcVA, length, ACL_MEMCPY_DEVICE_TO_HOST);
+            BM_ASSERT_LOG_AND_RETURN(ret == 0, "CopyGH2LH sync failed:" << ret, BM_ERROR);
+        }
+        return BM_OK;
+    }
     // dram池的拷贝到local host
     void *copyDevice;
     auto ret = DlAclApi::AclrtMalloc(&copyDevice, length, 0);
@@ -547,12 +634,15 @@ Result HostDataOpSDMA::CopyG2G(void *destVA, const void *srcVA, size_t count, ui
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
         void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
         BM_ASSERT_LOG_AND_RETURN(st != nullptr, "acl stream is nullptr", BM_ERROR);
-        BM_LOG_DEBUG("310P3 CopyG2G: destVA=0x" << std::hex << destVA << " srcVA=0x" << srcVA
-                                               << " count=" << std::dec << count << " stream=" << st);
         auto ret = DlAclApi::AclrtMemcpyAsync(destVA, count, srcVA, count, ACL_MEMCPY_DEVICE_TO_DEVICE, st);
-        BM_ASSERT_LOG_AND_RETURN(ret == 0, "AclrtMemcpyAsync failed:" << ret, BM_ERROR);
-        ret = DlAclApi::AclrtSynchronizeStream(st);
-        BM_ASSERT_LOG_AND_RETURN(ret == 0, "AclrtSynchronizeStream failed:" << ret, BM_ERROR);
+        if (ret != 0 || DlAclApi::AclrtSynchronizeStream(st) != 0) {
+            BM_LOG_WARN("AclrtMemcpyAsync/Synchronize failed, reset stream and retry sync");
+            if (stream == nullptr) {
+                HybmStreamManager::ResetThreadAclStream();
+            }
+            ret = DlAclApi::AclrtMemcpy(destVA, count, srcVA, count, ACL_MEMCPY_DEVICE_TO_DEVICE);
+            BM_ASSERT_LOG_AND_RETURN(ret == 0, "AclrtMemcpy fallback failed:" << ret, BM_ERROR);
+        }
         return BM_OK;
     }
 
