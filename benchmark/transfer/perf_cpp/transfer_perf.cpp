@@ -29,6 +29,7 @@
 #include "smem.h"
 #include "smem_shm.h"
 #include "smem_trans.h"
+#include "hybm.h"
 
 #define CHECK_ACL(x)                                                                        \
     do {                                                                                    \
@@ -97,9 +98,11 @@ int32_t trans_perf_test(smem_trans_t trans_handle, smem_shm_t shm_handle, int ra
     void *dst_dev_addr = nullptr;
     const uint32_t KB_SIZE = 1024;
 
-    // malloc device mem
-    aclError aclret = aclrtMalloc(&dev_addr, GVA_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_GOTO_ERR(aclret != ACL_ERROR_NONE, "failed to allocate device memory, ret:" << aclret, out);
+    // malloc device mem via VMM (needed for 310P3 trans register)
+    int32_t curDev = 0;
+    aclrtGetDevice(&curDev);
+    dev_addr = hybm_alloc_vmm_buffer(static_cast<uint32_t>(curDev), 1, GVA_SIZE);
+    CHECK_GOTO_ERR(dev_addr == nullptr, "failed to allocate VMM device memory", out);
 
     std::cout << "[" << rank_id << "]" << " malloc dev mem " << dev_addr << std::endl;
     /* gather peer addr */
@@ -110,10 +113,8 @@ int32_t trans_perf_test(smem_trans_t trans_handle, smem_shm_t shm_handle, int ra
     ret = smem_shm_control_barrier(shm_handle);
     CHECK_GOTO_ERR(ret, "barrier failed, ret:" << ret << " rank:" << rank_id, out);
 
-    if (rank_id == 1) {
-        ret = smem_trans_register_mem(trans_handle, dev_addr, GVA_SIZE, 0);
-        CHECK_GOTO_ERR(ret, "failed to register device memory, ret:" << ret, out);
-    }
+    ret = smem_trans_register_mem(trans_handle, dev_addr, GVA_SIZE, 0);
+    CHECK_GOTO_ERR(ret, "failed to register device memory, ret:" << ret, out);
     ret = smem_shm_control_barrier(shm_handle);
     std::this_thread::sleep_for(std::chrono::seconds(10UL)); // wait for register
     CHECK_GOTO_ERR(ret, "barrier failed, ret:" << ret << " rank:" << rank_id, out);
@@ -248,7 +249,7 @@ out:
         free(warmup_data);
     }
     if (dev_addr) {
-        aclrtFree(dev_addr);
+        hybm_free_vmm_buffer(dev_addr, GVA_SIZE);
     }
     return ret;
 }
@@ -297,7 +298,7 @@ int32_t trans_test(int rank_id, int rank_size, int device_id, int use_sdma, std:
     std::cout << "[" << rank_id << "]" << " smem trans create done" << std::endl;
 
     (void)smem_shm_config_init(&config2);
-    config2.startConfigStoreServer = false;
+    config2.startConfigStoreServer = (rank_id == 0);
 
     ret = smem_shm_init(ip_port.c_str(), rank_size, rank_id, device_id, &config2);
     CHECK_GOTO_ERR(ret, "smem shmem init failed, ret:" << ret << " rank:" << rank_id, err2);

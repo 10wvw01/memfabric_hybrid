@@ -38,6 +38,7 @@ target_link_directories(transfer_perf PUBLIC
 if ("${BUILD_TEST}" STREQUAL "ON")
     target_include_directories(transfer_perf PUBLIC
             ${PROJECT_SOURCE_DIR}/src/smem/include/host
+            ${PROJECT_SOURCE_DIR}/src/hybm/include
     )
     target_link_libraries(transfer_perf PRIVATE
             stdc++

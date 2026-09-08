@@ -21,7 +21,6 @@
 #include <cstdio>
 #include "band_width_calculator.h"
 
-const uint64_t GVA_SIZE = 4 * 1024ULL * 1024ULL * 1024ULL;
 const int32_t RANDOM_MULTIPLIER = 23;
 const int32_t RANDOM_INCREMENT = 17;
 const int32_t NEGATIVE_RATIO_DIVISOR = 3;
@@ -294,7 +293,7 @@ int32_t BandWidthCalculator::PrepareLocalMem(smem_bm_t handle, uint32_t rankId)
     } while (0);
     if (cmdParam_.opType == SMEMB_DATA_OP_SDMA) {
         auto gva = smem_bm_ptr_by_mem_type(handle, SMEM_MEM_TYPE_HOST, rankId);
-        CHECK_RET_ERR((len > GVA_SIZE || gva == nullptr || dataPtr == nullptr), "check memcpy param failed.");
+        CHECK_RET_ERR((len > cmdParam_.gvaSize || gva == nullptr || dataPtr == nullptr), "check memcpy param failed.");
         memcpy(gva, dataPtr, len);
         CHECK_RET_ERR((memcmp(gva, dataPtr, len) != 0), "check data failed, len:" << len);
     }
@@ -430,7 +429,7 @@ int32_t BandWidthCalculator::Execute(uint32_t deviceId, uint32_t rankId, uint32_
         uint32_t numaflag = HYBM_BIND_NUMA_AUTO_AFFINITY_FLAG;
         flags |= (performanceFlag | numaflag);
     }
-    smem_bm_t handle = smem_bm_create(0, 0, cmdParam_.opType, GVA_SIZE, GVA_SIZE, flags);
+    smem_bm_t handle = smem_bm_create(0, 0, cmdParam_.opType, cmdParam_.gvaSize, cmdParam_.gvaSize, flags);
     CHECK_RET_ERR((handle == nullptr), "smem_bm_create failed, rank:" << rankId);
 
     ret = smem_bm_join(handle, 0);

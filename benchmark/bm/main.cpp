@@ -55,8 +55,9 @@ void PrintHelp()
                  "(h2d,d2h,h2rd,h2rh,d2rh,d2rd,rh2d,rh2h,rd2h,rd2d,all).\n"
                  "    -s,  --size             Specifies block size (default 1024).\n"
                  "    -cc, --copy-count       Specifies copy count (default 1000).\n"
-                 "    -bs, --batch-size       Specifies block count (default 1).\n"
-                 "    -d,  --device           Specifies starting device ID (default 0).\n"
+    "    -bs, --batch-size       Specifies block count (default 1).\n"
+    "    -gs, --gva-size         Specifies GVA pool size in bytes (default 1073741824, i.e. 1GB).\n"
+    "    -d,  --device           Specifies starting device ID (default 0).\n"
                  "    -ws, --world-size       Specifies the total number of NPUs in the cluster.\n"
                  "    -lrs, --local-rank-size Specifies the number of NPUs on the local node.\n"
                  "    -rs, --rank-start       Specifies the starting rankId for the local node (default 0).\n"
@@ -227,6 +228,11 @@ void ParseCmdBw(int argc, char *argv[], BwTestParam &opts)
                 ExitWithError("missing value for " + arg);
             }
             opts.batchSize = ParseUint64(argv[++i], "batch-size");
+        } else if (arg == "-gs" || arg == "--gva-size") {
+            if (i + 1 >= argc) {
+                ExitWithError("missing value for " + arg);
+            }
+            opts.gvaSize = ParseUint64(argv[++i], "gva-size");
         } else if (arg == "-d" || arg == "--device") {
             if (i + 1 >= argc) {
                 ExitWithError("missing value for " + arg);
