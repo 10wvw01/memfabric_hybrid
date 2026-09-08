@@ -230,12 +230,6 @@ static int32_t smem_bm_create2_inner(uint32_t id, const smem_bm_create_option_t 
                                        "HOST_SHM op type does not support mixing with other data op types");
         return SM_INVALID_PARAM;
     }
-    /* 310P3: reject DRAM+HBM same handle — must use separate handles */
-    if (option->maxDramSize != 0 && option->maxHbmSize != 0) {
-        SM_LOG_AND_SET_LAST_ERROR_CODE(SM_INVALID_PARAM,
-                                       "DRAM+HBM in same handle is not supported on 310P3, use separate handles");
-        return SM_INVALID_PARAM;
-    }
     auto ret = manager.CreateEntryById(id, entry);
     if (ret != 0 || entry == nullptr) {
         SM_LOG_AND_SET_LAST_ERROR_CODE(ret != 0 ? ret : SM_ERROR, "create BM entity(" << id << ") failed: " << ret);

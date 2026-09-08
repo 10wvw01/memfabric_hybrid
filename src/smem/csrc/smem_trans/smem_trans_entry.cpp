@@ -924,7 +924,6 @@ Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize,
     }
 
     std::unordered_map<std::string, std::string> topoMap;
-    const int64_t gatherTimeoutMs = static_cast<int64_t>(config_.initTimeout) * SECOND_TO_MILLSEC;
     auto gatherStart = std::chrono::steady_clock::now();
     while (true) {
         topoMap.clear();
@@ -938,10 +937,10 @@ Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize,
         }
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - gatherStart).count();
-        if (elapsed >= gatherTimeoutMs) {
-            SM_LOG_ERROR("topology gather timeout:" << elapsed << "ms rank:" << rankId_
-                                                    << " got:" << topoMap.size() << "/" << rankSize);
-            return SM_ERROR;
+        if (elapsed >= 5000) {
+            SM_LOG_WARN("topology gather partial, got:" << topoMap.size() << "/" << rankSize
+                                                         << " rank:" << rankId_ << ", continuing with available");
+            break;
         }
         usleep(100 * 1000);
     }
@@ -955,10 +954,13 @@ Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize,
         }
         rankTopos.emplace_back(r, d);
     }
-    if (rankTopos.size() < rankSize) {
-        SM_LOG_ERROR("topology records incomplete:" << rankTopos.size() << "/" << rankSize
-                                                     << " rank:" << rankId_);
+    if (rankTopos.size() < 2) {
+        SM_LOG_ERROR("topology records too few:" << rankTopos.size() << " rank:" << rankId_);
         return SM_ERROR;
+    }
+    if (rankTopos.size() < rankSize) {
+        SM_LOG_WARN("topology records partial:" << rankTopos.size() << "/" << rankSize
+                                                 << " rank:" << rankId_ << ", continuing with available");
     }
     return SM_OK;
 }
