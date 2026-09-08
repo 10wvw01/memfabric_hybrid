@@ -15,12 +15,14 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <algorithm>
 #include <bitset>
 #include <cstddef>
 #include <optional>
 
+#include "dl_acl_api.h"
 #include "dl_hal_api.h"
 #include "hybm_def.h"
 #include "hybm_ex_info_transfer.h"
@@ -68,6 +70,10 @@ Result HybmConnBasedSegment::ReserveMemorySpace(void **address) noexcept
     BM_ASSERT_LOG_AND_RETURN(PrepareShareMemoryFd() == BM_OK, "PrepareShareMemoryFd failed.", BM_ERROR);
     BM_ASSERT_LOG_AND_RETURN(options_.rankId < options_.rankCnt,
                              "rank(" << options_.rankId << ") but total " << options_.rankCnt, BM_INVALID_PARAM);
+
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3 && options_.shmFd < 0) {
+        shmName_ = "/mf_dram_" + std::to_string(getpid()) + "_" + std::to_string(options_.rankId);
+    }
 
     uint64_t totalSize = options_.rankCnt * options_.maxSize;
     uint64_t localSize = options_.enable56BitsGva ? options_.maxSize : totalSize;
@@ -190,6 +196,9 @@ Result HybmConnBasedSegment::Export(const MemSlicePtr &slice, std::string &exInf
     info.pageTblType = MEM_PT_TYPE_SVM;
     info.memSegType = HYBM_MST_DRAM;
     info.exchangeType = HYBM_INFO_EXG_IN_NODE;
+    if (!shmName_.empty()) {
+        strncpy(info.shmName, shmName_.c_str(), sizeof(info.shmName) - 1);
+    }
     auto ret = LiteralExInfoTranslater<HostExportInfo>{}.Serialize(info, exInfo);
     if (ret != BM_OK) {
         BM_LOG_ERROR("export info failed: " << ret);
@@ -231,9 +240,30 @@ Result HybmConnBasedSegment::Mmap() noexcept
             continue;
         }
         mappedGvaMem_.insert(import.gva);
+        mappedGvaSize_[import.gva] = import.size;
+
+        uint64_t hva = 0;
+        if (import.shmName[0] != '\0') {
+            int shmFd = shm_open(import.shmName, O_RDWR, 0666);
+            if (shmFd >= 0) {
+                void *targetAddr = reinterpret_cast<void *>(import.gva);
+                void *mapped = mmap(targetAddr, import.size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, shmFd, 0);
+                close(shmFd);
+                if (mapped == targetAddr) {
+                    hva = import.gva;
+                    BM_LOG_INFO("310P3 remote DRAM shm_open mapped, rank:" << import.rankId
+                               << " name:" << import.shmName << " gva:" << VaToStr(import.gva));
+                } else {
+                    BM_LOG_ERROR("310P3 remote DRAM shm_open mmap failed, rank:" << import.rankId
+                                << " errno:" << errno);
+                }
+            } else {
+                BM_LOG_ERROR("310P3 remote DRAM shm_open failed, name:" << import.shmName << " errno:" << errno);
+            }
+        }
 
         auto ret = HybmVaManager::GetInstance().AddVaInfoFromExternal(
-            {import.gva, 0, 0, import.size, HYBM_MEM_TYPE_HOST}, options_.rankId, import.rankId);
+            {import.gva, 0, hva, import.size, HYBM_MEM_TYPE_HOST}, options_.rankId, import.rankId);
         BM_ASSERT_LOG_AND_RETURN(ret == BM_OK, "ret = " << ret, ret);
     }
     imports_.clear();
@@ -243,9 +273,18 @@ Result HybmConnBasedSegment::Mmap() noexcept
 Result HybmConnBasedSegment::Unmap() noexcept
 {
     for (auto gva : mappedGvaMem_) {
+        auto sizeIt = mappedGvaSize_.find(gva);
+        if (sizeIt != mappedGvaSize_.end()) {
+            munmap(reinterpret_cast<void *>(gva), sizeIt->second);
+        }
         HybmVaManager::GetInstance().RemoveOneVaInfo(gva);
     }
     mappedGvaMem_.clear();
+    mappedGvaSize_.clear();
+    if (!shmName_.empty()) {
+        shm_unlink(shmName_.c_str());
+        shmName_.clear();
+    }
     return 0;
 }
 
@@ -385,10 +424,12 @@ Result HybmConnBasedSegment::MapSlice(void *&mapped, void *sliceAddr, uint64_t l
         LvaShmReservePhysicalMemory(mapped, size);
     }
 
-    if (options_.dataOpType & (HYBM_DOP_TYPE_DEVICE_RDMA | HYBM_DOP_TYPE_DEVICE_URMA | HYBM_DOP_TYPE_DEVICE_UBOE)) {
+    bool needHostRegister = (options_.dataOpType & (HYBM_DOP_TYPE_DEVICE_RDMA | HYBM_DOP_TYPE_DEVICE_URMA |
+                                                     HYBM_DOP_TYPE_DEVICE_UBOE)) != 0;
+    if (needHostRegister) {
         auto ret = DlHalApi::HalHostRegister(mapped, size, HOST_MEM_MAP_DEV, logicDeviceId_, &dva);
         if (ret != BM_OK) {
-            BM_LOG_ERROR("register host va failed, ret:" << ret);
+            BM_LOG_ERROR("register host va failed, ret:" << ret << " addr:" << mapped << " size:" << size);
             FreeAllocatedMemory(mapped, size, allocMethod);
             return BM_ERROR;
         }
@@ -397,7 +438,7 @@ Result HybmConnBasedSegment::MapSlice(void *&mapped, void *sliceAddr, uint64_t l
                                                      options_.rankId);
     if (ret != 0) {
         BM_LOG_ERROR("AddVaInfo failed, size: " << size << " ret: " << ret);
-        if (options_.dataOpType & (HYBM_DOP_TYPE_DEVICE_RDMA | HYBM_DOP_TYPE_DEVICE_URMA | HYBM_DOP_TYPE_DEVICE_UBOE)) {
+        if (needHostRegister) {
             DlHalApi::HalHostUnregisterEx(mapped, logicDeviceId_, HOST_MEM_MAP_DEV);
         }
         FreeAllocatedMemory(mapped, size, allocMethod);
@@ -413,6 +454,26 @@ void *HybmConnBasedSegment::AllocMemory(void *sliceAddr, uint64_t lvOffset, uint
     int mmapFd = options_.shmFd < 0 ? -1 : options_.shmFd;
     int mmapFlags = options_.shmFd < 0 ? (MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE) : (MAP_FIXED | MAP_SHARED);
     uint64_t mmapOffset = options_.shmFd < 0 ? 0 : lvOffset;
+
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3 && !shmName_.empty() && mmapFd < 0) {
+        int shmFd = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0666);
+        if (shmFd >= 0) {
+            if (ftruncate(shmFd, static_cast<off_t>(lvOffset + size)) != 0) {
+                BM_LOG_WARN("310P3 shm_open ftruncate failed, errno:" << errno);
+                close(shmFd);
+            } else {
+                mapped = mmap(sliceAddr, size, prot, MAP_FIXED | MAP_SHARED, shmFd, lvOffset);
+                if (mapped == sliceAddr) {
+                    BM_LOG_INFO("310P3 shm_open DRAM alloc, name:" << shmName_ << " addr:" << mapped << " size:" << size);
+                    allocMethod = MemAllocMethod::MMAP;
+                    close(shmFd);
+                    return mapped;
+                }
+                BM_LOG_WARN("310P3 shm_open mmap failed, fallback to anonymous, addr:" << mapped << " errno:" << errno);
+                close(shmFd);
+            }
+        }
+    }
 
     // 0. ASCEND_950 only support HalMemAlloc for URMA
     if (socType_ == AscendSocType::ASCEND_950) {
@@ -582,4 +643,9 @@ Result HybmConnBasedSegment::GetExportSliceSize(size_t &size) noexcept
 {
     size = sizeof(HostExportInfo);
     return BM_OK;
+}
+
+bool HybmConnBasedSegment::CheckSdmaReaches(uint32_t rankId) const noexcept
+{
+    return true;
 }
