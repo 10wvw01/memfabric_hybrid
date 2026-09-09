@@ -2,6 +2,8 @@
 
 **平台**: 310P3 (CANN 9.1.0)
 **测试条件**: 混合 DRAM+HBM (各1GB), 2卡 (dev0+dev1 同卡)
+**测试工具**: `benchmark/bm/bm_perf_benchmark`（SDMA 全 10 路径）、`benchmark/transfer/perf_cpp/transfer_perf`（TRANS 路径）
+**编译**: `bash script/build_and_pack_run.sh --build_test ON`（`--build_test ON` 将 benchmark 纳入 CMake 构建，产物在 `build/benchmark/` 下）
 
 ---
 
@@ -63,20 +65,20 @@
 
 | 类别 | 路径 | memcpy 方式 | 说明 |
 |------|------|------------|------|
-| **device 间 (D2D)** | D2RD, RD2D | `AclrtMemcpyAsync(D2D)` + `AclrtSynchronizeStream` | device 间走 D2D async，单流 10-11 GB/s |
-| **D2H 方向** | D2H, D2RH, RH2H, RD2H | `AclrtMemcpyAsync(D2H)` + `AclrtSynchronizeStream` | host↔device 走 async + sync，带宽 5-6 GB/s（远端 shm 路径 18-21 GB/s） |
-| **H2D 方向** | H2D, H2RD, H2RH, RH2D | `AclrtMemcpyAsync(H2D)` + `AclrtSynchronizeStream` | 同上，远端 shm 路径 17-21 GB/s |
+| **device 间 (D2D)** | D2RD, RD2D | `BatchCopyG2G` → `CopyG2GAsync(D2D)` + `InnerWait` | device 间走 D2D async（批量合并 + 统一 sync），单流 10-11 GB/s |
+| **D2H 方向** | D2H, D2RH, RH2H, RD2H | `CopyGD2LH`/`CopyGH2LH`：`AclrtMemcpyAsync(D2H)` + `AclrtSynchronizeStream` | host↔device 走 async + sync，带宽 5-6 GB/s（远端 shm 路径 18-21 GB/s） |
+| **H2D 方向** | H2D, H2RD, H2RH, RH2D | `CopyLH2GD`/`CopyLH2GH`：`AclrtMemcpyAsync(H2D)` + `AclrtSynchronizeStream` | async + sync，远端 shm 路径 17-21 GB/s |
 
 **`CopyG2G`**：device 间拷贝走 `AclrtMemcpyAsync(ACL_MEMCPY_DEVICE_TO_DEVICE)` + `AclrtSynchronizeStream`，`Wait` 同步 ACL stream。310P3 支持 SVM（Shared Virtual Memory），device 可直接访问 host VA，`ACL_MEMCPY_DEVICE_TO_DEVICE` 对 HVA 和 DVA 均有效。
 
-**`CopyLH2GD`/`CopyGD2LH`/`CopyLH2GH`/`CopyGH2LH`**：host↔device 拷贝使用 `AclrtMemcpyAsync` + `AclrtSynchronizeStream`，async 失败后 fallback 到同步 `AclrtMemcpy` + `ResetThreadAclStream`。memcpy kind 由方向决定（H2D/D2H）：
+**`CopyLH2GD`/`CopyGD2LH`/`CopyLH2GH`/`CopyGH2LH`**：host↔device 拷贝统一使用 `AclrtMemcpyAsync` + `AclrtSynchronizeStream`，async 失败后 fallback 到同步 `AclrtMemcpy` + `ResetThreadAclStream`。`stream=null` 时取 `GetThreadAclStream()`。memcpy kind 由方向决定（H2D/D2H）：
 
 | 函数 | kind | 说明 |
 |------|------|------|
-| CopyLH2GD | H2D | host→HBM GVA |
-| CopyGD2LH | D2H | HBM GVA→host |
-| CopyLH2GH | H2D | host→DRAM GVA (device 可访问) |
-| CopyGH2LH | D2H | DRAM GVA→host |
+| CopyLH2GD | H2D | host→HBM GVA，`stream=null` 时走 `GetThreadAclStream` async + sync |
+| CopyGD2LH | D2H | HBM GVA→host，`stream=null` 时走 `GetThreadAclStream` async + sync |
+| CopyLH2GH | H2D | host→DRAM GVA (device 可访问)，`stream=null` 时走 `GetThreadAclStream` async + sync |
+| CopyGH2LH | D2H | DRAM GVA→host，`stream=null` 时走 `GetThreadAclStream` async + sync |
 
 **`TransformVa`**：GVA→DVA 地址转换，按拷贝方向选择目标 HVA/DVA（参考 `DataOpDeviceRDMA::TransformVa` 方向查找表）。DRAM 地址 DVA=0 时 fallback 到 GVA(=HVA)，在 SVM 下可直接使用。
 
@@ -104,6 +106,7 @@
 
 **命令**:
 ```bash
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 export LD_LIBRARY_PATH=output/smem/lib64:output/hybm/lib64:output/acc_links/lib64:output/acc_offload/lib64:$LD_LIBRARY_PATH
 export MF_CONFIG_STORE_URL=tcp://127.0.0.1:8570
 ./build/benchmark/bm/bm_perf_benchmark -bw -ot sdma -t all -s 1048576 -cc 100 -bs 1 -d 0 -ws 2 -lrs 2 -ip tcp://127.0.0.1:8570
@@ -124,12 +127,13 @@ export MF_CONFIG_STORE_URL=tcp://127.0.0.1:8570
 | RD2D | 远端HBM→本地HBM | 10.7-10.8 | `AclrtMemcpyAsync(D2D)` + sync |
 | RD2H | 远端HBM→Host | 5.6-6.2 | `AclrtMemcpyAsync(D2H)` + sync |
 
-**基线特征**：host↔device 路径 5-6 GB/s（H2D/D2H kind，单阶段 DMA 无法 pipeline）；device 间路径 10-11 GB/s（D2D async + stream sync）；远端 DRAM 路径 17-21 GB/s（shm 映射后 DMA 直读/直写远端 host 内存，避免本地 HBM 中转开销）。
+**基线特征**：host↔device 路径 5-6 GB/s（H2D/D2H kind，单阶段 DMA 无法 pipeline）；device 间路径 10-11 GB/s（D2D async + stream sync）；远端 DRAM 路径 17-21 GB/s（shm 映射后 DMA 直读/直写远端 host 内存，走 host↔host DMA 路径带宽高于 host↔HBM）。
 
 #### 2.6.2 transfer_perf（TRANS 路径）
 
 **命令**:
 ```bash
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 export LD_LIBRARY_PATH=output/smem/lib64:output/hybm/lib64:output/acc_links/lib64:output/acc_offload/lib64:$LD_LIBRARY_PATH
 export MF_CONFIG_STORE_URL=tcp://127.0.0.1:22052
 ./build/benchmark/transfer/perf_cpp/transfer_perf 2 0 0 1 tcp://127.0.0.1:22052 &
@@ -149,7 +153,7 @@ export MF_CONFIG_STORE_URL=tcp://127.0.0.1:22052
 | 8MB | 472.0 | 18.0 |
 | 16MB | 936.3 | 18.0 |
 
-> transfer_perf 走 `smem_trans_write` → `CopyG2G(D2D async)` 路径，每轮 100 次拷贝每次都 `AclrtSynchronizeStream`，无法利用 DMA pipeline 并行。大 block 下吞吐量稳定在 18 GB/s。
+> transfer_perf BW 测试走 `smem_trans_batch_write`（batch_size=32）→ `BatchCopyG2G` → `CopyG2GAsync`(D2D) 路径，每次调用将 32 个连续 block 合并为 1 个 async 提交后立即 `InnerWait` 同步。2 线程 × 100 次迭代，每次 `smem_trans_batch_write` 后 sync 阻止了跨迭代 pipeline。大 block 下吞吐量稳定在 18 GB/s（2 线程聚合）。
 
 ##### 裸 ACL D2D 基准对比
 
@@ -162,9 +166,9 @@ export MF_CONFIG_STORE_URL=tcp://127.0.0.1:22052
 | 1MB | 58.3 | 18.0 | 0.31x |
 | 16MB | 83.8 | 18.0 | 0.21x |
 
-> 注：裸 D2D 基准使用裸 ACL API 直接测试（100 次提交后统一 sync），其大 block 下的高带宽（84 GB/s）来自 DMA 多任务 pipeline 重叠。transfer_perf 走 `CopyG2G`（D2D async）路径，但每轮拷贝后立即 sync，无法利用 pipeline。两者差异在于 sync 粒度，而非 DMA 路径本身。bm_perf_benchmark 的 D2RD/RD2D 路径（10-11 GB/s）与 transfer_perf（18 GB/s）的差异来自测试框架和聚合方式不同。
+> 注：裸 D2D 基准使用裸 ACL API 直接测试（100 次提交后统一 sync），其大 block 下的高带宽（84 GB/s）来自 DMA 多任务 pipeline 重叠。transfer_perf 走 `BatchCopyG2G` → `CopyG2GAsync`（D2D async）路径，但每次 `smem_trans_batch_write` 后立即 `InnerWait` sync，无法利用跨迭代 pipeline。两者差异在于 sync 粒度，而非 DMA 路径本身。bm_perf_benchmark 的 D2RD/RD2D 路径（10-11 GB/s，1 线程 batchSize=1）与 transfer_perf（18 GB/s，2 线程 batchSize=32）的差异来自线程数和 batch 合并。
 
-**结论**: transfer_perf 大 block 下远低于裸 D2D 的 84 GB/s，根因是每轮拷贝后立即 sync，无法 pipeline。
+**结论**: transfer_perf 大 block 下远低于裸 D2D 的 84 GB/s，根因是每次 `smem_trans_batch_write` 后立即 `InnerWait` sync，无法跨迭代 pipeline。
 
 ---
 
@@ -181,14 +185,14 @@ export MF_CONFIG_STORE_URL=tcp://127.0.0.1:22052
 | D2RD | 10.2-10.4 | 同卡 HBM→远端 HBM(imported DVA), D2D async |
 | RD2D | 10.7-10.8 | 跨 die HBM→HBM, D2D async |
 
-**D2H 方向（CopyGD2LH/CopyGH2LH / D2H async）**:
+**D2H 方向（CopyGD2LH / CopyGH2LH / D2H async）**:
 
 | 路径 | 带宽 (GB/s) | 说明 |
 |------|------------|------|
-| D2H | 5.6-6.3 | HBM→本地 DRAM(shm HVA), D2H async |
-| D2RH | 5.6-6.3 | HBM→远端 DRAM(shm HVA), D2H async |
-| RH2H | 18.5-21.1 | 远端 DRAM(shm)→Host, D2H async + shm |
-| RD2H | 5.6-6.2 | 远端 HBM→Host, D2H async |
+| D2H | 5.6-6.3 | HBM→本地 DRAM(shm HVA), `CopyGD2LH` D2H async + sync |
+| D2RH | 5.6-6.3 | HBM→远端 DRAM(shm HVA), `CopyGD2LH` D2H async + sync |
+| RH2H | 18.5-21.1 | 远端 DRAM(shm)→Host, `CopyGH2LH` D2H async + sync + shm |
+| RD2H | 5.6-6.2 | 远端 HBM→Host, `CopyGD2LH` D2H async + sync |
 
 **H2D 方向（CopyLH2GD/CopyLH2GH / H2D async）**:
 
@@ -199,15 +203,15 @@ export MF_CONFIG_STORE_URL=tcp://127.0.0.1:22052
 | H2RH | 16.8-21.1 | Host→远端 DRAM(shm), H2D async + shm 远端写入 |
 | RH2D | 5.5-6.3 | 远端 DRAM(shm HVA)→HBM, H2D async |
 
-> **路径→函数映射**：D2H 路径通过 `HYBM_LOCAL_DEVICE_TO_GLOBAL_HOST` 方向调用 `CopyGD2LH`（D2H async）。D2RH 路径走 `CopyGD2LH`（D2H async）。RH2D 路径走 `CopyLH2GD`（H2D async）。device 间路径（D2RD/RD2D）走 `CopyG2G`（D2D async）。
+> **路径→函数映射**：D2H 路径通过 `HYBM_LOCAL_DEVICE_TO_GLOBAL_HOST` 方向调用 `CopyGD2LH`（D2H async + sync）。D2RH 路径走 `CopyGD2LH`（D2H async + sync）。RH2D 路径走 `CopyLH2GD`（H2D async + sync）。device 间路径（D2RD/RD2D）走 `BatchCopyG2G` → `CopyG2GAsync`（D2D async）+ `InnerWait`。
 
 ### 3.2 分析
 
 **路径带宽差异根因**：
 
-- **H2RH/RH2H 17-21 GB/s**：远端 DRAM 经 shm 映射后，DMA 直接读/写远端 host 内存，避免本地 HBM 中转开销。比本地 H2D/D2H（5-6 GB/s）快 3-4 倍。
-- **H2D/D2H/H2RD/RD2H 5-6 GB/s**：310P3 `AclrtMemcpyAsync(H2D/D2H)` 单次提交延迟固定约 160-200us/1MB，async 提交后立即 `AclrtSynchronizeStream`。DMA 引擎内部 host↔device 路径是单阶段，无可重叠阶段，无法形成 pipeline。
-- **device 路径（D2RD/RD2D）10-11 GB/s**：D2D async 路径在 310P3 上单流带宽约 10-11 GB/s，与 `transfer_perf` 的 18 GB/s（双 rank 聚合）在同一量级。
+- **H2RH/RH2H 17-21 GB/s**：远端 DRAM 经 shm 映射后，DMA 直接读/写远端 host 内存（HVA），走 host↔host DMA 路径带宽高于 host↔HBM。比本地 H2D/D2H（5-6 GB/s）快 3-4 倍。
+- **H2D/D2H/H2RD/RD2H 5-6 GB/s**：310P3 host↔device 单次提交延迟固定约 160-200us/1MB。H2D 方向（`CopyLH2GD`）走 `AclrtMemcpyAsync(H2D)` + `AclrtSynchronizeStream`；D2H 方向（`CopyGD2LH`）走 `AclrtMemcpyAsync(D2H)` + `AclrtSynchronizeStream`。DMA 引擎内部 host↔device 路径是单阶段，无可重叠阶段，无法形成 pipeline。
+- **device 路径（D2RD/RD2D）10-11 GB/s**：D2D async 路径在 310P3 上单流带宽约 10-11 GB/s，与 `transfer_perf` 的 18 GB/s（2 线程聚合）在同一量级。
 
 ---
 
@@ -221,7 +225,7 @@ export MF_CONFIG_STORE_URL=tcp://127.0.0.1:22052
 
 **H2D/D2H async（单阶段，不可 pipeline）**：host→device 和 device→host 拷贝走 `ACL_MEMCPY_HOST_TO_DEVICE`/`ACL_MEMCPY_DEVICE_TO_HOST`，DMA 引擎内部该路径为**单阶段**操作——每个任务从提交到完成是一个不可分割的阻塞过程，不存在可与其他任务重叠的内部阶段。批量提交 N 个 async 再统一 sync 时，DMA 引擎仍逐个串行执行，无法形成 pipeline。
 
-实测验证（2026-09-08）：对 `BatchCopyLH2GD`/`BatchCopyLH2GH`/`BatchCopyGD2LH`/`BatchCopyGH2LH` 改为批量 async 提交 + 统一 sync（消除每条 async 后的 sync 开销），各 batch size 下带宽如下：
+实测验证（2026-09-08）：对 `BatchCopyLH2GD`/`BatchCopyLH2GH`/`BatchCopyGD2LH`/`BatchCopyGH2LH` 改为批量 async 提交 + 统一 sync（消除每元素 async 后的 sync 开销），各 batch size 下带宽如下：
 
 | batch size | H2D (GB/s) | D2H (GB/s) |
 |------------|------------|------------|
@@ -234,7 +238,7 @@ H2D/D2H 带宽随 batch size 无显著提升，均在 5-6 GB/s 范围。瓶颈�
 
 **RH2H 18-21 GB/s**：`CopyGH2LH` 的 D2H async 路径 + shm 远端读取。
 
-**transfer_perf（18 GB/s）**：`smem_trans_write` 每次拷贝后 sync，无法利用 DMA pipeline。transfer_perf 走 `CopyG2G`（D2D async）路径，D2D async 本身支持 pipeline，瓶颈在于每轮拷贝后立即 sync。要提升需要 batch async + 统一 sync。
+**transfer_perf（18 GB/s）**：BW 测试用 `smem_trans_batch_write`（batch_size=32），每次调用后 `InnerWait` sync，无法跨迭代利用 DMA pipeline。transfer_perf 走 `BatchCopyG2G` → `CopyG2GAsync`（D2D async）路径，D2D async 本身支持 pipeline，瓶颈在于每次 batch_write 后立即 sync。要提升需要多次 batch_write 批量提交后再统一 sync。
 
 | 优先级 | 方向 | 预期收益 | 改动范围 |
 |--------|------|---------|---------|

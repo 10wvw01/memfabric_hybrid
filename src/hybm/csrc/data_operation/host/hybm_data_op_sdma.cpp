@@ -258,15 +258,12 @@ Result HostDataOpSDMA::CopyLH2GD(void *gvaAddr, const void *hostAddr, size_t cou
 Result HostDataOpSDMA::CopyGD2LH(void *hostAddr, const void *gvaAddr, size_t count, void *stream) noexcept
 {
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P3) {
-        if (stream == nullptr) {
-            auto ret = DlAclApi::AclrtMemcpy(hostAddr, count, gvaAddr, count, ACL_MEMCPY_DEVICE_TO_HOST);
-            BM_ASSERT_LOG_AND_RETURN(ret == 0, "CopyGD2LH sync failed:" << ret, BM_ERROR);
-            return BM_OK;
-        }
-        auto ret = DlAclApi::AclrtMemcpyAsync(hostAddr, count, gvaAddr, count, ACL_MEMCPY_DEVICE_TO_HOST, stream);
-        if (ret != 0 || DlAclApi::AclrtSynchronizeStream(stream) != 0) {
+        void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
+        BM_ASSERT_LOG_AND_RETURN(st != nullptr, "acl stream is nullptr", BM_ERROR);
+        auto ret = DlAclApi::AclrtMemcpyAsync(hostAddr, count, gvaAddr, count, ACL_MEMCPY_DEVICE_TO_HOST, st);
+        if (ret != 0 || DlAclApi::AclrtSynchronizeStream(st) != 0) {
             BM_LOG_WARN("CopyGD2LH async failed, retry sync");
-            HybmStreamManager::ResetThreadAclStream();
+            if (stream == nullptr) { HybmStreamManager::ResetThreadAclStream(); }
             ret = DlAclApi::AclrtMemcpy(hostAddr, count, gvaAddr, count, ACL_MEMCPY_DEVICE_TO_HOST);
             BM_ASSERT_LOG_AND_RETURN(ret == 0, "CopyGD2LH sync failed:" << ret, BM_ERROR);
         }
