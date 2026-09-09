@@ -57,6 +57,7 @@ typedef struct {
     uint64_t batchSize{1};
     uint64_t gvaSize{1ULL * 1024 * 1024 * 1024};
     uint32_t deviceId{0};
+    std::vector<uint32_t> deviceList{};
 } BwTestParam;
 
 typedef struct {

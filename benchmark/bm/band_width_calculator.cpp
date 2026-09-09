@@ -152,7 +152,8 @@ int32_t BandWidthCalculator::MultiProcessExecute()
             // subprocess
             LOG_INFO("subprocess (" << i << ") start.");
             close(pipes[i][0]);
-            auto ret = Execute(i + cmdParam_.deviceId, i + cmdParam_.localRankStart, cmdParam_.localRankSize,
+            uint32_t devId = !cmdParam_.deviceList.empty() ? cmdParam_.deviceList[i] : (i + cmdParam_.deviceId);
+            auto ret = Execute(devId, i + cmdParam_.localRankStart, cmdParam_.localRankSize,
                                cmdParam_.worldRankSize, pipes[i][1]);
             LOG_INFO("subprocess (" << i << ") exited.");
             if (ret != 0) {

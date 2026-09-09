@@ -976,7 +976,7 @@ Result HostDataOpSDMA::BatchCopyGH2LH(void **hostAddrs, void **gvaAddrs, const u
 }
 
 Result HostDataOpSDMA::BatchCopyLH2GD(void **gvaAddrs, void **hostAddrs, const uint64_t *counts, uint32_t batchSize,
-                                      void *stream) noexcept
+                                       void *stream) noexcept
 {
     auto ret = 0;
 

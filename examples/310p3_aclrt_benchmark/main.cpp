@@ -196,6 +196,131 @@ static const uint32_t COUNT = 100;
 static const uint32_t WARMUP = 10;
 static const size_t BUF_SIZE = 256 * 1024 * 1024;
 
+static aclrtStream CreateFastStream()
+{
+    aclrtStream stream = nullptr;
+    auto ret = aclrtCreateStreamWithConfig(&stream, 0,
+                                           ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC);
+    if (ret != 0 || stream == nullptr) {
+        std::cerr << "aclrtCreateStreamWithConfig failed, ret=" << ret
+                  << ", fallback to aclrtCreateStream" << std::endl;
+        CHECK_ACL(aclrtCreateStream(&stream));
+    }
+    return stream;
+}
+
+struct ConcResult {
+    uint32_t bs;
+    double h2dBw;
+    double d2hBw;
+};
+
+static std::string BwValStr(double bw)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << bw << " GB/s";
+    return oss.str();
+}
+
+static std::string RatioStr(double ratio)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << ratio << "x";
+    return oss.str();
+}
+
+static double RunMemcpyLoop(void *dst, void *src, uint32_t bs, aclrtStream stream, bool isH2D)
+{
+    auto kind = isH2D ? ACL_MEMCPY_HOST_TO_DEVICE : ACL_MEMCPY_DEVICE_TO_HOST;
+    const char *dir = isH2D ? "H2D" : "D2H";
+    for (int w = 0; w < WARMUP; w++) {
+        if (aclrtMemcpyAsync(dst, bs, src, bs, kind, stream) != 0 ||
+            aclrtSynchronizeStream(stream) != 0) {
+            std::cerr << "conc " << dir << " warmup failed, bs=" << bs << std::endl;
+            std::exit(1);
+        }
+    }
+    double t0 = GetTimeUs();
+    for (int i = 0; i < COUNT; i++) {
+        if (aclrtMemcpyAsync(dst, bs, src, bs, kind, stream) != 0 ||
+            aclrtSynchronizeStream(stream) != 0) {
+            std::cerr << "conc " << dir << " test failed, bs=" << bs << std::endl;
+            std::exit(1);
+        }
+    }
+    return GetTimeUs() - t0;
+}
+
+static double RunMemcpyLoopN(void *dst, void *src, uint32_t bs, aclrtStream stream, bool isH2D, int count)
+{
+    auto kind = isH2D ? ACL_MEMCPY_HOST_TO_DEVICE : ACL_MEMCPY_DEVICE_TO_HOST;
+    const char *dir = isH2D ? "H2D" : "D2H";
+    for (int w = 0; w < WARMUP; w++) {
+        if (aclrtMemcpyAsync(dst, bs, src, bs, kind, stream) != 0 ||
+            aclrtSynchronizeStream(stream) != 0) {
+            std::cerr << "conc " << dir << " warmup failed, bs=" << bs << std::endl;
+            std::exit(1);
+        }
+    }
+    double t0 = GetTimeUs();
+    for (int i = 0; i < count; i++) {
+        if (aclrtMemcpyAsync(dst, bs, src, bs, kind, stream) != 0 ||
+            aclrtSynchronizeStream(stream) != 0) {
+            std::cerr << "conc " << dir << " test failed, bs=" << bs << std::endl;
+            std::exit(1);
+        }
+    }
+    return GetTimeUs() - t0;
+}
+
+static void RunConcTest(void *devVa, void *hostMem, aclrtStream stream,
+                        std::vector<ConcResult> &results)
+{
+    for (int s = 0; s < NUM_SIZES; s++) {
+        uint32_t bs = BLOCK_SIZES[s];
+        uint64_t totalBytes = (uint64_t)COUNT * bs;
+        double h2dUs = RunMemcpyLoop(devVa, hostMem, bs, stream, true);
+        double d2hUs = RunMemcpyLoop(hostMem, devVa, bs, stream, false);
+        results.push_back({bs, CalcBw(totalBytes, h2dUs), CalcBw(totalBytes, d2hUs)});
+    }
+}
+
+static void PrintConcComparison(const std::vector<ConcResult> &r0, const std::vector<ConcResult> &r1,
+                                const std::vector<ConcResult> &single, int devA, int devB)
+{
+    std::cout << std::endl;
+    std::cout << "=== Concurrent H2D/D2H (both ranks, single-sync) ===" << std::endl;
+    std::cout << std::left
+              << std::setw(12) << "BlockSize"
+              << std::setw(16) << ("dev" + std::to_string(devA) + "-H2D")
+              << std::setw(16) << ("dev" + std::to_string(devB) + "-H2D")
+              << std::setw(16) << "agg-H2D"
+              << std::setw(12) << "H2D-ratio"
+              << std::setw(16) << ("dev" + std::to_string(devA) + "-D2H")
+              << std::setw(16) << ("dev" + std::to_string(devB) + "-D2H")
+              << std::setw(16) << "agg-D2H"
+              << std::setw(12) << "D2H-ratio"
+              << std::endl;
+    std::cout << std::string(132, '-') << std::endl;
+    for (int s = 0; s < NUM_SIZES; s++) {
+        double h2dRatio = (single[s].h2dBw > 0) ? r1[s].h2dBw / single[s].h2dBw : 0;
+        double d2hRatio = (single[s].d2hBw > 0) ? r1[s].d2hBw / single[s].d2hBw : 0;
+        std::cout << std::left << std::setw(12) << BsStr(r0[s].bs)
+                  << std::setw(16) << BwValStr(r0[s].h2dBw)
+                  << std::setw(16) << BwValStr(r1[s].h2dBw)
+                  << std::setw(16) << BwValStr(r0[s].h2dBw + r1[s].h2dBw)
+                  << std::setw(12) << RatioStr(h2dRatio)
+                  << std::setw(16) << BwValStr(r0[s].d2hBw)
+                  << std::setw(16) << BwValStr(r1[s].d2hBw)
+                  << std::setw(16) << BwValStr(r0[s].d2hBw + r1[s].d2hBw)
+                  << std::setw(12) << RatioStr(d2hRatio)
+                  << std::endl;
+    }
+    std::cout << std::endl;
+    std::cout << "H2D-ratio = dev" << devB << "-H2D(concurrent) / dev" << devB
+              << "-H2D(single); ~1.0x: no contention, <1.0x: contention" << std::endl;
+}
+
 int main(int argc, char *argv[])
 {
     MPI_Init(&argc, &argv);
@@ -244,9 +369,25 @@ int main(int argc, char *argv[])
 
         MPI_Send(&shareableHandle, 1, MPI_UINT64_T, 1, 100, MPI_COMM_WORLD);
 
-        /* wait for rank1 to finish */
+        void *hostMem0 = nullptr;
+        if (posix_memalign(&hostMem0, 4096, BUF_SIZE) != 0 || hostMem0 == nullptr) {
+            std::cerr << "rank0 posix_memalign failed, size=" << BUF_SIZE << std::endl;
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        aclrtStream stream0 = CreateFastStream();
+
         MPI_Barrier(MPI_COMM_WORLD);
 
+        std::vector<ConcResult> concResults0;
+        RunConcTest(devABuf.va, hostMem0, stream0, concResults0);
+
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        MPI_Send(concResults0.data(), NUM_SIZES * sizeof(ConcResult), MPI_BYTE, 1, 200, MPI_COMM_WORLD);
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        CHECK_ACL(aclrtDestroyStream(stream0));
+        free(hostMem0);
         FreeVmmP2P(devABuf);
         CHECK_ACL(aclrtResetDevice(devA));
         CHECK_ACL(aclFinalize());
@@ -281,8 +422,7 @@ int main(int argc, char *argv[])
     void *hostMem = nullptr;
     posix_memalign(&hostMem, 4096, BUF_SIZE);
 
-    aclrtStream stream;
-    CHECK_ACL(aclrtCreateStream(&stream));
+    aclrtStream stream = CreateFastStream();
 
     std::cout << std::endl;
     std::cout << "Bare ACL P2P VMM benchmark (MPI cross-process, " << COUNT << " iterations)" << std::endl;
@@ -344,6 +484,7 @@ int main(int argc, char *argv[])
     }
 
     /* H2D/D2H table: host <-> devB local VA */
+    std::vector<ConcResult> singleResults;
     std::cout << std::endl;
     std::cout << std::left
               << std::setw(12) << "BlockSize"
@@ -414,6 +555,8 @@ int main(int argc, char *argv[])
         CHECK_ACL(aclrtSynchronizeStream(stream));
         double d2hBatchUs = GetTimeUs() - t0;
 
+        singleResults.push_back({bs, CalcBw(totalBytes, h2dSingleUs), CalcBw(totalBytes, d2hSingleUs)});
+
         double h2dRatio = CalcBw(totalBytes, h2dBatchUs) / CalcBw(totalBytes, h2dSingleUs);
         double d2hRatio = CalcBw(totalBytes, d2hBatchUs) / CalcBw(totalBytes, d2hSingleUs);
 
@@ -428,12 +571,57 @@ int main(int argc, char *argv[])
                   << std::endl;
     }
 
+    /* === Iteration count comparison: 10 vs 100 (VMM P2P, single-sync, devB) === */
+    std::cout << std::endl;
+    std::cout << "=== Iteration count: 10 vs 100 (VMM P2P, single-sync, dev" << devB << ") ===" << std::endl;
+    std::cout << std::left
+              << std::setw(12) << "BlockSize"
+              << std::setw(22) << "H2D-10iter"
+              << std::setw(22) << "H2D-100iter"
+              << std::setw(12) << "ratio"
+              << std::setw(22) << "D2H-10iter"
+              << std::setw(22) << "D2H-100iter"
+              << std::setw(12) << "ratio"
+              << std::endl;
+    std::cout << std::string(116, '-') << std::endl;
+    for (int s = 0; s < NUM_SIZES; s++) {
+        uint32_t bs = BLOCK_SIZES[s];
+        double h2d10 = RunMemcpyLoopN(local.va, hostMem, bs, stream, true, 10);
+        double h2d100 = RunMemcpyLoopN(local.va, hostMem, bs, stream, true, 100);
+        double d2h10 = RunMemcpyLoopN(hostMem, local.va, bs, stream, false, 10);
+        double d2h100 = RunMemcpyLoopN(hostMem, local.va, bs, stream, false, 100);
+        uint64_t bytes10 = 10ULL * bs;
+        uint64_t bytes100 = 100ULL * bs;
+        double h2dRatio = CalcBw(bytes10, h2d10) / CalcBw(bytes100, h2d100);
+        double d2hRatio = CalcBw(bytes10, d2h10) / CalcBw(bytes100, d2h100);
+        std::cout << std::left << std::setw(12) << BsStr(bs)
+                  << std::setw(22) << BwStr(bytes10, h2d10)
+                  << std::setw(22) << BwStr(bytes100, h2d100)
+                  << std::setw(12) << (std::to_string(h2dRatio).substr(0, 5) + "x")
+                  << std::setw(22) << BwStr(bytes10, d2h10)
+                  << std::setw(22) << BwStr(bytes100, d2h100)
+                  << std::setw(12) << (std::to_string(d2hRatio).substr(0, 5) + "x")
+                  << std::endl;
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    std::vector<ConcResult> concResults1;
+    RunConcTest(local.va, hostMem, stream, concResults1);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    std::vector<ConcResult> concResults0(NUM_SIZES);
+    MPI_Recv(concResults0.data(), NUM_SIZES * sizeof(ConcResult), MPI_BYTE, 0, 200,
+             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    PrintConcComparison(concResults0, concResults1, singleResults, devA, devB);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
     CHECK_ACL(aclrtDestroyStream(stream));
     free(hostMem);
     FreeVmmP2P(local);
     FreeVmmP2P(imported);
-
-    MPI_Barrier(MPI_COMM_WORLD);
 
     CHECK_ACL(aclrtResetDevice(devB));
     CHECK_ACL(aclFinalize());
