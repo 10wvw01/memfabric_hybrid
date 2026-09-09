@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <regex>
+#include <sstream>
 #include "band_width_calculator.h"
 
 static std::string ExecShellCmd(const char *cmd)
@@ -58,6 +59,8 @@ void PrintHelp()
     "    -bs, --batch-size       Specifies block count (default 1).\n"
     "    -gs, --gva-size         Specifies GVA pool size in bytes (default 1073741824, i.e. 1GB).\n"
     "    -d,  --device           Specifies starting device ID (default 0).\n"
+    "    -dl, --device-list      Specifies explicit device ID list, comma-separated (e.g. 0,2).\n"
+    "                           Overrides -d. Use for cross-card topologies (e.g. 310P3 dev0,dev2).\n"
                  "    -ws, --world-size       Specifies the total number of NPUs in the cluster.\n"
                  "    -lrs, --local-rank-size Specifies the number of NPUs on the local node.\n"
                  "    -rs, --rank-start       Specifies the starting rankId for the local node (default 0).\n"
@@ -186,6 +189,10 @@ void CheckCmdBw(BwTestParam &opts)
     if (opts.worldRankSize > RANK_SIZE_MAX) {
         ExitWithError("world-size must be less than or equal to " + std::to_string(RANK_SIZE_MAX));
     }
+    if (!opts.deviceList.empty() && opts.deviceList.size() != opts.localRankSize) {
+        ExitWithError("device-list size (" + std::to_string(opts.deviceList.size()) +
+                      ") must match local-rank-size (" + std::to_string(opts.localRankSize) + ")");
+    }
     if (opts.copyCount == 0) {
         ExitWithError("copy-count must be greater than 0");
     }
@@ -238,6 +245,23 @@ void ParseCmdBw(int argc, char *argv[], BwTestParam &opts)
                 ExitWithError("missing value for " + arg);
             }
             opts.deviceId = ParseUint32(argv[++i], "device");
+        } else if (arg == "-dl" || arg == "--device-list") {
+            if (i + 1 >= argc) {
+                ExitWithError("missing value for " + arg);
+            }
+            std::string listStr = argv[++i];
+            opts.deviceList.clear();
+            std::stringstream ss(listStr);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                if (token.empty()) {
+                    ExitWithError("invalid device-list: empty entry in '" + listStr + "'");
+                }
+                opts.deviceList.push_back(ParseUint32(token, "device-list"));
+            }
+            if (opts.deviceList.empty()) {
+                ExitWithError("device-list must not be empty");
+            }
         } else if (arg == "-ws" || arg == "--world-size") {
             if (i + 1 >= argc) {
                 ExitWithError("missing value for " + arg);

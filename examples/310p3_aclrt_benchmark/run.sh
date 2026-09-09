@@ -2,12 +2,17 @@
 # 310P3 Bare ACL Benchmark — run script (MPI cross-process)
 #
 # Usage: ./run.sh [devA] [devB]
-#   devA: exporter device ID (rank0, default: 0)
-#   devB: importer device ID (rank1, default: 1)
+#   devA: rank0 device ID (exporter, default: 0)
+#   devB: rank1 device ID (importer, default: 1)
+#
+# Test phases:
+#   1. D2D test (rank1 only, single-sync vs batch-sync)
+#   2. Single-rank H2D/D2H test (rank1 only, single-sync vs batch-sync)
+#   3. Concurrent H2D/D2H test (both ranks, single-sync, for contention analysis)
 #
 # Examples:
-#   ./run.sh              # dev0 -> dev1 (same-card cross-die)
-#   ./run.sh 0 2          # dev0 -> dev2 (cross-card)
+#   ./run.sh              # dev0 + dev1 (same-card cross-die)
+#   ./run.sh 0 2          # dev0 + dev2 (cross-card)
 #
 # Prerequisites:
 #   - ASCEND_HOME_PATH set to CANN installation
