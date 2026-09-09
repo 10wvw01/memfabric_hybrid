@@ -49,7 +49,29 @@ host 编排：`HostDataOpAclMemcpy`（`src/hybm/csrc/data_operation/host/hybm_da
 | ACL 符号层 | `src/hybm/csrc/under_api/dl_acl_api.{h,cpp}` | 追加新符号弱加载 |
 | 310P 池化链路 | `HybmAclVmmSegment`（07 已验收） | SQE 的 src/dst 直接用池内 GVA（待 E0b 验证） |
 
-### 1.4 预期收益与预期管理
+### 1.4 与现有设备侧 kernel 基础设施的区别（评审必读，防混淆）
+
+仓库现有两套设备侧 kernel 搬运，**只有一套是真 AICPU**，且机制与本计划完全不同：
+
+| 维度 | 现有①：HybmBatchRead/Write（真 AICPU） | 现有②：copy_extend/accoffload（**AICore**，易误认） | 本计划：HostDataOpAicpuSqe |
+|------|------|------|------|
+| 位置 | `src/hybm/ops/hybm_kernel/`（hcc，OPP .run） | `src/hybm/csrc/copy_extend/`（AscendC AIV） | 新增（见 P1） |
+| 执行侧 | CP1 | AICore | CP1 |
+| AICPU/AICore 角色 | **hcomm 通道代理调用者**：kernel 内调 hcomm 弱符号 `HcommWriteOnThread` 等（hybm_batch_transfer.cc:17-27），搬运引擎封装在 hcomm 内不可见 | UB 中转 DataCopyPad 拷贝 | **自主编排者**：自构 64B STARS SDMA SQE + doorbell，不经 hcomm |
+| 消费方 | `DeviceUrmaTransportManager::LaunchDeviceKernelBatch`（A3 UB，:1933） | `HostDataOpSDMA` COPY_EXTEND_FLAG（dlopen extend lib） | 新 DataOperator 插槽 + 开关 |
+| 完成检测 | flag 轮询（含 marker-only） | mask 轮询（AICore） | NOTIFY_RECORD（flag 降级保留） |
+| 平台 | A3/910B | A3/910B | 310P |
+
+**310P 上现有两套全部不可用**（本计划的存在理由）：① libhcom 设备库未部署（07 运行日志
+"Unable to open library libhcom.so"），弱符号落空；② paramSpace 依赖 `HalHostRegister`，
+310P 不可用；③ 310P host 侧 STARS 直投不可用（`hybm_data_op_factory.cpp:25-29`）——
+但 **AICPU 内投可用**（xcclpp v43 实证）。
+
+**可复用部分**：`BinaryLoad + GetFunction + KernelArgsInit/Append + LaunchKernelWithHostArgs`
+框架（`load_kernel.cpp`/`DlAclApi` 已封装）、wire 契约 POD 模式、OPP `.run` 部署终态、
+flag 完成检测先例。
+
+### 1.5 预期收益与预期管理
 
 - **收益**：batch N 段一次 launch + 攒批 doorbell（一次 AICPU 往返摊薄）；真异步语义
   （notify 兑现 `DataCopyAsync`/`Wait`）；为 Reduce SQE（归约）与设备侧发起铺路。
