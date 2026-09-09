@@ -63,7 +63,8 @@ protected:
     }
     static void ResetStubInjections()
     {
-        for (const char *sym : {"g_stubSetCurrentContextFail", "g_stubSetDeviceFail", "g_stubSyncStreamFail"}) {
+        for (const char *sym :
+             {"g_stubSetCurrentContextFail", "g_stubSetDeviceFail", "g_stubSyncStreamFail", "g_stubMallocP2pOom"}) {
             auto *flag = StubSym(sym);
             if (flag != nullptr) {
                 *flag = 0;
@@ -133,6 +134,26 @@ TEST_F(HybmAclVmmSegmentTest, ReserveAndAlloc)
     size_t expSize = 0;
     ASSERT_EQ(seg.GetExportSliceSize(expSize), BM_OK);
     ASSERT_EQ(expSize, UNIFIED_EXCHANGE_SEG_INFO_SIZE);
+}
+
+TEST_F(HybmAclVmmSegmentTest, AllocPhysicalP2pOomFallbackToHbmHuge)
+{
+    // 注入 P2P 分区 OOM(207001): 回退 ACL_HBM_MEM_HUGE 后分配成功
+    auto *oom = StubSym("g_stubMallocP2pOom");
+    ASSERT_NE(oom, nullptr);
+    *oom = 1;
+    const uint64_t maxSize = 2UL * HYBM_LARGE_PAGE_SIZE;
+    MemSegmentOptions opt = MakeOptions(0, 2, maxSize, maxSize);
+    HybmAclVmmSegment seg(opt, 0);
+    void *base = nullptr;
+    ASSERT_EQ(seg.ReserveMemorySpace(&base), BM_OK);
+    MemSlicePtr slice = nullptr;
+    ASSERT_EQ(seg.AllocLocalMemory(HYBM_LARGE_PAGE_SIZE, slice), BM_OK);
+    ASSERT_NE(slice, nullptr);
+    ASSERT_EQ(slice->gva_, reinterpret_cast<uint64_t>(base));
+    ASSERT_EQ(seg.slices_.size(), 1UL);
+    ASSERT_EQ(seg.exportMap_.size(), 1UL);
+    ASSERT_EQ(seg.UnReserveMemorySpace(), BM_OK);
 }
 
 TEST_F(HybmAclVmmSegmentTest, ExportImportMmapFullChain)

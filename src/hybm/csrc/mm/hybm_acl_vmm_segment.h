@@ -83,6 +83,7 @@ private:
     Result MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_t size, uint64_t allocAddr) noexcept;
     Result RegisterAndExportSlice(const MemSlicePtr &slice, aclrtDrvMemHandle handle, uint64_t allocAddr,
                                   uint64_t size) noexcept;
+    Result MallocPhysicalWithFallback(uint64_t size, aclrtDrvMemHandle &handle) noexcept;
     Result ImportOne(const AclVmmExportInfo &im) noexcept;
     Result ImportHandleForDiePair(const AclVmmExportInfo &im, aclrtDrvMemHandle &handle) noexcept;
     Result MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrvMemHandle handle, uint64_t slotAddr) noexcept;
@@ -91,7 +92,7 @@ private:
     bool IsDiePair(uint32_t peerDevId) const noexcept;
     uint64_t OwnSlotBase() const noexcept;
     uint64_t SlotBase(uint32_t rankId) const noexcept;
-    void FillMemProp(aclrtPhysicalMemProp &prop) const noexcept;
+    void FillMemProp(aclrtPhysicalMemProp &prop, aclrtMemAttr memAttr) const noexcept;
 
     std::vector<AclVmmExportInfo> imports_;
     std::unordered_set<uint64_t> importKeys_; // (rankId<<32)|sliceIndex, Import 去重
