@@ -30,7 +30,7 @@ host 编排：`HostDataOpAclMemcpy`（`src/hybm/csrc/data_operation/host/hybm_da
 
 | # | 事实 | 证据（xcclpp README / 源码） |
 |---|------|------------------------------|
-| X1 | **v43 SQE 配方全链 PASS**：type=0x09（MEMCPY_ASYNC_SQE_V2）+ kernel_credit=0xff + w4=`00de0e00` + SMMU streamid 按 die（die0=0x7F45，die1=0xBF45）+ ssid 对称=实时查询值 + off8-11 全 0 | `aicpu_kernel/xcclpp_aicpu_sqe.cpp` `buildStarsSdmaSqe`；旧值 type=0x01 是 950 代值，310P3 固件不识别 → 静默丢弃假成功 |
+| X1 | **v43 SQE 配方全链 PASS**：type=0x09（MEMCPY_ASYNC_SQE_V2）+ kernel_credit=0xff + w4=`00de0e00` + SMMU streamid 按 die（die0=0x7F45，die1=0xBF45）+ ssid 对称=实时查询值 + off8-11 全 0 | `aicpu_kernel/xcclpp_aicpu_sqe.cpp` `buildStarsSdmaSqe`；**已对照 hcomm 源码逐字段证实（见附录 A.1 源码出处列）**；旧值 type=0x01 是 AICPU kernel-launch 类 SQE，固件按启动报文解析垃圾字段 → 静默丢弃假成功 |
 | X2 | **提交链**：SQE 直写 sqBase（`dc cvac` 逐 cacheline 刷）→ `halSqCqConfig(SQ_TAIL)` doorbell（CP1 内 HAL devId=**die 号**，host 设备号 %2） | `submitSqe`；v41 实测 tail 落寄存器、v43 后 head 前进（TSFW 消费） |
 | X3 | **CP 流配方**：`aclrtCreateStreamWithConfig(ACL_STREAM_DEVICE_USE_ONLY)` + `rtStreamGetSqid`（libruntime.so 内部符号）取 sqId | `aicpu_sqe_mpi.cc:146-156` |
 | X4 | **远端内存 IPC Case A**：接收方 P2P policy 分配 + `GetExportKey(flag=0)` + `SetImportPid` + `ImportByKey`（flag 按 `aclrtGetDevicesTopo` 选 HCCS/PHB） | 双拓扑（卡内双 die / 跨卡 PCIe）4MB 全量比对 PASS |
@@ -219,32 +219,50 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 - **TODO-4**：Reduce SQE（xcclpp 已拿到 slot7 模板：type=0x09 opcode=2 fp32 SUM，AllReduce
   in-transit 归约）
 - **TODO-5**：完成检测 CQE 化（`halCqReportRecv` 设备侧正路，携带 errorCode 可判"搬错了"，
-  优于 notify 只能判"搬完了"）
+  优于 notify 只能判"搬完了"）。**hcomm 生产配方已源码证实**（aicpu_hccl_sqcq.cc:289-315
+  `CqReportRecv`）：`timeout=0` 非阻塞 + `task_id=0xFFFF` 全收 + 非 DRV_LOGIC_TYPE 时
+  `cqe_num=MAX_REPORT_CNT`；`AC_SQE_REV_MAX_CNT=32`（aicpu_hccl_sqcq.h:126）
 
 ## 附录 A：xcclpp 移植配方速查（实施时直接对照）
 
 ### A.1 SQE 64B 布局（v43 破壁版，逐字段出处）
 
-| 偏移 | 值 | 说明 |
-|------|-----|------|
-| 0 | `0x09` | MEMCPY_ASYNC_SQE_V2 真实 type（**0x01 是 950 代错误值**） |
-| 4-5 | streamId | CP 流 rt_stream_id |
-| 6-7 | taskId | |
-| 8-11 | 全 0 | 0903 fresh dump 勘正（残留数据曾误导为 f1/f0） |
-| 12-15 | `res3:16 \| credit=0xff:8 \| res4:8` | kernel_credit=0xff |
-| 16-19 | `00 de 0e 00` | opcode=0 NOT_ATOMIC + 位域（ie_dma/sssv/dssv/sns/dns/qos/sro/dro） |
-| 20-21 / 24-25 | SMMU streamid | die0=0x7F45，die1=0xBF45（hcomm `aicpu_hccl_sqcqv2.cc:101-106`） |
-| 22-23 / 26-27 | ssid | **对称**=实时查询值（`drvMemSmmuQuery`，不可硬编码） |
-| 28-31 | length | |
-| 32-39 / 40-47 | src / dst（32+32 拆分） | |
-| 48-51 | `00 00 20 00` | 模板原样 |
-| 52-59 | overflow_addr | |
+> **源码级证据（2026-09-09 已对照 `/home/w00930648/hcomm` 逐字段证实）**：
+> 构造函数 `AddOneMemcpySqeV2`（`src/legacy/ascend910/platform/task/rtsq_interact/aicpu_hccl_sqcqv2.cc:92-152`）、
+> SQE type 枚举（`pub_inc/aicpu/aicpu_hccl_sqcqv2.h:20-30`）、credit 常量
+> （`ascend950/unified_platform/resource/stream/aicpu/sqe.h:24` = 255U）。
+> v43 的配方不再是"环 dump 逆向"，每个字段均有 hcomm 生产源码出处：
+
+| 偏移 | 值 | 说明 | hcomm 源码出处 |
+|------|-----|------|----------------|
+| 0 | `0x09` | `RT_HW_STARS_SQE_TYPE_SDMA = 9`（**0x01 是 AICPU kernel-launch 类 SQE**，固件按启动报文解析 → 静默丢弃假成功） | aicpu_hccl_sqcqv2.h:29 |
+| 4-5 | streamId | CP 流 rt_stream_id | `sqe->rt_stream_id = streamId` |
+| 6-7 | taskId | | `sqe->task_id = taskId` |
+| 8-11 | 全 0 | 0903 fresh dump 勘正（残留数据曾误导为 f1/f0） | — |
+| 12-15 | `res3:16 \| credit=0xff:8 \| res4:8` | `RT_STARS_NEVER_TIMEOUT_KERNEL_CREDIT = 255` | sqe.h:24 |
+| 16-19 | `00 de 0e 00` | opcode=NOT_ATOMIC + **sro/dro/sns/dns/sssv/dssv 六位全 1** + overflow_en + qos | aicpu_hccl_sqcqv2.cc:116-121,131-132 |
+| 20-21 / 24-25 | SMMU streamid | die0=0x7F45，die1=0xBF45（`devId==0 ? 0x7F45 : 0xBF45`） | aicpu_hccl_sqcqv2.cc:101-106 |
+| 22-23 / 26-27 | ssid | **对称**=实时查询值（`drvMemSmmuQuery`，不可硬编码） | `sqe->src/dst_substreamid = ssid` |
+| 28-31 | length | | `sqe->length = length` |
+| 32-39 / 40-47 | src / dst（32+32 拆分） | | aicpu_hccl_sqcqv2.cc:123-127 |
+| 48-51 | `00 00 20 00` | 模板原样（含 overflow_en 位） | `sqe->overflow_en = 1U` :130 |
+| 52-59 | overflow_addr | | aicpu_hccl_sqcqv2.cc:130-134 |
+
+**Reduce SQE（TODO-4）同函数证实**：`rtReduceOp == ACL_RT_MEMCPY_SDMA_AUTOMATIC_SUM` 时
+opcode 取 `ReduceOpcode(runtimeDataType)`（aicpu_hccl_sqcqv2.cc:137-139）——hcomm 生产
+在用 SDMA in-transit 归约，移植时照抄该分支即可。
 
 ### A.2 提交序列与流控
 
 读 shadow tail（先 `dc civac` invalidate）→ 环满判断（used = tail-head）→ SQE 直写
 slot → `dc cvac` 逐 cacheline 刷 → doorbell（GM 写 `sqRegBase+0x8` 或 `halSqCqConfig`）→
 回写 shadow tail（刷 cache）。攒批模式：只推进 shadow tail，整批完成后一次 doorbell。
+
+> hcomm 生产同款（源码证实）：`MemcpySqeArray` 批量直写后**仅末尾一次**
+> `ConfigSqStatusByType(devId, sqId, DRV_SQCQ_PROP_SQ_TAIL, newTail)`（dispatcher_aicpu.cc:926-932）；
+> `ConfigSqStatusByType` 内部即 `halSqCqConfig`（aicpu_hccl_sqcq.cc:96-117，
+> `configInfo.cqId = 0; type = DRV_NORMAL_TYPE`）——**攒批 doorbell 是 hcomm 生产用法**，
+> 非本计划发明。
 
 ### A.3 CP 流与 kernel 加载（host 侧）
 
