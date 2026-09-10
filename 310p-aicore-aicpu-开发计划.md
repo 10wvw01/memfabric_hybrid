@@ -1,6 +1,6 @@
 # 310P AICore×AICPU 协同模式开发计划（V2，xcclpp aicpu-aicore-310p3 迁移）
 
-> **状态：计划重写完成，待评审（未开始实施）**
+> **状态：P0 实施中——E0a 已完成（2026-09-10 dev0 一次通过，六判据全过）；E0b/E0c 待执行**
 > - **V2 勘正**：迁移源 = xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（**AICore×AICPU 协同**，
 >   AICore 产数据 → AICPU 编排 SDMA 跨卡搬运 → 对端 AICore 消费，计算-通信重叠）。
 >   V1 误选 `aicpu-310p3`（纯 AICPU 搬运、host 每笔 launch、无 AICore 协同）——该方案整体降级为 TODO-0。
@@ -160,6 +160,13 @@ Reduce SQE（TODO-4）、CQE（TODO-5）、OPP 产品化（TODO-1）、常驻编
 
 **E0a 部署链复刻（~0.5 天，沿用 V1）**：fork `xcclpp_overlap_aicpu.cpp` 进 hybm_kernel hcc 构建
 （`libmf_overlap_kernel.so`），复刻 deployer+KFC 链，验收 = 编排 kernel 在 CP1 内执行（result magic）。
+> **✅ 已完成（2026-09-10，dev0，一次通过）**——实验目录
+> `310p-capability_matrix/17_aicore_aicpu_overlap/`（kernel/contract fork + deployer/mini_kfc fork +
+> probe_e0a 六判据探针 + Makefile + run_e0a.sh 一键编排）。实测：hcc 构建产物 ELF64/AArch64、
+> `HybmOverlapRun` 符号导出；部署链纪律化执行（deployer load/getfunc=0 → KFC cat/chmod →
+> 双验证门）；探针六判据全过——magic=0xA1C0DE01、mainRet=0/stage=5、**headBefore=0→headAfter=2
+> （SQE 对全被 TSFW 消费）**、标志 SQE 8B 到达、数据 1024/1024 字一致、ssid=2 实时查询成功。
+> CP 流实测 streamId=240/sqId=241。**出口条件三项（构建/部署链/CP1 内 SQE 直投闭环）全部达成。**
 
 **E0b 关键实验：AclVmm 池 GVA 作 SQE src/dst（~1 天，沿用 V1，仍是最大技术未知点）**：
 07 池上发起方 launch kernel，SQE src/dst 直接用池 GVA（own/peer HBM 窗口），逐字校验。
