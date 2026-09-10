@@ -79,4 +79,4 @@ export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:...
 - **07**：host 编排（BM API + `HostDataOpAclMemcpy`），数据面全在 host 线程
 - **08**（本示例）：设备发起协同（SHM API + AICore×AICPU），通信与计算可重叠
 - 机制验收与配方档案：`310p-capability_matrix/17_aicore_aicpu_overlap/`
-  （E0a/E0b/E0c/P1 四级验收）+ `310p-aicore-aicpu-开发计划.md`（附录 A 配方速查）
+  （E0a/E0b/E0c/P1 四级验收）+ `310p-aicore-aicpu-开发进展.md`（附录 A 配方速查）

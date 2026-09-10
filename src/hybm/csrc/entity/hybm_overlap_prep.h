@@ -13,7 +13,7 @@
 /* hybm_overlap_prep.h — 310P AICore×AICPU 协同模式传输准备(进程级单例 + 引用计数)
  *
  * 挂载点: MemEntityDefault::InitTransManager 的 [310P + SDMA op 位 + 开关] 分支
- * (六级初始化地图的 L2-④, 见 310p-aicore-aicpu-开发计划.md D4)。
+ * (六级初始化地图的 L2-④, 见 310p-aicore-aicpu-开发进展.md D4)。
  *
  * 职责(P0 三实验已逐项实证, 见 310p-capability_matrix/17_aicore_aicpu_overlap/):
  *   1. CP 流: ACL_STREAM_DEVICE_USE_ONLY(其 SQ 注册进 CP1 进程 trs 表, 是 AICPU

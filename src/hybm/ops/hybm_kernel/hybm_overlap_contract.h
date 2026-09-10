@@ -5,7 +5,7 @@
 // 一律 include 本头 — static_assert 编译期锁布局, 任一副本漂移即报错。
 //
 // 溯源: fork 自 xcclpp main examples/tutorials/aicpu-aicore-310p3/overlap_wire.hpp (MIT),
-// 按 310p-aicore-aicpu-开发计划.md P0-E0a 迁移; 重命名 XcclppAicpuSqe* → HybmOverlap*,
+// 按 310p-aicore-aicpu-开发进展.md P0-E0a 迁移; 重命名 XcclppAicpuSqe* → HybmOverlap*,
 // 布局未动 (static_assert 尺寸原样)。P1-WP1 迁入 src/hybm/ops/hybm_kernel/ 时本契约
 // 随迁并 hybm 化字段语义注释。
 //

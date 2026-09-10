@@ -12,7 +12,7 @@
 
 /* smem_shm_aicore_overlap.h — 310P AICore×AICPU 协同模式设备侧原语(AICore kernel 用)
  *
- * 机制(310p-aicore-aicpu-开发计划.md D5/D6 + E0c 实测定论):
+ * 机制(310p-aicore-aicpu-开发进展.md D5/D6 + E0c 实测定论):
  *   AICore 产数据 → GM 邮箱(16B {dataAddr, words}, vector 直写 + 行 clean)委托
  *   AICPU 编排 kernel 代投 SDMA SQE 对(数据 + 8B 标志, FIFO 保序保证标志到即数据到)
  *   → 对端 AICore dcci 轮询池内标志后消费。

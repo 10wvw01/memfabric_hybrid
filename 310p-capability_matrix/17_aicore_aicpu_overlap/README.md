@@ -1,6 +1,6 @@
 # 17_aicore_aicpu_overlap — E0a：MemFabric 构建的协同编排 kernel CP1 执行验收
 
-> 上游计划：`/310p-aicore-aicpu-开发计划.md` P0-E0a。
+> 上游计划：`/310p-aicore-aicpu-开发进展.md` P0-E0a。
 > 迁移源：xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（AICore×AICPU 协同，MIT）。
 
 ## 目的
@@ -126,7 +126,7 @@ mode13 role0 同构（"到达轮询+ready"上移 AICore，规避 AICPU 解引用
 → AICore kernel 用设备头原语（`smem_shm_overlap_notify`/`poll_flag`）→ `smem_shm_overlap_launch/
 wait/get_result`。实测 r0 终态数据 mismatch=0/1024 == pattern+0x100、结果标志到达、双侧 kernel
 mainRet=0/stage=5/headAfter=4（冒烟 2+正式 SQE 对 2 条自洽）、GVA 对称 1GB 段、标志区物理段定位。
-BM 路径回归（E0b）PASS。P1 实施详情与两个存量缺陷修复见 `310p-aicore-aicpu-开发计划.md` P1 摘要。
+BM 路径回归（E0b）PASS。P1 实施详情与两个存量缺陷修复见 `310p-aicore-aicpu-开发进展.md` P1 摘要。
 
 ## 与后续实验的关系
 

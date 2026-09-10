@@ -1,7 +1,7 @@
 // MemFabric 310P AICore×AICPU 协同编排 kernel (310P3, 主构建产物)
 //
 // 溯源: fork 自 xcclpp main examples/tutorials/aicpu-aicore-310p3/aicpu_kernel/
-// xcclpp_overlap_aicpu.cpp (MIT), 按 310p-aicore-aicpu-开发计划.md 迁移;
+// xcclpp_overlap_aicpu.cpp (MIT), 按 310p-aicore-aicpu-开发进展.md 迁移;
 // 重命名 XcclppAicpuSqeRun → HybmOverlapRun (入口/json functionName),
 // XcclppAicpuSqeParam/Result → HybmOverlapParam/Result, 其余逐行保留
 // (SQE 配方/提交链/轮询纪律均已 hcomm 源码级证实, 见计划附录 A)。

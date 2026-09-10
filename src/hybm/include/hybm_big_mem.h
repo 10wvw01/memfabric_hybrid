@@ -187,7 +187,7 @@ int32_t hybm_set_extra_context(hybm_entity_t e, const void *context, uint32_t si
 int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va);
 
 /**
- * @brief 310P AICore×AICPU 协同模式信息(进程级, 详见 310p-aicore-aicpu-开发计划.md)
+ * @brief 310P AICore×AICPU 协同模式信息(进程级, 详见 310p-aicore-aicpu-开发进展.md)
  */
 typedef struct {
     uint32_t sqId;      /* CP 流 SQ id(kernel 内活查询用) */

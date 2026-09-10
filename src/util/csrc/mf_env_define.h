@@ -65,7 +65,7 @@ inline const std::string MF_CONFIG_STORE_PORT_START =
 inline const std::string MF_CONFIG_STORE_PORT_END =
     GetEnvStr("MF_CONFIG_STORE_PORT_END", "MEMFABRIC_HYBRID_CONFIG_STORE_PORT_END");
 
-// 310P AICore×AICPU 协同模式开关(默认关; 详见 310p-aicore-aicpu-开发计划.md D1)
+// 310P AICore×AICPU 协同模式开关(默认关; 详见 310p-aicore-aicpu-开发进展.md D1)
 inline const std::string MF_310P_SHM_OVERLAP = GetEnvStr("MF_310P_SHM_OVERLAP");
 // 协同编排 kernel 的 launch json 路径(缺省取 CWD 的 libmf_overlap_v1.json)
 inline const std::string MF_310P_OVERLAP_JSON = GetEnvStr("MF_310P_OVERLAP_JSON");

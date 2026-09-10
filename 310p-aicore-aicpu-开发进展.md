@@ -1,4 +1,4 @@
-# 310P AICore×AICPU 协同模式开发计划（V2，xcclpp aicpu-aicore-310p3 迁移）
+# 310P AICore×AICPU 协同模式开发进展（V2，xcclpp aicpu-aicore-310p3 迁移）
 
 > **状态：P0/P1/P2 完成 + P3 核心项完成（2026-09-10：UT 五用例/回归/性能基线即 08 三阶段实测/架构文档更新）；FIP 故障注入集成与 OPP 产品化在 TODO**
 > - **V2 勘正**：迁移源 = xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（**AICore×AICPU 协同**，
@@ -11,6 +11,159 @@
 >   L0 三堵墙与解锁条件（TODO-1）、CP 流配方（A.3）
 > - 上游依赖：xcclpp main（PR #27/#28 合入）；机制知识档案 `aicpu-310p3/README.md`（fork 源的共享地基）；
 >   本仓 `310p-2rank-vmm-开发计划.md`（AclVmm 池化前置，已验收）；`docs/架构概览.md`（第 3/4/6 章背景）
+
+## 〇、开发进展总结（2026-09-10 收官）
+
+**总体成果**：把 xcclpp main 的 `aicpu-aicore-310p3`（AICore×AICPU 协同）完整迁移进 MemFabric，
+使 **SHM API 在 310P 上从"完全不可用"变为"全链可用且通信被计算掩盖"**（实测流水加速比 8.02x）。
+
+### 0.1 里程碑总览
+
+| 阶段 | 里程碑 | 关键实测 |
+|---|---|---|
+| 计划 V2 | 迁移源勘正（aicpu-310p3→aicpu-aicore-310p3）、三决策（SHM 对接/08 示例/闭环+流水） | hcomm 源码级证实 SQE 配方；X9 文件系统边界实测（同卡共享/跨卡独立） |
+| P0 三实验 | M0：E0a/E0b/E0c 均**一次通过** | CP1 执行闭环六判据；池 GVA 可译（Plan B 不启动）；八步全链 + AICore 可直访池 |
+| P1 五工作包 | M1：SHM+SDMA 首通 | 八步全链全走产品 API，mismatch=0；修两个存量缺陷 |
+| P2 | M2：08 示例 | **流水加速比 8.02x**（103.61ms vs 串行 830.65ms），1MB 全量 mismatch=0 |
+| P3 | 核心项收官 | UT 五用例全过；回归 PASS（存量 mockcpp 崩溃与 2-rank 基线一致） |
+
+### 0.2 迁移方法论：实验先行、逐层落地、每层实机验收
+
+```
+调研锚定 → P0 可行性裁决(实验目录, 不进主线) → P1 骨架(源码, 5 工作包)
+        → P1 验收(E0c 场景产品化重跑) → P2 示例+流水 → P3 UT/文档
+```
+
+每层都在真机（dev0↔dev1）验收后才进下一层。P0 三实验分别裁决三个"可推翻架构"的未知点：
+
+- **E0a**：MemFabric 侧 hcc 构建 + deployer+KFC 部署链 + kernel 真在 CP1 执行且 TSFW 消费 SQE
+  （headAfter 0→2 是硬件执行铁证）；
+- **E0b**：AclVmm 池 GVA 可被 SDMA 经 SMMU ssid 翻译（轮A/轮B 双变体隔离诊断——本端窗口 VA
+  与导入 VA 分别验证，Plan B 不启动）；
+- **E0c**：AICore 可直接 GM 访问池 GVA + 八步通知链全通（顺带得出"两侧 AICPU 同构 role0"
+  的简化结论，规避 AICPU 解引用池 VA）。
+
+### 0.3 架构映射：xcclpp 组件 → MemFabric 位置
+
+| xcclpp 组件 | MemFabric 落点 | 改造 |
+|---|---|---|
+| `xcclpp_overlap_aicpu.cpp`（mode13/14 状态机） | `src/hybm/ops/hybm_kernel/hybm_overlap_kernel.cc` | git mv 迁入主构建（`mf_overlap_kernel` 目标），入口改 `HybmOverlapRun`，逐行保留（配方已经 hcomm 源码级证实） |
+| `overlap_wire.hpp`（wire 契约） | `hybm_overlap_contract.h`（同目录） | static_assert 锁布局，重命名 HybmOverlap* |
+| demo host 编排（MPI + 手工 ACL） | **拆成三层**：prep 单例（资源准备）/ hybm C API（提交）/ smem 公共 API（用户面） | 迁移的核心重构，见 0.4 |
+| demo 的 AICore kernel（手写 dcci/clean 原语） | `src/smem/include/device/smem_shm_aicore_overlap.h` | 原语产品化 + 池内标志保留区约定（按**物理段**末尾定位——symSize 含 1G 对齐尾部未映射） |
+| deployer/mini_kfc 部署链 | `310p-capability_matrix/17_aicore_aicpu_overlap/`（工具 + run 脚本内置 ensure_deploy） | 部署与验证门纪律固化；终态 OPP 见 0.6 |
+
+### 0.4 三层 API 设计（迁移的核心重构）
+
+xcclpp demo 把"资源准备+参数装配+kernel launch"全糊在 MPI host 代码里；MemFabric 化后拆成：
+
+```
+用户 host 代码
+ ├─ smem_shm_create(SDMA)                    ← L2 池级: 初始化即自动完成协同准备(含冒烟)
+ ├─ smem_shm_overlap_get_workspace(shm)      ← host 查工作区 → 作为参数传给自己的 AICore kernel
+ ├─ 用户 AICore kernel <<<>>>                 ← 用设备头原语 notify(邮箱)/poll_flag(dcci) 写协议
+ ├─ smem_shm_overlap_launch[_pipelined]      ← smem 层 → SmemShmEntry → hybm C API
+ │                                             → HybmOverlapSubmitCommon 装配 param
+ │                                             → HybmOverlapPrep::LaunchOrchestrator(URMA 同款
+ │                                               KernelArgs+LaunchKernelWithConfig)
+ └─ smem_shm_overlap_wait/get_result          ← SynchronizeStream + 读 workspace result
+```
+
+### 0.5 初始化流程的变化（对照六级初始化地图）
+
+**变化前：SHM 在 310P 上有两处断点，根本走不通**
+
+```
+smem_shm_init → hybm_init
+  └→ hybm_init_hbm_gva(SHM meta 标志) → [断点1] HybmModernInitMetaGva
+      (310P 被误判为 GVA_V4 走 halMem* 链, HalMemCreate ret=6 必败)
+smem_shm_create → MemEntityDefault::Initialize
+  └→ ④ InitTransManager → TT_SDMA → SdmaTransportManager::OpenDevice
+      → [断点2] AclnnShmemSdmaStarsQuery 在 310P 返回 65534 必败
+```
+
+**变化后：六级地图上动了三处**
+
+变化① **L1.5（引擎级）——meta 区的 310P AclVmm 路径**：`hybm_init_hbm_gva` 新增 SoC 前置分派，
+310P → `Hybm310PInitMetaGva`（`AclrtReserveMemAddress` 精确命中硬编码 `HYBM_DEVICE_META_ADDR` +
+`AclrtMallocPhysical`(NONE+P2P_HUGE) + `AclrtMapMem`），判断顺序先于 V4（310P 驱动被映射为 V4
+但无 halMem 语义）；`hybm_uninit` 增对称释放（Unmap/FreePhysical/ReleaseMemAddress）。
+
+变化② **L2-④（池级，核心挂载点）——InitTransManager 的 310P 分支**：
+
+```
+if (SDMA 位 && SoC==310P && MF_310P_SHM_OVERLAP 开):
+    HybmOverlapPrep::Acquire(devId)     ← 不再创建 SdmaTransportManager
+    │  ├─ CP 流: DEVICE_USE_ONLY + rtStreamGetSqid   (SQ 注册进 CP1, kernel 内可查可投)
+    │  ├─ 工作区: 4KB HUGE_FIRST (mailbox ring 64槽/sentinel/result/ovf)
+    │  ├─ kernel: BinaryLoadFromFile(cpuMode=0) + GetFunction("HybmOverlapRun")
+    │  └─ 冒烟: E0a 式 SQE 对自证(不过=报错不静默, ready 不置位)
+    │           ↑ 进程级单例+引用计数: 多池共享, 归零才释放
+    └─ overlapAcquired_=true (UnInitialize 对称 Release)
+```
+
+为什么挂 L2-④ 而不是别处：SHM 是 AI_CORE_INITIATE，**跳过 InitDataOperator**（⑤），dataOperator
+插槽不可用；协同准备本质是"设备资源准备"，与 URMA 在 OpenDevice 加载 kernel 同族；且此时 store
+已连（未来自部署的分布式锁可用）、SoC 已探测、devId 已知。冒烟受"算子初始化先于内存分配"时序
+约束——自备 scratch，不用池 GVA。
+
+变化③ **L2 建池参数——devId 透传修复**：`smem_shm_create` 此前**从未设置 options.devId**（恒 0，
+A3 无感）——310P 协同的 `dieId = devId%2` 依赖它（CP1 内 HAL devId），对齐 smem_bm 补
+`GetDeviceId()`。P1 验证时 r1 冒烟超时暴露的存量缺陷。
+
+配套：**HybmDeviceMeta 扩展（不动 128B 布局）**——`reserved[0]/[1]` → `overlapWorkspace`（工作区
+设备地址）+ `overlapFlags`（bit0 ready），经既有 `SetHybmDeviceInfo`（大页 H2D）写入，AICore kernel
+经设备头 `smem_shm_overlap_get_workspace/ready` 读取（字节偏移常量镜像）。
+
+**运行期数据面（新增，非初始化）**——初始化完成后每轮协同：
+
+```
+AICore(产) ──notify──▶ GM 邮箱(16B) ──AICPU 轮询──▶ SQE 对构造
+  ▲                                              (数据 dst=对端池GVA + 8B标志)
+  │                                              │ doorbell(halSqCqConfig, devId=die号)
+dcci 轮询池内标志 ◀──SDMA 写──对端池 ◀──TSFW 消费──┘
+  │
+AICore(消费: 读池+INC+ENTIRE clean) → 回程(同构 role0 反向)
+```
+
+全内存通知链（邮箱/池内标志/SQE 对），无 notify/事件对（310P3 实测证伪）；cache 纪律
+（ENTIRE clean / dcci / cvac）固化在设备头原语里。
+
+### 0.6 部署路径现状：两条路，一条能用、一条被墙挡
+
+**"能部署上去"的是 deployer+KFC（P0 至今全部实验在用）**；"上不去"的是产品正统的 OPP `.run`
+安装通道（本机 310P3 被挡）：
+
+| | deployer + mini_kfc（✅ 可用） | OPP `.run` 包安装（❌ 本机被挡） |
+|---|---|---|
+| 机制 | CUSTAICPUKernel mode=1 H2D 迁移落 `/home/CustAiCpuUser/`（**不经验签**）+ KFC 设备内 `cat` 复制到 CP1 搜索路径 | `.run` 装 host OPP tree → 首次 `aclrtSetDevice` 经 HDC 包通道推送设备 |
+| 实测 | 全部实验的 `libmf_overlap_v1.so` 均此路部署 | xcclpp 复刻实测：通道逐级全通，**终拒于设备端 CMS 验签**（verifyFlag [Only Huawei]） |
+| 致命点 | — | 拒收**毒化宿主进程**（TsdOpen 失败 → `aclrtSetDevice` 507033）——库形态不可接受，不能"先装上试试" |
+
+**三堵墙**（OPP 路在本机的解锁障碍）：① CMS 验签拒收无签名包；② 官方开关
+`custom-op-secverify-enable` 容器内被拒（需物理机），且 DCMI secverify 在 310P NOT_SUPPORT；
+③ user-certificate（官方第三方正解）需走华为签发流程。**对照证据**：`libcann_hybm_kernel.so`
+（同为 OPP `.run` + AICPUKernel）在 **A3 生产环境正常**——是本机 310P3 环境策略差异，非机制不可行；
+通道侧代码零障碍（包解压路径即 CP1 搜索路径），墙一解切换无需改码。
+
+deployer+KFC 的运维坑与纪律（实测踩过并固化为 `ensure_deploy`）：**deployer 保活到期退出触发
+清理链删除设备侧文件**（P1 验收真实复现）→ 每次正式运行前必跑验证门；并发 deployer 互斥（后起
+假成功）→ 同一时刻只跑一个；文件名带 PID 后缀 → 复制时改版本名 + 改 kernel 必 bump KVER（CP1
+按文件名 dlopen 缓存）；KFC `sync=` 是命令退出码（非零→507018）→ 判定看 `sync=0`。
+
+终态演进（D3 三段）：外部脚本 deployer+KFC（现在）→ `MF_310P_AICPU_SELF_DEPLOY=1` 自部署
+（绕墙动作收进 Initialize + 配置存储锁串行，P2 已备）→ OPP `.run` 安装期部署（穿墙：user-certificate
+或环境开关，届时删掉 deployer/KFC 整段）。
+
+### 0.7 量化结果与工程沉淀
+
+- **功能**：八步全链产品化（P1 验收 `probe_p1_overlap`）+ 08 示例三阶段，数据校验全 0 mismatch；
+- **性能**：mode14 流水 **8.02x**（103.61ms vs 串行 830.65ms，8×128KB）——≈理想线性 8x，通信完全
+  被计算/生产掩盖；head 计数（36 条 SQE）与阶段完全自洽；
+- **顺带修复的存量缺陷**：SHM meta 区 halMem 断点（310P AclVmm 路径）、`smem_shm_create` devId 未透传；
+- **运维纪律固化**：验证门前置 / 同卡单次部署（X9）/ KFC sync 语义 / bash `export && cmd &` 作用域坑；
+- **backlog**：OPP 产品化（三堵墙）、跨卡 PHB、Reduce SQE（hcomm 同函数已证在用）、CQE 完成检测、
+  FIP 故障注入集成。
 
 ## 一、迁移源与目标架构
 
