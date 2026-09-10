@@ -39,6 +39,7 @@ host 编排：`HostDataOpAclMemcpy`（`src/hybm/csrc/data_operation/host/hybm_da
 | X6 | **部署链（CP1）**：deployer（`CUSTAICPUKernel` json mode=1 落真 .so）→ KFC `cat` 复制到 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`（改名避免 PID 后缀多版本拼接）→ launch 用 `AICPUKernel` json（cpuMode=0） | 全链真机 PASS；CMS 验签墙只拦 common-sink 直推通道 |
 | X7 | **部署链已知坑**：并发 deployer 互斥（多设备须串行）；隔夜文件被清（跑前验证门 `grep -q <symbol>`）；KFC 非特权身份、单条短命令稳定（>3 段串联易 507018）；ssid 不可硬编码（随启动变化，kernel 内 `drvMemSmmuQuery` 活查询） | README 部署链档案 |
 | X8 | **flag-SQE 兼容模式**：8B SDMA 哨兵搬运 + `dc civac` 轮询（zbal 同款），25s 上限（< AICPU watchdog 30s） | completeMode=0 |
+| X9 | **部署文件系统边界（2026-09-10 本机实测，E0a 前置成果）**：**同卡双 die 共享设备 OS 文件系统**（dev0 写 /tmp 探针 → dev1 `test -f` 可见 sync=0）；**跨卡完全独立**（dev2/dev4 均不可见）。推论：①**同卡部署一次即服务双 die**（搜索路径同为 `/usr/lib64/aicpu_kernels/0/`，同一文件系统，两 die 的 CP1 各自 dlopen 同一文件）；②0209 deployer 互斥的作用域推断为**同卡**（共享设备侧迁移服务 CP2 竞态），跨卡目标独立理论上可并行。附带勘正：**KFC sync= 命令退出码**（0→sync=0，非零→507018），xcclpp"通道偶发 507018 须重试"的表述部分实为命令失败的正确信号（确定性失败的命令重试也不会过） | 本机 KFC 探针矩阵：dev0/dev1 同卡（正/阴性对照）+ dev2/dev4 跨卡（`test -d /usr/lib64` 正对照证明通道健康） |
 
 ### 1.3 MemFabric 侧可复用资产（重大利好）
 
@@ -98,7 +99,7 @@ flag 完成检测先例。
 |---|------|------|------|
 | D1 | **开关切换接入** | 新 env `MF_310P_DATA_OP_AICPU`（`MF_*` 主命名，遵循 `mf_env_define.h` 惯例），默认 0；`DataOperatorFactory::CreateSdmaDataOperator` 310P 分支按开关选 `HostDataOpAclMemcpy`（默认）/ `HostDataOpAicpuSqe`（新） | 回退安全：SQE 配方固件强相关，07 已验收链路不受影响；PR 可评审性好 |
 | D2 | **探测回退** | `HostDataOpAicpuSqe::Initialize` 内冒烟（建流→取 sqId→加载 kernel→提交一笔写读 own HBM 的 SQE→校验），任一步失败记 ERROR（含 deviceId/sqId/根因）置回退标记，数据面退回 AclMemcpy | 已知部署链脆弱（X7），回退是硬性设计 |
-| D3 | **部署形态：三段演进** | ① P0 外部脚本复刻 xcclpp 部署链（X6，隔离变量最快验证）；② **P2 起 opt-in 自部署**：`MF_310P_AICPU_SELF_DEPLOY=1` 时 Initialize 内完成部署——验证门先查（已部署跳过）→ 抢 config store **分布式锁**（`DistributedLockGuard` 现成设施，多 rank/多进程串行）→ mode=1 迁移 + KFC 复制 + 验证门 → mode=0 加载；③ OPP `.run` 产品化后自部署整段删除（移安装期）。**生命周期语义**：自部署文件与进程同生命周期（deployer 退出即清理链，天然对齐池生命周期，消除外部脚本的保活时长错配问题——xcclpp 隔夜文件消失实测） | 自部署是运行时能力（零外部步骤+生命周期正确）；外部脚本是 POC 手段；OPP 是产品终态。KFC（设备侧 shell 执行）进库代码需安全评审明示（风险表 R8） |
+| D3 | **部署形态：三段演进** | ① P0 外部脚本复刻 xcclpp 部署链（X6，隔离变量最快验证）；② **P2 起 opt-in 自部署**：`MF_310P_AICPU_SELF_DEPLOY=1` 时 Initialize 内完成部署——验证门先查（已部署跳过；**同卡对端已部署即命中**，X9）→ 按**卡分组**抢 config store 分布式锁（`DistributedLockGuard` 现成设施；**串行化粒度=卡**：同卡互斥、跨卡文件系统独立可并行，X9）→ mode=1 迁移 + KFC 复制 + 验证门 → mode=0 加载；③ OPP `.run` 产品化后自部署整段删除（移安装期）。**生命周期语义**：自部署文件与进程同生命周期（deployer 退出即清理链，天然对齐池生命周期，消除外部脚本的保活时长错配问题——xcclpp 隔夜文件消失实测）。**07 场景简化**：dev0/dev1 同卡 → **单次部署服务双 die** | 自部署是运行时能力（零外部步骤+生命周期正确）；外部脚本是 POC 手段；OPP 是产品终态。KFC（设备侧 shell 执行）进库代码需安全评审明示（风险表 R8） |
 | D4 | **每笔 copy 一次 launch，不做常驻** | batch N 段一次 launch + kernel 内攒批 doorbell | CP1 watchdog 30s 杀常驻进程；hcomm/zbal 均按需 launch |
 | D5 | **方向分层** | 一期 G2G 三方向（GD2GD 含跨 die）走 SQE；H2G/G2H 委托 `aclrtMemcpy` 混合路径（日志明确标注） | 见非目标；混合路径语义与现有算子一致 |
 | D6 | **完成检测** | **flag-SQE 哨兵轮询**（kernel 尾部哨兵 + `dc civac` 轮询，main 生产配方 PASS）；NOTIFY_RECORD 仅实验保留（310P3 notify 不触发 + 流内 wait 挂死，X5）——若实验 NOTIFY，**禁止在流内 enqueue wait 任务** | 对齐 xcclpp main 模式矩阵定案 |
@@ -173,7 +174,8 @@ OPP 产品化后自部署删除、移安装期（`_provision.py` / `installation
   CUSTAICPUKernel 加载+GetFunction 迁移 → KFC `cat` 复制到本设备 CP1 搜索路径 → 验证门 →
   mode=0 加载；多 rank 各自设备按锁串行（deployer 并发互斥，X7）。**文件生命周期=进程生命周期，
   进程退出自动清理**。默认关闭（外部队列预部署仍为主路径）
-- 双 rank 双向并发（每 die CP1 独立部署，07 双进程模型；deployer 串行部署规则见 X7）；
+- 双 rank 双向并发（**同卡单次部署服务双 die**，X9；07 双进程模型 dev0/dev1 同卡，
+  rank0 部署、rank1 验证门直接命中；每 die 的 CP1 各自 dlopen 同一文件）；
 - `DataCopyAsync` 真异步 + `Wait` 兑现（一期可先同步化，完成检测按 D6 flag 轮询）；
 - 资源生命周期：池 destroy 时 CP 流/kernel/notify 清理顺序、deployer 保活进程的拉起与退出管理；
 - **验收：07 示例 AICPU 模式三阶段 mismatch=0 + 干净退出**（复用
@@ -296,14 +298,18 @@ slot → `dc cvac` 逐 cacheline 刷 → doorbell（GM 写 `sqRegBase+0x8` 或 `
 `aclrtLaunchKernelWithHostArgs(funcHandle, ..., stream, &param, sizeof(param))`。
 **CP1 内 HAL devId = die 号**（host 设备号 %2：0/2/4/6→0，1/3/5/7→1）。
 
-### A.4 部署链运维规则（X6/X7 全量）
+### A.4 部署链运维规则（X6/X7/X9 全量）
 
-1. 同一时刻只跑一个 deployer（多设备串行：杀尽旧的→单起→验证门→下一台）；
+1. deployer 并发互斥作用域 = **卡**（X9 实测：同卡双 die 共享设备 OS 文件系统，跨卡独立）：
+   同卡同一时刻只跑一个 deployer（杀尽旧的→单起→验证门）；跨卡可并行（保守起见可仍全局串行）；
+   **部署粒度 = 每卡一次**（同卡对端 die 的 CP1 共享 `/0/` 目录，各自 dlopen 同一文件）；
 2. deployer json 必须 `CUSTAICPUKernel`（mode=1 才落真 ELF；`AICPUKernel`+mode=1 落假文件）；
 3. launch json 必须 `AICPUKernel` + cpuMode=0（走 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/` 搜索路径）；
 4. 复制时改名（文件名带 PID 后缀，glob 多版本拼接 = 损坏 ELF）；
 5. 正式验证前跑验证门（grep 符号）；deployer 保活时长按实验窗口设；
-6. KFC：单条短命令；多段串联（>3 段 / >2000 字符）拆单条 + 重试；精简 rootfs 无 `ls`/`od`/`base64`；
+6. KFC：单条短命令；多段串联（>3 段 / >2000 字符）拆单条；精简 rootfs 无 `ls`/`od`/`base64`；
+   **sync 语义勘正（X9 实测）：sync= 命令退出码**（0→sync=0，非零→507018）——确定性失败的命令
+   重试不会过，重试纪律只用于真偶发失败；判"文件不存在"用 `test -f`（非零→507018）即可判定；
 7. NOTIFY 通道在 310P3 已证伪（notify 不触发 E3 + 流内 wait 挂死）：生产完成检测用
    flag-SQE 哨兵轮询（main 定案）；若实验 NOTIFY，勿在流内 enqueue wait 任务；
 8. result/ovf buffer 必须 `ACL_MEM_MALLOC_HUGE_FIRST`（NORMAL_ONLY 落特殊段 SDMA 不可翻译）。
