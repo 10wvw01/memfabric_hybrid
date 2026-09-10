@@ -46,7 +46,7 @@ HOST_TOOLS := mini_kfc deployer
 
 .PHONY: all kernel host_tools probe clean
 
-all: host_tools kernel probe probe_e0b probe_e0c
+all: host_tools kernel probe probe_e0b probe_e0c probe_p1_shm
 
 # ---------- host 工具 (KFC 部署链, 源自 xcclpp aicpu-310p3 单一事实源的 fork) ----------
 host_tools: $(HOST_TOOLS)
@@ -75,6 +75,13 @@ probe_e0c: probe_e0c.asc $(KERNEL_CONTRACT) $(MF_LIBS)
 	    $(ASC_INC) $(KERNEL_INC) $(SMEM_INC) -I. \
 	    -Wl,--start-group $(MF_LIBS) -Wl,--end-group $(HOST_LDFLAGS) -pthread -lm
 
+# ---------- P1/WP3 验证探针(smem_shm API 走产品化挂载路径) ----------
+HYBM_INTERNAL_INC := -I$(PROJ_ROOT)/src/hybm/csrc/common -I$(PROJ_ROOT)/src/util/csrc
+
+probe_p1_shm: probe_p1_shm.cc $(MF_LIBS)
+	$(HOST_CXX) $(HOST_CXXFLAGS) $(SMEM_INC) $(HYBM_INTERNAL_INC) -w -o $@ $< \
+	    -Wl,--start-group $(MF_LIBS) -Wl,--end-group $(HOST_LDFLAGS) -pthread
+
 # ---------- AICPU 编排 kernel (hcc, 与主构建 mf_overlap_kernel 目标字节等价) ----------
 kernel: $(AICPU_SO) $(AICPU_JSON_CUST) $(VSO) $(VJSON)
 
@@ -94,6 +101,6 @@ $(VJSON): $(VSO)
 	@test -f $@ || printf '{\n    "HybmOverlapRun": {\n        "opInfo": {\n            "opKernelLib": "AICPUKernel",\n            "kernelSo": "libmf_overlap_v$(KVER).so",\n            "functionName": "HybmOverlapRun"\n        }\n    }\n}\n' > $@
 
 clean:
-	rm -f $(HOST_TOOLS) probe_e0a probe_e0b probe_e0c kfc_min.json
+	rm -f $(HOST_TOOLS) probe_e0a probe_e0b probe_e0c probe_p1_shm kfc_min.json
 	rm -f $(AICPU_SO) $(AICPU_JSON_CUST)
 	rm -f $(AICPU_DIR)/libmf_overlap_v*.so $(AICPU_DIR)/libmf_overlap_v*.json

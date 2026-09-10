@@ -57,6 +57,9 @@ SMEM_API smem_shm_t smem_shm_create(uint32_t id, uint32_t rankSize, uint32_t ran
     }
     options.rankCount = rankSize;
     options.rankId = rankId;
+    /* devId 必须透传(AI_CORE_INITIATE 场景此前恒 0 —— A3 的 SdmaTransportManager
+     * 自取设备未暴露; 310P 协同模式 dieId = devId%2 依赖此值, 对齐 smem_bm.cpp 同款) */
+    options.devId = SmemShmEntryManager::Instance().GetDeviceId();
     options.maxHBMSize = ALIGN_UP(localSize, SMEM_1G_SIZE);
     options.deviceVASpace = localSize;
     options.role = HYBM_ROLE_PEER;

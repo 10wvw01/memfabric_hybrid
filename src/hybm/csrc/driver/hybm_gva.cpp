@@ -62,8 +62,52 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
     return BM_OK;
 }
 
-int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags)
+/* 310P meta 区创建: AclVmm 路径 —— halMem* 语义在 310P 不可用(F16), 改用
+ * HybmAclVmmSegment 同款 API 配方(ReserveMemAddress + MallocPhysical + MapMem)。
+ * meta 区地址 HYBM_DEVICE_META_ADDR 是设备侧头文件(smem_shm_aicore_base_meta.h)
+ * 硬编码的约定地址, 必须 expectPtr 精确命中, 偏移即失败。 */
+int32_t Hybm310PInitMetaGva(uint16_t deviceId, void **globalMemoryBase, size_t allocSize, void **allocHandle)
 {
+    auto ret = DlAclApi::AclrtReserveMemAddress(globalMemoryBase, allocSize, 0,
+                                                reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), 0);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("reserve meta va failed, ret: " << ret << " size: 0x" << std::hex << allocSize
+                                                     << " deviceId: " << deviceId);
+        return BM_ERROR;
+    }
+    if (*globalMemoryBase != reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR)) {
+        BM_LOG_ERROR("meta va base mismatch, got: 0x" << std::hex << *globalMemoryBase << " expect: 0x"
+                                                      << HYBM_DEVICE_META_ADDR << " deviceId: " << deviceId);
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
+        return BM_ERROR;
+    }
+    aclrtPhysicalMemProp prop{};
+    prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;      /* F10: 310P 仅 NONE 可用 */
+    prop.allocationType = aclrtMemAllocationType::ACL_MEM_ALLOCATION_TYPE_PINNED;
+    prop.memAttr = aclrtMemAttr::ACL_MEM_P2P_HUGE;                       /* F10: P2P_HUGE 实测可用 */
+    prop.location.id = static_cast<uint32_t>(deviceId);
+    prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+    aclrtDrvMemHandle handle = nullptr;
+    ret = DlAclApi::AclrtMallocPhysical(&handle, allocSize, &prop, 0);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("malloc meta physical failed, ret: " << ret << " size: 0x" << std::hex << allocSize
+                                                          << " deviceId: " << deviceId);
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
+        return BM_ERROR;
+    }
+    ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, 0, handle, 0);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("map meta va failed, ret: " << ret << " addr: 0x" << std::hex << HYBM_DEVICE_META_ADDR
+                                                 << " size: 0x" << allocSize << " deviceId: " << deviceId);
+        (void)DlAclApi::AclrtFreePhysical(handle);
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
+        return BM_ERROR;
+    }
+    *allocHandle = handle;
+    return BM_OK;
+}
+
+int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags){
     auto ret = drv::HalGvaReserveMemory((uint64_t *)globalMemoryBase, allocSize, initedLogicDeviceId, flags);
     if (ret != 0 || reinterpret_cast<uint64_t>(*globalMemoryBase) != (SVM_END_ADDR - GB)) {
         if (ret == 0 && *globalMemoryBase != nullptr) {
@@ -116,7 +160,11 @@ int32_t hybm_init_hbm_gva(uint16_t deviceId, uint64_t flags, uint64_t &baseAddre
 
     void *globalMemoryBase = nullptr;
     size_t allocSize = HYBM_DEVICE_INFO_SIZE; // 申请meta空间
-    if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
+    if (socType == AscendSocType::ASCEND_310P) {
+        /* 310P: halMem* 不可用, 走 AclVmm 创建(判断须先于 V4 —— 310P 驱动被映射为 V4
+         * 但无 halMem 语义, 2-rank 计划 F2/F16 定论) */
+        ret = Hybm310PInitMetaGva(deviceId, &globalMemoryBase, allocSize, allocHandle);
+    } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         ret = HybmModernInitMetaGva(&globalMemoryBase, allocSize, allocHandle);
     } else {
         ret = HybmLegacyInitMetaGva(&globalMemoryBase, allocSize, flags);

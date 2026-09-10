@@ -131,7 +131,21 @@ HYBM_API void hybm_uninit()
 
     ptracer_uninit();
     auto socType = DlAclApi::GetAscendSocType();
-    if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
+    if (socType == AscendSocType::ASCEND_310P) {
+        /* 310P: 与 Hybm310PInitMetaGva 对称的 AclVmm 释放路径 */
+        if (g_baseAddr != 0) {
+            auto ret = DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR));
+            BM_LOG_INFO("unmap meta info res: " << ret);
+            if (g_allocHandle != nullptr) {
+                ret = DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
+                g_allocHandle = nullptr;
+                BM_LOG_INFO("free meta physical res: " << ret);
+            }
+            ret = DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
+            BM_LOG_INFO("release meta va res: " << ret);
+            g_baseAddr = 0ULL;
+        }
+    } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         if (g_baseAddr != 0) {
             auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
             BM_LOG_INFO("unmap meta info res: " << ret);

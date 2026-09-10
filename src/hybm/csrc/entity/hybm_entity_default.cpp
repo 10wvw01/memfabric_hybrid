@@ -21,6 +21,7 @@
 #include "hybm_ex_info_transfer.h"
 #include "hybm_gva.h"
 #include "hybm_logger.h"
+#include "hybm_overlap_prep.h"
 #include "mf_fault_injection_point.h"
 #include "hybm_stream_manager.h"
 #include "hybm_va_manager.h"
@@ -1051,6 +1052,15 @@ void MemEntityDefault::SetHybmDeviceInfo(HybmDeviceMeta &info)
         info.qpInfoAddress = 0UL;
         info.sdmaWorkSpace = 0UL;
     }
+    /* 310P 协同模式元数据: 工作区与能力位(AICore 经 smem_shm_aicore_overlap.h 读取) */
+    auto &prep = HybmOverlapPrep::GetInstance();
+    if (prep.Ready()) {
+        info.overlapWorkspace = prep.GetWorkspace();
+        info.overlapFlags = HYBM_OVERLAP_FLAG_READY;
+    } else {
+        info.overlapWorkspace = 0UL;
+        info.overlapFlags = 0UL;
+    }
 }
 
 int32_t MemEntityDefault::ImportForTransportPrecheck(const ExchangeInfoReader desc[], uint32_t &count,
@@ -1238,6 +1248,21 @@ Result MemEntityDefault::InitTransManager()
         return BM_OK;
     }
     if (options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA) {
+        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P && HybmOverlapPrep::SwitchOn()) {
+            /* 310P 协同模式(D4 挂载点): A3 SdmaTransportManager 配方在 310P 不可用
+             * (AclnnShmemSdmaStarsQuery 实测 65534), 改做 overlap 准备(CP 流+工作区+
+             * kernel+冒烟, 失败即报错不静默 D1/D2); meta 由 SetHybmDeviceInfo 填充 */
+            BM_LOG_INFO("310P overlap mode: AICore x AICPU orchestration instead of SdmaTransportManager, "
+                        "entityId: " << id_ << " devId: " << options_.devId);
+            auto ret = HybmOverlapPrep::GetInstance().Acquire(options_.devId);
+            if (ret != BM_OK) {
+                BM_LOG_ERROR("overlap prep acquire failed, ret: " << ret << " devId: " << options_.devId
+                                                                  << " entityId: " << id_);
+                return ret;
+            }
+            overlapAcquired_ = true;
+            return BM_OK;
+        }
         transportManager_ = transport::TransportManager::Create(transport::TT_SDMA, tagManager_);
     } else {
         transportManager_ = transport::TransportManager::Create(transport::TT_COMPOSE, tagManager_);
@@ -1362,6 +1387,11 @@ void MemEntityDefault::ReleaseResources()
         return;
     }
     dataOperator_.reset();
+    if (overlapAcquired_) {
+        /* 与 InitTransManager 的 Acquire 对称(进程级单例引用计数, 归零才真正释放) */
+        HybmOverlapPrep::GetInstance().Release();
+        overlapAcquired_ = false;
+    }
     if (transportManager_ != nullptr) {
         transportManager_->CloseDevice();
     }
