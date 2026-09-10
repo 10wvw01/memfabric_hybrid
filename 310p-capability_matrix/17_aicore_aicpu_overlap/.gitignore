@@ -1,0 +1,7 @@
+# 构建产物与运行生成物,勿提交(源文件见 Makefile 规则)
+mini_kfc
+deployer
+probe_e0a
+kfc_min.json
+aicpu_kernel/libmf_overlap_aicpu.json
+aicpu_kernel/libmf_overlap_v*.json
