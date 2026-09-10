@@ -6,7 +6,8 @@
 >   已验证的 v43 配方
 > - 已定决策：**开关切换接入**（默认 host 编排，env 开关 opt-in + 探测回退）、
 >   **deployer+KFC 部署链先行**（OPP .run 产品化后置）、**一期范围 = 卡内双 die G2G + batch**
-> - 上游依据：xcclpp `examples/tutorials/aicpu-310p3/README.md`（机制知识档案，v43 双拓扑 PASS）、
+> - 上游依据：xcclpp **main 分支** `examples/tutorials/aicpu-310p3/`（PR #27 合入，机制知识档案
+>   + 0908 模式矩阵定案）、
 >   `memfabric-310p-内存池化方案.md`（D1-D9 决策）、`310p-2rank-vmm-开发计划.md`（前置工程，
 >   已验收）、`docs/架构概览.md`（第 5 章数据面插槽机制）
 
@@ -34,7 +35,7 @@ host 编排：`HostDataOpAclMemcpy`（`src/hybm/csrc/data_operation/host/hybm_da
 | X2 | **提交链**：SQE 直写 sqBase（`dc cvac` 逐 cacheline 刷）→ `halSqCqConfig(SQ_TAIL)` doorbell（CP1 内 HAL devId=**die 号**，host 设备号 %2） | `submitSqe`；v41 实测 tail 落寄存器、v43 后 head 前进（TSFW 消费） |
 | X3 | **CP 流配方**：`aclrtCreateStreamWithConfig(ACL_STREAM_DEVICE_USE_ONLY)` + `rtStreamGetSqid`（libruntime.so 内部符号）取 sqId | `aicpu_sqe_mpi.cc:146-156` |
 | X4 | **远端内存 IPC Case A**：接收方 P2P policy 分配 + `GetExportKey(flag=0)` + `SetImportPid` + `ImportByKey`（flag 按 `aclrtGetDevicesTopo` 选 HCCS/PHB） | 双拓扑（卡内双 die / 跨卡 PCIe）4MB 全量比对 PASS |
-| X5 | **完成检测**：NOTIFY_RECORD SQE（type=6）+ host `aclrtWaitAndResetNotify` 实测 PASS；等待后必须补 `SynchronizeStream`（notify 状态残留误触发） | completeMode=1 |
+| X5 | **完成检测（main 模式矩阵 0908 定案）**：生产配方 = **completeMode 0（flag-SQE 哨兵轮询）**：kernel 尾部追加 8B SDMA 哨兵搬运 + `dc civac` 轮询，PASS；NOTIFY_RECORD（type=6，mode 1）仅对照用——**310P3 notify 不触发（E3 证伪）**，流内 wait 任务死等不放行且 timeout 不生效（sync/destroy 永久挂死），完成判据退化为数据比对 | main `README.md` 模式矩阵表 + kernel 头注释；wgm-dev4 的 CQE 化（mode 2）实测受阻已回退，未进 main |
 | X6 | **部署链（CP1）**：deployer（`CUSTAICPUKernel` json mode=1 落真 .so）→ KFC `cat` 复制到 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`（改名避免 PID 后缀多版本拼接）→ launch 用 `AICPUKernel` json（cpuMode=0） | 全链真机 PASS；CMS 验签墙只拦 common-sink 直推通道 |
 | X7 | **部署链已知坑**：并发 deployer 互斥（多设备须串行）；隔夜文件被清（跑前验证门 `grep -q <symbol>`）；KFC 非特权身份、单条短命令稳定（>3 段串联易 507018）；ssid 不可硬编码（随启动变化，kernel 内 `drvMemSmmuQuery` 活查询） | README 部署链档案 |
 | X8 | **flag-SQE 兼容模式**：8B SDMA 哨兵搬运 + `dc civac` 轮询（zbal 同款），25s 上限（< AICPU watchdog 30s） | completeMode=0 |
@@ -100,7 +101,7 @@ flag 完成检测先例。
 | D3 | **部署形态：deployer+KFC 先行** | POC 期复刻 xcclpp 部署链（X6）；OPP `.run`（复用 `script/kernel/build_ops_run.sh`）后置 backlog | 最快见效；OPP 在 310P3 的分发兼容性未验证过，不阻塞主线 |
 | D4 | **每笔 copy 一次 launch，不做常驻** | batch N 段一次 launch + kernel 内攒批 doorbell | CP1 watchdog 30s 杀常驻进程；hcomm/zbal 均按需 launch |
 | D5 | **方向分层** | 一期 G2G 三方向（GD2GD 含跨 die）走 SQE；H2G/G2H 委托 `aclrtMemcpy` 混合路径（日志明确标注） | 见非目标；混合路径语义与现有算子一致 |
-| D6 | **完成检测** | NOTIFY_RECORD + `aclrtWaitAndResetNotify`（后补 `SynchronizeStream`，X5）；flag-SQE 轮询作降级模式保留 | 对齐 xcclpp 已验证配方 |
+| D6 | **完成检测** | **flag-SQE 哨兵轮询**（kernel 尾部哨兵 + `dc civac` 轮询，main 生产配方 PASS）；NOTIFY_RECORD 仅实验保留（310P3 notify 不触发 + 流内 wait 挂死，X5）——若实验 NOTIFY，**禁止在流内 enqueue wait 任务** | 对齐 xcclpp main 模式矩阵定案 |
 | D7 | **wire 契约单一事实源** | `hybm_aicpu_sqe_contract.h`：纯 POD、static_assert 锁布局、hcc/g++ 双工具链可编 | 照 `aicpu_sqe_contract.h`（xcclpp）与 `hybm_batch_transfer.h`（本仓）先例 |
 | D8 | **符号层封装** | `rtStreamGetSqid`（libruntime）等新符号全部进 `DlAclApi` 弱加载，缺失即回退 | 内部符号有 CANN 版本漂移风险，弱加载 + 探测是防线 |
 
@@ -122,8 +123,9 @@ flag 完成检测先例。
 - 失败 → **Plan B**：`HybmAclVmmSegment` 增加 IPC Case A 导入模式（P2P policy + ImportByKey，
   xcclpp 配方现成，改动集中在段层）。
 
-**E0c 完成检测 + 双向（~0.5 天）**：NOTIFY_RECORD + `WaitAndResetNotify`（补 SynchronizeStream）；
-双方互为发起方各跑一轮；flag 模式作对照。
+**E0c 完成检测 + 双向（~0.5 天）**：flag-SQE 哨兵轮询为主验证（main 生产配方）；
+NOTIFY 仅作对照（已知不触发 + 挂死风险，**不得 enqueue 流内 wait**）；
+双方互为发起方各跑一轮。
 
 > P0 全部在 `310p-capability_matrix/` 风格的独立实验目录做（`17_aicpu_sqe/`，不进主线构建），
 > 产物为实验报告追加进本文件（仿 F1-F20 格式）。
@@ -142,7 +144,7 @@ NOTIFY_RECORD；流控：SQ 环满分批提交。CMakeLists 追加源文件。
 
 **WP3 `HostDataOpAicpuSqe`**（新 DataOperator，对照 AclMemcpy 结构）：
 - `Initialize`：读开关 → 建 CP 流 → sqId/streamId → kernel 加载 → 冒烟探测（D2）；
-- `DataCopy`(D2D)：param 写 GM → launch → notify 等待；
+- `DataCopy`(D2D)：param 写 GM → launch →（kernel 内 flag-SQE 轮询）→ `SynchronizeStream` 等待；
 - `BatchDataCopy`：N 段一次 launch + 攒批 doorbell（**核心收益点**）；
 - H2G/G2H：委托 `aclrtMemcpy`（D5）；
 - 错误自恢复：stream 重建照抄 AclMemcpy 的 `SyncStream` 恢复模式。
@@ -154,7 +156,7 @@ NOTIFY_RECORD；流控：SQ 环满分批提交。CMakeLists 追加源文件。
 ### P2 语义完整 + 07 验收（~1 周）
 
 - 双 rank 双向并发（每 die CP1 独立部署，07 双进程模型；deployer 串行部署规则见 X7）；
-- `DataCopyAsync` 真异步 + `Wait` 兑现（D6）；
+- `DataCopyAsync` 真异步 + `Wait` 兑现（一期可先同步化，完成检测按 D6 flag 轮询）；
 - 资源生命周期：池 destroy 时 CP 流/kernel/notify 清理顺序、deployer 保活进程的拉起与退出管理；
 - **验收：07 示例 AICPU 模式三阶段 mismatch=0 + 干净退出**（复用
   `310p-2rank-vmm-开发计划.md` 第八节命令，`/tmp` 二进制放 `/tmp` 之外——07 的 WORK_DIR
@@ -221,7 +223,9 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 - **TODO-5**：完成检测 CQE 化（`halCqReportRecv` 设备侧正路，携带 errorCode 可判"搬错了"，
   优于 notify 只能判"搬完了"）。**hcomm 生产配方已源码证实**（aicpu_hccl_sqcq.cc:289-315
   `CqReportRecv`）：`timeout=0` 非阻塞 + `task_id=0xFFFF` 全收 + 非 DRV_LOGIC_TYPE 时
-  `cqe_num=MAX_REPORT_CNT`；`AC_SQE_REV_MAX_CNT=32`（aicpu_hccl_sqcq.h:126）
+  `cqe_num=MAX_REPORT_CNT`；`AC_SQE_REV_MAX_CNT=32`（aicpu_hccl_sqcq.h:126）。
+  **风险预告**：xcclpp wgm-dev4 的 B1 实验（completeMode=2）在 310P3 实测 CQE 受阻后回退
+  （保持 mode 0，未进 main）——实施前先复核其受阻根因（wgm-dev4 提交 82224c1/8f0d684）
 
 ## 附录 A：xcclpp 移植配方速查（实施时直接对照）
 
@@ -280,5 +284,6 @@ slot → `dc cvac` 逐 cacheline 刷 → doorbell（GM 写 `sqRegBase+0x8` 或 `
 4. 复制时改名（文件名带 PID 后缀，glob 多版本拼接 = 损坏 ELF）；
 5. 正式验证前跑验证门（grep 符号）；deployer 保活时长按实验窗口设；
 6. KFC：单条短命令；多段串联（>3 段 / >2000 字符）拆单条 + 重试；精简 rootfs 无 `ls`/`od`/`base64`；
-7. `aclrtWaitAndResetNotify` 后必须补 `SynchronizeStream`（状态残留误触发）；
+7. NOTIFY 通道在 310P3 已证伪（notify 不触发 E3 + 流内 wait 挂死）：生产完成检测用
+   flag-SQE 哨兵轮询（main 定案）；若实验 NOTIFY，勿在流内 enqueue wait 任务；
 8. result/ovf buffer 必须 `ACL_MEM_MALLOC_HUGE_FIRST`（NORMAL_ONLY 落特殊段 SDMA 不可翻译）。
