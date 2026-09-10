@@ -1,6 +1,6 @@
 # 310P AICore×AICPU 协同模式开发计划（V2，xcclpp aicpu-aicore-310p3 迁移）
 
-> **状态：P0/P1 全部完成（E0a/E0b/E0c、WP1-WP5 均 2026-09-10 实机通过，M0/M1 达成）；P2（08 示例+流水）待启动**
+> **状态：P0/P1/P2 全部完成（E0a/E0b/E0c、WP1-WP5、08 示例均 2026-09-10 实机通过，M0/M1/M2 达成）；P3（UT/加固）待启动**
 > - **V2 勘正**：迁移源 = xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（**AICore×AICPU 协同**，
 >   AICore 产数据 → AICPU 编排 SDMA 跨卡搬运 → 对端 AICore 消费，计算-通信重叠）。
 >   V1 误选 `aicpu-310p3`（纯 AICPU 搬运、host 每笔 launch、无 AICore 协同）——该方案整体降级为 TODO-0。
@@ -233,7 +233,15 @@ mini AICore kernel（bisheng dav-2002：写邮箱/轮询 flag）+ 编排 kernel�
 **P1 验收**：E0c 场景产品化重跑（不开用户 kernel，用测试 AICore kernel）；开关关闭时 SHM 行为与
 现版本一致（回归）。
 
-### P2 08 示例 + 验收（~1 周）
+### P2 08 示例 + 验收（~1 周）—— ✅ 已完成（2026-09-10，M2 达成）
+
+> **实测（dev0↔dev1，`/tmp/ex08` 双进程）**：① mode13 闭环 103.76ms（数据校验通过）；
+> ② mode13×8 串行 830.65ms；③ **mode14 流水 103.61ms——加速比 8.02x（理想线性 8x，
+> 通信完全被计算/生产掩盖）**，1MB 全量 262144 字 mismatch=0，head=36 条 SQE 计数全自洽。
+> 实施：`hybm_overlap_submit_pipelined`（mode14 公共装配，chunks≤64 邮箱槽约束）+
+> `smem_shm_overlap_launch_pipelined`；08 示例四角色 AICore kernel（单块产/消费+流水产/消费），
+> 标志槽按轮次分区（免清池内标志）、串行阶段轮间会合（防回程 SDMA 数据 hazard）、
+> ResetWorkspace 清邮箱 ring（防旧值污染轮询）。
 
 - 新建 `examples/memory_pool/01_basic/08_310p_aicore_aicpu_overlap/`（README + .asc + 运行脚本，
   对齐 xcclpp demo 结构与 01-07 示例规范）：双 rank 双 die SHM 池 → rank0 AICore 产 pattern →
