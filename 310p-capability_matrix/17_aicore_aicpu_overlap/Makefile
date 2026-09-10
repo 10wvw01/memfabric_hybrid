@@ -1,13 +1,14 @@
-# 17_aicore_aicpu_overlap — E0a: MemFabric 构建的 AICore×AICPU 协同编排 kernel
-# 在 CP1 内执行 + SQE 直投闭环验收（310p-aicore-aicpu-开发计划.md P0-E0a）
+# 17_aicore_aicpu_overlap — E0a/E0b/E0c: MemFabric AICore×AICPU 协同验收三连
+# (310p-aicore-aicpu-开发计划.md P0; P1-WP1 起 kernel 源在 src/hybm/ops/hybm_kernel/)
 #
 # 目标:
-#   make kernel      编译 AICPU 编排 kernel .so + CUST 迁移 json + v1 版本对
-#                    (hcc 交叉编译, 与 src/hybm/ops/hybm_kernel 同工具链)
+#   make kernel      编译 AICPU 编排 kernel .so + CUST 迁移 json + v$(KVER) 版本对
+#                    (hcc, 与主构建 mf_overlap_kernel 目标字节等价)
 #   make host_tools  编译 mini_kfc / deployer (g++, KFC 部署链工具)
-#   make probe       编译 E0a 验收探针 (g++ + libruntime 内部符号)
+#   make probe       E0a 验收探针
+#   make probe_e0b   E0b 池 GVA 探针(链接 memfabric 静态库)
+#   make probe_e0c   E0c 池上协同探针(bisheng host+AICore 统一编译)
 #   make all         以上全部
-#   make clean
 #
 # 纪律: CP1 按文件名 dlopen 缓存 —— 改 kernel 必 bump KVER 再部署
 include ../common.mk
@@ -16,6 +17,19 @@ CANN_HOME ?= /usr/local/Ascend/cann-9.1.0
 AICPU_CC := $(CANN_HOME)/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++
 AICPU_DIR := aicpu_kernel
 KVER ?= 1
+
+# ---- 仓库根与单一事实源(P1-WP1 起 kernel/contract 在主构建树) ----
+PROJ_ROOT := $(abspath ../..)
+KERNEL_SRC_DIR := $(PROJ_ROOT)/src/hybm/ops/hybm_kernel
+KERNEL_SRC := $(KERNEL_SRC_DIR)/hybm_overlap_kernel.cc
+KERNEL_CONTRACT := $(KERNEL_SRC_DIR)/hybm_overlap_contract.h
+KERNEL_INC := -I$(KERNEL_SRC_DIR)
+
+# 仓库根构建产物: cmake -B build -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF && cmake --build build -j
+MF_LIBS := $(PROJ_ROOT)/build/src/smem/csrc/libmf_smem.a \
+           $(PROJ_ROOT)/build/src/hybm/csrc/libmf_hybm_core.a \
+           $(PROJ_ROOT)/build/src/acc_links/csrc/libacc_tcp_net.a
+SMEM_INC := -I$(PROJ_ROOT)/src/smem/include/host
 
 # kernel 产物: 迁移源 so(CUST 通道用) + 版本对 so(launch 用, KVER 纪律)
 AICPU_SO := $(AICPU_DIR)/libmf_overlap_aicpu.so
@@ -44,35 +58,28 @@ deployer: deployer.cpp
 	$(HOST_CXX) $(HOST_CXXFLAGS) -o $@ $< $(HOST_LDFLAGS)
 
 # ---------- E0a 验收探针 ----------
-probe: probe_e0a.cc hybm_overlap_contract.h
-	$(HOST_CXX) $(HOST_CXXFLAGS) -o probe_e0a $< $(HOST_LDFLAGS)
+probe: probe_e0a.cc $(KERNEL_CONTRACT)
+	$(HOST_CXX) $(HOST_CXXFLAGS) $(KERNEL_INC) -o probe_e0a $< $(HOST_LDFLAGS)
 
-# ---------- E0b 池 GVA 探针(链接 memfabric 静态库, 07 示例同款) ----------
-# 仓库根构建产物: cmake -B build -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF && cmake --build build -j
-PROJ_ROOT := $(abspath ../..)
-MF_LIBS := $(PROJ_ROOT)/build/src/smem/csrc/libmf_smem.a \
-            $(PROJ_ROOT)/build/src/hybm/csrc/libmf_hybm_core.a \
-            $(PROJ_ROOT)/build/src/acc_links/csrc/libacc_tcp_net.a
-SMEM_INC := -I$(PROJ_ROOT)/src/smem/include/host
-
-probe_e0b: probe_e0b.cc hybm_overlap_contract.h $(MF_LIBS)
-	$(HOST_CXX) $(HOST_CXXFLAGS) $(SMEM_INC) -w -o $@ $< \
+# ---------- E0b 池 GVA 探针 ----------
+probe_e0b: probe_e0b.cc $(KERNEL_CONTRACT) $(MF_LIBS)
+	$(HOST_CXX) $(HOST_CXXFLAGS) $(KERNEL_INC) $(SMEM_INC) -w -o $@ $< \
 	    -Wl,--start-group $(MF_LIBS) -Wl,--end-group $(HOST_LDFLAGS) -pthread
 
 # ---------- E0c 池上协同探针(bisheng 统一编译 host+AICore kernel, dav-2002) ----------
 BISHENG := $(CANN_HOME)/bin/bisheng
 ASC_INC := -I$(CANN_HOME)/aarch64-linux/include -I$(CANN_HOME)/aarch64-linux/ascendc/include
 
-probe_e0c: probe_e0c.asc hybm_overlap_contract.h $(MF_LIBS)
+probe_e0c: probe_e0c.asc $(KERNEL_CONTRACT) $(MF_LIBS)
 	$(BISHENG) --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc $< -x none -o $@ \
-	    $(ASC_INC) $(SMEM_INC) -I. \
+	    $(ASC_INC) $(KERNEL_INC) $(SMEM_INC) -I. \
 	    -Wl,--start-group $(MF_LIBS) -Wl,--end-group $(HOST_LDFLAGS) -pthread -lm
 
-# ---------- AICPU 编排 kernel (hcc 交叉编译, xcclpp 同款 flags) ----------
+# ---------- AICPU 编排 kernel (hcc, 与主构建 mf_overlap_kernel 目标字节等价) ----------
 kernel: $(AICPU_SO) $(AICPU_JSON_CUST) $(VSO) $(VJSON)
 
-$(AICPU_SO): $(AICPU_DIR)/hybm_overlap_kernel.cc hybm_overlap_contract.h
-	$(AICPU_CC) -shared -O2 -std=c++17 -fPIC -o $@ $<
+$(AICPU_SO): $(KERNEL_SRC) $(KERNEL_CONTRACT)
+	$(AICPU_CC) -shared -O2 -std=c++17 -fPIC -o $@ $(KERNEL_SRC)
 
 # CUST 迁移 json: mode=1 专用(opKernelLib=CUSTAICPUKernel, deployer 喂这个)
 $(AICPU_JSON_CUST):

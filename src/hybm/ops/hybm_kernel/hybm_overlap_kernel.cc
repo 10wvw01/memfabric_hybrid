@@ -1,12 +1,14 @@
-// MemFabric 310P AICore×AICPU 协同编排 kernel (310P3, E0a 实验)
+// MemFabric 310P AICore×AICPU 协同编排 kernel (310P3, 主构建产物)
 //
 // 溯源: fork 自 xcclpp main examples/tutorials/aicpu-aicore-310p3/aicpu_kernel/
-// xcclpp_overlap_aicpu.cpp (MIT), 按 310p-aicore-aicpu-开发计划.md P0-E0a 迁移;
+// xcclpp_overlap_aicpu.cpp (MIT), 按 310p-aicore-aicpu-开发计划.md 迁移;
 // 重命名 XcclppAicpuSqeRun → HybmOverlapRun (入口/json functionName),
-// XcclppAicpuSqeParam/Result → HybmOverlapParam/Result, include 改本目录契约头,
-// 其余逐行保留 (SQE 配方/提交链/轮询纪律均已 hcomm 源码级证实, 见计划附录 A)。
-// so 名 libmf_overlap_v$(KVER).so — 前缀隔离, 与 xcclpp 的 so 可同设备共存
-// (CP1 按文件名 dlopen 缓存, 改 kernel 必 bump KVER)。
+// XcclppAicpuSqeParam/Result → HybmOverlapParam/Result, 其余逐行保留
+// (SQE 配方/提交链/轮询纪律均已 hcomm 源码级证实, 见计划附录 A)。
+// P0 实证记录(2026-09-10 dev0/dev0↔dev1): E0a CP1 闭环/E0b 池 GVA 可译/
+// E0c 八步全链 三实验一次通过, 见 310p-capability_matrix/17_aicore_aicpu_overlap/。
+// 产物 so 名 libmf_overlap_aicpu.so — 与 libcann_hybm_kernel.so 独立
+// (CP1 按文件名 dlopen 缓存, 改 kernel 必 bump 设备侧版本名 MF_OVERLAP_KVER)。
 //
 // 本文件提供 (param.submitMode, 支持域 13/14, 其余值拒绝 mainRet=950):
 //   13 = 八步闭环编排状态机 (单 chunk, role0 发送方 / role1 编排方)
@@ -62,7 +64,7 @@ struct HalSqCqQueryInfo {
 // ============================================================================
 
 // wire 契约 — 单一事实源 ../overlap_wire.hpp (static_assert 编译期锁布局)
-#include "../hybm_overlap_contract.h"
+#include "hybm_overlap_contract.h"
 
 
 // ============================================================================
