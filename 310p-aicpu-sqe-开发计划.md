@@ -99,7 +99,7 @@ flag 完成检测先例。
 |---|------|------|------|
 | D1 | **开关切换接入** | 新 env `MF_310P_DATA_OP_AICPU`（`MF_*` 主命名，遵循 `mf_env_define.h` 惯例），默认 0；`DataOperatorFactory::CreateSdmaDataOperator` 310P 分支按开关选 `HostDataOpAclMemcpy`（默认）/ `HostDataOpAicpuSqe`（新） | 回退安全：SQE 配方固件强相关，07 已验收链路不受影响；PR 可评审性好 |
 | D2 | **探测回退** | `HostDataOpAicpuSqe::Initialize` 内冒烟（建流→取 sqId→加载 kernel→提交一笔写读 own HBM 的 SQE→校验），任一步失败记 ERROR（含 deviceId/sqId/根因）置回退标记，数据面退回 AclMemcpy | 已知部署链脆弱（X7），回退是硬性设计 |
-| D3 | **部署形态：三段演进** | ① P0 外部脚本复刻 xcclpp 部署链（X6，隔离变量最快验证）；② **P2 起 opt-in 自部署**：`MF_310P_AICPU_SELF_DEPLOY=1` 时 Initialize 内完成部署——验证门先查（已部署跳过；**同卡对端已部署即命中**，X9）→ 按**卡分组**抢 config store 分布式锁（`DistributedLockGuard` 现成设施；**串行化粒度=卡**：同卡互斥、跨卡文件系统独立可并行，X9）→ mode=1 迁移 + KFC 复制 + 验证门 → mode=0 加载；③ OPP `.run` 产品化后自部署整段删除（移安装期）。**生命周期语义**：自部署文件与进程同生命周期（deployer 退出即清理链，天然对齐池生命周期，消除外部脚本的保活时长错配问题——xcclpp 隔夜文件消失实测）。**07 场景简化**：dev0/dev1 同卡 → **单次部署服务双 die** | 自部署是运行时能力（零外部步骤+生命周期正确）；外部脚本是 POC 手段；OPP 是产品终态。KFC（设备侧 shell 执行）进库代码需安全评审明示（风险表 R8） |
+| D3 | **部署形态：三段演进** | ① P0 外部脚本复刻 xcclpp 部署链（X6，隔离变量最快验证）；② **P2 起 opt-in 自部署**：`MF_310P_AICPU_SELF_DEPLOY=1` 时 Initialize 内完成部署——验证门先查（已部署跳过；**同卡对端已部署即命中**，X9）→ 按**卡分组**抢 config store 分布式锁（`DistributedLockGuard` 现成设施；**串行化粒度=卡**：同卡互斥、跨卡文件系统独立可并行，X9）→ mode=1 迁移 + KFC 复制 + 验证门 → mode=0 加载；③ **L0 OPP `.run` 安装期部署（产品终态）**——解锁条件与三堵墙详见 TODO-1；达成后自部署整段删除。**生命周期语义**：自部署文件与进程同生命周期（deployer 退出即清理链，天然对齐池生命周期，消除外部脚本的保活时长错配问题——xcclpp 隔夜文件消失实测）。**07 场景简化**：dev0/dev1 同卡 → **单次部署服务双 die** | 自部署是运行时能力（零外部步骤+生命周期正确）；外部脚本是 POC 手段；OPP 是产品终态。KFC（设备侧 shell 执行）进库代码需安全评审明示（风险表 R8） |
 | D4 | **每笔 copy 一次 launch，不做常驻** | batch N 段一次 launch + kernel 内攒批 doorbell | CP1 watchdog 30s 杀常驻进程；hcomm/zbal 均按需 launch |
 | D5 | **方向分层** | 一期 G2G 三方向（GD2GD 含跨 die）走 SQE；H2G/G2H 委托 `aclrtMemcpy` 混合路径（日志明确标注） | 见非目标；混合路径语义与现有算子一致 |
 | D6 | **完成检测** | **flag-SQE 哨兵轮询**（kernel 尾部哨兵 + `dc civac` 轮询，main 生产配方 PASS）；NOTIFY_RECORD 仅实验保留（310P3 notify 不触发 + 流内 wait 挂死，X5）——若实验 NOTIFY，**禁止在流内 enqueue wait 任务** | 对齐 xcclpp main 模式矩阵定案 |
@@ -252,8 +252,15 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 
 ## 九、后续 TODO（backlog，一期不做）
 
-- **TODO-1**：OPP `.run` 产品化部署（复用 `script/kernel/build_ops_run.sh`，需验证 310P3
-  OPP vendors 分发兼容性）
+- **TODO-1**：OPP `.run` 产品化部署（L0 安装期，**D3 终态**；复用 `script/kernel/build_ops_run.sh`）。
+  **当下被推迟的三堵墙（全部实测，xcclpp 包通道复现）**：① 设备端 CMS 验签拒收无签名包
+  （`verifyFlag [Only Huawei]`）；② 拒收**毒化宿主进程**（TsdOpen 失败 → `aclrtSetDevice`
+  507033——库形态不可接受的失败模式）；③ 解锁通道堵死（`custom-op-secverify-enable` 开关
+  容器内被拒需物理机；DCMI secverify 在 310P NOT_SUPPORT；user-certificate 需签发流程）。
+  对照：同为 OPP `.run` + AICPUKernel 的 `libcann_hybm_kernel.so` 在 A3 生产环境工作——
+  系 310P3 本机环境策略差异，非机制不可行。**解锁条件（其一即可切 L0 并删自部署）**：
+  拿到 user-certificate（官方第三方正解）或目标环境验签开关可关闭。通道侧无需改码
+  （包解压路径 `tsd_path_mgr.cpp:15` 即 CP1 搜索路径）
 - **TODO-2**：跨卡 PCIe（PHB）拓扑支持（xcclpp `make run_mpi DEVS="0 2"` 配方移植）
 - **TODO-3**：H2G/G2H 的 SQE 直译（host 内存注册 SMMU 实验）
 - **TODO-4**：Reduce SQE（xcclpp 已拿到 slot7 模板：type=0x09 opcode=2 fp32 SUM，AllReduce
