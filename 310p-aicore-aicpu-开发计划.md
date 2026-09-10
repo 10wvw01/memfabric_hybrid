@@ -1,6 +1,6 @@
 # 310P AICore×AICPU 协同模式开发计划（V2，xcclpp aicpu-aicore-310p3 迁移）
 
-> **状态：P0/P1/P2 全部完成（E0a/E0b/E0c、WP1-WP5、08 示例均 2026-09-10 实机通过，M0/M1/M2 达成）；P3（UT/加固）待启动**
+> **状态：P0/P1/P2 完成 + P3 核心项完成（2026-09-10：UT 五用例/回归/性能基线即 08 三阶段实测/架构文档更新）；FIP 故障注入集成与 OPP 产品化在 TODO**
 > - **V2 勘正**：迁移源 = xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（**AICore×AICPU 协同**，
 >   AICore 产数据 → AICPU 编排 SDMA 跨卡搬运 → 对端 AICore 消费，计算-通信重叠）。
 >   V1 误选 `aicpu-310p3`（纯 AICPU 搬运、host 每笔 launch、无 AICore 协同）——该方案整体降级为 TODO-0。
@@ -251,7 +251,18 @@ mini AICore kernel（bisheng dav-2002：写邮箱/轮询 flag）+ 编排 kernel�
   计算时间，两方向时间线 JSONL 输出）；
 - 部署：同卡单次部署（X9）；异常退出清理纪律照抄 07（`/dev/shm` 残留清理）。
 
-### P3 加固（~1 周）
+### P3 加固（~1 周）—— 核心项已完成（2026-09-10）
+
+> **UT**（`hybm_overlap_prep_test.cpp` 五用例全 PASS）：冒烟防护语义（UT stub 环境下
+> Acquire 必然失败且不置 ready、可重试、Release 幂等）/未就绪 API 全拒绝/chunks 边界
+> （参数检查先于就绪检查）/工作区布局不变式/smem 层无效 handle 拒绝。
+> **回归**：`HybmAclVmmSegmentTest` 67/67 PASS；`SmemShmTest` 8/27 处 ASAN 崩溃为存量
+> mockcpp 环境问题（与 2-rank 基线相同进度，附录 A4 在案）。
+> **性能基线**：即 08 示例三阶段实测（①mode13 闭环 103.76ms / ②串行×8 830.65ms /
+> ③流水 103.61ms——加速比 8.02x 理想线性）。**文档**：架构概览第 8 章平台表 310P 行
+> 已更新（协同模式入表）。
+> **遗留**：FIP 故障注入点集成（prep 失败路径已由 UT 覆盖，FIP 化为锦上添花）；
+> OPP `.run` 产品化（TODO-1 三堵墙不变）。
 
 - UT：310P 传输准备分支（mock DlAclApi 符号缺失→回退路径）、contract 布局锁、host API 参数校验；
 - 故障注入：kernel 未部署→明确报错、SQE 不消费→轮询预算超时上报（错误码带 die/sqId/chunk 序号）；
