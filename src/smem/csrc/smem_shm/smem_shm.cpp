@@ -473,3 +473,20 @@ SMEM_API void *smem_shm_overlap_get_workspace(smem_shm_t handle)
     }
     return entry->OverlapGetWorkspace();
 }
+
+SMEM_API int32_t smem_shm_overlap_launch_pipelined(smem_shm_t handle, void *dstGva, void *flagDoneGva,
+                                                   uint32_t chunks)
+{
+    SmemShmEntryPtr entry = nullptr;
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    if (ret != SM_OK || entry == nullptr) {
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
+        return SM_INVALID_PARAM;
+    }
+    ret = entry->OverlapLaunchPipelined(dstGva, flagDoneGva, chunks);
+    if (ret != SM_OK) {
+        SM_LOG_AND_SET_LAST_ERROR("overlap launch pipelined failed, result: " << ret << " chunks: " << chunks);
+        return ret;
+    }
+    return SM_OK;
+}

@@ -241,6 +241,21 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
 int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva);
 
 /**
+ * @brief [310P 协同模式] 提交一次多 chunk 流水搬运(mode14)
+ *
+ * 本端 AICore kernel 逐 chunk 产数据并写邮箱 ring(槽序号 = chunk 序号),
+ * 本接口触发的 AICPU 编排 kernel 逐 chunk 提交 SQE 对(每 chunk 一次 doorbell),
+ * 通信与对端 AICore 计算重叠; 等待最后一块标志即全部就位(FIFO 保序)。
+ *
+ * @param handle           [in] shm object
+ * @param dstGva           [in] 数据目的基址(对端池 GVA, kernel 内按 chunk 递增)
+ * @param flagDoneGva      [in] 标志数组目的基址(每槽 8B × chunks)
+ * @param chunks           [in] chunk 数(1~64, 受邮箱槽数约束)
+ * @return 0 if successful
+ */
+int32_t smem_shm_overlap_launch_pipelined(smem_shm_t handle, void *dstGva, void *flagDoneGva, uint32_t chunks);
+
+/**
  * @brief [310P 协同模式] 等待最近一次协同搬运完成
  * @param handle           [in] shm object
  * @return 0 if successful
