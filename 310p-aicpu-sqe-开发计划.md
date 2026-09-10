@@ -145,19 +145,35 @@ NOTIFY_RECORD；流控：SQ 环满分批提交。CMakeLists 追加源文件。
 
 **WP3 `HostDataOpAicpuSqe`**（新 DataOperator，对照 AclMemcpy 结构）：
 
-挂载点（为什么在 create2 而非 bm_init）：`smem_bm_create2 → SmemBmEntry::Initialize
-(smem_bm_entry.cpp:124) → hybm_create_entity → MemEntityDefault::Initialize
+挂载点（为什么在 create2 而非 bm_init）——先看初始化分级地图（全部实测锚点）：
+
+| 级 | 入口 | 内容 | 部署放这？ |
+|---|---|---|---|
+| L0 安装期 | OPP `.run` / `_provision.py` | kernel 装进 CANN OPP tree | 产品终态（D3-③） |
+| L1 进程级 | `smem_init` / `mf.initialize()` | 日志/TLS/last-error | ✗ 过早（不知道要不要建 SDMA 池） |
+| L1.5 引擎级 | `smem_bm_init` | store 连接/竞争、AutoRanking、`hybm_init`（SoC 探测/ptracer） | ✗ 进程级过粗（纯 DRAM/SHM 用户被迫部署） |
+| **L2 池级** | `MemEntityDefault::Initialize`（hybm_entity_default.cpp:106-133） | ①InitTagManager ②LoadExtendLibrary（dlopen）③InitSegment（不分配内存）④InitTransManager（**URMA 设备 kernel 在此加载**）⑤**InitDataOperator（★挂载点）** | ✓ |
+| L2.5 池资源 | smem_bm_entry.cpp:157-208 | reserve 窗口 → **alloc HBM/DRAM（:167，在算子 init 之后）** → export | ✗ 太晚且非资源语义 |
+| L3 成员级 | `smem_bm_join` | import/建链/mmap（可多次：rejoin/extend） | ✗ 一 join 一次，副作用叠动态回滚 |
+
+选 L2 的五条理由：①作用域精确（dataOpType 是池参数；HOST_SHM 池/SHM API 均不需要——
+AI_CORE_INITIATE 明确跳过 dataOperator，:1267-1270）；②资源准备语义统一（URMA kernel 加载
+在隔壁 InitTransManager、扩展库 dlopen 在 LoadExtendLibrary，同族先例）；③前置齐备（store 已连
+=分布式锁可用、SoC 已探测、deviceId/rankId 已知）；④回退决策点就在工厂路由（D1/D2），错误不
+跨层传播；⑤多池重复初始化由单例+引用计数兜底。调用链：`smem_bm_create2 →
+SmemBmEntry::Initialize(smem_bm_entry.cpp:124) → hybm_create_entity → MemEntityDefault::Initialize
 (hybm_entity_default.cpp:106) → InitDataOperator(:1264-1280) → HostComposeDataOp::Initialize
-(hybm_compose_data_op.cpp:32) → CreateSdmaDataOperator → Initialize()`。dataOpType 是池级参数，
-且一进程可多池并存（07 双池仅 HBM 池走 SDMA 位）；SHM（AI_CORE_INITIATE）不走 dataOperator
-（:1267-1270）天然不受影响。先例：URMA 设备 kernel 加载在同链 `InitTransManager →
-OpenDevice → load_kernel.cpp`。**多池防重复加载：进程级单例 + 引用计数**（binHandle/funcHandle
-全局复用，最后一个 UnInitialize 才释放——每 entity 各建一份 compose→sdma 算子）。
+(hybm_compose_data_op.cpp:32) → CreateSdmaDataOperator → Initialize()`。
+**多池防重复加载：进程级单例 + 引用计数**（binHandle/funcHandle 全局复用，最后一个
+UnInitialize 才释放——每 entity 各建一份 compose→sdma 算子）。
 部署边界（D3 三段演进）：P0/P1 为外部脚本前置步骤（不进 memfabric 代码）；P2 起 opt-in 自部署
 （`MF_310P_AICPU_SELF_DEPLOY=1`，Initialize 内完成，配置存储锁串行，文件生命周期=进程）；
 OPP 产品化后自部署删除、移安装期（`_provision.py` / `installation_aicpu_kernel.md` 先例）。
 
-- `Initialize`：读开关 → 建 CP 流 → sqId/streamId → kernel 加载 → 冒烟探测（D2）；
+- `Initialize`：读开关 → 建 CP 流 → sqId/streamId → kernel 加载 → 冒烟探测（D2）。
+  **时序约束（实测核实）**：算子 Initialize 时池内存尚未分配（`hybm_alloc_local_memory` 在
+  entity Initialize 返回后，smem_bm_entry.cpp:167）→ 冒烟探测**不得用池 GVA**，自备 scratch
+  （`aclrtMalloc` 小 buffer → SQE 写读校验 → 释放）；池内真实验证留给 P1 验收的 07 链路；
 - `DataCopy`(D2D)：param 写 GM → launch →（kernel 内 flag-SQE 轮询）→ `SynchronizeStream` 等待；
 - `BatchDataCopy`：N 段一次 launch + 攒批 doorbell（**核心收益点**）；
 - H2G/G2H：委托 `aclrtMemcpy`（D5）；
