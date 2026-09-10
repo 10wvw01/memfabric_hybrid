@@ -69,6 +69,12 @@ public:
         return ready_;
     }
 
+    /* 引用计数只读查询(UT 断言失败后归零/Release 幂等语义用) */
+    uint32_t GetRefCountForTest() const noexcept
+    {
+        return refCount_;
+    }
+
     /* 查询接口(WP4 设备头文件/WP5 host API 装配 param 用) */
     uint32_t GetSqId() const noexcept
     {
