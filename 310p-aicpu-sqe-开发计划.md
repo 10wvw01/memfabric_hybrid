@@ -143,6 +143,18 @@ NOTIFY_RECORD；流控：SQ 环满分批提交。CMakeLists 追加源文件。
 `LaunchKernelWithHostArgs`、notify 族、`aclrtDeviceGetBareTgid`。全部弱加载 + 探测。
 
 **WP3 `HostDataOpAicpuSqe`**（新 DataOperator，对照 AclMemcpy 结构）：
+
+挂载点（为什么在 create2 而非 bm_init）：`smem_bm_create2 → SmemBmEntry::Initialize
+(smem_bm_entry.cpp:124) → hybm_create_entity → MemEntityDefault::Initialize
+(hybm_entity_default.cpp:106) → InitDataOperator(:1264-1280) → HostComposeDataOp::Initialize
+(hybm_compose_data_op.cpp:32) → CreateSdmaDataOperator → Initialize()`。dataOpType 是池级参数，
+且一进程可多池并存（07 双池仅 HBM 池走 SDMA 位）；SHM（AI_CORE_INITIATE）不走 dataOperator
+（:1267-1270）天然不受影响。先例：URMA 设备 kernel 加载在同链 `InitTransManager →
+OpenDevice → load_kernel.cpp`。**多池防重复加载：进程级单例 + 引用计数**（binHandle/funcHandle
+全局复用，最后一个 UnInitialize 才释放——每 entity 各建一份 compose→sdma 算子）。
+部署（deployer+KFC）不进 memfabric 代码（POC 期外部脚本前置步骤）；OPP 产品化后移安装期
+（`_provision.py` / `installation_aicpu_kernel.md` 先例）。
+
 - `Initialize`：读开关 → 建 CP 流 → sqId/streamId → kernel 加载 → 冒烟探测（D2）；
 - `DataCopy`(D2D)：param 写 GM → launch →（kernel 内 flag-SQE 轮询）→ `SynchronizeStream` 等待；
 - `BatchDataCopy`：N 段一次 launch + 攒批 doorbell（**核心收益点**）；
