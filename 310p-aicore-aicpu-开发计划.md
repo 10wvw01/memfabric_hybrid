@@ -1,6 +1,6 @@
 # 310P AICore×AICPU 协同模式开发计划（V2，xcclpp aicpu-aicore-310p3 迁移）
 
-> **状态：P0 全部完成（E0a/E0b/E0c 均 2026-09-10 一次通过，M0 达成）；P1 骨架待启动**
+> **状态：P0/P1 全部完成（E0a/E0b/E0c、WP1-WP5 均 2026-09-10 实机通过，M0/M1 达成）；P2（08 示例+流水）待启动**
 > - **V2 勘正**：迁移源 = xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（**AICore×AICPU 协同**，
 >   AICore 产数据 → AICPU 编排 SDMA 跨卡搬运 → 对端 AICore 消费，计算-通信重叠）。
 >   V1 误选 `aicpu-310p3`（纯 AICPU 搬运、host 每笔 launch、无 AICore 协同）——该方案整体降级为 TODO-0。
@@ -191,7 +191,22 @@ mini AICore kernel（bisheng dav-2002：写邮箱/轮询 flag）+ 编排 kernel�
 > 轮询+ready 通知"上移 AICore 直接 dcci 池内标志，规避 AICPU 解引用池 VA，比 xcclpp 原版
 > role0/role1 非对称更简洁）。**P0 全部完成，M0 达成。**
 
-### P1 骨架（~1.5 周，5 个工作包）
+### P1 骨架（~1.5 周，5 个工作包）—— ✅ 已完成（2026-09-10，M1 达成）
+
+> 实施摘要：**WP2 为零代码缺口**（所需 ACL 符号 `CreateStreamWithConfig`/`StreamGetId`/`BinaryLoad`/
+> `GetFunction`/`KernelArgs+LaunchKernelWithConfig`/`rtStreamGetSqid` 仓库全部已有，URMA/DlRtApi 先例）。
+> WP1 kernel 迁入主构建（`mf_overlap_kernel` 目标，git mv 保留历史）。WP3 传输准备落地
+> （`hybm_overlap_prep` 单例 + InitTransManager 分支 + meta 扩展），途中修复**两个存量缺陷**：
+> ① SHM meta 区创建走 A3 halMem* 在 310P 失败（新增 `Hybm310PInitMetaGva` AclVmm 路径 + uninit 对称）；
+> ② `smem_shm_create` 从未透传 devId（恒 0，310P dieId 依赖——对齐 smem_bm 补 `GetDeviceId()`）。
+> WP4 设备头原语（notify/poll_flag/get_flag_addr——标志区按**物理段**末尾定位，symSize 含 1G 对齐
+> 尾部未映射）。WP5 host API（hybm C API + smem_shm overlap 族）。
+> **P1 验收**（`probe_p1_overlap` + `run_p1_overlap.sh`，dev0↔dev1）：八步全链**全部走产品 API**
+> （smem_shm_create → AICore 设备头原语 → smem_shm_overlap_launch/wait/get_result），r0 终态数据
+> mismatch=0/1024、双侧 mainRet=0/headAfter=4（冒烟 2+正式 2 条 SQE 自洽）；BM 路径回归（E0b）PASS。
+> 运维坑实测复现：**deployer 保活到期退出触发清理链删设备侧文件**——每次正式验证前必跑验证门
+> （`run_p1_overlap.sh` 内置 ensure_deploy）。另：bash `export X && cmd0 & cmd1 &` 的 `&` 优先级
+> 会使 export 只作用于第一个后台子 shell（E0b/E0c 时代探针不依赖 env 侥幸未爆，P1 排查记录）。
 
 **WP1 编排 kernel + wire 契约**（`src/hybm/ops/hybm_kernel/hybm_overlap_kernel.cc` +
 `hybm_overlap_contract.h`）：fork mode13/14 状态机（`cp1LiveQuery`/`querySsidAndStamp`/`buildStarsSdmaSqe`/

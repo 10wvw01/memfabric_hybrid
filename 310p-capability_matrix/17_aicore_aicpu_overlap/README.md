@@ -28,10 +28,13 @@
 | `probe_e0a.cc` | E0a 验收探针（六项判据，见下） |
 | `probe_e0b.cc` | E0b 池 GVA 探针（双 rank 双 die 池 + 两轮变体：轮A 纯本地src→peer池GVA / 轮B own池GVA→peer池GVA） |
 | `probe_e0c.asc` | E0c 池上协同探针（bisheng 统一编译 host + AICore kernel；八步语义全链） |
-| `Makefile` | hcc kernel + g++ 工具/探针 + bisheng E0c（与 src/hybm/ops/hybm_kernel 同工具链） |
+| `probe_p1_shm.cc` | P1/WP3 验证（smem_shm API 走产品化挂载路径 + meta 读回 + 引用计数） |
+| `probe_p1_overlap.asc` | P1 验收（八步全链**全走产品 API** + 设备头原语） |
+| `Makefile` | hcc kernel + g++ 工具/探针 + bisheng E0c/P1（与 src/hybm/ops/hybm_kernel 同工具链） |
 | `run_e0a.sh` | 一键：编译 → 部署（纪律见计划附录 A.4）→ 探针验收 |
 | `run_e0b.sh` | E0b 一键：部署保障（验证门+按需重部署）→ 双 rank 运行 → 结果判读 |
 | `run_e0c.sh` | E0c 一键：部署保障 → 双 rank 协同运行 → 八步全链验收 |
+| `run_p1_overlap.sh` | P1 验收一键：部署保障 → 双 rank 产品化全链 → 判定 |
 
 ## 用法
 
@@ -40,6 +43,7 @@ source /usr/local/Ascend/cann/set_env.sh   # 或 run 脚本内置 source
 bash run_e0a.sh 0                          # E0a: 部署到 dev0 并跑验收探针
 bash run_e0b.sh 0 1                        # E0b: 双 rank(同卡 die 对)池 GVA 探针
 bash run_e0c.sh 0 1                        # E0c: 双 rank 池上协同八步全链
+bash run_p1_overlap.sh 0 1                 # P1 验收: 八步全链产品化(产品 API)
 bash run_e0a.sh clean 0                    # 清理设备侧文件 + 杀 deployer
 ```
 
@@ -115,6 +119,14 @@ SQE 对）+ cache 纪律（ENTIRE clean/SINGLE clean/dcci）全链无一处失�
 mode13 role0 同构（"到达轮询+ready"上移 AICore，规避 AICPU 解引用池 VA）。
 
 **P0 三实验（E0a/E0b/E0c）全部一次通过——计划 M0 里程碑达成，可进入 P1 骨架。**
+
+**P1 验收 PASS（2026-09-10，dev0↔dev1，`run_p1_overlap.sh`）——八步全链产品化（M1 达成）**：
+
+全部走产品 API：`smem_shm_create`（SDMA 位 → InitTransManager 310P 协同分支 → prep 单例含冒烟）
+→ AICore kernel 用设备头原语（`smem_shm_overlap_notify`/`poll_flag`）→ `smem_shm_overlap_launch/
+wait/get_result`。实测 r0 终态数据 mismatch=0/1024 == pattern+0x100、结果标志到达、双侧 kernel
+mainRet=0/stage=5/headAfter=4（冒烟 2+正式 SQE 对 2 条自洽）、GVA 对称 1GB 段、标志区物理段定位。
+BM 路径回归（E0b）PASS。P1 实施详情与两个存量缺陷修复见 `310p-aicore-aicpu-开发计划.md` P1 摘要。
 
 ## 与后续实验的关系
 
