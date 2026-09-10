@@ -98,7 +98,7 @@ flag 完成检测先例。
 |---|------|------|------|
 | D1 | **开关切换接入** | 新 env `MF_310P_DATA_OP_AICPU`（`MF_*` 主命名，遵循 `mf_env_define.h` 惯例），默认 0；`DataOperatorFactory::CreateSdmaDataOperator` 310P 分支按开关选 `HostDataOpAclMemcpy`（默认）/ `HostDataOpAicpuSqe`（新） | 回退安全：SQE 配方固件强相关，07 已验收链路不受影响；PR 可评审性好 |
 | D2 | **探测回退** | `HostDataOpAicpuSqe::Initialize` 内冒烟（建流→取 sqId→加载 kernel→提交一笔写读 own HBM 的 SQE→校验），任一步失败记 ERROR（含 deviceId/sqId/根因）置回退标记，数据面退回 AclMemcpy | 已知部署链脆弱（X7），回退是硬性设计 |
-| D3 | **部署形态：deployer+KFC 先行** | POC 期复刻 xcclpp 部署链（X6）；OPP `.run`（复用 `script/kernel/build_ops_run.sh`）后置 backlog | 最快见效；OPP 在 310P3 的分发兼容性未验证过，不阻塞主线 |
+| D3 | **部署形态：三段演进** | ① P0 外部脚本复刻 xcclpp 部署链（X6，隔离变量最快验证）；② **P2 起 opt-in 自部署**：`MF_310P_AICPU_SELF_DEPLOY=1` 时 Initialize 内完成部署——验证门先查（已部署跳过）→ 抢 config store **分布式锁**（`DistributedLockGuard` 现成设施，多 rank/多进程串行）→ mode=1 迁移 + KFC 复制 + 验证门 → mode=0 加载；③ OPP `.run` 产品化后自部署整段删除（移安装期）。**生命周期语义**：自部署文件与进程同生命周期（deployer 退出即清理链，天然对齐池生命周期，消除外部脚本的保活时长错配问题——xcclpp 隔夜文件消失实测） | 自部署是运行时能力（零外部步骤+生命周期正确）；外部脚本是 POC 手段；OPP 是产品终态。KFC（设备侧 shell 执行）进库代码需安全评审明示（风险表 R8） |
 | D4 | **每笔 copy 一次 launch，不做常驻** | batch N 段一次 launch + kernel 内攒批 doorbell | CP1 watchdog 30s 杀常驻进程；hcomm/zbal 均按需 launch |
 | D5 | **方向分层** | 一期 G2G 三方向（GD2GD 含跨 die）走 SQE；H2G/G2H 委托 `aclrtMemcpy` 混合路径（日志明确标注） | 见非目标；混合路径语义与现有算子一致 |
 | D6 | **完成检测** | **flag-SQE 哨兵轮询**（kernel 尾部哨兵 + `dc civac` 轮询，main 生产配方 PASS）；NOTIFY_RECORD 仅实验保留（310P3 notify 不触发 + 流内 wait 挂死，X5）——若实验 NOTIFY，**禁止在流内 enqueue wait 任务** | 对齐 xcclpp main 模式矩阵定案 |
@@ -152,8 +152,9 @@ NOTIFY_RECORD；流控：SQ 环满分批提交。CMakeLists 追加源文件。
 （:1267-1270）天然不受影响。先例：URMA 设备 kernel 加载在同链 `InitTransManager →
 OpenDevice → load_kernel.cpp`。**多池防重复加载：进程级单例 + 引用计数**（binHandle/funcHandle
 全局复用，最后一个 UnInitialize 才释放——每 entity 各建一份 compose→sdma 算子）。
-部署（deployer+KFC）不进 memfabric 代码（POC 期外部脚本前置步骤）；OPP 产品化后移安装期
-（`_provision.py` / `installation_aicpu_kernel.md` 先例）。
+部署边界（D3 三段演进）：P0/P1 为外部脚本前置步骤（不进 memfabric 代码）；P2 起 opt-in 自部署
+（`MF_310P_AICPU_SELF_DEPLOY=1`，Initialize 内完成，配置存储锁串行，文件生命周期=进程）；
+OPP 产品化后自部署删除、移安装期（`_provision.py` / `installation_aicpu_kernel.md` 先例）。
 
 - `Initialize`：读开关 → 建 CP 流 → sqId/streamId → kernel 加载 → 冒烟探测（D2）；
 - `DataCopy`(D2D)：param 写 GM → launch →（kernel 内 flag-SQE 轮询）→ `SynchronizeStream` 等待；
@@ -167,6 +168,11 @@ OpenDevice → load_kernel.cpp`。**多池防重复加载：进程级单例 + �
 
 ### P2 语义完整 + 07 验收（~1 周）
 
+- **自部署模式（D3-②）**：`MF_310P_AICPU_SELF_DEPLOY=1` 时 Initialize 内部署——验证门先查
+  （grep 符号，已部署跳过）→ 抢 config store 分布式锁（`DistributedLockGuard`）→ mode=1
+  CUSTAICPUKernel 加载+GetFunction 迁移 → KFC `cat` 复制到本设备 CP1 搜索路径 → 验证门 →
+  mode=0 加载；多 rank 各自设备按锁串行（deployer 并发互斥，X7）。**文件生命周期=进程生命周期，
+  进程退出自动清理**。默认关闭（外部队列预部署仍为主路径）
 - 双 rank 双向并发（每 die CP1 独立部署，07 双进程模型；deployer 串行部署规则见 X7）；
 - `DataCopyAsync` 真异步 + `Wait` 兑现（一期可先同步化，完成检测按 D6 flag 轮询）；
 - 资源生命周期：池 destroy 时 CP 流/kernel/notify 清理顺序、deployer 保活进程的拉起与退出管理；
@@ -195,6 +201,8 @@ kernel 侧（hcc）代码遵循 `hybm_batch_transfer.cc` 现有风格。每个 P
 |------|------|------|
 | E0b：AclVmm VA 不被 SDMA ssid 翻译 | **高（唯一可推翻架构项）** | P0 前置验证；Plan B 段层 IPC Case A |
 | deployer+KFC 是 POC 形态（保活/易失/非特权） | 高 | 一期验收不承诺产品可用；OPP 路线在 backlog；探测回退兜底 |
+| R8：自部署把 KFC（设备侧 shell 执行）引入库代码 | 中 | 默认关闭（opt-in env）+ 部署路径全链日志留痕；上线前过安全评审（PR 模板安全项）；OPP 终态删除该路径 |
+| R9：自部署并发（多 rank/多进程同时 mode=1）| 中 | config store 分布式锁串行（`DistributedLockGuard` 现成）；锁等待超时回退外部队列 |
 | `rtStreamGetSqid` 为 libruntime 内部符号，CANN 升级漂移 | 中 | D8 弱加载 + 探测；声明锁定 CANN 9.1 |
 | SQE 配方固件强相关（X1 教训：type 错=静默假成功） | 中 | D2 冒烟探测；配方逐字段注释出处；失败回退 |
 | AICPU 单笔延迟劣化引发"退步"质疑 | 确定 | 1.4 预期管理 + P3 双表量化 |
