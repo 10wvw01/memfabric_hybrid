@@ -32,7 +32,7 @@ HOST_TOOLS := mini_kfc deployer
 
 .PHONY: all kernel host_tools probe clean
 
-all: host_tools kernel probe
+all: host_tools kernel probe probe_e0b
 
 # ---------- host 工具 (KFC 部署链, 源自 xcclpp aicpu-310p3 单一事实源的 fork) ----------
 host_tools: $(HOST_TOOLS)
@@ -46,6 +46,18 @@ deployer: deployer.cpp
 # ---------- E0a 验收探针 ----------
 probe: probe_e0a.cc hybm_overlap_contract.h
 	$(HOST_CXX) $(HOST_CXXFLAGS) -o probe_e0a $< $(HOST_LDFLAGS)
+
+# ---------- E0b 池 GVA 探针(链接 memfabric 静态库, 07 示例同款) ----------
+# 仓库根构建产物: cmake -B build -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF && cmake --build build -j
+PROJ_ROOT := $(abspath ../..)
+MF_LIBS := $(PROJ_ROOT)/build/src/smem/csrc/libmf_smem.a \
+            $(PROJ_ROOT)/build/src/hybm/csrc/libmf_hybm_core.a \
+            $(PROJ_ROOT)/build/src/acc_links/csrc/libacc_tcp_net.a
+SMEM_INC := -I$(PROJ_ROOT)/src/smem/include/host
+
+probe_e0b: probe_e0b.cc hybm_overlap_contract.h $(MF_LIBS)
+	$(HOST_CXX) $(HOST_CXXFLAGS) $(SMEM_INC) -w -o $@ $< \
+	    -Wl,--start-group $(MF_LIBS) -Wl,--end-group $(HOST_LDFLAGS) -pthread
 
 # ---------- AICPU 编排 kernel (hcc 交叉编译, xcclpp 同款 flags) ----------
 kernel: $(AICPU_SO) $(AICPU_JSON_CUST) $(VSO) $(VJSON)
@@ -66,6 +78,6 @@ $(VJSON): $(VSO)
 	@test -f $@ || printf '{\n    "HybmOverlapRun": {\n        "opInfo": {\n            "opKernelLib": "AICPUKernel",\n            "kernelSo": "libmf_overlap_v$(KVER).so",\n            "functionName": "HybmOverlapRun"\n        }\n    }\n}\n' > $@
 
 clean:
-	rm -f $(HOST_TOOLS) probe_e0a kfc_min.json
+	rm -f $(HOST_TOOLS) probe_e0a probe_e0b kfc_min.json
 	rm -f $(AICPU_SO) $(AICPU_JSON_CUST)
 	rm -f $(AICPU_DIR)/libmf_overlap_v*.so $(AICPU_DIR)/libmf_overlap_v*.json

@@ -26,14 +26,17 @@
 | `deployer.cpp` | CUST 迁移部署工具（fork，functionName 改 HybmOverlapRun） |
 | `mini_kfc.cpp` | KFC 设备命令通道工具（fork，行为逐字节一致） |
 | `probe_e0a.cc` | E0a 验收探针（六项判据，见下） |
+| `probe_e0b.cc` | E0b 池 GVA 探针（双 rank 双 die 池 + 两轮变体：轮A 纯本地src→peer池GVA / 轮B own池GVA→peer池GVA） |
 | `Makefile` | hcc kernel + g++ 工具/探针（与 src/hybm/ops/hybm_kernel 同工具链） |
 | `run_e0a.sh` | 一键：编译 → 部署（纪律见计划附录 A.4）→ 探针验收 |
+| `run_e0b.sh` | E0b 一键：部署保障（验证门+按需重部署）→ 双 rank 运行 → 结果判读 |
 
 ## 用法
 
 ```bash
 source /usr/local/Ascend/cann/set_env.sh   # 或 bash run_e0a.sh 内置 source
-bash run_e0a.sh 0                          # 部署到 dev0 并跑验收探针
+bash run_e0a.sh 0                          # E0a: 部署到 dev0 并跑验收探针
+bash run_e0b.sh 0 1                        # E0b: 双 rank(同卡 die 对)池 GVA 探针
 bash run_e0a.sh clean 0                    # 清理设备侧文件 + 杀 deployer
 ```
 
@@ -79,6 +82,17 @@ bash run_e0a.sh clean 0                    # 清理设备侧文件 + 杀 deploye
 附注：CP 流 streamId=240 / sqId=241 / dieId=0；部署链（deployer load/getfunc=0 →
 KFC cat/chmod → 双验证门）全程纪律化执行无异常。**E0a 出口条件达成**：MemFabric 侧
 hcc 构建 + 部署链复刻 + CP1 内 SQE 直投闭环三项全部验证通过。
+
+**E0b PASS（2026-09-10，dev0↔dev1 双 die 32MB HBM 池，一次通过）——架构成立性裁决**：
+
+| 变体 | SQE src/dst | 结果 | 证明 |
+|------|------------|------|------|
+| 轮A | src=纯本地设备内存，dst=**peer 池 GVA**（AclVmm 导入映射） | PASS（headAfter 0→2，数据 1024/1024 一致） | **导入 VA 可被 SDMA 经 SMMU ssid 翻译** |
+| 轮B | src=**own 池 GVA**（本端窗口 VA），dst=**peer 池 GVA** | PASS（headAfter 2→4，数据 1024/1024 一致） | 本端窗口 VA 同样可译——真实使用形态全通 |
+
+GVA 对称基址 0x12c140000000（与 07 实测一致）；ssid=2 实时查询；标志 SQE 8B 到达。
+**结论：AclVmm 池 GVA 可直接作 SQE src/dst，数据面架构成立，无需 Plan B（段层 IPC Case A
+导入模式不启动）。** AICPU 全程未解引用池 VA（D9 纪律），池地址仅出现在 SQE 字段。
 
 ## 与后续实验的关系
 
