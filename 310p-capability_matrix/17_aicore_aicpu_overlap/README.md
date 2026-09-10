@@ -27,16 +27,19 @@
 | `mini_kfc.cpp` | KFC 设备命令通道工具（fork，行为逐字节一致） |
 | `probe_e0a.cc` | E0a 验收探针（六项判据，见下） |
 | `probe_e0b.cc` | E0b 池 GVA 探针（双 rank 双 die 池 + 两轮变体：轮A 纯本地src→peer池GVA / 轮B own池GVA→peer池GVA） |
-| `Makefile` | hcc kernel + g++ 工具/探针（与 src/hybm/ops/hybm_kernel 同工具链） |
+| `probe_e0c.asc` | E0c 池上协同探针（bisheng 统一编译 host + AICore kernel；八步语义全链） |
+| `Makefile` | hcc kernel + g++ 工具/探针 + bisheng E0c（与 src/hybm/ops/hybm_kernel 同工具链） |
 | `run_e0a.sh` | 一键：编译 → 部署（纪律见计划附录 A.4）→ 探针验收 |
 | `run_e0b.sh` | E0b 一键：部署保障（验证门+按需重部署）→ 双 rank 运行 → 结果判读 |
+| `run_e0c.sh` | E0c 一键：部署保障 → 双 rank 协同运行 → 八步全链验收 |
 
 ## 用法
 
 ```bash
-source /usr/local/Ascend/cann/set_env.sh   # 或 bash run_e0a.sh 内置 source
+source /usr/local/Ascend/cann/set_env.sh   # 或 run 脚本内置 source
 bash run_e0a.sh 0                          # E0a: 部署到 dev0 并跑验收探针
 bash run_e0b.sh 0 1                        # E0b: 双 rank(同卡 die 对)池 GVA 探针
+bash run_e0c.sh 0 1                        # E0c: 双 rank 池上协同八步全链
 bash run_e0a.sh clean 0                    # 清理设备侧文件 + 杀 deployer
 ```
 
@@ -93,6 +96,25 @@ hcc 构建 + 部署链复刻 + CP1 内 SQE 直投闭环三项全部验证通过�
 GVA 对称基址 0x12c140000000（与 07 实测一致）；ssid=2 实时查询；标志 SQE 8B 到达。
 **结论：AclVmm 池 GVA 可直接作 SQE src/dst，数据面架构成立，无需 Plan B（段层 IPC Case A
 导入模式不启动）。** AICPU 全程未解引用池 VA（D9 纪律），池地址仅出现在 SQE 字段。
+
+**E0c PASS（2026-09-10，dev0↔dev1 双 die 池，一次通过）——八步语义全链 + AICore 访池裁决**：
+
+| 步 | 实测证据 |
+|----|---------|
+| ①② r0 AICore 产 pattern→池 + 邮箱 | status 0xA1/0xA2 递进 |
+| ③ r0 AICPU SQE 对→doorbell | mainRet=0，headBefore=0→headAfter=2 |
+| ④ r1 AICore dcci 轮询池内到达标志 | status 0xB1，flagVal=SENT_A(0xE0ECA001) |
+| ⑤ r1 AICore 读池+INC 写回 | status 0xB2 |
+| ⑥ r1 AICPU 回程 SQE 对 | mainRet=0，head 0→2（die1 ssid=5，与 die0 的 2 不同——按 die 区分实证） |
+| ⑦ r0 AICore 轮询结果标志 | status 0xA3，flagVal=SENT_B，pollIters≈139 万（八步往返时延的可观测度量） |
+| ⑧ r0 终态数据校验 | **mismatch=0/1024 == pattern+0x100**（r1 的 INC 经回程覆写） |
+
+**关键新结论**：① **AICore 可直接 GM 访问 AclVmm 池 GVA**（写 pattern/读改写 INC/dcci 轮询
+池内标志全通）——SHM API 设备发起语义在 310P 成立的基石；② 通知链三件套（邮箱/池内标志/
+SQE 对）+ cache 纪律（ENTIRE clean/SINGLE clean/dcci）全链无一处失败；③ 两侧 AICPU 均
+mode13 role0 同构（"到达轮询+ready"上移 AICore，规避 AICPU 解引用池 VA）。
+
+**P0 三实验（E0a/E0b/E0c）全部一次通过——计划 M0 里程碑达成，可进入 P1 骨架。**
 
 ## 与后续实验的关系
 

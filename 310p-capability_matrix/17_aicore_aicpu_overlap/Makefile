@@ -32,7 +32,7 @@ HOST_TOOLS := mini_kfc deployer
 
 .PHONY: all kernel host_tools probe clean
 
-all: host_tools kernel probe probe_e0b
+all: host_tools kernel probe probe_e0b probe_e0c
 
 # ---------- host 工具 (KFC 部署链, 源自 xcclpp aicpu-310p3 单一事实源的 fork) ----------
 host_tools: $(HOST_TOOLS)
@@ -59,6 +59,15 @@ probe_e0b: probe_e0b.cc hybm_overlap_contract.h $(MF_LIBS)
 	$(HOST_CXX) $(HOST_CXXFLAGS) $(SMEM_INC) -w -o $@ $< \
 	    -Wl,--start-group $(MF_LIBS) -Wl,--end-group $(HOST_LDFLAGS) -pthread
 
+# ---------- E0c 池上协同探针(bisheng 统一编译 host+AICore kernel, dav-2002) ----------
+BISHENG := $(CANN_HOME)/bin/bisheng
+ASC_INC := -I$(CANN_HOME)/aarch64-linux/include -I$(CANN_HOME)/aarch64-linux/ascendc/include
+
+probe_e0c: probe_e0c.asc hybm_overlap_contract.h $(MF_LIBS)
+	$(BISHENG) --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc $< -x none -o $@ \
+	    $(ASC_INC) $(SMEM_INC) -I. \
+	    -Wl,--start-group $(MF_LIBS) -Wl,--end-group $(HOST_LDFLAGS) -pthread -lm
+
 # ---------- AICPU 编排 kernel (hcc 交叉编译, xcclpp 同款 flags) ----------
 kernel: $(AICPU_SO) $(AICPU_JSON_CUST) $(VSO) $(VJSON)
 
@@ -78,6 +87,6 @@ $(VJSON): $(VSO)
 	@test -f $@ || printf '{\n    "HybmOverlapRun": {\n        "opInfo": {\n            "opKernelLib": "AICPUKernel",\n            "kernelSo": "libmf_overlap_v$(KVER).so",\n            "functionName": "HybmOverlapRun"\n        }\n    }\n}\n' > $@
 
 clean:
-	rm -f $(HOST_TOOLS) probe_e0a probe_e0b kfc_min.json
+	rm -f $(HOST_TOOLS) probe_e0a probe_e0b probe_e0c kfc_min.json
 	rm -f $(AICPU_SO) $(AICPU_JSON_CUST)
 	rm -f $(AICPU_DIR)/libmf_overlap_v*.so $(AICPU_DIR)/libmf_overlap_v*.json
