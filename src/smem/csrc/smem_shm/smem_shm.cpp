@@ -408,3 +408,68 @@ SMEM_API void smem_shm_global_exit(smem_shm_t handle, int status)
     }
     entry->GetGroup()->GroupBroadcastExit(status);
 }
+
+/* ---- 310P AICore×AICPU 协同模式 host API(转发 entry, 实现见 SmemShmEntry) ---- */
+SMEM_API int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva)
+{
+    SmemShmEntryPtr entry = nullptr;
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    if (ret != SM_OK || entry == nullptr) {
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
+        return SM_INVALID_PARAM;
+    }
+    ret = entry->OverlapLaunch(dstGva, flagDoneGva);
+    if (ret != SM_OK) {
+        SM_LOG_AND_SET_LAST_ERROR("overlap launch failed, result: " << ret);
+        return ret;
+    }
+    return SM_OK;
+}
+
+SMEM_API int32_t smem_shm_overlap_wait(smem_shm_t handle)
+{
+    SmemShmEntryPtr entry = nullptr;
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    if (ret != SM_OK || entry == nullptr) {
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
+        return SM_INVALID_PARAM;
+    }
+    ret = entry->OverlapWait();
+    if (ret != SM_OK) {
+        SM_LOG_AND_SET_LAST_ERROR("overlap wait failed, result: " << ret);
+        return ret;
+    }
+    return SM_OK;
+}
+
+SMEM_API int32_t smem_shm_overlap_get_result(smem_shm_t handle, uint32_t *mainRet, uint32_t *stage,
+                                             uint32_t *headAfter)
+{
+    if (mainRet == nullptr || stage == nullptr || headAfter == nullptr) {
+        SM_LOG_AND_SET_LAST_ERROR("invalid param, out pointers must not be NULL");
+        return SM_INVALID_PARAM;
+    }
+    SmemShmEntryPtr entry = nullptr;
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    if (ret != SM_OK || entry == nullptr) {
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
+        return SM_INVALID_PARAM;
+    }
+    ret = entry->OverlapGetResult(*mainRet, *stage, *headAfter);
+    if (ret != SM_OK) {
+        SM_LOG_AND_SET_LAST_ERROR("overlap get result failed, result: " << ret);
+        return ret;
+    }
+    return SM_OK;
+}
+
+SMEM_API void *smem_shm_overlap_get_workspace(smem_shm_t handle)
+{
+    SmemShmEntryPtr entry = nullptr;
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    if (ret != SM_OK || entry == nullptr) {
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
+        return nullptr;
+    }
+    return entry->OverlapGetWorkspace();
+}

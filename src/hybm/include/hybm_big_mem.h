@@ -186,6 +186,48 @@ int32_t hybm_set_extra_context(hybm_entity_t e, const void *context, uint32_t si
  */
 int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va);
 
+/**
+ * @brief 310P AICore×AICPU 协同模式信息(进程级, 详见 310p-aicore-aicpu-开发计划.md)
+ */
+typedef struct {
+    uint32_t sqId;      /* CP 流 SQ id(kernel 内活查询用) */
+    int32_t streamId;   /* CP 流 id(SQE 的 rt_stream_id) */
+    uint32_t dieId;     /* die 号 = 设备号 % 2(CP1 内 HAL devId) */
+    uint64_t workspace; /* 协同工作区设备地址(mailbox/sentinel/result/ovf) */
+} hybm_overlap_info_t;
+
+/**
+ * @brief 查询协同模式就绪信息(未就绪返回非 0)
+ * @param info            [out] 就绪信息
+ * @return 0 if successful
+ */
+int32_t hybm_overlap_get_info(hybm_overlap_info_t *info);
+
+/**
+ * @brief 提交一次协同搬运(mode13 role0 语义: AICPU 轮询本端邮箱 → SQE 对
+ *        [数据 src(邮箱描述符)→dstAddr + 标志 哨兵→flagDoneAddr] → doorbell)。
+ *        邮箱由本端 AICore kernel 写(smem_shm_aicore_overlap.h 的 notify 原语)。
+ * @param dstAddr         [in] 数据目的地址(池 GVA)
+ * @param flagDoneAddr    [in] 标志目的地址(池 GVA, 对端 AICore dcci 轮询)
+ * @return 0 if successful
+ */
+int32_t hybm_overlap_submit(uint64_t dstAddr, uint64_t flagDoneAddr);
+
+/**
+ * @brief 等待协同搬运完成(SynchronizeStream)
+ * @return 0 if successful
+ */
+int32_t hybm_overlap_wait(void);
+
+/**
+ * @brief 读取最近一次协同搬运的 kernel 结果(诊断: mainRet/stage/headAfter)
+ * @param mainRet         [out] kernel 主返回码(0=成功, 13xx/14xx 段见计划附录 A.6)
+ * @param stage           [out] 状态机阶段(5=STAGE_DONE)
+ * @param headAfter       [out] SQ head(TSFW 消费证据)
+ * @return 0 if successful
+ */
+int32_t hybm_overlap_get_result(uint32_t *mainRet, uint32_t *stage, uint32_t *headAfter);
+
 #ifdef __cplusplus
 }
 #endif

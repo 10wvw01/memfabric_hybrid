@@ -330,5 +330,50 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
     return SM_OK;
 }
 
+/* ---- 310P 协同模式转发(实现细节见 hybm_overlap_capi.cpp) ---- */
+Result SmemShmEntry::OverlapLaunch(void *dstGva, void *flagDoneGva)
+{
+    if (entity_ == nullptr) {
+        SM_LOG_ERROR("overlap launch failed: entity is null, shmId: " << id_);
+        return SM_NOT_INITIALIZED;
+    }
+    auto ret = hybm_overlap_submit(reinterpret_cast<uint64_t>(dstGva), reinterpret_cast<uint64_t>(flagDoneGva));
+    if (ret != 0) {
+        SM_LOG_ERROR("hybm_overlap_submit failed, ret: " << ret << " shmId: " << id_
+                                                         << " dstGva: " << dstGva);
+        return SM_ERROR;
+    }
+    return SM_OK;
+}
+
+Result SmemShmEntry::OverlapWait()
+{
+    auto ret = hybm_overlap_wait();
+    if (ret != 0) {
+        SM_LOG_ERROR("hybm_overlap_wait failed, ret: " << ret << " shmId: " << id_);
+        return SM_ERROR;
+    }
+    return SM_OK;
+}
+
+Result SmemShmEntry::OverlapGetResult(uint32_t &mainRet, uint32_t &stage, uint32_t &headAfter)
+{
+    auto ret = hybm_overlap_get_result(&mainRet, &stage, &headAfter);
+    if (ret != 0) {
+        SM_LOG_ERROR("hybm_overlap_get_result failed, ret: " << ret << " shmId: " << id_);
+        return SM_ERROR;
+    }
+    return SM_OK;
+}
+
+void *SmemShmEntry::OverlapGetWorkspace() const
+{
+    hybm_overlap_info_t info = {};
+    if (hybm_overlap_get_info(&info) != 0) {
+        return nullptr; /* 未就绪(开关关/初始化失败), 上层以 nullptr 判定 */
+    }
+    return reinterpret_cast<void *>(info.workspace);
+}
+
 } // namespace smem
 } // namespace ock
