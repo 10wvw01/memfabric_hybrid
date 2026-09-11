@@ -1,5 +1,10 @@
 # 310P AICore×AICPU 协同模式开发进展（V2，xcclpp aicpu-aicore-310p3 迁移）
 
+> **文档状态：已冻结为过程记录（2026-09-11）**
+> 技术内容已沉淀至 `docs/310p/`（机制档案 / 部署档案 / 平台事实档案），
+> 行为契约已固化至 `openspec/specs/310p-shm-overlap/`。本文档保留完整的决策、
+> 验收与踩坑历史，不再更新；若与档案冲突，以档案为准。
+
 > **状态：P0/P1/P2 完成 + P3 核心项完成（2026-09-10：UT 五用例/回归/性能基线即 08 三阶段实测/架构文档更新）；FIP 故障注入集成与 OPP 产品化在 TODO**
 > - **V2 勘正**：迁移源 = xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（**AICore×AICPU 协同**，
 >   AICore 产数据 → AICPU 编排 SDMA 跨卡搬运 → 对端 AICore 消费，计算-通信重叠）。

@@ -17,7 +17,8 @@
 //
 // 完成检测: flag-SQE 哨兵轮询 (尾部 8B SDMA 搬运 + dc civac 轮询)。
 // 提交路径: SQE 直写 sqBase + dc cvac 刷 PoC; doorbell 走 halSqCqConfig (ioctl)。
-// 机制档案见本目录 README 与 xcclpp aicpu-310p3/README.md。
+// 机制档案见 docs/310p/机制档案.md (SQE配方/通知链/cache纪律/状态机要点)
+// 与 xcclpp aicpu-310p3/README.md (fork 源机制知识)。
 //
 // SPDX-License-Identifier: MIT
 
