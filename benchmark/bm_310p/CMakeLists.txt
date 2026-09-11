@@ -22,6 +22,7 @@ if ("${BUILD_TEST}" STREQUAL "ON")
 
     include_directories(
             ${PROJECT_SOURCE_DIR}/src/smem/include/host
+            ${CMAKE_CURRENT_SOURCE_DIR}/../bm
             ${ASCEND_CANN_PACKAGE_PATH}/${TARGET_ARCH}-linux/include/
     )
     target_link_directories(bm_perf_benchmark_310p PUBLIC
@@ -76,6 +77,7 @@ else ()
 
     include_directories(
             ${CMAKE_CURRENT_SOURCE_DIR}/
+            ${CMAKE_CURRENT_SOURCE_DIR}/../bm
             ${MF_PATH}/include/smem/host
             ${MF_PATH}/include/hybm
             ${ASCEND_CANN_PACKAGE_PATH}/${TARGET_ARCH}-linux/include/

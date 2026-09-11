@@ -17,6 +17,7 @@
 #include <array>
 #include <unistd.h>
 #include <cstdint>
+#include <sstream>
 #include "barrier_util.h"
 #include "common_def.h"
 #include "acl/acl.h"
