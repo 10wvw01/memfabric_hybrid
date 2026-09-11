@@ -17,6 +17,11 @@
 
 namespace ock {
 namespace mf {
+// 310P die 对实测(310p_probe/05_vmm_die): ACL_MEM_P2P_* 物理分区上限 ~4088MB(动态, 随设备空闲波动),
+// 超限返 207001(RT_ERROR_DRV_OUT_MEMORY, 设备侧 P2P 分区 OOM); ACL_HBM_MEM_HUGE 从 AI 主池(~42GB)分配
+// 无此限制, 4GB 实测全链路可用且带宽与 P2P_HUGE 无差异
+constexpr int32_t RT_ERROR_DRV_OUT_MEMORY = 207001;
+
 HybmAclVmmSegment::~HybmAclVmmSegment()
 {
     if (globalVirtualAddress_ != nullptr) {
@@ -116,13 +121,31 @@ Result HybmAclVmmSegment::UnReserveMemorySpace() noexcept
     return BM_OK;
 }
 
-void HybmAclVmmSegment::FillMemProp(aclrtPhysicalMemProp &prop) const noexcept
+void HybmAclVmmSegment::FillMemProp(aclrtPhysicalMemProp &prop, aclrtMemAttr memAttr) const noexcept
 {
     prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
     prop.allocationType = aclrtMemAllocationType::ACL_MEM_ALLOCATION_TYPE_PINNED;
-    prop.memAttr = aclrtMemAttr::ACL_MEM_P2P_HUGE;
+    prop.memAttr = memAttr;
     prop.location.id = static_cast<uint32_t>(options_.devId);
     prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+}
+
+Result HybmAclVmmSegment::MallocPhysicalWithFallback(uint64_t size, aclrtDrvMemHandle &handle) noexcept
+{
+    aclrtPhysicalMemProp prop{};
+    FillMemProp(prop, aclrtMemAttr::ACL_MEM_P2P_HUGE);
+    auto ret = DlAclApi::AclrtMallocPhysical(&handle, size, &prop, 0);
+    if (ret == RT_ERROR_DRV_OUT_MEMORY) {
+        BM_LOG_WARN("AclrtMallocPhysical(P2P_HUGE) P2P partition exhausted, fallback to ACL_HBM_MEM_HUGE, ret:"
+                    << ret << " rankId:" << options_.rankId << " size:" << size);
+        FillMemProp(prop, aclrtMemAttr::ACL_HBM_MEM_HUGE);
+        ret = DlAclApi::AclrtMallocPhysical(&handle, size, &prop, 0);
+    }
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("AclrtMallocPhysical failed, ret:" << ret << " rankId:" << options_.rankId
+                                                        << " size:" << size);
+    }
+    return ret;
 }
 
 Result HybmAclVmmSegment::MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_t size, uint64_t allocAddr) noexcept
@@ -193,13 +216,9 @@ Result HybmAclVmmSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) no
         return BM_INVALID_PARAM;
     }
 
-    aclrtPhysicalMemProp prop{};
-    FillMemProp(prop);
     aclrtDrvMemHandle handle = nullptr;
-    auto ret = DlAclApi::AclrtMallocPhysical(&handle, size, &prop, 0);
+    auto ret = MallocPhysicalWithFallback(size, handle);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtMallocPhysical failed, ret:" << ret << " rankId:" << options_.rankId
-                                                        << " size:" << size);
         return ret;
     }
 
