@@ -50,14 +50,12 @@
 | 位置 | 内容 |
 |---|---|
 | `test/ut/testcase/hybm/hybm_overlap_prep_test.cpp`（110 行，5 用例全 PASS） | 冒烟防护语义（stub 环境 Acquire 必败且不置 ready/可重试/Release 幂等）/ 未就绪 API 全拒绝 / chunks 边界（参数检查先于就绪检查）/ 工作区布局不变式 / smem 层无效 handle |
-| UT（`test/ut/testcase/hybm/hybm_overlap_prep_test.cpp`，5 用例全 PASS） | 冒烟防护语义（stub 环境 Acquire 必败且不置 ready/可重试/Release 幂等）/ 未就绪 API 全拒绝 / chunks 边界（参数检查先于就绪检查）/ 工作区布局不变式 / smem 层无效 handle |
-| 08 示例（见 0.1-E 组） | 真机验收载体（三阶段含流水加速比量化） |
+| `examples/memory_pool/01_basic/08_310p_aicore_aicpu_overlap/` | 真机验收载体（三阶段含流水加速比量化）：四角色 AICore kernel（单块产/消费 + 流水产/消费）+ 三阶段验收 host（含轮次分区标志槽/轮间会合防数据 hazard/邮箱复位）+ README |
 
 > **验收探针与部署工具未随本 PR 合入**：E0a/E0b/E0c 三级可行性探针、P1 验收探针、
 > deployer/mini_kfc 部署工具及一键脚本属开发过程产物（含 xcclpp MIT fork，且 OPP 终态后
 > 整段退役），保留在开发环境用于回归，不进产品分支。各验收的判据与实测数字完整记录于
 > 本文 0.6 节与 P0/P1 章节。
-| `examples/memory_pool/01_basic/08_310p_aicore_aicpu_overlap/` | 四角色 AICore kernel（单块产/消费 + 流水产/消费）+ 三阶段验收 host（含轮次分区标志槽/轮间会合防数据 hazard/邮箱复位）+ README |
 
 #### E. 文档
 
