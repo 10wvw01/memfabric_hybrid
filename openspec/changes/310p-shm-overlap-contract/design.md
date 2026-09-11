@@ -36,7 +36,7 @@ proposal.md - Why）：
 | 平台机制配方（SQE/cache/通知链/状态机） | 10 年 | `docs/310p/机制档案.md` |
 | 部署链规则与三堵墙 | 10 年 | `docs/310p/部署档案.md` |
 | 平台实机事实（F1-F20/定论表/工具链） | 10 年 | `docs/310p/平台事实.md` |
-| 行为契约（开关/冒烟/API 语义/布局锁） | 架构存续期 | spec delta → 归档进 `specs/310p-shm-overlap/` |
+| 行为契约（开关/冒烟/API 语义/布局锁） | 架构存续期 | spec delta → 归档进 `specs/smem/310p-shm-overlap/` |
 | 进展记录、设计决策 D1-D10 原文、TODO | 历史/待办 | 三份过程文档原地冻结 |
 
 **备选**：全部进 OpenSpec specs——被否，specs 是行为契约不是技术手册；全部进 docs/
@@ -77,7 +77,7 @@ proposal.md - Why）：
 ## Migration Plan
 
 1. WP1 修复残留（独立可回退）→ 2. WP2 建档 + 指针头 → 3. WP3 工作法 →
-4. 归档 change（spec delta 合入 `specs/310p-shm-overlap/`）。全流程无部署动作，
+4. 归档 change（spec delta 合入 `specs/smem/310p-shm-overlap/`）。全流程无部署动作，
    回滚 = git revert 对应提交。
 
 ## Open Questions

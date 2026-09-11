@@ -31,7 +31,7 @@ mismatch=0、mode14 流水加速比 8.02x），但其行为契约（开关门控
 
 ### New Capabilities
 
-- `310p-shm-overlap`: 310P SHM API AICore×AICPU 协同模式的行为契约——环境开关门控
+- `smem/310p-shm-overlap`: 310P SHM API AICore×AICPU 协同模式的行为契约——环境开关门控
   （`MF_310P_SHM_OVERLAP` 默认关闭）、传输准备（CP 流/工作区/编排 kernel 加载/
   冒烟探测）、overlap host API 参数与错误语义、wire 契约与工作区布局不变式、
   开关关闭时存量路径行为零变化
