@@ -265,6 +265,19 @@ int32_t BandWidthCalculator::PreInit(uint32_t deviceId, BarrierUtil *&barrier, u
 
 void BandWidthCalculator::FinalizeAll(uint32_t deviceId, BarrierUtil *&barrier, aclrtStream *stream)
 {
+    // 本地缓冲须在 ResetDevice 前释放(pinned host 依赖 device context)
+    if (localHbm_ != nullptr) {
+        (void)aclrtFree(localHbm_);
+        localHbm_ = nullptr;
+    }
+    if (localDram_ != nullptr) {
+        if (localHostPinned_) {
+            (void)aclrtFreeHost(localDram_);
+        } else {
+            free(localDram_);
+        }
+        localDram_ = nullptr;
+    }
     if (barrier != nullptr) {
         delete barrier;
         barrier = nullptr;
@@ -336,10 +349,21 @@ int32_t BandWidthCalculator::PrepareLocalMem(uint32_t rankId)
 
 int32_t BandWidthCalculator::PrepareLocalHostMem(const void *dataPtr, uint64_t len)
 {
-    auto ret = posix_memalign(&localDram_, 4096, len);
-    CHECK_RET_ERR(ret, "malloc local dram failed, len:" << len);
-    ret = aclrtMemcpy(localDram_, len, dataPtr, len, ACL_MEMCPY_HOST_TO_HOST);
-    CHECK_RET_ERR((ret != 0), "memcpy pattern to local dram failed, ret:" << ret << " len:" << len);
+    // 两种口径: pinned(aclrtMallocHost, 对齐 01 探针高速路径)/pageable(posix_memalign, 驱动内部
+    // staging 中转两次拷贝)。pinned VA 落 SVM 统一窗口被分类为 LOCAL_DEVICE, copyType 由
+    // localHostPinned_ 自动切换为 device 侧(见 BatchCopyPut/Get)
+    if (cmdParam_.hostMemPinned) {
+        localHostPinned_ = true;
+        auto ret = aclrtMallocHost(&localDram_, len);
+        CHECK_RET_ERR((ret != 0 || localDram_ == nullptr), "malloc pinned host buffer failed, ret:" << ret
+                                                                                                     << " len:" << len);
+    } else {
+        localHostPinned_ = false;
+        auto ret = posix_memalign(&localDram_, 4096, len);
+        CHECK_RET_ERR(ret, "malloc pageable host buffer failed, len:" << len);
+    }
+    auto ret = aclrtMemcpy(localDram_, len, dataPtr, len, ACL_MEMCPY_HOST_TO_HOST);
+    CHECK_RET_ERR((ret != 0), "memcpy pattern to host buffer failed, ret:" << ret << " len:" << len);
     return 0;
 }
 
@@ -444,7 +468,8 @@ void BandWidthCalculator::PrintResult(std::vector<BwTestResult> &results)
 
     std::cout << std::endl
               << "  copy_size:" << results[0].copySize << "  copy_count:" << results[0].copyCount
-              << "  batch_size:" << results[0].batchSize << std::endl;
+              << "  batch_size:" << results[0].batchSize
+              << "  host_mem:" << (cmdParam_.hostMemPinned ? "pinned" : "pageable") << std::endl;
     std::cout << "----------------------------------------------------------"
                  "Band Width Test(310P dual pool)----------------------------------------------------------\n";
     const int32_t DIGIT_WIDTH = 10;
@@ -580,11 +605,15 @@ void BandWidthCalculator::BatchCopyPut(smem_bm_mem_type localMemType, smem_bm_me
     param.dataSizes = tmpParam.dataSizes;
     param.batchSize = tmpParam.batchSize;
 
+    // copyType 选择: pinned host 缓冲(aclrtMallocHost)的 VA 落在 SVM 统一地址窗口内,
+    // hybm 分类器按地址范围判为 LOCAL_DEVICE(hybm_va_manager.cpp:256), 故 copyType 须用
+    // device 侧类型(L2G/L2GH/G2L/GH2L), 走 async D2D(实测 x16 23.8 GB/s)或 HostShm 算子;
+    // pageable(普通 malloc)才可用 H2G/H2GH/G2H/GH2H 的 host 侧类型
     smem_bm_copy_type copyType = SMEMB_COPY_L2G;
     if (localMemType == SMEM_MEM_TYPE_LOCAL_DEVICE) {
         copyType = SMEMB_COPY_L2G;
     } else if (localMemType == SMEM_MEM_TYPE_LOCAL_HOST) {
-        copyType = SMEMB_COPY_H2G;
+        copyType = localHostPinned_ ? SMEMB_COPY_L2G : SMEMB_COPY_H2G;
     } else {
         LOG_ERROR("localMemType type error, localMemType:" << localMemType << " rmtMemType:" << rmtMemType);
         return;
@@ -633,7 +662,7 @@ void BandWidthCalculator::BatchCopyGet(smem_bm_mem_type localMemType, smem_bm_me
     if (localMemType == SMEM_MEM_TYPE_LOCAL_DEVICE) {
         copyType = SMEMB_COPY_G2L;
     } else if (localMemType == SMEM_MEM_TYPE_LOCAL_HOST) {
-        copyType = SMEMB_COPY_G2H;
+        copyType = localHostPinned_ ? SMEMB_COPY_G2L : SMEMB_COPY_G2H;
     } else {
         LOG_ERROR("localMemType type error, localMemType:" << localMemType << " rmtMemType:" << rmtMemType);
         return;

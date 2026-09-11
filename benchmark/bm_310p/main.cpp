@@ -40,6 +40,7 @@ void PrintHelp()
                  "    -ip, --ip               Specifies the IP address and port (e.g., tcp://<ip>:<port>).\n"
                  "    -hbm-size, --hbm-size   Specifies HBM pool size in bytes (default 2GB).\n"
                  "    -dram-size, --dram-size Specifies DRAM pool size in bytes (default 2GB).\n"
+                 "    -hm, --host-mem         Local host buffer type: pinned|pageable (default pinned).\n"
               << std::endl;
 }
 
@@ -159,6 +160,19 @@ void CheckCmdBw(BwTestParam &opts)
     }
 }
 
+void ParseHostMem(const std::string &arg, BwTestParam &opts)
+{
+    if (arg == "pinned") {
+        opts.hostMemPinned = true;
+        return;
+    }
+    if (arg == "pageable") {
+        opts.hostMemPinned = false;
+        return;
+    }
+    ExitWithError("invalid host-mem type: " + arg + " (must be pinned or pageable)");
+}
+
 void ParseCmdBw(int argc, char *argv[], BwTestParam &opts)
 {
     bool hasType = false;
@@ -223,6 +237,11 @@ void ParseCmdBw(int argc, char *argv[], BwTestParam &opts)
                 ExitWithError("missing value for " + arg);
             }
             opts.dramPoolSize = ParseUint64(argv[++i], "dram-size");
+        } else if (arg == "-hm" || arg == "--host-mem") {
+            if (i + 1 >= argc) {
+                ExitWithError("missing value for " + arg);
+            }
+            ParseHostMem(argv[++i], opts);
         } else {
             ExitWithError("unknown option: " + arg);
         }

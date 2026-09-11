@@ -34,7 +34,7 @@ mkdir build && cmake . -B build && make -C build
 ```bash
 ./bm_perf_benchmark_310p -bw -t [TYPE] -s [BLOCK_SIZE] -cc [COPY_COUNT] -bs [BATCH_SIZE]
        -d [DEVICE_START] -ws [WORLD_SIZE] -lrs [LOCAL_RANK_SIZE] -ip tcp://<ip>:<port>
-       -hbm-size [BYTES] -dram-size [BYTES]
+       -hbm-size [BYTES] -dram-size [BYTES] -hm [pinned|pageable]
 ```
 
 - TYPE：`h2d/d2h/h2rd/h2rh/d2rd/d2rh/rh2d/rh2h/rd2d/rd2h/all`（`all` 依次测全部 10 方向）
@@ -61,6 +61,43 @@ Type      Pool  NPU        Rank      ...
 H2D       HBM   4          0         ...  BW(GB/s) ...  WrongBytes(B) 0
 D2H       DRAM  4          0         ...
 ```
+
+## host 缓冲两种口径（`-hm pinned|pageable`，默认 pinned）
+
+本地 host 缓冲（H2D/D2H 系方向的源/目的）支持两种分配方式，对齐 01 探针的口径矩阵：
+
+| 口径 | 分配方式 | 数据通路 | copyType |
+|------|---------|---------|----------|
+| `pinned`（默认） | `aclrtMallocHost` | DMA 直达（pinned→HBM 池实际走 `AclrtMemcpyAsync(D2D)`+Sync） | device 侧：Put `L2G` / Get `G2L` |
+| `pageable` | `posix_memalign` | 驱动内部 staging 中转（host→staging memcpy + staging→dev DMA 两次拷贝） | host 侧：Put `H2G` / Get `G2H` |
+
+- **pinned VA 落在 SVM 统一地址窗口内（~0x12c0_xxxx_xxxx），hybm 地址分类器按范围判为
+  LOCAL_DEVICE**（hybm_va_manager.cpp:256），故 pinned 模式 host 侧方向须使用 device 侧
+  copyType；池类型（dst/src 的 HOST/DEVICE）由地址分类自动落位
+- pageable 模式保持原 host 侧 copyType 语义（SVM 窗口外的普通 malloc 地址判为 LOCAL_HOST）
+- 实测对比（128MB 块，x16 卡 dev6/dev7，2-rank）：pinned H2D 11.8~12.7 vs pageable 8.8 GB/s；
+  x8 卡两种口径均触顶 ~7（链路上限，见下表）
+
+## pinned host 缓冲与 copyType 语义（310P SVM 特性）
+
+- 本地 host 缓冲使用 `aclrtMallocHost`（pinned，对齐 01 探针口径）。pageable（普通 malloc）
+  走驱动内部 staging 两次拷贝，x16 卡实测仅 5.6~8.5 GB/s
+- **pinned VA 落在 SVM 统一地址窗口内（~0x12c0_xxxx_xxxx），hybm 地址分类器按范围判为
+  LOCAL_DEVICE**（hybm_va_manager.cpp:256），故 host 侧方向须使用 device 侧 copyType：
+  Put 用 `L2G`（H2D/H2RD/H2RH），Get 用 `G2L`（RD2H/RH2H）；dst/src 池类型由地址分类自动落位
+- pinned → HBM 池实际走 `AclrtMemcpyAsync(D2D)` + SyncStream（单流 x16 实测 23.8 GB/s）
+- pageable 模式（H2G/G2H/GH2H host 侧类型）已被 pinned 模式取代，语义差异见测试计划附录
+
+## 带宽参考值（128MB 块 × 30 次，2-rank 双 die 同时压测）
+
+| 卡型 | PCIe | H2D/H2D系(每rank) | D2RD/RD2D(die间) | host memcpy(H2RH/RH2H) |
+|------|------|------------------|------------------|------------------------|
+| x16（dev6/dev7） | Gen4 x16 | 10.6 ~ 12.7 GB/s | 16.5 / 17.6 GB/s | 10.8 ~ 13.8 GB/s |
+| x8（dev4/dev5） | Gen4 x8 | 6.4 ~ 7.1 GB/s | 16.4 / 17.6 GB/s | 9.5 ~ 11.5 GB/s |
+
+> H2D 系上限 = 单卡 PCIe 链路 ÷ 2（双 die 共享一个端点）：x16 单流 pinned sync 实测 27.1 GB/s，
+> 双 rank 各得 ~12；x8 单流 13.8，双 rank 各得 ~7。die 间 D2D 与 host memcpy 不走 PCIe，不受此限。
+> 单 die 裸 API 参考值（01 探针口径 128MB pinned sync）：x16 卡 26.96 GB/s。
 
 ## 与通用版 bm_perf_benchmark 的差异
 

@@ -61,6 +61,7 @@ typedef struct {
     uint32_t deviceId{0};
     uint64_t hbmPoolSize{2ULL << 30};
     uint64_t dramPoolSize{2ULL << 30};
+    bool hostMemPinned{true}; // 本地 host 缓冲类型: true=aclrtMallocHost(pinned), false=posix_memalign(pageable)
 } BwTestParam;
 
 typedef struct {
@@ -137,6 +138,7 @@ private:
     void *localHbm_ = nullptr;
     smem_bm_t hbmHandle_ = nullptr;   // entity 0: HBM 池(SDMA op 位, 310P AclVmm 链路)
     smem_bm_t dramHandle_ = nullptr;  // entity 1: DRAM 池(HOST_SHM, 独立 entity)
+    bool localHostPinned_ = false;    // localDram_ 为 aclrtMallocHost pinned(SVM VA, 按 DEVICE 分类)
 };
 
 #endif

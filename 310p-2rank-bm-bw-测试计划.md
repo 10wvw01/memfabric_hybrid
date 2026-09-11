@@ -306,6 +306,70 @@ batch=1，数据为两 rank 各一行（取值接近，读表时按方向看两�
   块从 2MB→16MB 仅小幅提升——同步语义下带不动更高吞吐
 - 所有方向 WrongBytes=0（逐字校验通过）
 
+## 附录 D：128MB 块 + pinned host 适配（2026-09-09 二轮）
+
+### D.1 用户问题：块从 16MB 加大能否达到探针带宽？
+
+- 01 探针实际口径为 **128MB×30 次**（README 标"16MB"为标签错误，test.c `BW_SIZE=128MB`）
+- 单流块大小扫描（dev4, pinned sync）：16MB 13.92 / 64MB 14.21 / 128MB 14.27 / 256MB 14.31 GB/s
+  ——**x8 卡上块大小几乎无增益，链路已饱和**；块大小不是与探针差距的主因
+- **真正差距 = 两个硬件/口径因素**：
+  1. **PCIe 链路宽度**：dev4/dev5 卡（96:00.0）为 **Gen4 x8**，dev2/dev6 卡为 x16（sysfs
+     current_link_width 实测）。探针 26.96 是 x16 数字；x8 单流上限 ~13.8
+  2. **双 die 共享一个 PCIe 端点**：2-rank 同时压测均分链路（并发实证：双进程 pinned 各得 ~7.9，
+     聚合 ≈ x8 上限）。故 2-rank H2D 理论上限：x8 卡 ~7/rank，x16 卡 ~13.5/rank
+
+### D.2 pinned 适配过程中的发现：SVM VA 分类拒绝 host 侧 copyType
+
+`aclrtMallocHost` 的 pinned 缓冲 VA 落在 SVM 统一窗口（实测 0x12c041800000），hybm 分类器按
+地址范围判为 **LOCAL_DEVICE**（hybm_va_manager.cpp:256），导致 H2G/GH2H 等 host 侧方向
+`Direction mismatch`(except=196) 返 -2——缺失方向恰好是 {H2D,H2RD,H2RH,RH2H,RD2H}
+（全部以 localDram_ 为 src/dst 的方向），与掩码校验逐一吻合。
+
+**适配**：pinned 模式下 host 侧方向改用 device 侧 copyType（Put→L2G、Get→G2L），池类型由
+地址分类自动落位（L2G+dst=DRAM池 → LOCAL_DEVICE_TO_GLOBAL_HOST → HostShm 算子）。
+pinned→HBM 池实际走 `AclrtMemcpyAsync(D2D)`+Sync，单流 x16 实测 23.8 GB/s。
+
+### D.3 适配后实测（128MB × 30 次，双 rank 同时压测，WrongBytes 全 0）
+
+| 方向 | x16 dev6/dev7 (GB/s) | x8 dev4/dev5 (GB/s) | 之前 pageable 16MB dev4/5 |
+|------|----------------------|---------------------|---------------------------|
+| H2D / H2RD | 11.8 ~ 12.7 | 6.8 ~ 7.0 | 6.8 |
+| D2H / D2RH / RD2H | 9.4 ~ 12.2 | 6.4 ~ 6.6 | 6.2 ~ 6.5 |
+| RH2D | 10.6 | 7.0 | 6.9 |
+| H2RH / RH2H | 10.8 ~ 13.8 | 9.5 ~ 11.5 | 13.6 ~ 15.1 |
+| D2RD / RD2D（die 间） | 16.5 / 17.6 | 16.4 / 17.6 | 15.3 / 16.4 |
+
+- x16 卡 H2D 从 8.8（pageable）→ 12.7（pinned+D2D 路径），聚合 ~24.5 ≈ x16 上限 ✓
+- x8 卡 H2D 不变（~7 = 13.8÷2 物理上限，pinned/pageable 均触顶）
+- die 间 D2D 与块大小无关地稳定 16.4~17.6（不受 PCIe 限制）
+- 注：/dev/shm 需 ≥ dram-size×rank 数（本轮 remount 至 2G，DRAM 池 256MB/rank）
+
+### D.4 复现命令（pinned 128MB 口径）
+
+```bash
+mount -o remount,size=2G /dev/shm   # DRAM 池需容纳于 /dev/shm
+./bm_perf_benchmark_310p -bw -t all -s 134217728 -cc 30 -d 6 -ws 2 -lrs 2 \
+    -hbm-size 2147483648 -dram-size 268435456 -ip tcp://127.0.0.1:28590
+```
+
+### D.5 `-hm pinned|pageable` 双口径实测（2026-09-11）
+
+新增 `-hm` 开关（默认 pinned）后，两种 host 缓冲口径 2×2 矩阵（128MB×30，2-rank，全 WrongBytes=0）：
+
+| 方向 | x16 pinned(空载09-09) | x16 pageable(空载09-09) | x8 pinned | x8 pageable |
+|------|----------------------|------------------------|-----------|-------------|
+| H2D/H2RD | 11.8~12.7 | 8.8~10.0 | 5.9~6.7 | 6.8~6.9 |
+| D2H/D2RH/RH2D/RD2H | 9.4~12.2 | 7.7~10.3 | 5.8~7.5 | 5.7~10.6* |
+| H2RH/RH2H | 10.8~13.8 | 10.2~11.2 | 6.0~7.9 | 5.0~12.5* |
+| D2RD/RD2D | 16.0~17.6 | 15.3~17.6 | 15.8~17.1 | 15.8~17.2 |
+
+- 09-11 当日复测两轮：die 间 D2D 稳定 15.3~17.4；host memcpy/staging 方向因机器存在其他负载
+  （dev3 AICore 10%）出现 4.1~12.6 波动与 rank 间不对称（CPU 密集型敏感），基线以空载轮为准
+- 环境踩坑：/dev/shm remount 2G 跨天失效（回到 64MB 且被残留池文件占满）→ DRAM 池 SIGBUS；
+  remount + 清 `/dev/shm/memfabric_hybrid_*` 残留后恢复，代码无问题（tmpfs 满后缺页无法物化）
+- 完整数据见 PR #3 评论（2026-09-11，ID 29fac850）
+
 ## 附录 C：复现命令
 
 ```bash
