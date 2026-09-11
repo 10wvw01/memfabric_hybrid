@@ -6,7 +6,7 @@
 // XcclppAicpuSqeParam/Result → HybmOverlapParam/Result, 其余逐行保留
 // (SQE 配方/提交链/轮询纪律均已 hcomm 源码级证实, 见计划附录 A)。
 // P0 实证记录(2026-09-10 dev0/dev0↔dev1): E0a CP1 闭环/E0b 池 GVA 可译/
-// E0c 八步全链 三实验一次通过, 见 310p-capability_matrix/17_aicore_aicpu_overlap/。
+// E0c 八步全链 三实验一次通过(实测记录见 310p-aicore-aicpu-开发进展.md)。
 // 产物 so 名 libmf_overlap_aicpu.so — 与 libcann_hybm_kernel.so 独立
 // (CP1 按文件名 dlopen 缓存, 改 kernel 必 bump 设备侧版本名 MF_OVERLAP_KVER)。
 //

@@ -50,7 +50,13 @@
 | 位置 | 内容 |
 |---|---|
 | `test/ut/testcase/hybm/hybm_overlap_prep_test.cpp`（110 行，5 用例全 PASS） | 冒烟防护语义（stub 环境 Acquire 必败且不置 ready/可重试/Release 幂等）/ 未就绪 API 全拒绝 / chunks 边界（参数检查先于就绪检查）/ 工作区布局不变式 / smem 层无效 handle |
-| `310p-capability_matrix/17_aicore_aicpu_overlap/`（16 文件） | 部署链工具（deployer/mini_kfc，fork 后函数名改 `HybmOverlapRun` + 中文注释）+ **三级可行性探针**（probe_e0a/e0b/e0c）+ **P1 验收双探针**（probe_p1_shm 挂载路径三判据 / probe_p1_overlap 八步全链产品化）+ 四个一键脚本（内置部署保障：验证门 + 按需重部署） |
+| UT（`test/ut/testcase/hybm/hybm_overlap_prep_test.cpp`，5 用例全 PASS） | 冒烟防护语义（stub 环境 Acquire 必败且不置 ready/可重试/Release 幂等）/ 未就绪 API 全拒绝 / chunks 边界（参数检查先于就绪检查）/ 工作区布局不变式 / smem 层无效 handle |
+| 08 示例（见 0.1-E 组） | 真机验收载体（三阶段含流水加速比量化） |
+
+> **验收探针与部署工具未随本 PR 合入**：E0a/E0b/E0c 三级可行性探针、P1 验收探针、
+> deployer/mini_kfc 部署工具及一键脚本属开发过程产物（含 xcclpp MIT fork，且 OPP 终态后
+> 整段退役），保留在开发环境用于回归，不进产品分支。各验收的判据与实测数字完整记录于
+> 本文 0.6 节与 P0/P1 章节。
 | `examples/memory_pool/01_basic/08_310p_aicore_aicpu_overlap/` | 四角色 AICore kernel（单块产/消费 + 流水产/消费）+ 三阶段验收 host（含轮次分区标志槽/轮间会合防数据 hazard/邮箱复位）+ README |
 
 #### E. 文档
@@ -323,9 +329,9 @@ Reduce SQE（TODO-4）、CQE（TODO-5）、OPP 产品化（TODO-1）、常驻编
 
 **E0a 部署链复刻（~0.5 天，沿用 V1）**：fork `xcclpp_overlap_aicpu.cpp` 进 hybm_kernel hcc 构建
 （`libmf_overlap_kernel.so`），复刻 deployer+KFC 链，验收 = 编排 kernel 在 CP1 内执行（result magic）。
-> **✅ 已完成（2026-09-10，dev0，一次通过）**——实验目录
-> `310p-capability_matrix/17_aicore_aicpu_overlap/`（kernel/contract fork + deployer/mini_kfc fork +
-> probe_e0a 六判据探针 + Makefile + run_e0a.sh 一键编排）。实测：hcc 构建产物 ELF64/AArch64、
+> **✅ 已完成（2026-09-10，dev0，一次通过）**——kernel/contract 迁入主构建（见 0.1-A），
+> 部署链工具与 probe_e0a 六判据探针位于开发环境（未随 PR 合入，见 0.1-D 说明）。
+> 实测：hcc 构建产物 ELF64/AArch64、
 > `HybmOverlapRun` 符号导出；部署链纪律化执行（deployer load/getfunc=0 → KFC cat/chmod →
 > 双验证门）；探针六判据全过——magic=0xA1C0DE01、mainRet=0/stage=5、**headBefore=0→headAfter=2
 > （SQE 对全被 TSFW 消费）**、标志 SQE 8B 到达、数据 1024/1024 字一致、ssid=2 实时查询成功。

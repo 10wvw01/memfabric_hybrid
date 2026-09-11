@@ -40,11 +40,12 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 ## 必要条件
 
 - Atlas 300I Duo（Ascend310P3）+ CANN ≥ 9.1
-- 协同编排 kernel 已部署到设备 CP1（部署链见
-  `310p-capability_matrix/17_aicore_aicpu_overlap/` 的 deployer+mini_kfc 工具与
-  `run_p1_overlap.sh` 内置 ensure_deploy；**每次正式运行前须过验证门**——
+- 协同编排 kernel 已部署到设备 CP1（部署链：CUSTAICPUKernel mode=1 迁移落盘 + 设备内复制到
+  `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`，机制与运维纪律见
+  `310p-aicore-aicpu-开发进展.md` 附录 A.4；**每次正式运行前须过验证门**——
   deployer 保活到期退出会触发清理链删除设备侧文件）
 - 环境变量：`MF_310P_SHM_OVERLAP=1` + `MF_310P_OVERLAP_JSON=<launch json 路径>`
+  （json 由主构建 `mf_overlap_kernel` 目标产出）
 
 ## 验收标准
 
@@ -65,7 +66,7 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_overla
   -o /tmp/ex08 <CANN include 路径> <仓库 include 路径> \
   -Wl,--start-group <build 下三个静态库> -Wl,--end-group <CANN lib 路径> -lascendcl -lruntime -ldl -pthread -lm
 
-# 2. 部署 kernel 到设备(或用 matrix/17 的 run_p1_overlap.sh ensure_deploy)
+# 2. 部署 kernel 到设备(部署链见开发进展文档附录 A.4)
 # 3. 双 rank 运行
 export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v1.json 路径>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
@@ -78,5 +79,5 @@ export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:...
 
 - **07**：host 编排（BM API + `HostDataOpAclMemcpy`），数据面全在 host 线程
 - **08**（本示例）：设备发起协同（SHM API + AICore×AICPU），通信与计算可重叠
-- 机制验收与配方档案：`310p-capability_matrix/17_aicore_aicpu_overlap/`
+- 机制验收与配方档案：`310p-aicore-aicpu-开发进展.md`(〇章实现总结+附录A配方速查)
   （E0a/E0b/E0c/P1 四级验收）+ `310p-aicore-aicpu-开发进展.md`（附录 A 配方速查）

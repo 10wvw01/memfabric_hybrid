@@ -15,7 +15,7 @@
  * 挂载点: MemEntityDefault::InitTransManager 的 [310P + SDMA op 位 + 开关] 分支
  * (六级初始化地图的 L2-④, 见 310p-aicore-aicpu-开发进展.md D4)。
  *
- * 职责(P0 三实验已逐项实证, 见 310p-capability_matrix/17_aicore_aicpu_overlap/):
+ * 职责(P0 三实验已逐项实证, 机制档案见 310p-aicore-aicpu-开发进展.md):
  *   1. CP 流: ACL_STREAM_DEVICE_USE_ONLY(其 SQ 注册进 CP1 进程 trs 表, 是 AICPU
  *      kernel 内 halSqCqQuery 可查可投的前提, X3/A.3);
  *   2. 工作区: mailbox/sentinel/result/ovf, 普通设备内存 HUGE_FIRST(NORMAL_ONLY 落

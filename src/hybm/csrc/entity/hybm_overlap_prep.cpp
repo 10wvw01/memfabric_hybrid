@@ -12,7 +12,7 @@
 
 /* hybm_overlap_prep.cpp — 310P AICore×AICPU 协同模式传输准备(实现)
  * 机制依据: 310p-aicore-aicpu-开发进展.md 附录 A(SQE 配方/CP 流/工作区/冒烟)
- * 与 P0 三实验(310p-capability_matrix/17_aicore_aicpu_overlap/)的实测定论。
+ * 与 P0 三实验的实测定论(档案见 310p-aicore-aicpu-开发进展.md)。
  */
 #include "hybm_overlap_prep.h"
 

@@ -48,7 +48,6 @@ exit_mmap → __mmu_notifier_release → mn_hlist_release → synchronize_srcu
 | 14 | 14_transfer_remote | 远端 slab 直达 H2D/D2H(pinned vs pageable) | 2 NPU | ✅ PASS |
 | 15 | 15_peer_needed | 跨卡 IPC 是否需要 enable peer(5 MODE 干净对照) | 2 NPU | ✅ PASS |
 | 16 | 16_vmm_matrix | 8 NPU VMM 池全连接(对照 07 IPC 版) | 8 NPU | ⚠️ FAIL(VMM import 隐式 enable P2P,同一配额墙,失败矩阵与 07 全同;VA 槽位窗口 CONSISTENT) |
-| 17 | 17_aicore_aicpu_overlap | AICore×AICPU 协同编排验收三连(E0a CP1执行闭环/E0b 池GVA SQE裁决/E0c 八步全链+AICore访池) | 1-2 NPU | ✅ PASS(三实验均一次过;池GVA可译,AICore可访池,八步 mismatch=0) |
 
 ## 运行方法
 
