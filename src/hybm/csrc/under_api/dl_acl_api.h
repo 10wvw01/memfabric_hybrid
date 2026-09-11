@@ -74,14 +74,26 @@ enum class aclrtMemAllocationType : uint32_t {
 };
 
 enum class aclrtMemAttr : uint32_t {
-    ACL_MEM_NORMAL = 0,
+    /* 与 CANN acl_rt.h 的 aclrtMemAttr 严格对齐(310P 实测: 值经 aclrtMallocPhysical 直传驱动,
+     * 编号错位会导致语义漂移——曾因本枚举自编号, 名为 P2P_HUGE 实发 HBM_HUGE(值 4)) */
+    ACL_DDR_MEM = 0,
+    ACL_HBM_MEM,
+    ACL_DDR_MEM_HUGE,
+    ACL_DDR_MEM_NORMAL,
+    ACL_HBM_MEM_HUGE,
+    ACL_HBM_MEM_NORMAL,
+    ACL_DDR_MEM_P2P_HUGE,
+    ACL_DDR_MEM_P2P_NORMAL,
+    ACL_HBM_MEM_P2P_HUGE,
+    ACL_HBM_MEM_P2P_NORMAL,
+    ACL_HBM_MEM_HUGE1G,
+    ACL_HBM_MEM_P2P_HUGE1G,
+    ACL_MEM_NORMAL,
     ACL_MEM_HUGE,
     ACL_MEM_HUGE1G,
     ACL_MEM_P2P_NORMAL,
     ACL_MEM_P2P_HUGE,
     ACL_MEM_P2P_HUGE1G,
-    ACL_HBM_MEM_NORMAL,
-    ACL_HBM_MEM_HUGE,
 };
 
 enum class aclrtMemAccessFlags : uint32_t {

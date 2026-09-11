@@ -17,7 +17,7 @@ Atlas 300I Duo (310P3) / CANN 9.1.0 / aarch64,单进程,无 MPI。设备号由�
 
 校验 pattern:`value = (tag<<24) | (idx & 0xFFFFFF)`,每步使用不同 tag(0xA2/0xA4/0xA5)防止残留数据假阳性;D2D 步骤校验的是上一步 H2D 写入的 tag 数据。
 
-带宽口径:正确性全过后才测。step 6:3 预热 + 30×16MB,H2D/D2H 分别测 sync/async × pinned/pageable 共 8 种组合,D2D 测 sync/async。step 7:D2D sweep(4/16/64/256MB),对比 sync/async-pipe/async-serial 三条路径。
+带宽口径:正确性全过后才测。step 6:3 预热 + 30×128MB(`BW_SIZE`,现行 test.c 定义),H2D/D2H 分别测 sync/async × pinned/pageable 共 8 种组合,D2D 测 sync/async。step 7:D2D sweep(4/16/64/256MB),对比 sync/async-pipe/async-serial 三条路径。
 
 ## 运行方法
 ```
@@ -28,7 +28,7 @@ DEV=1 ./run.sh
 ## 预期结果
 全部 OK, RESULT: PASS(7/7 步 ret=0,无校验 mismatch)。
 
-带宽参考值(30×16MB,详见实测矩阵):
+带宽参考值(30×128MB,详见实测矩阵):
 
 | 路径 | 带宽 | 说明 |
 |---|---|---|
@@ -80,7 +80,12 @@ sync 走 `drvMemcpy`(~5 GB/s),async 走 SDMA(渐近 ~91 GB/s),差距随 size 扩
 [01] RESULT: PASS
 ```
 
-### 完整带宽测试矩阵(16MB × 30 iters)
+> 注: 上引"关键输出"为**早期 16MB 口径的历史运行记录**(step 6 打印行可见 16 MB);
+> 现行 test.c 的 `BW_SIZE` 已为 128MB, 重新运行时 step 6 将按 128 MB 口径打印与计时,
+> 下文矩阵表头口径以现行代码(128MB)标注。H2D/D2H 系在此尺寸区间对块大小不敏感
+> (2026-09-09 dev6 实测 16MB/128MB pinned sync 均为 ~27 GB/s), 历史数值仍具参考性。
+
+### 完整带宽测试矩阵(128MB × 30 iters)
 
 | 方向 | Host 内存类型 | API 类型 | 带宽 (GB/s) | 说明 |
 |------|--------------|---------|------------|------|

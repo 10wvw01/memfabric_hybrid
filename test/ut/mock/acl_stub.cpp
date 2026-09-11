@@ -26,6 +26,7 @@ int32_t g_stubDestroyStreamCalls = 0;
 int32_t g_stubSetCurrentContextFail = 0; // 非 0 时 SetCurrentContext 返回错误(die 对导入防护用例)
 int32_t g_stubSetDeviceFail = 0;         // 非 0 时 SetDevice 返回错误(die 对导入恢复失败用例)
 int32_t g_stubDestroyContextCalls = 0;   // 计数: context 销毁次数(验证失败时跳过销毁)
+int32_t g_stubMallocP2pOom = 0;          // 非 0 时 memAttr=P2P(4/5) 的 MallocPhysical 返回 207001(分区 OOM 注入)
 }
 
 extern "C" {
@@ -451,10 +452,17 @@ int32_t aclrtDestroyContext(void *context)
 int32_t aclrtMallocPhysical(void **handle, size_t size, const void *prop, uint64_t flags)
 {
     (void)size;
-    (void)prop;
     (void)flags;
     if (handle != nullptr) {
         *handle = reinterpret_cast<void *>(0x2002);
+    }
+    if (g_stubMallocP2pOom != 0 && prop != nullptr) {
+        /* aclrtPhysicalMemProp 布局: handleType(4B)+allocationType(4B)+memAttr(4B), 偏移 8 处取 memAttr;
+         * 值与 CANN aclrtMemAttr 对齐: 15=ACL_MEM_P2P_NORMAL, 16=ACL_MEM_P2P_HUGE */
+        auto memAttr = *reinterpret_cast<const uint32_t *>(reinterpret_cast<const uint8_t *>(prop) + 8);
+        if (memAttr == 15U || memAttr == 16U) {
+            return 207001; // RT_ERROR_DRV_OUT_MEMORY(P2P 分区 OOM)
+        }
     }
     return RETURN_OK;
 }
