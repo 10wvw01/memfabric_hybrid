@@ -2,13 +2,19 @@
 
 ## 1. 前置复核（实机）
 
-- [ ] 1.1 运行 `310p-capability_matrix/12_topo_probe/run.sh` 复核本机拓扑与跨卡 P2P 带宽：8 die 基线、48 跨卡有序对 can=1 且带宽无数量级异常（排除上游机器 socket1 式劣化）；结果记入本 change 记录。验证方式：探针 PASS 且跨卡带宽数量级正常
+- [x] 1.1 运行 `310p-capability_matrix/12_topo_probe/run.sh` 复核本机拓扑与跨卡 P2P 带宽：8 die 基线、48 跨卡有序对 can=1 且带宽无数量级异常（排除上游机器 socket1 式劣化）；结果记入本 change 记录。验证方式：探针 PASS 且跨卡带宽数量级正常
+  > 实测（9/14）：topo 探针 PASS（die 对 can=0/enable 507899 基线一致，24 跨卡对 can=1、48 有序对 enable 全通）；
+  > 13_bw_compare dev0→dev2 三跑 3/3 PASS（IPC 11.38-11.44 / VMM P2P 11.24-11.41 GB/s，首跑 FAIL 判瞬时抖动）；
+  > 附注：探针 Makefile 依赖 mpicc，本机补装 openmpi（apt update 后安装）。跨卡链路健康无劣化。
 
 ## 2. D 态拆除产品化（池层）
 
-- [ ] 2.1 `dl_acl_api.{h,cpp}` 新增 `aclrtDeviceDisablePeerAccess` 符号封装（typedef/静态成员/DL_LOAD_SYM/inline wrapper/unload 置空，镜像 Enable 五处）。验证方式：编译通过且符号缺失时返回 BM_UNDER_API_UNLOAD
-- [ ] 2.2 `hybm_acl_vmm_segment.{h,cpp}` 跨卡 peer 跟踪与拆除：ImportOne 跨卡分支登记 slotAddr→peerDevId 与 peerDevId→计数；UnmapOne 成功路径递减、归零调用拆除（失败记 ERROR 不阻断）；UnReserve 兜底扫描剩余活跃对端。验证方式：代码评审 + UT 全绿
-- [ ] 2.3 UT 新增 D 态拆除用例（stub so 加 DisablePeerAccess 计数符号）：跨卡全量释放恰好拆一次 / die 对不拆 / 部分释放不拆 / uninit 兜底拆；跑全量 UT 回归（含既有 HybmAclVmmSegmentTest 全部用例）。验证方式：新用例 PASS 且全量回归不低于基线
+- [x] 2.1 `dl_acl_api.{h,cpp}` 新增 `aclrtDeviceDisablePeerAccess` 符号封装（typedef/静态成员/DL_LOAD_SYM/inline wrapper/unload 置空，镜像 Enable 五处）。验证方式：编译通过且符号缺失时返回 BM_UNDER_API_UNLOAD
+- [x] 2.2 `hybm_acl_vmm_segment.{h,cpp}` 跨卡 peer 跟踪与拆除：ImportOne 跨卡分支登记 slotAddr→peerDevId 与 peerDevId→计数；UnmapOne 成功路径递减、归零调用拆除（失败记 ERROR 不阻断）；UnReserve 兜底扫描剩余活跃对端。验证方式：代码评审 + UT 全绿
+- [x] 2.3 UT 新增 D 态拆除用例（stub so 加 DisablePeerAccess 计数符号）：跨卡全量释放恰好拆一次 / die 对不拆 / 部分释放不拆 / uninit 兜底拆；跑全量 UT 回归（含既有 HybmAclVmmSegmentTest 全部用例）。验证方式：新用例 PASS 且全量回归不低于基线
+  > 实测（9/14）：HybmAclVmmSegmentTest 12/12 PASS（存量 8 + 新增 4）；全量逐套件对照基线零差异
+  >（73 通过/18 失败完全一致，18 个失败套件均为本机存量环境问题——mockcpp 系 SEGV×4、acc_links
+  > SUAR、网络/etcd 依赖系；其中 4 个代表性崩溃用例已 stash 基线逐一复现实锤）。
 
 ## 3. 示例与探针跨卡跑法
 
