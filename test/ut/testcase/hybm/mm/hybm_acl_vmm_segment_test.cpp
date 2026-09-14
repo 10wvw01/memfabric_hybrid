@@ -22,7 +22,7 @@
 #define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
 #endif
 
-#define private public
+#define private   public
 #define protected public
 #include "hybm_acl_vmm_segment.h"
 #undef private
@@ -121,8 +121,8 @@ TEST_F(HybmAclVmmSegmentTest, ReserveAndAlloc)
     MemSlicePtr slice = nullptr;
     ASSERT_EQ(seg.AllocLocalMemory(HYBM_LARGE_PAGE_SIZE, slice), BM_OK);
     ASSERT_NE(slice, nullptr);
-    ASSERT_EQ(slice->gva_, reinterpret_cast<uint64_t>(base));          // own slot 基址
-    ASSERT_EQ(slice->vAddress_, slice->gva_);                          // 对称窗口 GVA==DVA
+    ASSERT_EQ(slice->gva_, reinterpret_cast<uint64_t>(base)); // own slot 基址
+    ASSERT_EQ(slice->vAddress_, slice->gva_);                 // 对称窗口 GVA==DVA
     ASSERT_EQ(slice->size_, HYBM_LARGE_PAGE_SIZE);
     ASSERT_EQ(seg.slices_.size(), 1UL);
     ASSERT_EQ(seg.exportMap_.size(), 1UL);
@@ -246,7 +246,7 @@ TEST_F(HybmAclVmmSegmentTest, RemoveImportedAndRelease)
 /* Create 分派用例需 mock InitDeviceInfo(否则 stub soc name 覆盖 socType_), 依赖 mockcpp 环境 */
 TEST_F(HybmAclVmmSegmentTest, CreateDispatchesToAclVmmFor310P)
 {
-    MOCKER_CPP(&ock::mf::MemSegment::InitDeviceInfo, Result (*)(int32_t)).stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&ock::mf::MemSegment::InitDeviceInfo, Result(*)(int32_t)).stubs().will(returnValue(BM_OK));
     MemSegment::socType_ = AscendSocType::ASCEND_310P;
     MemSegmentOptions opt = MakeOptions(0, 2, HYBM_LARGE_PAGE_SIZE, HYBM_LARGE_PAGE_SIZE);
     auto seg = MemSegment::Create(opt, 0);

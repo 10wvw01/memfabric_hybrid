@@ -37,8 +37,8 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
         void *va = nullptr;
         auto ret = DlAclApi::AclrtReserveMemAddress(&va, allocSize, 0, hintAddr, 0);
         if (ret != BM_OK || va == nullptr) {
-            BM_LOG_ERROR("310P3 AclrtReserveMemAddress failed, ret:" << ret << " size:" << allocSize
-                                                                      << " hintAddr:0x" << std::hex << hintAddr);
+            BM_LOG_ERROR("310P3 AclrtReserveMemAddress failed, ret:" << ret << " size:" << allocSize << " hintAddr:0x"
+                                                                     << std::hex << hintAddr);
             return BM_ERROR;
         }
         aclrtPhysicalMemProp prop{};
@@ -51,7 +51,7 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
         ret = DlAclApi::AclrtMallocPhysical(&aclHandle, allocSize, &prop, 0);
         if (ret != BM_OK) {
             BM_LOG_ERROR("310P3 AclrtMallocPhysical failed, ret:" << ret << " size:" << allocSize
-                                                                      << " logicDeviceId:" << initedLogicDeviceId);
+                                                                  << " logicDeviceId:" << initedLogicDeviceId);
             DlAclApi::AclrtReleaseMemAddress(va);
             return BM_ERROR;
         }

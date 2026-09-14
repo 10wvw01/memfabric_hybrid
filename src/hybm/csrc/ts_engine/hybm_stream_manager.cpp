@@ -65,8 +65,14 @@ public:
             DlAclApi::AclrtDestroyStream(stream_);
         }
     }
-    void *Get() const { return stream_; }
-    void Reset(void *s) { stream_ = s; }
+    void *Get() const
+    {
+        return stream_;
+    }
+    void Reset(void *s)
+    {
+        stream_ = s;
+    }
 
 private:
     void *stream_;

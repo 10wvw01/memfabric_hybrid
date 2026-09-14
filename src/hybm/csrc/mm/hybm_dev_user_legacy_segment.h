@@ -26,7 +26,8 @@ struct RegisterSlice {
     uint64_t shareableHandle{0};
     RegisterSlice() = default;
     RegisterSlice(MemSlicePtr s, std::string n, uint64_t sh = 0) noexcept
-        : slice(std::move(s)), name(std::move(n)), shareableHandle(sh) {}
+        : slice(std::move(s)), name(std::move(n)), shareableHandle(sh)
+    {}
 };
 
 struct HbmExportDeviceInfo {

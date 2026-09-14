@@ -318,7 +318,8 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
     void *va = nullptr;
     ret = DlAclApi::AclrtReserveMemAddress(&va, alignedSize, 0, nullptr, 0);
     if (ret != 0 || va == nullptr) {
-        BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " deviceId:" << deviceId << " size:" << alignedSize);
+        BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " deviceId:" << deviceId
+                                                           << " size:" << alignedSize);
         DlAclApi::AclrtFreePhysical(handle);
         return nullptr;
     }
@@ -331,7 +332,8 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
         return nullptr;
     }
 
-    aclrtMemAccessDesc localDesc{ACL_RT_MEM_ACCESS_FLAGS_READWRITE, {deviceId, aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE}, {}};
+    aclrtMemAccessDesc localDesc{
+        ACL_RT_MEM_ACCESS_FLAGS_READWRITE, {deviceId, aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE}, {}};
     DlAclApi::AclrtMemSetAccess(va, alignedSize, &localDesc, 1);
 
     for (uint32_t d = 0; d < worldSize; d++) {
@@ -341,7 +343,8 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
         if ((d / 2U) == (deviceId / 2U)) {
             continue;
         }
-        aclrtMemAccessDesc desc{ACL_RT_MEM_ACCESS_FLAGS_READWRITE, {d, aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE}, {}};
+        aclrtMemAccessDesc desc{
+            ACL_RT_MEM_ACCESS_FLAGS_READWRITE, {d, aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE}, {}};
         auto r = DlAclApi::AclrtMemSetAccess(va, alignedSize, &desc, 1);
         if (r != 0) {
             BM_LOG_WARN("AclrtMemSetAccess for dev:" << d << " failed:" << r << " (non-fatal, may be set later)");
@@ -353,8 +356,8 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
         g_vmmHandleMap[va] = handle;
     }
 
-    BM_LOG_INFO("hybm_alloc_vmm_buffer success, deviceId:" << deviceId << " va:" << va
-                                                           << " size:" << alignedSize << " handle:" << handle);
+    BM_LOG_INFO("hybm_alloc_vmm_buffer success, deviceId:" << deviceId << " va:" << va << " size:" << alignedSize
+                                                           << " handle:" << handle);
     return va;
 }
 

@@ -462,8 +462,7 @@ Result SmemBmEntry::TopologyPreflight()
     const uint32_t p2pSlotsPerCard = 8U;
     const std::string topoPrefix = "TOPO_";
 
-    SM_LOG_INFO("[rank " << rankId << "] 310P3 topology preflight: devId:" << devId
-                << " rankSize:" << rankSize);
+    SM_LOG_INFO("[rank " << rankId << "] 310P3 topology preflight: devId:" << devId << " rankSize:" << rankSize);
 
     /* Query local topology: physicalChipId */
     int32_t phyChipIdVal = hybm_get_phy_chip_id(devId);
@@ -502,8 +501,9 @@ Result SmemBmEntry::TopologyPreflight()
         if (topoMap.size() >= rankSize) {
             break;
         }
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - gatherStart).count();
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gatherStart)
+                .count();
         if (elapsed >= gatherTimeoutMs) {
             SM_LOG_ERROR("topology preflight gather timeout:" << elapsed << "ms rank:" << rankId
                                                               << " got:" << topoMap.size() << "/" << rankSize);
@@ -536,7 +536,7 @@ Result SmemBmEntry::TopologyPreflight()
     for (const auto &t : topos) {
         bool isLocal = (t.rankId == rankId);
         SM_LOG_INFO("[rank " << rankId << "] topology record: rank:" << t.rankId << " devId:" << t.devId
-                    << " phyChipId:" << t.phyChipId << (isLocal ? " (local)" : " (peer)"));
+                             << " phyChipId:" << t.phyChipId << (isLocal ? " (local)" : " (peer)"));
     }
 
     /* Compute P2P budget: count inbound cross-card connections per card.
@@ -556,7 +556,9 @@ Result SmemBmEntry::TopologyPreflight()
     for (size_t i = 0; i < topos.size(); i++) {
         uint32_t cardI = topos[i].devId / 2U;
         for (size_t j = 0; j < topos.size(); j++) {
-            if (i == j) { continue; }
+            if (i == j) {
+                continue;
+            }
             uint32_t cardJ = topos[j].devId / 2U;
             if (cardI != cardJ) {
                 requiredPerCard[cardI]++;
@@ -567,8 +569,7 @@ Result SmemBmEntry::TopologyPreflight()
     bool feasible = true;
     for (const auto &card : requiredPerCard) {
         if (card.second > p2pSlotsPerCard) {
-            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first
-                                                             << " required:" << card.second
+            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first << " required:" << card.second
                                                              << " limit:" << p2pSlotsPerCard
                                                              << " poolId:" << options_.id << " worldSize:" << rankSize);
             feasible = false;
@@ -660,8 +661,8 @@ Result SmemBmEntry::Leave(uint32_t flags)
 {
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
     /* 310P3 HBM pool: reject dynamic leave (shrink not supported in P1) */
-    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P &&
-        (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) != 0U && coreOptions_.maxHBMSize > 0) {
+    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) != 0U &&
+        coreOptions_.maxHBMSize > 0) {
         SM_LOG_ERROR("leave not supported for 310P3 HBM pool, poolId:" << options_.id << " rank:" << options_.rank);
         return SM_INVALID_PARAM;
     }
@@ -677,8 +678,8 @@ Result SmemBmEntry::ExtendLocalMem(smem_bm_mem_type memType, uint64_t size)
     SM_ASSERT_RETURN(memType == SMEM_MEM_TYPE_DEVICE || memType == SMEM_MEM_TYPE_HOST, SM_INVALID_PARAM);
     SM_ASSERT_RETURN(size > 0, SM_INVALID_PARAM);
     /* 310P3 HOST_SHM DRAM: localDRAMSize==maxDramSize, no room for extend */
-    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P &&
-        (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_HOST_SHM) != 0U && memType == SMEM_MEM_TYPE_HOST) {
+    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_HOST_SHM) != 0U &&
+        memType == SMEM_MEM_TYPE_HOST) {
         SM_LOG_ERROR("extend not supported for 310P3 HOST_SHM DRAM pool, poolId:" << options_.id);
         return SM_INVALID_PARAM;
     }
