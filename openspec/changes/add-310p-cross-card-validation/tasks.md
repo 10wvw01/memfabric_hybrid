@@ -35,6 +35,8 @@
   > （cc_probe 模式 0/9/11/13 多变体，3 次以上复现）
 - [ ] 4.2 E0b 跨卡：probe_e0b_cc 双轮变体（本地 src→peer 池 GVA / own 池 GVA→peer 池 GVA）——SMMU 对跨卡导入 VA 的可译性裁决。验证方式：headAfter 前进且数据全对
   > **阻塞**：同 4.1（E0b 池建链走同一产品 import 路径）
+  > **分支策略（9/14 定）**：主线 wgm-dev-310p 冻结等待合入（卡内已验收修复随 PR #5）；
+  > 跨卡 4.x 解锁探索（IPC 切换/CANN 工单）转移至新分支 `wgm-dev-310p-crosscard`。
 - [ ] 4.3 08 跨卡端到端：两卡各自部署编排 kernel 后，`RANK_DEV_LIST=0,2` 三阶段（mode13 闭环 / 串行×8 / mode14 流水）。验证方式：mismatch=0、双侧 mainRet=0、流水时延 < 串行对照、干净退出
   > **阻塞**：同 4.1
 
