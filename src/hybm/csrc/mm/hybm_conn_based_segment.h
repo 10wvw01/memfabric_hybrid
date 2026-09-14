@@ -82,7 +82,7 @@ private:
     std::map<uint32_t, MemSliceStatus> slices_;
     std::map<uint32_t, std::string> exportMap_;
     std::vector<HostExportInfo> imports_;
-    std::set<uint64_t> mappedGvaMem_; // gva sets
+    std::set<uint64_t> mappedGvaMem_;            // gva sets
     std::map<uint64_t, uint64_t> mappedGvaSize_; // gva → size for munmap
     std::string shmName_{};
 };

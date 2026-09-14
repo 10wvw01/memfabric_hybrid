@@ -110,8 +110,7 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pAclrtDeviceEnablePeerAccess, aclrtDeviceEnablePeerAccessFunc, rtHandle, "aclrtDeviceEnablePeerAccess");
     DL_LOAD_SYM_OPTIONAL(pAclrtDeviceDisablePeerAccess, aclrtDeviceDisablePeerAccessFunc, rtHandle,
                          "aclrtDeviceDisablePeerAccess");
-    DL_LOAD_SYM_OPTIONAL(pAclrtDeviceCanAccessPeer, aclrtDeviceCanAccessPeerFunc, rtHandle,
-                         "aclrtDeviceCanAccessPeer");
+    DL_LOAD_SYM_OPTIONAL(pAclrtDeviceCanAccessPeer, aclrtDeviceCanAccessPeerFunc, rtHandle, "aclrtDeviceCanAccessPeer");
     DL_LOAD_SYM(pAclrtCreateStream, aclrtCreateStreamFunc, rtHandle, "aclrtCreateStream");
     DL_LOAD_SYM(pAclrtCreateStreamWithConfig, aclrtCreateStreamWithConfigFunc, rtHandle, "aclrtCreateStreamWithConfig");
     DL_LOAD_SYM(pAclrtStreamGetId, aclrtStreamGetIdFunc, rtHandle, "aclrtStreamGetId");

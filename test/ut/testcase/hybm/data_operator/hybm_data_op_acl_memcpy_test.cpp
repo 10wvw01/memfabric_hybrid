@@ -17,7 +17,7 @@
 #include <gtest/gtest.h>
 #include <dlfcn.h>
 
-#define private public
+#define private   public
 #define protected public
 #include "hybm_data_op_acl_memcpy.h"
 #undef private

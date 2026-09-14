@@ -161,9 +161,8 @@ Result HostDataOpAclMemcpy::CopyD2D(void *dest, const void *src, uint64_t length
         BM_LOG_WARN("D2D async+sync failed, retry sync AclrtMemcpy, rankId:" << rankId_);
         ret = DlAclApi::AclrtMemcpy(dest, length, src, length, ACL_MEMCPY_DEVICE_TO_DEVICE);
         if (ret != BM_OK) {
-            BM_LOG_ERROR("AclrtMemcpy(D2D fallback) failed, ret:" << ret << " rankId:" << rankId_
-                                                                  << " src:" << src << " dst:" << dest
-                                                                  << " size:" << length);
+            BM_LOG_ERROR("AclrtMemcpy(D2D fallback) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
+                                                                  << " dst:" << dest << " size:" << length);
         }
     }
     return ret;
@@ -182,8 +181,8 @@ Result HostDataOpAclMemcpy::CopyH2D(void *dest, const void *src, uint64_t length
         BM_LOG_WARN("H2D async+sync failed, retry sync AclrtMemcpy, rankId:" << rankId_);
         ret = DlAclApi::AclrtMemcpy(dest, length, src, length, ACL_MEMCPY_HOST_TO_DEVICE);
         if (ret != BM_OK) {
-            BM_LOG_ERROR("AclrtMemcpy(H2D fallback) failed, ret:" << ret << " rankId:" << rankId_
-                                                                  << " dst:" << dest << " size:" << length);
+            BM_LOG_ERROR("AclrtMemcpy(H2D fallback) failed, ret:" << ret << " rankId:" << rankId_ << " dst:" << dest
+                                                                  << " size:" << length);
         }
     }
     return ret;
@@ -202,15 +201,15 @@ Result HostDataOpAclMemcpy::CopyD2H(void *dest, const void *src, uint64_t length
         BM_LOG_WARN("D2H async+sync failed, retry sync AclrtMemcpy, rankId:" << rankId_);
         ret = DlAclApi::AclrtMemcpy(dest, length, src, length, ACL_MEMCPY_DEVICE_TO_HOST);
         if (ret != BM_OK) {
-            BM_LOG_ERROR("AclrtMemcpy(D2H fallback) failed, ret:" << ret << " rankId:" << rankId_
-                                                                  << " src:" << src << " size:" << length);
+            BM_LOG_ERROR("AclrtMemcpy(D2H fallback) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
+                                                                  << " size:" << length);
         }
     }
     return ret;
 }
 
 Result HostDataOpAclMemcpy::CopyByDirection(void *dest, const void *src, uint64_t length,
-                                             hybm_data_copy_direction direction) noexcept
+                                            hybm_data_copy_direction direction) noexcept
 {
     if (IsD2DDirection(direction)) {
         return CopyD2D(dest, src, length);
@@ -243,7 +242,7 @@ Result HostDataOpAclMemcpy::BatchCopyD2D(hybm_batch_copy_params &params) noexcep
         auto ret = SubmitD2D(params.destinations[i], params.sources[i], params.dataSizes[i]);
         if (ret != BM_OK) {
             BM_LOG_ERROR("batch submit failed, ret:" << ret << " index:" << i << " rankId:" << rankId_
-                   << " size:" << params.dataSizes[i]);
+                                                     << " size:" << params.dataSizes[i]);
             // 已提交的前 i 项仍悬在流上: 补一次同步清空未决任务(顺带触发失败自恢复重建),
             // 否则返回失败时流带未决操作, 后续 DestroyStream 会报错
             (void)SyncStream();
@@ -257,8 +256,8 @@ Result HostDataOpAclMemcpy::BatchCopyD2D(hybm_batch_copy_params &params) noexcep
             ret = DlAclApi::AclrtMemcpy(params.destinations[i], params.dataSizes[i], params.sources[i],
                                         params.dataSizes[i], ACL_MEMCPY_DEVICE_TO_DEVICE);
             if (ret != BM_OK) {
-                BM_LOG_ERROR("batch D2D sync fallback failed, ret:" << ret << " index:" << i
-                   << " rankId:" << rankId_ << " size:" << params.dataSizes[i]);
+                BM_LOG_ERROR("batch D2D sync fallback failed, ret:" << ret << " index:" << i << " rankId:" << rankId_
+                                                                    << " size:" << params.dataSizes[i]);
                 return ret;
             }
         }
@@ -280,7 +279,7 @@ Result HostDataOpAclMemcpy::BatchDataCopy(hybm_batch_copy_params &params, hybm_d
         auto ret = CopyByDirection(params.destinations[i], params.sources[i], params.dataSizes[i], direction);
         if (ret != BM_OK) {
             BM_LOG_ERROR("batch copy item failed, ret:" << ret << " index:" << i << " rankId:" << rankId_
-                   << " size:" << params.dataSizes[i]);
+                                                        << " size:" << params.dataSizes[i]);
             return ret;
         }
     }

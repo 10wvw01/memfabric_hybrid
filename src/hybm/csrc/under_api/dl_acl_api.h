@@ -638,7 +638,7 @@ public:
     }
 
     static inline Result AclrtIpcMemGetExportKey(void *devPtr, uint64_t size, char *key, uint64_t keyLen,
-                                                  uint64_t flags)
+                                                 uint64_t flags)
     {
         if (pAclrtIpcMemGetExportKey == nullptr) {
             return BM_UNDER_API_UNLOAD;
@@ -733,7 +733,7 @@ public:
     }
 
     static inline Result AclrtReserveMemAddress(void **virPtr, size_t size, size_t alignment, void *expectPtr,
-                                                 uint64_t flags)
+                                                uint64_t flags)
     {
         if (pAclrtReserveMemAddress == nullptr) {
             return BM_UNDER_API_UNLOAD;
@@ -749,8 +749,7 @@ public:
         return pAclrtReleaseMemAddress(virPtr);
     }
 
-    static inline Result AclrtMapMem(void *virPtr, size_t size, size_t offset, aclrtDrvMemHandle handle,
-                                     uint64_t flags)
+    static inline Result AclrtMapMem(void *virPtr, size_t size, size_t offset, aclrtDrvMemHandle handle, uint64_t flags)
     {
         if (pAclrtMapMem == nullptr) {
             return BM_UNDER_API_UNLOAD;
@@ -785,7 +784,7 @@ public:
     }
 
     static inline Result AclrtMemGetAllocationGranularity(const aclrtPhysicalMemProp *prop, uint32_t option,
-                                                         size_t *granularity)
+                                                          size_t *granularity)
     {
         if (pAclrtMemGetAllocationGranularity == nullptr) {
             return BM_UNDER_API_UNLOAD;

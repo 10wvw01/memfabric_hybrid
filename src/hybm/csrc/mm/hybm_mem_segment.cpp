@@ -82,8 +82,9 @@ MemSegmentPtr MemSegment::Create(const MemSegmentOptions &options, int entityId)
     MemSegmentPtr tmpSeg;
     switch (options.segType) {
         case HYBM_MST_HBM:
-             BM_LOG_INFO("HBM segment: gvaVer=" << HybmGetGvaVersion() << " socType=" << socType_
-                          << " → VMM=" << (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_310P));
+            BM_LOG_INFO("HBM segment: gvaVer="
+                        << HybmGetGvaVersion() << " socType=" << socType_
+                        << " → VMM=" << (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_310P));
             if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950 ||
                 socType_ == AscendSocType::ASCEND_310P) {
                 tmpSeg = std::make_shared<HybmVmmBasedSegment>(options, entityId);
@@ -214,7 +215,8 @@ Result MemSegment::InitDeviceInfo(int devId)
     int64_t value = 0;
     ret = DlAclApi::RtGetDeviceInfo(deviceId_, 0, INFO_TYPE_SDID, &value);
     if (ret != BM_OK) {
-        BM_LOG_WARN("get sdid failed: " << ret << " deviceId: " << deviceId_ << " — using 0, may affect cross-server logic");
+        BM_LOG_WARN("get sdid failed: " << ret << " deviceId: " << deviceId_
+                                        << " — using 0, may affect cross-server logic");
         sdid_ = 0;
     } else {
         sdid_ = static_cast<uint32_t>(value);
@@ -322,16 +324,16 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
         if (ret != 0) {
             if (ret == ACL_ERROR_RT_DRV_INTERNAL_ERROR && sameCard) {
                 BM_LOG_INFO("[rank " << "] same-card cross-die P2P rejected (507899), safe to ignore."
-                            << " local_user:" << deviceId_ << " remote_phy:" << remotePhyId);
+                                     << " local_user:" << deviceId_ << " remote_phy:" << remotePhyId);
             } else {
                 BM_LOG_ERROR("AclrtDeviceEnablePeerAccess failed:" << ret << " local_user:" << deviceId_
-                                                                    << " remote_phy:" << remotePhyId
-                                                                    << " sameCard:" << sameCard);
+                                                                   << " remote_phy:" << remotePhyId
+                                                                   << " sameCard:" << sameCard);
                 return BM_DL_FUNCTION_FAILED;
             }
         }
-        BM_LOG_DEBUG("310P3 P2P enabled: local_user:" << deviceId_ << " remote_phy:" << remotePhyId
-                                                       << " ret:" << ret << " sameCard:" << sameCard);
+        BM_LOG_DEBUG("310P3 P2P enabled: local_user:" << deviceId_ << " remote_phy:" << remotePhyId << " ret:" << ret
+                                                      << " sameCard:" << sameCard);
         return BM_OK;
     }
 

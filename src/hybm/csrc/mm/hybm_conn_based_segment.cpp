@@ -251,11 +251,11 @@ Result HybmConnBasedSegment::Mmap() noexcept
                 close(shmFd);
                 if (mapped == targetAddr) {
                     hva = import.gva;
-                    BM_LOG_INFO("310P3 remote DRAM shm_open mapped, rank:" << import.rankId
-                               << " name:" << import.shmName << " gva:" << VaToStr(import.gva));
+                    BM_LOG_INFO("310P3 remote DRAM shm_open mapped, rank:"
+                                << import.rankId << " name:" << import.shmName << " gva:" << VaToStr(import.gva));
                 } else {
                     BM_LOG_ERROR("310P3 remote DRAM shm_open mmap failed, rank:" << import.rankId
-                                << " errno:" << errno);
+                                                                                 << " errno:" << errno);
                 }
             } else {
                 BM_LOG_ERROR("310P3 remote DRAM shm_open failed, name:" << import.shmName << " errno:" << errno);
@@ -424,8 +424,8 @@ Result HybmConnBasedSegment::MapSlice(void *&mapped, void *sliceAddr, uint64_t l
         LvaShmReservePhysicalMemory(mapped, size);
     }
 
-    bool needHostRegister = (options_.dataOpType & (HYBM_DOP_TYPE_DEVICE_RDMA | HYBM_DOP_TYPE_DEVICE_URMA |
-                                                     HYBM_DOP_TYPE_DEVICE_UBOE)) != 0;
+    bool needHostRegister = (options_.dataOpType &
+                             (HYBM_DOP_TYPE_DEVICE_RDMA | HYBM_DOP_TYPE_DEVICE_URMA | HYBM_DOP_TYPE_DEVICE_UBOE)) != 0;
     if (needHostRegister) {
         auto ret = DlHalApi::HalHostRegister(mapped, size, HOST_MEM_MAP_DEV, logicDeviceId_, &dva);
         if (ret != BM_OK) {
@@ -464,7 +464,8 @@ void *HybmConnBasedSegment::AllocMemory(void *sliceAddr, uint64_t lvOffset, uint
             } else {
                 mapped = mmap(sliceAddr, size, prot, MAP_FIXED | MAP_SHARED, shmFd, lvOffset);
                 if (mapped == sliceAddr) {
-                    BM_LOG_INFO("310P3 shm_open DRAM alloc, name:" << shmName_ << " addr:" << mapped << " size:" << size);
+                    BM_LOG_INFO("310P3 shm_open DRAM alloc, name:" << shmName_ << " addr:" << mapped
+                                                                   << " size:" << size);
                     allocMethod = MemAllocMethod::MMAP;
                     close(shmFd);
                     return mapped;

@@ -863,20 +863,18 @@ Result SmemTransEntry::DeregisterLocalMemory(const void *address)
     std::unique_lock<std::mutex> uniqueLock{memMutex_};
     auto it = registeredSlices_.find(alignedAddr);
     if (it == registeredSlices_.end()) {
-        SM_LOG_ERROR("address not found in registered slices, address:" << address
-                                                                          << " alignedAddr:" << alignedAddr);
+        SM_LOG_ERROR("address not found in registered slices, address:" << address << " alignedAddr:" << alignedAddr);
         return SM_INVALID_PARAM;
     }
 
     auto ret = hybm_free_local_memory(entity_, it->second.slice, 1, 0);
     if (ret != 0) {
-        SM_LOG_ERROR("hybm_free_local_memory failed, address:" << alignedAddr
-                                                               << " size:" << it->second.size << " ret:" << ret);
+        SM_LOG_ERROR("hybm_free_local_memory failed, address:" << alignedAddr << " size:" << it->second.size
+                                                               << " ret:" << ret);
         return SM_ERROR;
     }
 
-    SM_LOG_INFO("deregistered memory, address:" << alignedAddr << " size:" << it->second.size
-                                                << " rank:" << rankId_);
+    SM_LOG_INFO("deregistered memory, address:" << alignedAddr << " size:" << it->second.size << " rank:" << rankId_);
     registeredSlices_.erase(it);
     return SM_OK;
 }
@@ -906,13 +904,11 @@ Result SmemTransEntry::TopologyPreflight()
     return CheckP2PSlotBudget(rankTopos, rankSize);
 }
 
-Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize,
-                                              std::vector<std::pair<uint32_t, uint32_t>> &rankTopos)
+Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize, std::vector<std::pair<uint32_t, uint32_t>> &rankTopos)
 {
     const std::string topoPrefix = "TOPO_";
     std::string topoVal = std::to_string(rankId_) + ":" + std::to_string(config_.deviceId);
-    auto ret = store_->Set(topoPrefix + std::to_string(rankId_),
-                           std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
+    auto ret = store_->Set(topoPrefix + std::to_string(rankId_), std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
     if (ret != 0) {
         SM_LOG_ERROR("Set topology key failed, ret:" << ret << " rank:" << rankId_);
         return SM_ERROR;
@@ -930,11 +926,12 @@ Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize,
         if (topoMap.size() >= rankSize) {
             break;
         }
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - gatherStart).count();
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gatherStart)
+                .count();
         if (elapsed >= 5000) {
-            SM_LOG_WARN("topology gather partial, got:" << topoMap.size() << "/" << rankSize
-                                                         << " rank:" << rankId_ << ", continuing with available");
+            SM_LOG_WARN("topology gather partial, got:" << topoMap.size() << "/" << rankSize << " rank:" << rankId_
+                                                        << ", continuing with available");
             break;
         }
         usleep(100 * 1000);
@@ -954,14 +951,14 @@ Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize,
         return SM_ERROR;
     }
     if (rankTopos.size() < rankSize) {
-        SM_LOG_WARN("topology records partial:" << rankTopos.size() << "/" << rankSize
-                                                 << " rank:" << rankId_ << ", continuing with available");
+        SM_LOG_WARN("topology records partial:" << rankTopos.size() << "/" << rankSize << " rank:" << rankId_
+                                                << ", continuing with available");
     }
     return SM_OK;
 }
 
 Result SmemTransEntry::CheckP2PSlotBudget(const std::vector<std::pair<uint32_t, uint32_t>> &rankTopos,
-                                           uint32_t rankSize)
+                                          uint32_t rankSize)
 {
     constexpr uint32_t p2pSlotsPerCard = 8U;
     std::map<uint32_t, uint32_t> requiredPerCard;
@@ -981,22 +978,19 @@ Result SmemTransEntry::CheckP2PSlotBudget(const std::vector<std::pair<uint32_t, 
     bool feasible = true;
     for (const auto &card : requiredPerCard) {
         if (card.second > p2pSlotsPerCard) {
-            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first
-                                                             << " required:" << card.second
-                                                             << " limit:" << p2pSlotsPerCard
-                                                             << " rank:" << rankId_
+            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first << " required:" << card.second
+                                                             << " limit:" << p2pSlotsPerCard << " rank:" << rankId_
                                                              << " worldSize:" << rankSize);
             feasible = false;
         }
     }
     if (!feasible) {
-        SM_LOG_ERROR("topology preflight FAILED for TRANS rank:" << rankId_
-                                                                 << " worldSize:" << rankSize);
+        SM_LOG_ERROR("topology preflight FAILED for TRANS rank:" << rankId_ << " worldSize:" << rankSize);
         return SM_NO_RESOURCES;
     }
 
     SM_LOG_INFO("topology preflight PASS: rank:" << rankId_ << " worldSize:" << rankSize
-                                                << " cross-card slots per card all <= " << p2pSlotsPerCard);
+                                                 << " cross-card slots per card all <= " << p2pSlotsPerCard);
     return SM_OK;
 }
 

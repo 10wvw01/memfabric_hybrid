@@ -101,8 +101,9 @@ TEST_F(DlAclApiVmmInitTest, VmmSymbolsLoaded)
     int32_t pid = 1;
     ASSERT_NE(DlAclApi::AclrtMemSetPidToShareableHandle(sh, &pid, 1), BM_UNDER_API_UNLOAD);
     size_t gran = 0;
-    ASSERT_EQ(DlAclApi::AclrtMemGetAllocationGranularity(&prop,
-                  aclrtMemGranularityOptions::ACL_RT_MEM_ALLOC_GRANULARITY_RECOMMENDED, &gran), 0);
+    ASSERT_EQ(DlAclApi::AclrtMemGetAllocationGranularity(
+                  &prop, aclrtMemGranularityOptions::ACL_RT_MEM_ALLOC_GRANULARITY_RECOMMENDED, &gran),
+              0);
     ASSERT_EQ(gran, 2UL * 1024UL * 1024UL);
 }
 
