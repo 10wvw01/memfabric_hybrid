@@ -148,9 +148,9 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pRtIpcDestroyMemoryName, rtIpcDestroyMemoryNameFunc, rtHandle, "rtIpcDestroyMemoryName");
     DL_LOAD_SYM(pRtIpcOpenMemory, rtIpcOpenMemoryFunc, rtHandle, "rtIpcOpenMemory");
     DL_LOAD_SYM(pRtIpcCloseMemory, rtIpcCloseMemoryFunc, rtHandle, "rtIpcCloseMemory");
-    DL_LOAD_SYM(pAclrtIpcMemGetExportKey, aclrtIpcMemGetExportKeyFunc, rtHandle, "aclrtIpcMemGetExportKey");
-    DL_LOAD_SYM(pAclrtIpcMemImportByKey, aclrtIpcMemImportByKeyFunc, rtHandle, "aclrtIpcMemImportByKey");
-    DL_LOAD_SYM(pAclrtIpcMemClose, aclrtIpcMemCloseFunc, rtHandle, "aclrtIpcMemClose");
+    DL_LOAD_SYM_OPTIONAL(pAclrtIpcMemGetExportKey, aclrtIpcMemGetExportKeyFunc, rtHandle, "aclrtIpcMemGetExportKey");
+    DL_LOAD_SYM_OPTIONAL(pAclrtIpcMemImportByKey, aclrtIpcMemImportByKeyFunc, rtHandle, "aclrtIpcMemImportByKey");
+    DL_LOAD_SYM_OPTIONAL(pAclrtIpcMemClose, aclrtIpcMemCloseFunc, rtHandle, "aclrtIpcMemClose");
     DL_LOAD_SYM(pAclrtGetSocName, aclrtGetSocNameFunc, rtHandle, "aclrtGetSocName");
     DL_LOAD_SYM(pRtEnableP2P, rtEnableP2PFunc, rtHandle, "rtEnableP2P");
     DL_LOAD_SYM(pRtDisableP2P, rtDisableP2PFunc, rtHandle, "rtDisableP2P");
