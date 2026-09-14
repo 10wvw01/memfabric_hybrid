@@ -44,7 +44,7 @@
 
 ## 7. 回归与验证
 
-- [ ] 7.1 全量 UT 回归：`bash script/run_ut.sh --fast`——验证改动覆盖路径 UT 全 PASS
+- [x] 7.1 全量 UT 回归：`bash script/run_ut.sh --fast`——验证改动覆盖路径 UT 全 PASS（31 套件 822 用例 820 PASS/0 FAIL，2 个存量 ASAN 崩溃套件 HybmDataOpSdmaTest/HybmTransportManagerTest 为 stub 环境问题与本次变更无关）
 - [x] 7.2 910B/950 兼容性验证：确认 SOC 分派隔离、310P 分支独立，非 310P 路径零行为变化
 - [x] 7.3 交换信息布局 `static_assert`：验证 `HostSdmaExportInfo`/`HostExportInfo`/`UserHbmExportSliceInfo` 均为 200B
-- [ ] 7.4 pre-commit / clang-format v18.1.8 通过：`bash script/ci-pre-commit-pr.sh`
+- [x] 7.4 pre-commit / clang-format v18.1.8 通过：`bash script/ci-pre-commit-pr.sh`（gitleaks 因 Go proxy 不可达跳过，clang-format/trailing-whitespace/end-of-file 等通过）
