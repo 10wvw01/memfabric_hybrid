@@ -75,6 +75,26 @@ export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:...
 # 期望输出: 双方 "=== EX08 rN PASS ===" + r0 掩盖量化加速比
 ```
 
+## 跨卡运行（rank→devId 映射参数化）
+
+`RANK_DEV_LIST` 环境变量指定 rank0/rank1 的 deviceId（缺省 `0,1` 即同卡 die 对，与上述既有跑法
+完全一致）。跨卡（跨 PCIe 卡）2-rank 协同：
+
+```bash
+export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v1.json 路径>
+export RANK_DEV_LIST=0,2    # rank0=dev0(卡0), rank1=dev2(卡1)
+RANK_DEV_LIST=0,2 /tmp/ex08 0 & RANK_DEV_LIST=0,2 /tmp/ex08 1 & wait
+```
+
+注意事项：
+
+- **两卡各自部署编排 kernel**（deployer 互斥作用域 = 卡，跨卡设备 OS 文件系统独立）：先对卡0
+  （dev0/dev1 所在）部署一次，再对卡1（dev2/dev3 所在）部署一次，验证门两卡都要过
+- 本端 die 号由 `devId % 2` 推导（本地 die 编址与对端所在卡无关），跨卡 rank（如 dev2）同样成立
+- 跨卡分片经"本进程上下文直接 import"（隐式双向 P2P）后，池 GVA 可作 SDMA SQE src/dst；
+  进程退出前由池层自动拆除 P2P 状态（防 D 态挂死）
+- 同 socket 跨卡带宽 ~11 GB/s；流水加速比与 die 对场景可比（通信开销略高但同为 P2P 直达）
+
 ## 与相关示例/实验的关系
 
 - **07**：host 编排（BM API + `HostDataOpAclMemcpy`），数据面全在 host 线程

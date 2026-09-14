@@ -20,7 +20,8 @@ from memfabric_hybrid import bm
 
 STORE_URL = "tcp://127.0.0.1:8576"
 WORLD_SIZE = 2
-RANK_DEV = {0: 0, 1: 1}  # rank0=dev0, rank1=dev1(同卡 die 对)
+# rank->devId 映射: 缺省 "0,1"(同卡 die 对); 跨卡运行前 export RANK_DEV_LIST="0,2"
+RANK_DEV = {i: int(d) for i, d in enumerate(os.environ.get("RANK_DEV_LIST", "0,1").split(","))}
 HBM_POOL_SIZE = 32 * 1024 * 1024
 DRAM_POOL_SIZE = 32 * 1024 * 1024
 TEST_LEN = 8 * 1024 * 1024

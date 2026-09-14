@@ -76,6 +76,21 @@ export LD_LIBRARY_PATH=$CANN/aarch64-linux/lib64:/usr/local/Ascend/driver/lib64/
 # 期望输出: 双方 "=== P5 rN DONE ==="
 ```
 
+## 跨卡运行（rank→devId 映射参数化）
+
+`RANK_DEV_LIST` 环境变量指定 rank0/rank1 的 deviceId（缺省 `0,1` 即同卡 die 对，与上述既有跑法
+完全一致）。跨卡（跨 PCIe 卡）2-rank 建池：
+
+```bash
+export RANK_DEV_LIST=0,2    # rank0=dev0(卡0), rank1=dev2(卡1)
+python3 07_310p_die_pair_pool.py            # Python 版
+RANK_DEV_LIST=0,2 /tmp/p5_e2e 0 & RANK_DEV_LIST=0,2 /tmp/p5_e2e 1 & wait   # C++ 版
+```
+
+- 跨卡导入走"本进程上下文直接 import"路径（隐式双向 P2P，消耗 P2P 槽位）；分片为 P2P policy 分配
+- 进程退出前由池层自动 `DisablePeerAccess` 拆除 P2P 状态（防 D 态挂死），无需用户干预
+- 同 socket 跨卡（如 dev0↔dev2）带宽 ~11 GB/s；跨 socket（如 dev0↔dev4）经 host 根复合体转发
+
 ## Q&A
 
 - **Q：为何 HBM 池 data_op_type 仍传 SDMA？**

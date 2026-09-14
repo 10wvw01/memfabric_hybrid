@@ -55,6 +55,20 @@ static void WriteDone(const char *name)
     }
 }
 
+/* rank->devId 映射: 环境变量 RANK_DEV_LIST(缺省 "0,1" 同卡 die 对; 跨卡如 "0,2") */
+static uint16_t RankDevId(int rank)
+{
+    const char *list = getenv("RANK_DEV_LIST");
+    int dev[2] = {0, 1}; /* 缺省 die 对: rank0=dev0, rank1=dev1 */
+    if (list != nullptr && strlen(list) != 0) {
+        if (sscanf(list, "%d,%d", &dev[0], &dev[1]) != 2 || dev[0] < 0 || dev[1] < 0) {
+            printf("invalid RANK_DEV_LIST: %s (expect e.g. 0,2)\n", list);
+            exit(1);
+        }
+    }
+    return static_cast<uint16_t>(dev[rank]);
+}
+
 static void WaitPeerDone(const char *name)
 {
     char path[128];
@@ -163,7 +177,7 @@ int main(int argc, char *argv[])
     cfg.startConfigStoreServer = (g_rank == 0);
     char buf[256];
     (void)snprintf(buf, sizeof(buf), "smem_bm_init");
-    Step("smem_bm_init", smem_bm_init(STORE_URL, 2, static_cast<uint16_t>(g_rank), &cfg));
+    Step("smem_bm_init", smem_bm_init(STORE_URL, 2, RankDevId(g_rank), &cfg));
 
     /* ---- HBM 池(SDMA 位 -> 310P AclVmm 链路) ---- */
     smem_bm_create_option_t hbmOpt{};
