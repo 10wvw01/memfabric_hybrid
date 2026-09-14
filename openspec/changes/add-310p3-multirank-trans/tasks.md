@@ -45,6 +45,6 @@
 ## 7. 回归与验证
 
 - [ ] 7.1 全量 UT 回归：`bash script/run_ut.sh --fast`——验证改动覆盖路径 UT 全 PASS
-- [ ] 7.2 910B/950 兼容性验证：确认 SOC 分派隔离、310P 分支独立，非 310P 路径零行为变化
-- [ ] 7.3 交换信息布局 `static_assert`：验证 `HostSdmaExportInfo`/`HostExportInfo`/`UserHbmExportSliceInfo` 均为 200B
+- [x] 7.2 910B/950 兼容性验证：确认 SOC 分派隔离、310P 分支独立，非 310P 路径零行为变化
+- [x] 7.3 交换信息布局 `static_assert`：验证 `HostSdmaExportInfo`/`HostExportInfo`/`UserHbmExportSliceInfo` 均为 200B
 - [ ] 7.4 pre-commit / clang-format v18.1.8 通过：`bash script/ci-pre-commit-pr.sh`
