@@ -104,7 +104,7 @@ void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size_t size);
  * @brief Free VMM-backed device buffer allocated by hybm_alloc_vmm_buffer.
  *
  * @param addr            [in] mapped device VA returned by hybm_alloc_vmm_buffer
- * @param size            [in] buffer size in bytes
+ * @param size            [in] buffer size in bytes (unused, kept for ABI compatibility)
  */
 void hybm_free_vmm_buffer(void *addr, size_t size);
 

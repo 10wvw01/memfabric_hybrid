@@ -40,11 +40,11 @@ struct HbmExportDeviceInfo {
     uint32_t rankId{0};
     uint32_t devicePhyId{0};
 
-    // Padding to make total size UNIFIED_EXCHANGE_SEG_INFO_SIZE(192) bytes
+    // Padding to make total size UNIFIED_EXCHANGE_SEG_INFO_SIZE bytes
     char padding_[UNIFIED_EXCHANGE_SEG_INFO_SIZE - 36]{};
 };
 static_assert(sizeof(HbmExportDeviceInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE,
-              "HbmExportDeviceInfo must be UNIFIED_EXCHANGE_SEG_INFO_SIZE(192) bytes,"
+              "HbmExportDeviceInfo must match UNIFIED_EXCHANGE_SEG_INFO_SIZE,"
               " compatible with HostSdmaExportInfo");
 static_assert(offsetof(HbmExportDeviceInfo, segmentType) == SEGMENT_TYPE_OFFSET, "segmentType offset mismatch!");
 
@@ -61,11 +61,11 @@ struct UserHbmExportSliceInfo {
     uint32_t devicePhyId{0};
     char name[DEVICE_SHM_NAME_SIZE + 1]{};
 
-    // Padding to make total size 200 bytes
+    // Padding to make total size UNIFIED_EXCHANGE_SEG_INFO_SIZE bytes
     char padding_[UNIFIED_EXCHANGE_SEG_INFO_SIZE - 125]{};
 };
 static_assert(sizeof(UserHbmExportSliceInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE,
-              "UserHbmExportSliceInfo must be 200 bytes, compatible with HostSdmaExportInfo");
+              "UserHbmExportSliceInfo must match UNIFIED_EXCHANGE_SEG_INFO_SIZE, compatible with HostSdmaExportInfo");
 static_assert(offsetof(UserHbmExportSliceInfo, segmentType) == SEGMENT_TYPE_OFFSET, "segmentType offset mismatch!");
 
 class HybmDevUserLegacySegment : public HybmDevLegacySegment {

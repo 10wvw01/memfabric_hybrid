@@ -223,7 +223,7 @@ Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_me
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
         aclrtPhysicalMemProp prop{};
         prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-        prop.allocationType = 0; /* PINNED */
+        prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
         prop.location.id = static_cast<uint32_t>(deviceId_);
         prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
         prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
@@ -389,7 +389,7 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         aclrtMemAccessDesc localDesc{};
         localDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
         localDesc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-        localDesc.location.id = static_cast<uint32_t>(logicDeviceId_);
+        localDesc.location.id = static_cast<uint32_t>(deviceId_);
         auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &localDesc, 1);
         if (saRet != BM_OK) {
             BM_LOG_WARN("AclrtMemSetAccess(RW) local dev failed:" << saRet << " addr:0x" << std::hex << allocAddr
@@ -806,6 +806,7 @@ Result HybmVmmBasedSegment::Mmap() noexcept
                 BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
                                       << " shareable:" << shareable << " sameCard:" << sameCard
                                       << " deviceId:" << deviceId_ << " segType:" << options_.segType);
+                DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(lva));
                 return BM_ERROR;
             }
             mapHandle = aclHandle;
@@ -824,7 +825,7 @@ Result HybmVmmBasedSegment::Mmap() noexcept
             aclrtMemAccessDesc impDesc{};
             impDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
             impDesc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-            impDesc.location.id = static_cast<uint32_t>(logicDeviceId_);
+            impDesc.location.id = static_cast<uint32_t>(deviceId_);
             auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(lva), im.size, &impDesc, 1);
             if (saRet != BM_OK) {
                 BM_LOG_WARN("[rank " << options_.rankId << "] AclrtMemSetAccess on imported VA failed:" << saRet
@@ -942,13 +943,12 @@ Result HybmVmmBasedSegment::RemoveImported(const std::vector<uint32_t> &ranks) n
 
     // remove imports_ infos for specified ranks
     std::set<uint32_t> removedRanks(ranks.begin(), ranks.end());
+    ReleaseP2PLeases(removedRanks);
     imports_.erase(std::remove_if(imports_.begin(), imports_.end(),
                                   [&removedRanks](const HostSdmaExportInfo &info) {
                                       return removedRanks.find(info.rankId) != removedRanks.end();
                                   }),
                    imports_.end());
-
-    ReleaseP2PLeases(removedRanks);
     return BM_OK;
 }
 

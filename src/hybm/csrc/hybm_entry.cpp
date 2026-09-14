@@ -38,7 +38,12 @@ void *g_allocHandle = nullptr;
 
 std::mutex initMutex;
 
-std::unordered_map<void *, aclrtDrvMemHandle> g_vmmHandleMap;
+struct VmmHandleEntry {
+    aclrtDrvMemHandle handle{nullptr};
+    uint32_t deviceId{0};
+};
+
+std::unordered_map<void *, VmmHandleEntry> g_vmmHandleMap;
 std::mutex g_vmmMutex;
 } // namespace
 
@@ -48,7 +53,7 @@ aclrtDrvMemHandle HybmLookupVmmHandle(void *addr)
 {
     std::lock_guard<std::mutex> lock(g_vmmMutex);
     auto it = g_vmmHandleMap.find(addr);
-    return (it != g_vmmHandleMap.end()) ? it->second : nullptr;
+    return (it != g_vmmHandleMap.end()) ? it->second.handle : nullptr;
 }
 } // namespace mf
 } // namespace ock
@@ -167,12 +172,15 @@ HYBM_API void hybm_uninit()
     } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         if (g_baseAddr != 0) {
             if (socType == AscendSocType::ASCEND_310P) {
-                DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(g_baseAddr));
+                auto unmapRet = DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("310P unmap meta res: " << unmapRet);
                 if (g_allocHandle != nullptr) {
-                    DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
+                    auto freeRet = DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
                     g_allocHandle = nullptr;
+                    BM_LOG_INFO("310P free physical res: " << freeRet);
                 }
-                DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
+                auto releaseRet = DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("310P release mem addr res: " << releaseRet);
             } else {
                 auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
                 BM_LOG_INFO("unmap meta info res: " << ret);
@@ -307,11 +315,15 @@ HYBM_API int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t 
 
 HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size_t size)
 {
-    DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId), true);
+    auto setRet = DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId), true);
+    if (setRet != 0) {
+        BM_LOG_ERROR("AclrtSetDevice failed, ret:" << setRet << " deviceId:" << deviceId);
+        return nullptr;
+    }
 
     aclrtPhysicalMemProp prop{};
     prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-    prop.allocationType = 0U;
+    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
     prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
     prop.location.id = deviceId;
     prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
@@ -351,7 +363,15 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
 
     aclrtMemAccessDesc localDesc{
         ACL_RT_MEM_ACCESS_FLAGS_READWRITE, {deviceId, aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE}, {}};
-    DlAclApi::AclrtMemSetAccess(va, alignedSize, &localDesc, 1);
+    auto localAccessRet = DlAclApi::AclrtMemSetAccess(va, alignedSize, &localDesc, 1);
+    if (localAccessRet != 0) {
+        BM_LOG_ERROR("AclrtMemSetAccess(local) failed, ret:" << localAccessRet << " deviceId:" << deviceId
+                                                              << " va:" << va << " size:" << alignedSize);
+        DlAclApi::AclrtUnmapMem(va);
+        DlAclApi::AclrtReleaseMemAddress(va);
+        DlAclApi::AclrtFreePhysical(handle);
+        return nullptr;
+    }
 
     for (uint32_t d = 0; d < worldSize; d++) {
         if (d == deviceId) {
@@ -370,7 +390,7 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
 
     {
         std::lock_guard<std::mutex> lock(g_vmmMutex);
-        g_vmmHandleMap[va] = handle;
+        g_vmmHandleMap[va] = {handle, deviceId};
     }
 
     BM_LOG_INFO("hybm_alloc_vmm_buffer success, deviceId:" << deviceId << " va:" << va << " size:" << alignedSize
@@ -380,11 +400,13 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
 
 HYBM_API void hybm_free_vmm_buffer(void *addr, size_t size)
 {
+    (void)size;
     if (addr == nullptr) {
         return;
     }
 
     aclrtDrvMemHandle handle = nullptr;
+    uint32_t deviceId = 0;
     {
         std::lock_guard<std::mutex> lock(g_vmmMutex);
         auto it = g_vmmHandleMap.find(addr);
@@ -392,12 +414,18 @@ HYBM_API void hybm_free_vmm_buffer(void *addr, size_t size)
             BM_LOG_WARN("hybm_free_vmm_buffer: addr not found in registry, addr:" << addr);
             return;
         }
-        handle = it->second;
+        handle = it->second.handle;
+        deviceId = it->second.deviceId;
         g_vmmHandleMap.erase(it);
     }
 
-    DlAclApi::AclrtUnmapMem(addr);
-    DlAclApi::AclrtReleaseMemAddress(addr);
-    DlAclApi::AclrtFreePhysical(handle);
-    BM_LOG_INFO("hybm_free_vmm_buffer success, addr:" << addr << " handle:" << handle);
+    auto setRet = DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId), true);
+    if (setRet != 0) {
+        BM_LOG_ERROR("hybm_free_vmm_buffer AclrtSetDevice failed, ret:" << setRet << " deviceId:" << deviceId);
+    }
+    auto unmapRet = DlAclApi::AclrtUnmapMem(addr);
+    auto releaseRet = DlAclApi::AclrtReleaseMemAddress(addr);
+    auto freeRet = DlAclApi::AclrtFreePhysical(handle);
+    BM_LOG_INFO("hybm_free_vmm_buffer done, addr:" << addr << " handle:" << handle << " unmapRet:" << unmapRet
+                                                   << " releaseRet:" << releaseRet << " freeRet:" << freeRet);
 }

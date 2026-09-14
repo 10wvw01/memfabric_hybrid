@@ -12,7 +12,6 @@
 #include "smem_bm_entry.h"
 
 #include <chrono>
-#include <sstream>
 #include <cstring>
 
 #include "hybm_def.h"
@@ -445,7 +444,6 @@ void SmemBmEntry::InvokeEventCb(uint32_t rankId, smem_bm_group_event_t event)
 
 Result SmemBmEntry::TopologyPreflight()
 {
-    /* Only for 310P3 HBM pools; DRAM HOST_SHM and other SoCs skip */
     if (hybm_get_soc_type() != ock::mf::SOC_TYPE_310P) {
         return SM_OK;
     }
@@ -459,41 +457,47 @@ Result SmemBmEntry::TopologyPreflight()
     const uint32_t rankId = options_.rank;
     const uint32_t rankSize = options_.rankSize;
     const uint32_t devId = coreOptions_.devId;
-    const uint32_t p2pSlotsPerCard = 8U;
     const std::string topoPrefix = "TOPO_";
 
     SM_LOG_INFO("[rank " << rankId << "] 310P3 topology preflight: devId:" << devId << " rankSize:" << rankSize);
 
-    /* Query local topology: physicalChipId */
-    int32_t phyChipIdVal = hybm_get_phy_chip_id(devId);
-    if (phyChipIdVal < 0) {
-        SM_LOG_ERROR("hybm_get_phy_chip_id failed, devId:" << devId);
-        return SM_ERROR;
+    auto ret = PublishBmTopologyRecord(topoPrefix);
+    if (ret != SM_OK) {
+        return ret;
     }
-    uint32_t phyChipId = static_cast<uint32_t>(phyChipIdVal);
-    SM_LOG_INFO("[rank " << rankId << "] 310P3 topology preflight: phyChipId:" << phyChipId);
 
-    /* Publish topology record to store */
-    std::string topoKey = topoPrefix + std::to_string(rankId);
-    std::string topoVal;
-    {
-        std::ostringstream oss;
-        oss << rankId << ":" << devId << ":" << phyChipId;
-        topoVal = oss.str();
+    std::vector<std::pair<uint32_t, uint32_t>> rankTopos;
+    ret = GatherBmTopologyRecords(topoPrefix, rankSize, rankTopos);
+    if (ret != SM_OK) {
+        return ret;
     }
+    return CheckBmP2PSlotBudget(rankTopos, rankSize);
+}
+
+Result SmemBmEntry::PublishBmTopologyRecord(const std::string &topoPrefix)
+{
+    const uint32_t rankId = options_.rank;
+    const uint32_t devId = coreOptions_.devId;
+    std::string topoKey = topoPrefix + std::to_string(rankId);
+    std::string topoVal = std::to_string(rankId) + ":" + std::to_string(devId);
     auto ret = _configStore->Set(topoKey, std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
     if (ret != 0) {
         SM_LOG_ERROR("Set topology key failed:" << ret << " rank:" << rankId << " key:" << topoKey);
         return SM_ERROR;
     }
+    return SM_OK;
+}
 
-    /* Gather all ranks' topology records */
+Result SmemBmEntry::GatherBmTopologyRecords(const std::string &topoPrefix, uint32_t rankSize,
+                                            std::vector<std::pair<uint32_t, uint32_t>> &rankTopos)
+{
+    const uint32_t rankId = options_.rank;
     std::unordered_map<std::string, std::string> topoMap;
     const int64_t gatherTimeoutMs = static_cast<int64_t>(options_.controlOperationTimeout) * 1000;
     auto gatherStart = std::chrono::steady_clock::now();
     while (true) {
         topoMap.clear();
-        ret = _configStore->PrefixGet(topoPrefix, topoMap);
+        auto ret = _configStore->PrefixGet(topoPrefix, topoMap);
         if (ret != 0) {
             SM_LOG_ERROR("PrefixGet topology failed:" << ret << " rank:" << rankId);
             return SM_ERROR;
@@ -505,61 +509,41 @@ Result SmemBmEntry::TopologyPreflight()
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gatherStart)
                 .count();
         if (elapsed >= gatherTimeoutMs) {
-            SM_LOG_ERROR("topology preflight gather timeout:" << elapsed << "ms rank:" << rankId
-                                                              << " got:" << topoMap.size() << "/" << rankSize);
+            SM_LOG_ERROR("topology gather timeout:" << elapsed << "ms rank:" << rankId
+                                                    << " got:" << topoMap.size() << "/" << rankSize);
             return SM_ERROR;
         }
-        usleep(100 * 1000); /* 100ms poll */
+        usleep(100 * 1000);
     }
 
-    /* Parse all topology records */
-    struct RankTopo {
-        uint32_t rankId;
-        uint32_t devId;
-        uint32_t phyChipId;
-    };
-    std::vector<RankTopo> topos;
     for (const auto &kv : topoMap) {
-        RankTopo t{};
-        if (sscanf(kv.second.c_str(), "%u:%u:%u", &t.rankId, &t.devId, &t.phyChipId) != 3) {
+        uint32_t r = 0;
+        uint32_t d = 0;
+        if (sscanf(kv.second.c_str(), "%u:%u", &r, &d) != 2) {
             SM_LOG_ERROR("parse topology record failed:" << kv.first << " val:" << kv.second);
             continue;
         }
-        topos.push_back(t);
+        rankTopos.emplace_back(r, d);
     }
-    if (topos.size() < rankSize) {
-        SM_LOG_ERROR("topology records incomplete:" << topos.size() << "/" << rankSize);
+    if (rankTopos.size() < rankSize) {
+        SM_LOG_ERROR("topology records incomplete:" << rankTopos.size() << "/" << rankSize << " rank:" << rankId);
         return SM_ERROR;
     }
+    return SM_OK;
+}
 
-    /* Log topology summary */
-    for (const auto &t : topos) {
-        bool isLocal = (t.rankId == rankId);
-        SM_LOG_INFO("[rank " << rankId << "] topology record: rank:" << t.rankId << " devId:" << t.devId
-                             << " phyChipId:" << t.phyChipId << (isLocal ? " (local)" : " (peer)"));
-    }
-
-    /* Compute P2P budget: count inbound cross-card connections per card.
-     * On 310P3 Duo, devId/2 identifies the physical card (dev0/dev1 -> card0, etc.).
-     * Same-card devices share the P2P domain and don't need cross-card connections.
-     *
-     * HAL constraint (ascend_hal_base.h): the two dies of a 310P Duo card share
-     * 8 MAX enable-number (inbound P2P authorization slots). Each cross-card
-     * enable(local->remote) consumes one inbound slot on remote's card.
-     * VMM import internally calls halDeviceEnableP2P, consuming the same quota.
-     *
-     * Full-mesh N-rank with 2 ranks per card: each card has 2 dies, each die
-     * connects to (N-2) cross-card peers → 2×(N-2) inbound slots per card.
-     *   N=4: 2×2=4 ≤ 8  ✅    N=6: 2×4=8 ≤ 8  ✅(saturated)    N=8: 2×6=12 > 8  ❌
-     */
-    std::map<uint32_t, uint32_t> requiredPerCard; /* cardId(devId/2) -> inbound cross-card count */
-    for (size_t i = 0; i < topos.size(); i++) {
-        uint32_t cardI = topos[i].devId / 2U;
-        for (size_t j = 0; j < topos.size(); j++) {
+Result SmemBmEntry::CheckBmP2PSlotBudget(const std::vector<std::pair<uint32_t, uint32_t>> &rankTopos, uint32_t rankSize)
+{
+    constexpr uint32_t p2pSlotsPerCard = 8U;
+    const uint32_t rankId = options_.rank;
+    std::map<uint32_t, uint32_t> requiredPerCard;
+    for (size_t i = 0; i < rankTopos.size(); i++) {
+        uint32_t cardI = rankTopos[i].second / 2U;
+        for (size_t j = 0; j < rankTopos.size(); j++) {
             if (i == j) {
                 continue;
             }
-            uint32_t cardJ = topos[j].devId / 2U;
+            uint32_t cardJ = rankTopos[j].second / 2U;
             if (cardI != cardJ) {
                 requiredPerCard[cardI]++;
             }
@@ -570,23 +554,18 @@ Result SmemBmEntry::TopologyPreflight()
     for (const auto &card : requiredPerCard) {
         if (card.second > p2pSlotsPerCard) {
             SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first << " required:" << card.second
-                                                             << " limit:" << p2pSlotsPerCard
-                                                             << " poolId:" << options_.id << " worldSize:" << rankSize);
+                                                             << " limit:" << p2pSlotsPerCard << " poolId:" << options_.id
+                                                             << " worldSize:" << rankSize);
             feasible = false;
         }
     }
     if (!feasible) {
         SM_LOG_ERROR("topology preflight FAILED for pool:" << options_.id << " rank:" << rankId
-                                                           << " worldSize:" << rankSize << " zero import will be done");
+                                                           << " worldSize:" << rankSize);
         return SM_NO_RESOURCES;
     }
-
     SM_LOG_INFO("topology preflight PASS: rank:" << rankId << " worldSize:" << rankSize
                                                  << " inbound cross-card slots per card all <= " << p2pSlotsPerCard);
-
-    /* 310P3: pre-enable P2P disabled — p3_store_repro test proved it's not needed.
-     * ACL runtime handles P2P internally during aclrtMemImportFromShareableHandle. */
-
     return SM_OK;
 }
 

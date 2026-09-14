@@ -33,7 +33,7 @@ struct HostExportInfo {
 };
 
 static_assert(sizeof(HostExportInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE,
-              "HostExportInfo must be UNIFIED_EXCHANGE_SEG_INFO_SIZE(192) bytes");
+              "HostExportInfo must match UNIFIED_EXCHANGE_SEG_INFO_SIZE");
 
 class HybmConnBasedSegment : public MemSegment {
 public:
@@ -84,6 +84,7 @@ private:
     std::vector<HostExportInfo> imports_;
     std::set<uint64_t> mappedGvaMem_;            // gva sets
     std::map<uint64_t, uint64_t> mappedGvaSize_; // gva → size for munmap
+    std::set<uint64_t> shmMappedGva_;            // gva sets that have shm-backed mmap
     std::string shmName_{};
 };
 } // namespace mf
