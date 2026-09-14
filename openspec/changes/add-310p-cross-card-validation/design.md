@@ -41,7 +41,7 @@
 4. 预热实验（模式 15）：import 前在对端槽位 VA 临时映射一块**新**物理 → 仍 FAIL——规则进一步收窄为「源 VA 须映射着**导入方自己导出的物理**」。
 5. runtime plog 证实 auto-P2P（EnableP2PWithOtherDevice 双向）成功，失败点在 import ioctl 本身；借导出方 ctx 的方式三同样失败——排除 P2P 使能问题。
 
-**推断**：内核跨卡 import 要求句柄源 VA 在导入方进程已有「自身导出物理」的映射（同卡 die 对路径无此约束，故 07 die 对一直正常）。该约束与产品对称槽位设计结构性冲突（对端槽位必须留给导入句柄）。
+**进一步收敛（9/14 深夜补测，探针矩阵完备化后修正）**：上述「源 VA 映射约束」推断**被新证据推翻**——cc_probe3/4 系列（产品同款槽位布局 + NULL expect + 直调链，含完整 hybm_init/create_entity 前导）跨卡 import 双向全通（≥8 次复现）。同时 plog 对比证明：通过路径（直调链）与失败路径（产品段代码链）在**全部可观测层面逐字节一致**（ACL 调用序列、halMem 参数含 Reserve/Map/export、内核 devmm 日志、InfoGet 成功、句柄值传递正确）。已逐一排除并失败的修复假设：显式 expectPtr（addr 字段差异）、预热源 VA（未导出物理/已导出句柄两种）、借导出方 ctx（方式三）、登记阶段双向 enable（已合入，正确但非充分）。**结论修正：存在一个产品段代码路径特有的、当前仪器（plog/gdb/valgrind/strace）不可见的隐藏差异**，使内核 halMemImportFromShareableHandle 返回 drvRetCode=17；设备侧 devmm agent 源码（AICPU 固件）不在本机，宿主侧源码已排查完毕。
 
 **解锁路径**（二选一，需团队决策）：
 - **A. CANN/驱动侧澄清**：向驱动团队提交证据链，确认 drvRetCode 17 是否驱动缺陷（合法 import 被拒）；若修复则产品零改动。
