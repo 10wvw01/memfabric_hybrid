@@ -233,8 +233,8 @@ constexpr int32_t ACL_ERROR_RT_DRV_INTERNAL_ERROR = 507899;
 /* aclrtMemAccessDesc.flags bit field: read + write access */
 constexpr uint32_t ACL_RT_MEM_ACCESS_FLAGS_READWRITE = 0x3U;
 
-/* aclrtPhysicalMemProp.allocationType: pinned allocation */
-constexpr uint32_t ACL_MEM_ALLOCATION_TYPE_PINNED = 1U;
+/* aclrtPhysicalMemProp.allocationType: pinned allocation (matches CANN acl_rt.h) */
+constexpr uint32_t ACL_MEM_ALLOCATION_TYPE_PINNED = 0U;
 
 struct aclrtPhysicalMemProp {
     aclrtMemHandleType handleType;

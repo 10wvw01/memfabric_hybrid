@@ -56,24 +56,28 @@ Result HybmDevUserLegacySegment::UnReserveMemorySpace() noexcept
 {
     BM_LOG_INFO("un-reserve memory space.");
     bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
-    bool hasVmmExport = false;
+    std::set<std::string> vmmNames;
     for (auto &rs : registerSlices_) {
         if (rs.second.shareableHandle != 0) {
-            hasVmmExport = true;
-            break;
+            vmmNames.insert(rs.second.name);
         }
     }
-    if (!memNames_.empty() && !hasVmmExport) {
+    if (!memNames_.empty()) {
         if (is310P) {
-            BM_LOG_INFO("310P3 ACL IPC keys do not need explicit destroy.");
+            for (auto &name : memNames_) {
+                if (vmmNames.find(name) == vmmNames.end()) {
+                    DlAclApi::AclrtIpcMemClose(name.c_str());
+                }
+            }
+            BM_LOG_INFO("Finish to close 310P3 IPC keys (non-VMM).");
         } else {
             for (auto &name : memNames_) {
-                DlAclApi::RtIpcDestroyMemoryName(name.c_str());
+                if (vmmNames.find(name) == vmmNames.end()) {
+                    DlAclApi::RtIpcDestroyMemoryName(name.c_str());
+                }
             }
-            BM_LOG_INFO("Finish to destroy memory names.");
+            BM_LOG_INFO("Finish to destroy memory names (non-VMM).");
         }
-    } else {
-        BM_LOG_INFO("Sender does not need to destroy memory names.");
     }
     memNames_.clear();
     CloseMemory();

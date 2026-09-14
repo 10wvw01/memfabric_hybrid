@@ -245,21 +245,23 @@ Result HybmConnBasedSegment::Mmap() noexcept
         uint64_t hva = 0;
         if (import.shmName[0] != '\0') {
             int shmFd = shm_open(import.shmName, O_RDWR, 0666);
-            if (shmFd >= 0) {
-                void *targetAddr = reinterpret_cast<void *>(import.gva);
-                void *mapped = mmap(targetAddr, import.size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, shmFd, 0);
-                close(shmFd);
-                if (mapped == targetAddr) {
-                    hva = import.gva;
-                    BM_LOG_INFO("310P3 remote DRAM shm_open mapped, rank:"
-                                << import.rankId << " name:" << import.shmName << " gva:" << VaToStr(import.gva));
-                } else {
-                    BM_LOG_ERROR("310P3 remote DRAM shm_open mmap failed, rank:" << import.rankId
-                                                                                 << " errno:" << errno);
-                }
-            } else {
-                BM_LOG_ERROR("310P3 remote DRAM shm_open failed, name:" << import.shmName << " errno:" << errno);
+            if (shmFd < 0) {
+                BM_LOG_ERROR("310P3 remote DRAM shm_open failed, name:" << import.shmName << " errno:" << errno
+                                                                         << " rankId:" << import.rankId);
+                return BM_ERROR;
             }
+            void *targetAddr = reinterpret_cast<void *>(import.gva);
+            void *mapped = mmap(targetAddr, import.size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, shmFd, 0);
+            close(shmFd);
+            if (mapped != targetAddr) {
+                BM_LOG_ERROR("310P3 remote DRAM mmap failed, rankId:" << import.rankId << " errno:" << errno
+                                                                      << " shmName:" << import.shmName);
+                return BM_ERROR;
+            }
+            hva = import.gva;
+            shmMappedGva_.insert(import.gva);
+            BM_LOG_INFO("310P3 remote DRAM shm_open mapped, rank:"
+                        << import.rankId << " name:" << import.shmName << " gva:" << VaToStr(import.gva));
         }
 
         auto ret = HybmVaManager::GetInstance().AddVaInfoFromExternal(
@@ -273,14 +275,17 @@ Result HybmConnBasedSegment::Mmap() noexcept
 Result HybmConnBasedSegment::Unmap() noexcept
 {
     for (auto gva : mappedGvaMem_) {
-        auto sizeIt = mappedGvaSize_.find(gva);
-        if (sizeIt != mappedGvaSize_.end()) {
-            munmap(reinterpret_cast<void *>(gva), sizeIt->second);
+        if (shmMappedGva_.find(gva) != shmMappedGva_.end()) {
+            auto sizeIt = mappedGvaSize_.find(gva);
+            if (sizeIt != mappedGvaSize_.end()) {
+                munmap(reinterpret_cast<void *>(gva), sizeIt->second);
+            }
         }
         HybmVaManager::GetInstance().RemoveOneVaInfo(gva);
     }
     mappedGvaMem_.clear();
     mappedGvaSize_.clear();
+    shmMappedGva_.clear();
     if (!shmName_.empty()) {
         shm_unlink(shmName_.c_str());
         shmName_.clear();

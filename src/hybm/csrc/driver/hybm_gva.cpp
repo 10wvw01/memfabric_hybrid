@@ -43,7 +43,7 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
         }
         aclrtPhysicalMemProp prop{};
         prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-        prop.allocationType = 0;
+        prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
         prop.location.id = static_cast<uint32_t>(initedLogicDeviceId);
         prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
         prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);

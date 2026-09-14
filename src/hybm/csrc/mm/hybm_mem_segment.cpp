@@ -323,8 +323,8 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
         bool sameCard = (deviceId_ / 2) == (remotePhyId / 2);
         if (ret != 0) {
             if (ret == ACL_ERROR_RT_DRV_INTERNAL_ERROR && sameCard) {
-                BM_LOG_INFO("[rank " << "] same-card cross-die P2P rejected (507899), safe to ignore."
-                                     << " local_user:" << deviceId_ << " remote_phy:" << remotePhyId);
+                BM_LOG_INFO("same-card cross-die P2P rejected (507899), safe to ignore."
+                            " local_user:" << deviceId_ << " remote_phy:" << remotePhyId);
             } else {
                 BM_LOG_ERROR("AclrtDeviceEnablePeerAccess failed:" << ret << " local_user:" << deviceId_
                                                                    << " remote_phy:" << remotePhyId

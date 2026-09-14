@@ -144,6 +144,9 @@ void SmemTransEntry::UnInitialize()
 
     globalGroup_ = nullptr;
     if (entity_ != nullptr) {
+        std::unique_lock<std::mutex> uniqueLock{memMutex_};
+        CleanupRegisteredSlices();
+        uniqueLock.unlock();
         hybm_destroy_entity(entity_, 0);
         entity_ = nullptr;
     }
@@ -523,6 +526,17 @@ Result SmemTransEntry::RegisterLocalMemory(const void *address, uint64_t size, u
     return RegisterLocalMemories(regMemories, flags);
 }
 
+void SmemTransEntry::CleanupRegisteredSlices() noexcept
+{
+    for (auto &it : registeredSlices_) {
+        auto ret = hybm_free_local_memory(entity_, it.second.slice, 1, 0);
+        if (ret != 0) {
+            SM_LOG_ERROR("hybm_free_local_memory failed, address:" << it.first << " ret:" << ret);
+        }
+    }
+    registeredSlices_.clear();
+}
+
 Result SmemTransEntry::RegisterLocalMemories(const std::vector<std::pair<const void *, size_t>> &regMemories,
                                              uint32_t flags)
 {
@@ -551,7 +565,10 @@ Result SmemTransEntry::RegisterLocalMemories(const std::vector<std::pair<const v
     for (auto &m : mm) {
         auto ret = RegisterOneMemory(m.first, m.second, flags);
         if (ret != 0) {
+            SM_LOG_ERROR("RegisterOneMemory failed, address:" << m.first << " size:" << m.second
+                                                              << " rank:" << rankId_ << " ret:" << ret);
             registedInfo_.clear();
+            CleanupRegisteredSlices();
             return ret;
         }
     }
@@ -559,6 +576,7 @@ Result SmemTransEntry::RegisterLocalMemories(const std::vector<std::pair<const v
     if (topoRet != SM_OK) {
         SM_LOG_ERROR("topology preflight failed, rank:" << rankId_ << " ret:" << topoRet);
         registedInfo_.clear();
+        CleanupRegisteredSlices();
         return topoRet;
     }
     auto ret = Update(0);
@@ -930,9 +948,9 @@ Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize, std::vector<std:
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gatherStart)
                 .count();
         if (elapsed >= 5000) {
-            SM_LOG_WARN("topology gather partial, got:" << topoMap.size() << "/" << rankSize << " rank:" << rankId_
-                                                        << ", continuing with available");
-            break;
+            SM_LOG_ERROR("topology gather timeout, got:" << topoMap.size() << "/" << rankSize
+                                                         << " rank:" << rankId_);
+            return SM_ERROR;
         }
         usleep(100 * 1000);
     }
@@ -951,8 +969,8 @@ Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize, std::vector<std:
         return SM_ERROR;
     }
     if (rankTopos.size() < rankSize) {
-        SM_LOG_WARN("topology records partial:" << rankTopos.size() << "/" << rankSize << " rank:" << rankId_
-                                                << ", continuing with available");
+        SM_LOG_ERROR("topology records incomplete:" << rankTopos.size() << "/" << rankSize << " rank:" << rankId_);
+        return SM_ERROR;
     }
     return SM_OK;
 }

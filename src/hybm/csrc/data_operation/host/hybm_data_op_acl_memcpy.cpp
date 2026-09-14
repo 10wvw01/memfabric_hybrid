@@ -304,6 +304,9 @@ Result HostDataOpAclMemcpy::DataCopyAsync(hybm_copy_params &params, hybm_data_co
             return DlAclApi::AclrtMemcpyAsync(params.dest, params.dataSize, params.src, params.dataSize,
                                               ACL_MEMCPY_DEVICE_TO_HOST, options.stream);
         }
+        BM_LOG_ERROR("DataCopyAsync unsupported direction with user stream, direction:" << direction
+                                                                                         << " rankId:" << rankId_);
+        return BM_INVALID_PARAM;
     }
     auto ret = CopyByDirection(params.dest, params.src, params.dataSize, direction);
     if (ret != BM_OK) {
