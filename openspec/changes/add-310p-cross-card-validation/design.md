@@ -47,6 +47,39 @@
 - **A. CANN/驱动侧澄清**：向驱动团队提交证据链，确认 drvRetCode 17 是否驱动缺陷（合法 import 被拒）；若修复则产品零改动。
 - **B. 布局重设计**：2-rank 场景改为「own 物理@base+0、对端导入@base+maxSize」（探针已验证此布局内核接受），但破坏 GVA==DVA==HVA 对称不变式，牵动 AddVaInfo/TransformVa/peer 寻址全链——需独立 change 立项设计。
 
+## 探索资产与证据矩阵（跨卡 import 排障结晶，索引）
+
+**探针资产**（`310p-capability_matrix/17_aicore_aicpu_overlap/`，未跟踪目录，随备份保留）：
+- `cc_probe.c` / `cc_probe2.cc`：初代裁决探针（模式 0-13：直调/段链/ctx技巧/预热/双句柄对照等变体矩阵）
+- `cc_probe3.c` / `cc_probe4.cc`：终代裁决探针（产品槽位布局 + PRE 前导隔离 + ctrl/ctrlnul/fix 三模式）
+- `hybm_min.cc`：最小 hybm 直调复现器（二分定位用）
+
+**实验矩阵结论**（dev0↔dev2，各 ≥2 次复现）：
+
+| 配置 | import 结果 |
+|---|---|
+| 产品槽位布局 + NULL expect + 直调链（含完整 hybm_init/create_entity 前导） | **PASS** |
+| 产品槽位布局 + 显式 expectPtr + 直调链 | PASS |
+| 产品槽位布局 + NULL/显式 expect + **产品段代码链**（07 示例 / cc_probe2 模式 7/12） | **FAIL 17** |
+| 段链 + 预热源VA（未导出物理 / 已导出句柄） | FAIL / PASS(但直调链本就 PASS，预热非必要) |
+| 借导出方 ctx（方式三）+ 段链 / 直调链 | FAIL / PASS |
+| 13_bw 布局（单块窗口，import 先于 reserve） | PASS |
+| xcclpp demo 的 IPC 链路跨卡 | PASS（demo + 03/13/15 号探针） |
+
+**关键谜团**：直调链与段链在全部可观测层面逐字节一致（ACL 调用序列、halMem 参数、plog 内核日志、
+句柄值传递、valgrind 零堆错误、单 libascendcl 实例），结果一 PASS 一 FAIL。宿主侧源码
+（runtime api_impl / driver devmm_svm）已排查完毕，17 出自设备侧 AICPU devmm agent（固件源码不在本机）。
+
+**已排除假设全录**：P2P 未使能／线程设备上下文／内核残留脏退出／双 ACL 实例／时序竞争／
+源 VA 映射约束（被同布局直调 PASS 推翻）／显式 expectPtr addr 字段／源 VA 预热／
+Disable 签名与设备绑定（后两项为已合入的正确修复，但非充分条件）。
+
+**新分支路线（IPC 切换，方案文档 §7 已备案的兜底）**：
+- 传统 IPC 的 import VA 驱动分配不可控（方案文档 619-620 行）→ GVA 对称公式（`base+p*maxSize`）
+  改为地址查表（R1 兜底条款："回退 IPC+查表"）
+- xcclpp demo 先例：SDMA SQE dst 用 IPC 导入 VA 跨卡可译 → E0b 结论对 IPC 内存需重验
+- die 对路径保留 VMM（已验收），仅跨卡导入分支切换 → `IsDiePair` 分派点天然就是切换点
+
 ## 顺带发现（独立缺陷，另行修复）
 
 - **exit 时静态析构顺序缺陷**：进程未显式 `hybm_uninit` 而经 `exit()` 退出时，`MemEntityFactory` 静态析构触发段拆除，调用已析构的 `HybmVaManager::RemoveOneVaInfo` → double-free 崩溃（valgrind/gdb 栈实锤，crash 栈：MemEntityFactory::~ → UnReserveMemorySpace → ReleaseSliceMemory → RemoveOneVaInfo）。die 对既有场景显式 uninit 不触发；脏退出路径必现。建议后续 change 修复（析构顺序守护或工厂空转检查）。
