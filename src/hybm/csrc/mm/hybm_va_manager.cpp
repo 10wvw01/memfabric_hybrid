@@ -260,16 +260,9 @@ Result HybmVaManager::GetLocalMemoryType(uint64_t va, hybm_mem_type &memType) co
 uint8_t HybmVaManager::ClassifyAddressMask(const uint64_t va)
 {
     auto r = QueryAddr(va);
-    if (r.inAllocGva) {
-        /* 池内地址分类契约(跨段类型共享, hybm_data_op_entry 方向查表依赖, 勿回退):
-         * imported → 单 GLOBAL 位; 本地分配 → LOCAL|GLOBAL 双位。
-         * 双位与下方 reservedMap_ 分支语义一致(对称池内地址可作源也可作目标);
-         * 新增非对称池型时需重新评估此处, 否则 L2G/G2L 方向会被误判 */
-        if (r.memType == HYBM_MEM_TYPE_DEVICE) {
-            return (r.importedRankId != INVALID_RANK_ID) ? BIT_GLOBAL_DEVICE
-                                                         : (BIT_LOCAL_DEVICE | BIT_GLOBAL_DEVICE);
-        }
-        return (r.importedRankId != INVALID_RANK_ID) ? BIT_GLOBAL_HOST : (BIT_LOCAL_HOST | BIT_GLOBAL_HOST);
+    // 已 import → 单 GLOBAL
+    if (r.inAllocGva && r.importedRankId != INVALID_RANK_ID) {
+        return (r.memType == HYBM_MEM_TYPE_DEVICE) ? BIT_GLOBAL_DEVICE : BIT_GLOBAL_HOST;
     }
     // reservedMap_ → GVA，已在 allocatedMap_ 中才设有效位
     {

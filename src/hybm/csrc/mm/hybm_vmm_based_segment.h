@@ -16,6 +16,8 @@
 #include "hybm_mem_common.h"
 #include "dl_hal_api.h"
 
+#include <set>
+
 namespace ock {
 namespace mf {
 struct HostSdmaExportInfo {
@@ -31,8 +33,10 @@ struct HostSdmaExportInfo {
     uint32_t rankId{0};
     uint32_t devicePhyId{0};
     uint64_t size{0};
+    uint32_t physicalChipId{0};
+    uint32_t reserved_{0};
     MemShareHandle shareHandle;
-}; // 192B
+}; // 200B
 
 static_assert(sizeof(HostSdmaExportInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE,
               "HostSdmaExportInfo must match UNIFIED_EXCHANGE_SEG_INFO_SIZE, "
@@ -74,6 +78,9 @@ private:
     Result MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept;
     Result HalMemCreateAdapterFromHost(size_t size, drv_mem_handle_t **handle, drv_mem_prop prop);
     uint64_t ReserveLva(const HostSdmaExportInfo &im);
+    void ReleaseP2PLeases(const std::set<uint32_t> &removedRanks = {}) noexcept;
+    bool Is310PAclPath() const noexcept;
+    void ReleaseHandle(drv_mem_handle_t *handle) noexcept;
 
     std::vector<HostSdmaExportInfo> imports_;
     uint8_t *globalVirtualAddress_{nullptr}; // gva, if total size < 128t, it equal lva
@@ -84,8 +91,9 @@ private:
     std::map<uint32_t, MemSliceStatus> slices_;
     std::map<uint32_t, std::pair<MemSliceStatus, uint64_t>> registerSlices_;
     std::map<uint32_t, std::string> exportMap_;
-    std::map<uint64_t, drv_mem_handle_t *> mappedGvaMem_; // mapped gva
+    std::map<uint64_t, void *> mappedGvaMem_; // mapped gva, handle is drv_mem_handle_t* or aclrtDrvMemHandle
     std::vector<void *> reservedLva_;
+    std::set<int32_t> p2pLeases_; // enabled peer physical device ids for cleanup
 };
 } // namespace mf
 } // namespace ock

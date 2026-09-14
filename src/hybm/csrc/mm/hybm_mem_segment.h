@@ -151,7 +151,7 @@ protected:
     static bool CanSdmaReaches(uint32_t superPodId, uint32_t serverId, uint32_t deviceId) noexcept;
     static void FillSysBootIdInfo() noexcept;
     static Result EnableRemotePeerAccess(int32_t remotePhyId) noexcept;
-    static Result QueryDeviceInfoSocTolerant(int32_t infoType, const char *name, int64_t &value) noexcept;
+    static bool IsSameCard(uint32_t peerId) noexcept;
 
 protected:
     const MemSegmentOptions options_;
@@ -161,6 +161,7 @@ protected:
     static int deviceId_;
     static int logicDeviceId_;
     static int devicePhyId_;
+    static uint32_t physicalChipId_;
     static uint32_t pid_;
     static uint32_t sdid_;
     static uint32_t serverId_;

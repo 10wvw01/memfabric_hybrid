@@ -126,8 +126,8 @@ Result HybmAclVmmSegment::UnReserveMemorySpace() noexcept
 void HybmAclVmmSegment::FillMemProp(aclrtPhysicalMemProp &prop, aclrtMemAttr memAttr) const noexcept
 {
     prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-    prop.allocationType = aclrtMemAllocationType::ACL_MEM_ALLOCATION_TYPE_PINNED;
-    prop.memAttr = memAttr;
+    prop.allocationType = static_cast<uint32_t>(ACL_MEM_ALLOCATION_TYPE_PINNED);
+    prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
     prop.location.id = static_cast<uint32_t>(options_.devId);
     prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
 }
@@ -160,7 +160,7 @@ Result HybmAclVmmSegment::MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_
     }
 
     aclrtMemAccessDesc acc{};
-    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     acc.location.id = static_cast<uint32_t>(options_.devId);
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &acc, 1);
@@ -484,7 +484,7 @@ Result HybmAclVmmSegment::MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrv
     }
 
     aclrtMemAccessDesc acc{};
-    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     acc.location.id = static_cast<uint32_t>(options_.devId);
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(slotAddr), im.size, &acc, 1);
