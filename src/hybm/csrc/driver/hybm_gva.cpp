@@ -32,6 +32,42 @@ int32_t HybmGetInitedLogicDeviceId()
 
 int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **allocHandle)
 {
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+        void *hintAddr = reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR);
+        void *va = nullptr;
+        auto ret = DlAclApi::AclrtReserveMemAddress(&va, allocSize, 0, hintAddr, 0);
+        if (ret != BM_OK || va == nullptr) {
+            BM_LOG_ERROR("310P3 AclrtReserveMemAddress failed, ret:" << ret << " size:" << allocSize
+                                                                      << " hintAddr:0x" << std::hex << hintAddr);
+            return BM_ERROR;
+        }
+        aclrtPhysicalMemProp prop{};
+        prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
+        prop.allocationType = 0;
+        prop.location.id = static_cast<uint32_t>(initedLogicDeviceId);
+        prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+        prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
+        aclrtDrvMemHandle aclHandle = nullptr;
+        ret = DlAclApi::AclrtMallocPhysical(&aclHandle, allocSize, &prop, 0);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("310P3 AclrtMallocPhysical failed, ret:" << ret << " size:" << allocSize
+                                                                      << " logicDeviceId:" << initedLogicDeviceId);
+            DlAclApi::AclrtReleaseMemAddress(va);
+            return BM_ERROR;
+        }
+        ret = DlAclApi::AclrtMapMem(va, allocSize, 0, aclHandle, 0);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("310P3 AclrtMapMem failed, ret:" << ret << " addr:0x" << std::hex << va
+                                                          << " logicDeviceId:" << std::dec << initedLogicDeviceId);
+            DlAclApi::AclrtFreePhysical(aclHandle);
+            DlAclApi::AclrtReleaseMemAddress(va);
+            return BM_ERROR;
+        }
+        *globalMemoryBase = va;
+        *(reinterpret_cast<aclrtDrvMemHandle *>(allocHandle)) = aclHandle;
+        BM_LOG_INFO("310P3 meta gva init success, addr:0x" << std::hex << va << " size:" << std::dec << allocSize);
+        return BM_OK;
+    }
     drv_mem_handle_t **handle = (drv_mem_handle_t **)allocHandle;
     uint64_t va = SVM_END_ADDR - GB;
     auto ret = DlHalApi::HalMemAddressReserve(globalMemoryBase, GB, 0, reinterpret_cast<void *>(va), 0);
@@ -116,7 +152,8 @@ int32_t hybm_init_hbm_gva(uint16_t deviceId, uint64_t flags, uint64_t &baseAddre
 
     void *globalMemoryBase = nullptr;
     size_t allocSize = HYBM_DEVICE_INFO_SIZE; // 申请meta空间
-    if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
+    if ((socType == AscendSocType::ASCEND_950) || (socType == AscendSocType::ASCEND_310P) ||
+        (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         ret = HybmModernInitMetaGva(&globalMemoryBase, allocSize, allocHandle);
     } else {
         ret = HybmLegacyInitMetaGva(&globalMemoryBase, allocSize, flags);

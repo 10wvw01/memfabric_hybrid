@@ -958,6 +958,11 @@ int MemEntityDefault::CheckOptions(const hybm_options *options) noexcept
             BM_LOG_ERROR("HOST_SHM op type only supports DRAM shared memory without HBM");
             return BM_INVALID_PARAM;
         }
+        if (options->hostVASpace != options->maxDRAMSize) {
+            BM_LOG_ERROR("HOST_SHM requires localDRAMSize == maxDramSize, but localDRAMSize: "
+                         << options->hostVASpace << " maxDramSize: " << options->maxDRAMSize);
+            return BM_INVALID_PARAM;
+        }
         constexpr uint32_t hostShmConflictMask =
             HYBM_DOP_TYPE_SDMA | HYBM_DOP_TYPE_DEVICE_RDMA | HYBM_DOP_TYPE_DEVICE_URMA | HYBM_DOP_TYPE_DEVICE_UBOE |
             HYBM_DOP_TYPE_HOST_RDMA | HYBM_DOP_TYPE_HOST_TCP | HYBM_DOP_TYPE_HOST_URMA;
