@@ -57,71 +57,6 @@ using aclrtBinHandle = void *;
 using aclrtFuncHandle = void *;
 using aclrtArgsHandle = void *;
 using aclrtParamHandle = void *;
-using aclrtDrvMemHandle = void *;   // aclrtMallocPhysical 返回的物理内存句柄
-using aclrtContext = void *;        // aclrtCreateContext 返回的 context 句柄
-
-/* ---- ACL VMM 相关本地声明(与 CANN acl_rt.h 对齐, 310P 内存池使用) ----
- * 对齐版本: CANN 9.1.0 (aarch64-linux/include/acl/acl_rt.h)。
- * 不直接 include CANN 头以避免构建环境强依赖; 若 CANN 升级改变以下 ABI,
- * 需同步核对字段布局(与 app/zbal 的 dl_cann_api_def.h 各自独立维护, 见方案文档 TODO)。 */
-enum class aclrtMemHandleType : uint32_t {
-    ACL_MEM_HANDLE_TYPE_NONE = 0,
-    ACL_MEM_HANDLE_TYPE_POSIX = 2,
-};
-
-enum class aclrtMemAllocationType : uint32_t {
-    ACL_MEM_ALLOCATION_TYPE_PINNED = 0,
-};
-
-enum class aclrtMemAttr : uint32_t {
-    /* 与 CANN acl_rt.h 的 aclrtMemAttr 严格对齐(310P 实测: 值经 aclrtMallocPhysical 直传驱动,
-     * 编号错位会导致语义漂移——曾因本枚举自编号, 名为 P2P_HUGE 实发 HBM_HUGE(值 4)) */
-    ACL_DDR_MEM = 0,
-    ACL_HBM_MEM,
-    ACL_DDR_MEM_HUGE,
-    ACL_DDR_MEM_NORMAL,
-    ACL_HBM_MEM_HUGE,
-    ACL_HBM_MEM_NORMAL,
-    ACL_DDR_MEM_P2P_HUGE,
-    ACL_DDR_MEM_P2P_NORMAL,
-    ACL_HBM_MEM_P2P_HUGE,
-    ACL_HBM_MEM_P2P_NORMAL,
-    ACL_HBM_MEM_HUGE1G,
-    ACL_HBM_MEM_P2P_HUGE1G,
-    ACL_MEM_NORMAL,
-    ACL_MEM_HUGE,
-    ACL_MEM_HUGE1G,
-    ACL_MEM_P2P_NORMAL,
-    ACL_MEM_P2P_HUGE,
-    ACL_MEM_P2P_HUGE1G,
-};
-
-enum class aclrtMemAccessFlags : uint32_t {
-    ACL_RT_MEM_ACCESS_FLAGS_NONE = 0x0,
-    ACL_RT_MEM_ACCESS_FLAGS_READ = 0x1,
-    ACL_RT_MEM_ACCESS_FLAGS_READWRITE = 0x3,
-};
-
-enum class aclrtMemGranularityOptions : uint32_t {
-    ACL_RT_MEM_ALLOC_GRANULARITY_MINIMUM = 0,
-    ACL_RT_MEM_ALLOC_GRANULARITY_RECOMMENDED,
-};
-
-constexpr uint64_t ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION = 0x1;
-
-struct aclrtMemAccessDesc {
-    aclrtMemAccessFlags flags;
-    aclrtMemLocation location;
-    uint8_t rsv[12];
-};
-
-struct aclrtPhysicalMemProp {
-    aclrtMemHandleType handleType;
-    aclrtMemAllocationType allocationType;
-    aclrtMemAttr memAttr;
-    aclrtMemLocation location;
-    uint64_t reserve;
-};
 
 enum class aclrtBinaryLoadOptionType : int32_t {
     ACL_RT_BINARY_LOAD_OPT_LAZY_LOAD = 1,
@@ -202,6 +137,8 @@ typedef enum aclrtMemMallocPolicy {
 using aclrtSetDeviceFunc = int32_t (*)(int32_t);
 using aclrtGetDeviceFunc = int32_t (*)(int32_t *);
 using aclrtDeviceEnablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
+using aclrtDeviceDisablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
+using aclrtDeviceCanAccessPeerFunc = int32_t (*)(int32_t *, int32_t, int32_t);
 using aclrtCreateStreamFunc = int (*)(void **);
 using aclrtCreateStreamWithConfigFunc = int (*)(void **, int32_t, uint32_t);
 using aclrtStreamGetIdFunc = int (*)(void *, int32_t *);
@@ -210,6 +147,9 @@ using aclrtGetNotifyIdFunc = int (*)(void *, uint32_t *);
 using aclrtDestroyNotifyFunc = int (*)(void *);
 using aclrtWaitAndResetNotifyFunc = int (*)(void *, void *, uint32_t);
 using aclrtGetCurrentContextFunc = int (*)(void **);
+using aclrtCreateContextFunc = int (*)(void **, int32_t);
+using aclrtSetCurrentContextFunc = int (*)(void *);
+using aclrtDestroyContextFunc = int (*)(void *);
 using aclrtSetStreamAttributeFunc = int (*)(void *, aclrtStreamAttr, aclrtStreamAttrValue *);
 using aclrtDestroyStreamFunc = int (*)(void *);
 using aclrtSynchronizeStreamFunc = int (*)(void *);
@@ -233,23 +173,15 @@ using rtGetLogicDevIdByUserDevIdFunc = int32_t (*)(const int32_t, int32_t *const
 using aclrtGetPhyDevIdByLogicDevIdFunc = int32_t (*)(const int32_t, int32_t *const);
 using rtIpcOpenMemoryFunc = int32_t (*)(void **, const char *);
 using rtIpcCloseMemoryFunc = int32_t (*)(const void *);
+using aclrtIpcMemGetExportKeyFunc = int32_t (*)(void *, uint64_t, char *, uint64_t, uint64_t);
+using aclrtIpcMemImportByKeyFunc = int32_t (*)(void **, const char *, uint64_t);
+using aclrtIpcMemCloseFunc = int32_t (*)(const char *);
+
+constexpr uint64_t ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION = 1ULL;
+constexpr uint64_t ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT = 0ULL;
+constexpr uint64_t ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS = 1ULL;
 using rtMemcpyAsyncFunc = int32_t (*)(void *, size_t, const void *, size_t, uint32_t, void *);
 using aclrtGetSocNameFunc = const char *(*)();
-using aclrtCreateContextFunc = int32_t (*)(aclrtContext *, int32_t);
-using aclrtSetCurrentContextFunc = int32_t (*)(aclrtContext);
-using aclrtDestroyContextFunc = int32_t (*)(aclrtContext);
-using aclrtMallocPhysicalFunc = int32_t (*)(aclrtDrvMemHandle *, size_t, const aclrtPhysicalMemProp *, uint64_t);
-using aclrtFreePhysicalFunc = int32_t (*)(aclrtDrvMemHandle);
-using aclrtReserveMemAddressFunc = int32_t (*)(void **, size_t, size_t, void *, uint64_t);
-using aclrtReleaseMemAddressFunc = int32_t (*)(void *);
-using aclrtMapMemFunc = int32_t (*)(void *, size_t, size_t, aclrtDrvMemHandle, uint64_t);
-using aclrtUnmapMemFunc = int32_t (*)(void *);
-using aclrtMemSetAccessFunc = int32_t (*)(void *, size_t, aclrtMemAccessDesc *, size_t);
-using aclrtMemExportToShareableHandleFunc = int32_t (*)(aclrtDrvMemHandle, aclrtMemHandleType, uint64_t, uint64_t *);
-using aclrtMemImportFromShareableHandleFunc = int32_t (*)(uint64_t, int32_t, aclrtDrvMemHandle *);
-using aclrtMemSetPidToShareableHandleFunc = int32_t (*)(uint64_t, int32_t *, size_t);
-using aclrtMemGetAllocationGranularityFunc = int32_t (*)(aclrtPhysicalMemProp *, aclrtMemGranularityOptions,
-                                                         size_t *);
 using aclrtMemcpyBatchFunc = int32_t (*)(void **, size_t *, void **, size_t *, size_t, aclrtMemcpyBatchAttr *, size_t *,
                                          size_t, size_t *);
 using aclrtBinaryLoadFromFileFunc = int32_t (*)(const char *, aclrtBinaryLoadOptions *, aclrtBinHandle *);
@@ -263,12 +195,80 @@ using aclrtLaunchKernelWithConfigFunc = int32_t (*)(aclrtFuncHandle, uint32_t, v
 using aclrtLaunchKernelWithHostArgsFunc = int32_t (*)(aclrtFuncHandle, uint32_t, void *,
                                                       aclrtLaunchKernelCfg *, void *, size_t, void *, size_t);
 
+using aclrtDrvMemHandle = void *;
+using aclrtContext = void *;
+
+/* Must match aclrtMemAttr in CANN acl_rt.h — members are sequential from 0.
+ * Do NOT assign explicit values; the auto-increment order must match CANN exactly. */
+enum class aclrtMemAttr : uint32_t {
+    ACL_DDR_MEM,
+    ACL_HBM_MEM,
+    ACL_DDR_MEM_HUGE,
+    ACL_DDR_MEM_NORMAL,
+    ACL_HBM_MEM_HUGE,
+    ACL_HBM_MEM_NORMAL,
+    ACL_DDR_MEM_P2P_HUGE,
+    ACL_DDR_MEM_P2P_NORMAL,
+    ACL_HBM_MEM_P2P_HUGE,
+    ACL_HBM_MEM_P2P_NORMAL,
+    ACL_HBM_MEM_HUGE1G,
+    ACL_HBM_MEM_P2P_HUGE1G,
+    ACL_MEM_NORMAL,
+    ACL_MEM_HUGE,
+    ACL_MEM_HUGE1G,
+    ACL_MEM_P2P_NORMAL,
+    ACL_MEM_P2P_HUGE,
+    ACL_MEM_P2P_HUGE1G,
+};
+
+enum class aclrtMemHandleType : uint32_t {
+    ACL_MEM_HANDLE_TYPE_NONE = 0,
+    ACL_MEM_HANDLE_TYPE_POSIX = 2,
+};
+
+constexpr uint64_t ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION = 1ULL;
+
+/* ACL runtime error: driver internal error (e.g. P2P enable ioctl failed on same-card dies).
+ * In 310P3 same-card cross-die scenarios, halDeviceEnableP2P returns this when P2P is
+ * already configured or not needed — treat as non-fatal in EnableRemotePeerAccess. */
+constexpr int32_t ACL_ERROR_RT_DRV_INTERNAL_ERROR = 507899;
+
+/* aclrtMemAccessDesc.flags bit field: read + write access */
+constexpr uint32_t ACL_RT_MEM_ACCESS_FLAGS_READWRITE = 0x3U;
+
+/* aclrtPhysicalMemProp.allocationType: pinned allocation */
+constexpr uint32_t ACL_MEM_ALLOCATION_TYPE_PINNED = 1U;
+
+struct aclrtPhysicalMemProp {
+    aclrtMemHandleType handleType;
+    uint32_t allocationType;
+    uint32_t memAttr;
+    aclrtMemLocation location;
+    uint64_t reserve;
+};
+
+using aclrtMallocPhysicalFunc = int32_t (*)(aclrtDrvMemHandle *, size_t, const aclrtPhysicalMemProp *, uint64_t);
+using aclrtFreePhysicalFunc = int32_t (*)(aclrtDrvMemHandle);
+using aclrtReserveMemAddressFunc = int32_t (*)(void **, size_t, size_t, void *, uint64_t);
+using aclrtReleaseMemAddressFunc = int32_t (*)(void *);
+using aclrtMapMemFunc = int32_t (*)(void *, size_t, size_t, aclrtDrvMemHandle, uint64_t);
+using aclrtUnmapMemFunc = int32_t (*)(void *);
+using aclrtMemExportToShareableHandleFunc = int32_t (*)(aclrtDrvMemHandle, aclrtMemHandleType, uint64_t, uint64_t *);
+using aclrtMemImportFromShareableHandleFunc = int32_t (*)(uint64_t, int32_t, aclrtDrvMemHandle *);
+struct aclrtMemAccessDesc {
+    uint32_t flags; /* aclrtMemAccessFlags */
+    aclrtMemLocation location;
+    uint8_t rsv[12];
+};
+
+using aclrtMemSetAccessFunc = int32_t (*)(void *, size_t, aclrtMemAccessDesc *, size_t);
+using aclrtMemGetAllocationGranularityFunc = int32_t (*)(const aclrtPhysicalMemProp *, uint32_t, size_t *);
+
 class DlAclApi {
 public:
     static Result LoadLibrary(const std::string &libDirPath);
     static void CleanupLibrary();
     static AscendSocType GetAscendSocType();
-    static AscendSocType ParseAscendSocName(const std::string &socName);
 
     static inline Result AclrtSetDevice(int32_t deviceId, bool force = false)
     {
@@ -300,6 +300,22 @@ public:
             return BM_UNDER_API_UNLOAD;
         }
         return pAclrtDeviceEnablePeerAccess(peerDeviceId, flags);
+    }
+
+    static inline Result AclrtDeviceDisablePeerAccess(int32_t peerDeviceId, uint32_t flags)
+    {
+        if (pAclrtDeviceDisablePeerAccess == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtDeviceDisablePeerAccess(peerDeviceId, flags);
+    }
+
+    static inline Result AclrtDeviceCanAccessPeer(int32_t *canAccessPeer, int32_t deviceId, int32_t peerDeviceId)
+    {
+        if (pAclrtDeviceCanAccessPeer == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtDeviceCanAccessPeer(canAccessPeer, deviceId, peerDeviceId);
     }
 
     static inline Result AclrtCreateStream(void **stream)
@@ -364,6 +380,30 @@ public:
             return BM_UNDER_API_UNLOAD;
         }
         return pAclrtGetCurrentContext(context);
+    }
+
+    static inline Result AclrtCreateContext(void **context, int32_t deviceId)
+    {
+        if (pAclrtCreateContext == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtCreateContext(context, deviceId);
+    }
+
+    static inline Result AclrtSetCurrentContext(void *context)
+    {
+        if (pAclrtSetCurrentContext == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtSetCurrentContext(context);
+    }
+
+    static inline Result AclrtDestroyContext(void *context)
+    {
+        if (pAclrtDestroyContext == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtDestroyContext(context);
     }
 
     static inline Result AclrtSetStreamAttribute(void *stream, aclrtStreamAttr stmAttrType, aclrtStreamAttrValue *value)
@@ -597,6 +637,31 @@ public:
         return pRtIpcCloseMemory(ptr);
     }
 
+    static inline Result AclrtIpcMemGetExportKey(void *devPtr, uint64_t size, char *key, uint64_t keyLen,
+                                                  uint64_t flags)
+    {
+        if (pAclrtIpcMemGetExportKey == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtIpcMemGetExportKey(devPtr, size, key, keyLen, flags);
+    }
+
+    static inline Result AclrtIpcMemImportByKey(void **devPtr, const char *key, uint64_t flags)
+    {
+        if (pAclrtIpcMemImportByKey == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtIpcMemImportByKey(devPtr, key, flags);
+    }
+
+    static inline Result AclrtIpcMemClose(const char *key)
+    {
+        if (pAclrtIpcMemClose == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtIpcMemClose(key);
+    }
+
     static inline const char *AclrtGetSocName()
     {
 #ifdef NO_XPU
@@ -650,30 +715,6 @@ public:
         return pRtMemcpyAsync(dst, destMax, src, count, kind, stream);
     }
 
-    static inline Result AclrtCreateContext(aclrtContext *context, int32_t deviceId)
-    {
-        if (pAclrtCreateContext == nullptr) {
-            return BM_UNDER_API_UNLOAD;
-        }
-        return pAclrtCreateContext(context, deviceId);
-    }
-
-    static inline Result AclrtSetCurrentContext(aclrtContext context)
-    {
-        if (pAclrtSetCurrentContext == nullptr) {
-            return BM_UNDER_API_UNLOAD;
-        }
-        return pAclrtSetCurrentContext(context);
-    }
-
-    static inline Result AclrtDestroyContext(aclrtContext context)
-    {
-        if (pAclrtDestroyContext == nullptr) {
-            return BM_UNDER_API_UNLOAD;
-        }
-        return pAclrtDestroyContext(context);
-    }
-
     static inline Result AclrtMallocPhysical(aclrtDrvMemHandle *handle, size_t size, const aclrtPhysicalMemProp *prop,
                                              uint64_t flags)
     {
@@ -692,7 +733,7 @@ public:
     }
 
     static inline Result AclrtReserveMemAddress(void **virPtr, size_t size, size_t alignment, void *expectPtr,
-                                                uint64_t flags)
+                                                 uint64_t flags)
     {
         if (pAclrtReserveMemAddress == nullptr) {
             return BM_UNDER_API_UNLOAD;
@@ -725,14 +766,6 @@ public:
         return pAclrtUnmapMem(virPtr);
     }
 
-    static inline Result AclrtMemSetAccess(void *virPtr, size_t size, aclrtMemAccessDesc *desc, size_t count)
-    {
-        if (pAclrtMemSetAccess == nullptr) {
-            return BM_UNDER_API_UNLOAD;
-        }
-        return pAclrtMemSetAccess(virPtr, size, desc, count);
-    }
-
     static inline Result AclrtMemExportToShareableHandle(aclrtDrvMemHandle handle, aclrtMemHandleType handleType,
                                                          uint64_t flags, uint64_t *shareableHandle)
     {
@@ -751,21 +784,21 @@ public:
         return pAclrtMemImportFromShareableHandle(shareableHandle, deviceId, handle);
     }
 
-    static inline Result AclrtMemSetPidToShareableHandle(uint64_t shareableHandle, int32_t *pid, size_t pidNum)
-    {
-        if (pAclrtMemSetPidToShareableHandle == nullptr) {
-            return BM_UNDER_API_UNLOAD;
-        }
-        return pAclrtMemSetPidToShareableHandle(shareableHandle, pid, pidNum);
-    }
-
-    static inline Result AclrtMemGetAllocationGranularity(aclrtPhysicalMemProp *prop,
-                                                          aclrtMemGranularityOptions option, size_t *granularity)
+    static inline Result AclrtMemGetAllocationGranularity(const aclrtPhysicalMemProp *prop, uint32_t option,
+                                                         size_t *granularity)
     {
         if (pAclrtMemGetAllocationGranularity == nullptr) {
             return BM_UNDER_API_UNLOAD;
         }
         return pAclrtMemGetAllocationGranularity(prop, option, granularity);
+    }
+
+    static inline Result AclrtMemSetAccess(void *virPtr, size_t size, aclrtMemAccessDesc *desc, size_t count)
+    {
+        if (pAclrtMemSetAccess == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtMemSetAccess(virPtr, size, desc, count);
     }
 
 private:
@@ -777,6 +810,8 @@ private:
     static aclrtSetDeviceFunc pAclrtSetDevice;
     static aclrtGetDeviceFunc pAclrtGetDevice;
     static aclrtDeviceEnablePeerAccessFunc pAclrtDeviceEnablePeerAccess;
+    static aclrtDeviceDisablePeerAccessFunc pAclrtDeviceDisablePeerAccess;
+    static aclrtDeviceCanAccessPeerFunc pAclrtDeviceCanAccessPeer;
     static aclrtCreateStreamFunc pAclrtCreateStream;
     static aclrtCreateStreamWithConfigFunc pAclrtCreateStreamWithConfig;
     static aclrtStreamGetIdFunc pAclrtStreamGetId;
@@ -785,6 +820,9 @@ private:
     static aclrtDestroyNotifyFunc pAclrtDestroyNotify;
     static aclrtWaitAndResetNotifyFunc pAclrtWaitAndResetNotify;
     static aclrtGetCurrentContextFunc pAclrtGetCurrentContext;
+    static aclrtCreateContextFunc pAclrtCreateContext;
+    static aclrtSetCurrentContextFunc pAclrtSetCurrentContext;
+    static aclrtDestroyContextFunc pAclrtDestroyContext;
     static aclrtSetStreamAttributeFunc pAclrtSetStreamAttribute;
     static aclrtDestroyStreamFunc pAclrtDestroyStream;
     static aclrtSynchronizeStreamFunc pAclrtSynchronizeStream;
@@ -812,25 +850,25 @@ private:
     static rtIpcDestroyMemoryNameFunc pRtIpcDestroyMemoryName;
     static rtIpcOpenMemoryFunc pRtIpcOpenMemory;
     static rtIpcCloseMemoryFunc pRtIpcCloseMemory;
+    static aclrtIpcMemGetExportKeyFunc pAclrtIpcMemGetExportKey;
+    static aclrtIpcMemImportByKeyFunc pAclrtIpcMemImportByKey;
+    static aclrtIpcMemCloseFunc pAclrtIpcMemClose;
     static aclrtGetSocNameFunc pAclrtGetSocName;
     static rtEnableP2PFunc pRtEnableP2P;
     static rtDisableP2PFunc pRtDisableP2P;
     static rtMemcpyAsyncFunc pRtMemcpyAsync;
     static rtGetLogicDevIdByUserDevIdFunc pRtGetLogicDevIdByUserDevId;
     static aclrtGetPhyDevIdByLogicDevIdFunc pAclrtGetPhyDevIdByLogicDevId;
-    static aclrtCreateContextFunc pAclrtCreateContext;
-    static aclrtSetCurrentContextFunc pAclrtSetCurrentContext;
-    static aclrtDestroyContextFunc pAclrtDestroyContext;
+
     static aclrtMallocPhysicalFunc pAclrtMallocPhysical;
     static aclrtFreePhysicalFunc pAclrtFreePhysical;
     static aclrtReserveMemAddressFunc pAclrtReserveMemAddress;
     static aclrtReleaseMemAddressFunc pAclrtReleaseMemAddress;
     static aclrtMapMemFunc pAclrtMapMem;
     static aclrtUnmapMemFunc pAclrtUnmapMem;
-    static aclrtMemSetAccessFunc pAclrtMemSetAccess;
     static aclrtMemExportToShareableHandleFunc pAclrtMemExportToShareableHandle;
     static aclrtMemImportFromShareableHandleFunc pAclrtMemImportFromShareableHandle;
-    static aclrtMemSetPidToShareableHandleFunc pAclrtMemSetPidToShareableHandle;
+    static aclrtMemSetAccessFunc pAclrtMemSetAccess;
     static aclrtMemGetAllocationGranularityFunc pAclrtMemGetAllocationGranularity;
 };
 } // namespace mf

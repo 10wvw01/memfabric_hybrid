@@ -22,6 +22,8 @@ const char *DlAclApi::gAscendAclLibName = "libascendcl.so";
 aclrtGetDeviceFunc DlAclApi::pAclrtGetDevice = nullptr;
 aclrtSetDeviceFunc DlAclApi::pAclrtSetDevice = nullptr;
 aclrtDeviceEnablePeerAccessFunc DlAclApi::pAclrtDeviceEnablePeerAccess = nullptr;
+aclrtDeviceDisablePeerAccessFunc DlAclApi::pAclrtDeviceDisablePeerAccess = nullptr;
+aclrtDeviceCanAccessPeerFunc DlAclApi::pAclrtDeviceCanAccessPeer = nullptr;
 aclrtCreateStreamFunc DlAclApi::pAclrtCreateStream = nullptr;
 aclrtCreateStreamWithConfigFunc DlAclApi::pAclrtCreateStreamWithConfig = nullptr;
 
@@ -31,6 +33,9 @@ aclrtGetNotifyIdFunc DlAclApi::pAclrtGetNotifyId = nullptr;
 aclrtDestroyNotifyFunc DlAclApi::pAclrtDestroyNotify = nullptr;
 aclrtWaitAndResetNotifyFunc DlAclApi::pAclrtWaitAndResetNotify = nullptr;
 aclrtGetCurrentContextFunc DlAclApi::pAclrtGetCurrentContext = nullptr;
+aclrtCreateContextFunc DlAclApi::pAclrtCreateContext = nullptr;
+aclrtSetCurrentContextFunc DlAclApi::pAclrtSetCurrentContext = nullptr;
+aclrtDestroyContextFunc DlAclApi::pAclrtDestroyContext = nullptr;
 aclrtSetStreamAttributeFunc DlAclApi::pAclrtSetStreamAttribute = nullptr;
 aclrtDestroyStreamFunc DlAclApi::pAclrtDestroyStream = nullptr;
 aclrtSynchronizeStreamFunc DlAclApi::pAclrtSynchronizeStream = nullptr;
@@ -58,25 +63,25 @@ rtIpcDestroyMemoryNameFunc DlAclApi::pRtIpcDestroyMemoryName = nullptr;
 rtIpcSetMemoryNameFunc DlAclApi::pRtIpcSetMemoryName = nullptr;
 rtIpcOpenMemoryFunc DlAclApi::pRtIpcOpenMemory = nullptr;
 rtIpcCloseMemoryFunc DlAclApi::pRtIpcCloseMemory = nullptr;
+aclrtIpcMemGetExportKeyFunc DlAclApi::pAclrtIpcMemGetExportKey = nullptr;
+aclrtIpcMemImportByKeyFunc DlAclApi::pAclrtIpcMemImportByKey = nullptr;
+aclrtIpcMemCloseFunc DlAclApi::pAclrtIpcMemClose = nullptr;
 aclrtGetSocNameFunc DlAclApi::pAclrtGetSocName = nullptr;
 rtEnableP2PFunc DlAclApi::pRtEnableP2P = nullptr;
 rtDisableP2PFunc DlAclApi::pRtDisableP2P = nullptr;
 rtMemcpyAsyncFunc DlAclApi::pRtMemcpyAsync = nullptr;
 rtGetLogicDevIdByUserDevIdFunc DlAclApi::pRtGetLogicDevIdByUserDevId = nullptr;
 aclrtGetPhyDevIdByLogicDevIdFunc DlAclApi::pAclrtGetPhyDevIdByLogicDevId = nullptr;
-aclrtCreateContextFunc DlAclApi::pAclrtCreateContext = nullptr;
-aclrtSetCurrentContextFunc DlAclApi::pAclrtSetCurrentContext = nullptr;
-aclrtDestroyContextFunc DlAclApi::pAclrtDestroyContext = nullptr;
+
 aclrtMallocPhysicalFunc DlAclApi::pAclrtMallocPhysical = nullptr;
 aclrtFreePhysicalFunc DlAclApi::pAclrtFreePhysical = nullptr;
 aclrtReserveMemAddressFunc DlAclApi::pAclrtReserveMemAddress = nullptr;
 aclrtReleaseMemAddressFunc DlAclApi::pAclrtReleaseMemAddress = nullptr;
 aclrtMapMemFunc DlAclApi::pAclrtMapMem = nullptr;
 aclrtUnmapMemFunc DlAclApi::pAclrtUnmapMem = nullptr;
-aclrtMemSetAccessFunc DlAclApi::pAclrtMemSetAccess = nullptr;
 aclrtMemExportToShareableHandleFunc DlAclApi::pAclrtMemExportToShareableHandle = nullptr;
 aclrtMemImportFromShareableHandleFunc DlAclApi::pAclrtMemImportFromShareableHandle = nullptr;
-aclrtMemSetPidToShareableHandleFunc DlAclApi::pAclrtMemSetPidToShareableHandle = nullptr;
+aclrtMemSetAccessFunc DlAclApi::pAclrtMemSetAccess = nullptr;
 aclrtMemGetAllocationGranularityFunc DlAclApi::pAclrtMemGetAllocationGranularity = nullptr;
 
 Result DlAclApi::LoadLibrary(const std::string &libDirPath)
@@ -103,6 +108,10 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pAclrtGetDevice, aclrtGetDeviceFunc, rtHandle, "aclrtGetDevice");
     DL_LOAD_SYM(pAclrtSetDevice, aclrtSetDeviceFunc, rtHandle, "aclrtSetDevice");
     DL_LOAD_SYM(pAclrtDeviceEnablePeerAccess, aclrtDeviceEnablePeerAccessFunc, rtHandle, "aclrtDeviceEnablePeerAccess");
+    DL_LOAD_SYM_OPTIONAL(pAclrtDeviceDisablePeerAccess, aclrtDeviceDisablePeerAccessFunc, rtHandle,
+                         "aclrtDeviceDisablePeerAccess");
+    DL_LOAD_SYM_OPTIONAL(pAclrtDeviceCanAccessPeer, aclrtDeviceCanAccessPeerFunc, rtHandle,
+                         "aclrtDeviceCanAccessPeer");
     DL_LOAD_SYM(pAclrtCreateStream, aclrtCreateStreamFunc, rtHandle, "aclrtCreateStream");
     DL_LOAD_SYM(pAclrtCreateStreamWithConfig, aclrtCreateStreamWithConfigFunc, rtHandle, "aclrtCreateStreamWithConfig");
     DL_LOAD_SYM(pAclrtStreamGetId, aclrtStreamGetIdFunc, rtHandle, "aclrtStreamGetId");
@@ -111,6 +120,9 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pAclrtDestroyNotify, aclrtDestroyNotifyFunc, rtHandle, "aclrtDestroyNotify");
     DL_LOAD_SYM(pAclrtWaitAndResetNotify, aclrtWaitAndResetNotifyFunc, rtHandle, "aclrtWaitAndResetNotify");
     DL_LOAD_SYM(pAclrtGetCurrentContext, aclrtGetCurrentContextFunc, rtHandle, "aclrtGetCurrentContext");
+    DL_LOAD_SYM_OPTIONAL(pAclrtCreateContext, aclrtCreateContextFunc, rtHandle, "aclrtCreateContext");
+    DL_LOAD_SYM_OPTIONAL(pAclrtSetCurrentContext, aclrtSetCurrentContextFunc, rtHandle, "aclrtSetCurrentContext");
+    DL_LOAD_SYM_OPTIONAL(pAclrtDestroyContext, aclrtDestroyContextFunc, rtHandle, "aclrtDestroyContext");
     DL_LOAD_SYM(pAclrtSetStreamAttribute, aclrtSetStreamAttributeFunc, rtHandle, "aclrtSetStreamAttribute");
     DL_LOAD_SYM(pAclrtDestroyStream, aclrtDestroyStreamFunc, rtHandle, "aclrtDestroyStream");
     DL_LOAD_SYM(pAclrtSynchronizeStream, aclrtSynchronizeStreamFunc, rtHandle, "aclrtSynchronizeStream");
@@ -140,6 +152,9 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pRtIpcDestroyMemoryName, rtIpcDestroyMemoryNameFunc, rtHandle, "rtIpcDestroyMemoryName");
     DL_LOAD_SYM(pRtIpcOpenMemory, rtIpcOpenMemoryFunc, rtHandle, "rtIpcOpenMemory");
     DL_LOAD_SYM(pRtIpcCloseMemory, rtIpcCloseMemoryFunc, rtHandle, "rtIpcCloseMemory");
+    DL_LOAD_SYM(pAclrtIpcMemGetExportKey, aclrtIpcMemGetExportKeyFunc, rtHandle, "aclrtIpcMemGetExportKey");
+    DL_LOAD_SYM(pAclrtIpcMemImportByKey, aclrtIpcMemImportByKeyFunc, rtHandle, "aclrtIpcMemImportByKey");
+    DL_LOAD_SYM(pAclrtIpcMemClose, aclrtIpcMemCloseFunc, rtHandle, "aclrtIpcMemClose");
     DL_LOAD_SYM(pAclrtGetSocName, aclrtGetSocNameFunc, rtHandle, "aclrtGetSocName");
     DL_LOAD_SYM(pRtEnableP2P, rtEnableP2PFunc, rtHandle, "rtEnableP2P");
     DL_LOAD_SYM(pRtDisableP2P, rtDisableP2PFunc, rtHandle, "rtDisableP2P");
@@ -149,22 +164,17 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pRtMemcpyAsync, rtMemcpyAsyncFunc, rtHandle, "rtMemcpyAsyncWithoutCheckKind");
 
     /* ACL VMM 符号集(310P 内存池): OPTIONAL 加载, 910B/950 环境缺失不阻塞 */
-    DL_LOAD_SYM_OPTIONAL(pAclrtCreateContext, aclrtCreateContextFunc, rtHandle, "aclrtCreateContext");
-    DL_LOAD_SYM_OPTIONAL(pAclrtSetCurrentContext, aclrtSetCurrentContextFunc, rtHandle, "aclrtSetCurrentContext");
-    DL_LOAD_SYM_OPTIONAL(pAclrtDestroyContext, aclrtDestroyContextFunc, rtHandle, "aclrtDestroyContext");
     DL_LOAD_SYM_OPTIONAL(pAclrtMallocPhysical, aclrtMallocPhysicalFunc, rtHandle, "aclrtMallocPhysical");
     DL_LOAD_SYM_OPTIONAL(pAclrtFreePhysical, aclrtFreePhysicalFunc, rtHandle, "aclrtFreePhysical");
     DL_LOAD_SYM_OPTIONAL(pAclrtReserveMemAddress, aclrtReserveMemAddressFunc, rtHandle, "aclrtReserveMemAddress");
     DL_LOAD_SYM_OPTIONAL(pAclrtReleaseMemAddress, aclrtReleaseMemAddressFunc, rtHandle, "aclrtReleaseMemAddress");
     DL_LOAD_SYM_OPTIONAL(pAclrtMapMem, aclrtMapMemFunc, rtHandle, "aclrtMapMem");
     DL_LOAD_SYM_OPTIONAL(pAclrtUnmapMem, aclrtUnmapMemFunc, rtHandle, "aclrtUnmapMem");
-    DL_LOAD_SYM_OPTIONAL(pAclrtMemSetAccess, aclrtMemSetAccessFunc, rtHandle, "aclrtMemSetAccess");
     DL_LOAD_SYM_OPTIONAL(pAclrtMemExportToShareableHandle, aclrtMemExportToShareableHandleFunc, rtHandle,
                          "aclrtMemExportToShareableHandle");
     DL_LOAD_SYM_OPTIONAL(pAclrtMemImportFromShareableHandle, aclrtMemImportFromShareableHandleFunc, rtHandle,
                          "aclrtMemImportFromShareableHandle");
-    DL_LOAD_SYM_OPTIONAL(pAclrtMemSetPidToShareableHandle, aclrtMemSetPidToShareableHandleFunc, rtHandle,
-                         "aclrtMemSetPidToShareableHandle");
+    DL_LOAD_SYM_OPTIONAL(pAclrtMemSetAccess, aclrtMemSetAccessFunc, rtHandle, "aclrtMemSetAccess");
     DL_LOAD_SYM_OPTIONAL(pAclrtMemGetAllocationGranularity, aclrtMemGetAllocationGranularityFunc, rtHandle,
                          "aclrtMemGetAllocationGranularity");
 
@@ -172,31 +182,29 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     return BM_OK;
 }
 
-AscendSocType DlAclApi::ParseAscendSocName(const std::string &socName)
-{
-    if (socName.find("Ascend910B") != std::string::npos) {
-        return AscendSocType::ASCEND_910B;
-    } else if (socName.find("Ascend910_93") != std::string::npos) {
-        return AscendSocType::ASCEND_910C;
-    } else if (socName.find("Ascend910_95") != std::string::npos ||
-               socName.find("Ascend950") != std::string::npos) {
-        return AscendSocType::ASCEND_950;
-    } else if (socName.find("Ascend310P") != std::string::npos) {
-        return AscendSocType::ASCEND_310P;
-    }
-    return AscendSocType::ASCEND_UNKNOWN;
-}
-
 AscendSocType DlAclApi::GetAscendSocType()
 {
-    static AscendSocType cachedSocType = []() -> AscendSocType {
+    static AscendSocType cachedSocType = [&]() -> AscendSocType {
         auto name = DlAclApi::AclrtGetSocName();
         if (name == nullptr) {
             BM_LOG_WARN("AclrtGetSocName() failed.");
             return AscendSocType::ASCEND_UNKNOWN;
         }
         BM_LOG_DEBUG("success get soc name: " << name);
-        return DlAclApi::ParseAscendSocName(std::string{name});
+        std::string socName{name};
+        if (socName.find("Ascend910B") != std::string::npos) {
+            return AscendSocType::ASCEND_910B;
+        } else if (socName.find("Ascend910_93") != std::string::npos) {
+            return AscendSocType::ASCEND_910C;
+        } else if (socName.find("Ascend910_95") != std::string::npos ||
+                   socName.find("Ascend950") != std::string::npos) {
+            return AscendSocType::ASCEND_950;
+        } else if (socName.find("Ascend310P") != std::string::npos ||
+                   socName.find("Ascend_310P") != std::string::npos) {
+            return AscendSocType::ASCEND_310P;
+        }
+
+        return AscendSocType::ASCEND_UNKNOWN;
     }();
 
     return cachedSocType;
@@ -212,6 +220,8 @@ void DlAclApi::CleanupLibrary()
     pAclrtGetDevice = nullptr;
     pAclrtSetDevice = nullptr;
     pAclrtDeviceEnablePeerAccess = nullptr;
+    pAclrtDeviceDisablePeerAccess = nullptr;
+    pAclrtDeviceCanAccessPeer = nullptr;
     pAclrtCreateStream = nullptr;
     pAclrtCreateStreamWithConfig = nullptr;
     pAclrtDestroyStream = nullptr;
@@ -245,22 +255,24 @@ void DlAclApi::CleanupLibrary()
     pAclrtDestroyNotify = nullptr;
     pAclrtWaitAndResetNotify = nullptr;
     pAclrtGetCurrentContext = nullptr;
-    pAclrtSetStreamAttribute = nullptr;
-    pAclrtGetPhyDevIdByLogicDevId = nullptr;
     pAclrtCreateContext = nullptr;
     pAclrtSetCurrentContext = nullptr;
     pAclrtDestroyContext = nullptr;
+    pAclrtSetStreamAttribute = nullptr;
+    pAclrtGetPhyDevIdByLogicDevId = nullptr;
     pAclrtMallocPhysical = nullptr;
     pAclrtFreePhysical = nullptr;
     pAclrtReserveMemAddress = nullptr;
     pAclrtReleaseMemAddress = nullptr;
     pAclrtMapMem = nullptr;
     pAclrtUnmapMem = nullptr;
-    pAclrtMemSetAccess = nullptr;
     pAclrtMemExportToShareableHandle = nullptr;
     pAclrtMemImportFromShareableHandle = nullptr;
-    pAclrtMemSetPidToShareableHandle = nullptr;
+    pAclrtMemSetAccess = nullptr;
     pAclrtMemGetAllocationGranularity = nullptr;
+    pAclrtIpcMemGetExportKey = nullptr;
+    pAclrtIpcMemImportByKey = nullptr;
+    pAclrtIpcMemClose = nullptr;
 
     if (rtHandle != nullptr) {
         dlclose(rtHandle);

@@ -78,7 +78,7 @@ constexpr uint16_t SEGMENT_TYPE_VMM = 0x1U;
 constexpr uint16_t SEGMENT_TYPE_USER_DEV = 0x2U;
 constexpr uint16_t SEGMENT_TYPE_DEFAULT = 0x10U;
 constexpr uint16_t SEGMENT_TYPE_OFFSET = 8U;
-constexpr uint16_t UNIFIED_EXCHANGE_SEG_INFO_SIZE = 192U; /* all exchange info padding to same size */
+constexpr uint16_t UNIFIED_EXCHANGE_SEG_INFO_SIZE = 200U; /* all exchange info padding to same size, 192+8 for physicalChipId */
 
 inline bool IsDramSlice(uint64_t magic)
 {
@@ -105,6 +105,9 @@ enum AscendSocType {
     ASCEND_950,
     ASCEND_310P,
 };
+
+/* Integer constants for C API consumers that cannot include this enum */
+constexpr int32_t SOC_TYPE_310P = 4;
 
 enum DeviceSystemInfoType {
     INFO_TYPE_VERSION = 1,
@@ -193,6 +196,33 @@ typedef struct {
     } while (0)
 
 enum HybmGvaVersion : uint32_t { HYBM_GVA_V1 = 0, HYBM_GVA_V2 = 1, HYBM_GVA_V3 = 2, HYBM_GVA_V4 = 3, HYBM_GVA_UNKNOWN };
+
+enum D2dCopyMode {
+    D2D_COPY_SQE = 0,
+    D2D_COPY_ACL_ASYNC_ONLY = 1,
+};
+
+struct HybmPlatformCapability {
+    D2dCopyMode d2dCopy = D2D_COPY_SQE;
+    bool hostRegister = false;
+    bool sameCardNeedsP2P = false;
+    uint32_t p2pSlotsPerCard = 0;
+};
+
+static inline HybmPlatformCapability GetPlatformCapability(AscendSocType socType) noexcept
+{
+    switch (socType) {
+        case ASCEND_310P:
+            return HybmPlatformCapability{D2D_COPY_ACL_ASYNC_ONLY, false, false, 8};
+        default:
+            return HybmPlatformCapability{D2D_COPY_SQE, true, true, 0};
+    }
+}
+
+static inline bool Is310PSupported(AscendSocType socType) noexcept
+{
+    return socType == ASCEND_310P;
+}
 
 } // namespace mf
 } // namespace ock
