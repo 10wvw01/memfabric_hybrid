@@ -86,7 +86,7 @@ TEST_F(HybmDataOpAclMemcpyTest, DataCopyBeforeInitRejected)
 
 TEST_F(HybmDataOpAclMemcpyTest, SupportedDirections)
 {
-    /* stub 的 aclrtMemcpy 为直通 no-op(不搬运数据), 本用例校验方向分派与返回码 */
+    /* stub 的 aclrtMemcpy/aclrtMemcpyAsync 为直通 no-op(不搬运数据), 本用例校验方向分派与返回码 */
     HostDataOpAclMemcpy op(0);
     ASSERT_EQ(op.Initialize(), BM_OK);
 
@@ -94,13 +94,18 @@ TEST_F(HybmDataOpAclMemcpyTest, SupportedDirections)
     uint64_t devBuf[4] = {0};
     ExtOptions options{};
 
-    // H2D(LH2GD) / D2H(GD2LH): 同步 aclrtMemcpy 路径
+    // H2D(LH2GD/LH2GH): async aclrtMemcpyAsync + SyncStream 路径
     auto p1 = MakeParams(devBuf, hostBuf, sizeof(hostBuf));
     ASSERT_EQ(op.DataCopy(p1, HYBM_LOCAL_HOST_TO_GLOBAL_DEVICE, options), BM_OK);
+    auto p1b = MakeParams(devBuf, hostBuf, sizeof(hostBuf));
+    ASSERT_EQ(op.DataCopy(p1b, HYBM_LOCAL_HOST_TO_GLOBAL_HOST, options), BM_OK);
+    // D2H(GD2LH/GH2LH): async aclrtMemcpyAsync + SyncStream 路径
     auto p2 = MakeParams(hostBuf, reinterpret_cast<void *>(devBuf), sizeof(devBuf));
     ASSERT_EQ(op.DataCopy(p2, HYBM_GLOBAL_DEVICE_TO_LOCAL_HOST, options), BM_OK);
+    auto p2b = MakeParams(hostBuf, reinterpret_cast<void *>(devBuf), sizeof(devBuf));
+    ASSERT_EQ(op.DataCopy(p2b, HYBM_GLOBAL_HOST_TO_LOCAL_HOST, options), BM_OK);
 
-    // D2D(GD2GD/LD2GD/GD2LD): MemcpyAsync + SynchronizeStream 路径
+    // D2D(GD2GD/LD2GD/GD2LD): async MemcpyAsync + SynchronizeStream 路径
     uint64_t devBuf2[4] = {0};
     auto p3 = MakeParams(devBuf2, reinterpret_cast<void *>(devBuf), sizeof(devBuf));
     ASSERT_EQ(op.DataCopy(p3, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, options), BM_OK);
@@ -109,9 +114,9 @@ TEST_F(HybmDataOpAclMemcpyTest, SupportedDirections)
     auto p5 = MakeParams(devBuf, reinterpret_cast<void *>(devBuf2), sizeof(devBuf));
     ASSERT_EQ(op.DataCopy(p5, HYBM_GLOBAL_DEVICE_TO_LOCAL_DEVICE, options), BM_OK);
 
-    // 不支持方向拒绝
+    // 不支持方向拒绝(AUTO 不在 D2D/H2D/D2H 任一类)
     auto p6 = MakeParams(devBuf, hostBuf, sizeof(hostBuf));
-    ASSERT_EQ(op.DataCopy(p6, HYBM_LOCAL_HOST_TO_GLOBAL_HOST, options), BM_INVALID_PARAM);
+    ASSERT_EQ(op.DataCopy(p6, HYBM_DATA_COPY_DIRECTION_AUTO, options), BM_INVALID_PARAM);
 }
 
 TEST_F(HybmDataOpAclMemcpyTest, BatchCopyAndAsyncAndWait)
@@ -132,14 +137,14 @@ TEST_F(HybmDataOpAclMemcpyTest, BatchCopyAndAsyncAndWait)
     ExtOptions options{};
     ASSERT_EQ(op.BatchDataCopy(bp, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, options), BM_OK);
 
-    // async 降级 sync
+    // async 真实异步: 提交到内部 stream + InnerWait 同步
     auto p = MakeParams(dst[0], reinterpret_cast<void *>(src[0]), sizeof(src[0]));
     ASSERT_EQ(op.DataCopyAsync(p, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, options), BM_OK);
-    // Wait no-op
+    // Wait 同步内部流
     ASSERT_EQ(op.Wait(0), BM_OK);
 
-    // batch 非法方向拒绝
-    ASSERT_EQ(op.BatchDataCopy(bp, HYBM_LOCAL_HOST_TO_GLOBAL_HOST, options), BM_INVALID_PARAM);
+    // batch 非法方向拒绝(AUTO 不在 D2D/H2D/D2H 任一类)
+    ASSERT_EQ(op.BatchDataCopy(bp, HYBM_DATA_COPY_DIRECTION_AUTO, options), BM_INVALID_PARAM);
 }
 
 TEST_F(HybmDataOpAclMemcpyTest, TransformVaIsNoop)
@@ -168,12 +173,12 @@ TEST_F(HybmDataOpAclMemcpyTest, StreamRecoveryAfterSyncFailure)
     uint64_t src[2] = {1, 2};
     uint64_t dst[2] = {0};
 
-    // 注入同步失败: D2D 返回错误且 stream 被销毁重建(各一次), 算子不残留持久错误态
+    // 注入同步失败: SyncStream 销毁重建 stream(各一次), CopyD2D 回退同步 AclrtMemcpy 成功
     *fail = static_cast<int32_t>(kStubFail);
     const int32_t createBefore = *creates;
     const int32_t destroyBefore = *destroys;
     auto p1 = MakeParams(dst, src, sizeof(src));
-    ASSERT_NE(op.DataCopy(p1, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, {}), BM_OK);
+    ASSERT_EQ(op.DataCopy(p1, HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE, {}), BM_OK);
     ASSERT_EQ(*destroys - destroyBefore, 1);
     ASSERT_EQ(*creates - createBefore, 1);
 

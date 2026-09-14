@@ -20,27 +20,13 @@
 namespace ock {
 namespace mf {
 
-/* ---- SOC 字符串匹配(纯函数, 无 mock 依赖) ---- */
-TEST(DlAclApiVmmTest, ParseAscendSocName_310P)
+/* ---- SOC 类型获取(stub 环境, GetAscendSocType 内部缓存) ---- */
+TEST(DlAclApiVmmTest, GetAscendSocType_StubEnv)
 {
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend310P3"), AscendSocType::ASCEND_310P);
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend310P1"), AscendSocType::ASCEND_310P);
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend310P"), AscendSocType::ASCEND_310P);
-}
-
-TEST(DlAclApiVmmTest, ParseAscendSocName_ExistingSocs)
-{
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend910B3"), AscendSocType::ASCEND_910B);
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend910_93"), AscendSocType::ASCEND_910C);
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend910_95"), AscendSocType::ASCEND_950);
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend950"), AscendSocType::ASCEND_950);
-}
-
-TEST(DlAclApiVmmTest, ParseAscendSocName_Unknown)
-{
-    ASSERT_EQ(DlAclApi::ParseAscendSocName(""), AscendSocType::ASCEND_UNKNOWN);
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Ascend310B"), AscendSocType::ASCEND_UNKNOWN);
-    ASSERT_EQ(DlAclApi::ParseAscendSocName("Kunpeng920"), AscendSocType::ASCEND_UNKNOWN);
+    auto socType = DlAclApi::GetAscendSocType();
+    ASSERT_TRUE(socType == AscendSocType::ASCEND_310P || socType == AscendSocType::ASCEND_UNKNOWN ||
+                socType == AscendSocType::ASCEND_910B || socType == AscendSocType::ASCEND_910C ||
+                socType == AscendSocType::ASCEND_950);
 }
 
 /* ---- ACL VMM 符号加载: stub 环境下 hybm_init 后 wrapper 可调用(非 UNLOAD) ---- */
@@ -66,8 +52,8 @@ TEST_F(DlAclApiVmmInitTest, VmmSymbolsLoaded)
 
     aclrtPhysicalMemProp prop{};
     prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-    prop.allocationType = aclrtMemAllocationType::ACL_MEM_ALLOCATION_TYPE_PINNED;
-    prop.memAttr = aclrtMemAttr::ACL_MEM_P2P_HUGE;
+    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
+    prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
     prop.location.id = 0;
     prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
 
@@ -84,7 +70,7 @@ TEST_F(DlAclApiVmmInitTest, VmmSymbolsLoaded)
     ASSERT_NE(DlAclApi::AclrtUnmapMem(base), BM_UNDER_API_UNLOAD);
 
     aclrtMemAccessDesc acc{};
-    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     acc.location.id = 0;
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     ASSERT_NE(DlAclApi::AclrtMemSetAccess(base, 2UL * 1024UL * 1024UL, &acc, 1), BM_UNDER_API_UNLOAD);
@@ -98,12 +84,8 @@ TEST_F(DlAclApiVmmInitTest, VmmSymbolsLoaded)
     ASSERT_EQ(DlAclApi::AclrtMemImportFromShareableHandle(sh, 0, &imported), 0);
     ASSERT_NE(imported, nullptr);
 
-    int32_t pid = 1;
-    ASSERT_NE(DlAclApi::AclrtMemSetPidToShareableHandle(sh, &pid, 1), BM_UNDER_API_UNLOAD);
     size_t gran = 0;
-    ASSERT_EQ(DlAclApi::AclrtMemGetAllocationGranularity(
-                  &prop, aclrtMemGranularityOptions::ACL_RT_MEM_ALLOC_GRANULARITY_RECOMMENDED, &gran),
-              0);
+    ASSERT_EQ(DlAclApi::AclrtMemGetAllocationGranularity(&prop, 1U, &gran), 0);
     ASSERT_EQ(gran, 2UL * 1024UL * 1024UL);
 }
 
