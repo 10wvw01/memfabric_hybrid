@@ -26,6 +26,8 @@ int32_t g_stubDestroyStreamCalls = 0;
 int32_t g_stubSetCurrentContextFail = 0; // 非 0 时 SetCurrentContext 返回错误(die 对导入防护用例)
 int32_t g_stubSetDeviceFail = 0;         // 非 0 时 SetDevice 返回错误(die 对导入恢复失败用例)
 int32_t g_stubDestroyContextCalls = 0;   // 计数: context 销毁次数(验证失败时跳过销毁)
+int32_t g_stubDisablePeerAccessCalls = 0; // 计数: DisablePeerAccess 调用次数(D 态拆除纪律用例)
+int32_t g_stubDisablePeerLastPeer = -1;   // 记录: DisablePeerAccess 最近一次对端 devId
 }
 
 extern "C" {
@@ -45,6 +47,14 @@ int32_t aclrtGetDevice(int32_t *deviceId)
 
 int32_t aclrtDeviceEnablePeerAccess(int32_t peerDeviceId, uint32_t flags)
 {
+    return RETURN_OK;
+}
+
+int32_t aclrtDeviceDisablePeerAccess(int32_t peerDeviceId, uint32_t flags)
+{
+    (void)flags;
+    g_stubDisablePeerAccessCalls++; // 每次拆除计数, UT 断言"恰好一次/不调用"
+    g_stubDisablePeerLastPeer = peerDeviceId;
     return RETURN_OK;
 }
 

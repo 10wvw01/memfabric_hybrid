@@ -103,6 +103,9 @@ Result HybmAclVmmSegment::UnReserveMemorySpace() noexcept
     }
     orphanHandles_.clear();
 
+    /* 跨卡 P2P 残留拆除兜底: 须在设备复位前的窗口释放阶段完成 */
+    TeardownResidualCrossCardP2p();
+
     if (globalVirtualAddress_ != nullptr) {
         ret = DlAclApi::AclrtReleaseMemAddress(globalVirtualAddress_);
         if (ret != BM_OK) {
@@ -448,7 +451,16 @@ Result HybmAclVmmSegment::ImportOne(const AclVmmExportInfo &im) noexcept
     }
 
     auto slotAddr = SlotBase(im.rankId) + im.sliceIndex * HYBM_LARGE_PAGE_SIZE;
-    return MapImportedToSlot(im, handle, slotAddr);
+    ret = MapImportedToSlot(im, handle, slotAddr);
+    if (ret != BM_OK) {
+        return ret;
+    }
+    if (!IsDiePair(im.devId)) {
+        /* 跨卡导入登记 P2P 引用: 句柄全量释放时显式拆除, 防进程退出 D 态挂死 */
+        slotPeerDev_[slotAddr] = im.devId;
+        crossCardPeerCnt_[im.devId]++;
+    }
+    return BM_OK;
 }
 
 Result HybmAclVmmSegment::MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrvMemHandle handle,
@@ -537,7 +549,56 @@ Result HybmAclVmmSegment::UnmapOne(uint64_t slotAddr, aclrtDrvMemHandle handle) 
         return ret;
     }
     HybmVaManager::GetInstance().RemoveOneVaInfo(slotAddr);
+    ReleaseCrossCardRef(slotAddr);
     return BM_OK;
+}
+
+void HybmAclVmmSegment::ReleaseCrossCardRef(uint64_t slotAddr) noexcept
+{
+    auto it = slotPeerDev_.find(slotAddr);
+    if (it == slotPeerDev_.end()) {
+        return; /* die 对导入不在册, 无 PCIe P2P 拆除需求 */
+    }
+    auto peerDevId = it->second;
+    slotPeerDev_.erase(it);
+    auto cntIt = crossCardPeerCnt_.find(peerDevId);
+    if (cntIt == crossCardPeerCnt_.end() || cntIt->second == 0) {
+        return;
+    }
+    if (--(cntIt->second) > 0) {
+        return; /* 该对端仍有活跃跨卡句柄, P2P 状态须保留 */
+    }
+    crossCardPeerCnt_.erase(cntIt);
+    auto peerRank = options_.rankCnt == 0 ? options_.rankId
+                                          : static_cast<uint32_t>((slotAddr - reinterpret_cast<uint64_t>(
+                                                                                 globalVirtualAddress_)) /
+                                                                  options_.maxSize);
+    auto ret = DlAclApi::AclrtDeviceDisablePeerAccess(static_cast<int32_t>(peerDevId), 0);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("AclrtDeviceDisablePeerAccess failed, ret:" << ret << " rankId:" << options_.rankId
+                   << " remoteRank:" << peerRank << " peerDevId:" << peerDevId);
+        return;
+    }
+    BM_LOG_INFO("cross card P2P torn down, rankId:" << options_.rankId << " remoteRank:" << peerRank
+                << " peerDevId:" << peerDevId);
+}
+
+void HybmAclVmmSegment::TeardownResidualCrossCardP2p() noexcept
+{
+    /* uninit 兜底: 正常路径引用应已归零; 残留计数源于孤立句柄(unmap 成功/free 失败)重试释放后未走
+     * UnmapOne 递减, 或清理路径提前返回——在设备复位前全量拆除, 防 D 态挂死 */
+    for (auto &kv : crossCardPeerCnt_) {
+        auto ret = DlAclApi::AclrtDeviceDisablePeerAccess(static_cast<int32_t>(kv.first), 0);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("residual P2P teardown failed, ret:" << ret << " rankId:" << options_.rankId
+                       << " peerDevId:" << kv.first << " residualCnt:" << kv.second);
+            continue; /* 拆除失败不阻断其余对端与后续清理 */
+        }
+        BM_LOG_INFO("residual cross card P2P torn down, rankId:" << options_.rankId
+                    << " peerDevId:" << kv.first << " residualCnt:" << kv.second);
+    }
+    crossCardPeerCnt_.clear();
+    slotPeerDev_.clear();
 }
 
 Result HybmAclVmmSegment::Unmap() noexcept

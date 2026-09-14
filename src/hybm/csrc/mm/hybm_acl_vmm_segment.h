@@ -87,6 +87,8 @@ private:
     Result ImportHandleForDiePair(const AclVmmExportInfo &im, aclrtDrvMemHandle &handle) noexcept;
     Result MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrvMemHandle handle, uint64_t slotAddr) noexcept;
     Result UnmapOne(uint64_t slotAddr, aclrtDrvMemHandle handle) noexcept;
+    void ReleaseCrossCardRef(uint64_t slotAddr) noexcept;      /* 跨卡句柄释放: 引用归零即拆 P2P */
+    void TeardownResidualCrossCardP2p() noexcept;              /* uninit 兜底: 残留跨卡 P2P 全量拆除 */
     bool IsImportInfoValid(const AclVmmExportInfo &info) const noexcept;
     bool IsDiePair(uint32_t peerDevId) const noexcept;
     uint64_t OwnSlotBase() const noexcept;
@@ -102,6 +104,8 @@ private:
     std::map<uint32_t, MemSliceStatus> slices_;              // index -> (slice, own handle)
     std::map<uint32_t, std::string> exportMap_;              // index -> serialized export info
     std::map<uint64_t, aclrtDrvMemHandle> mappedGvaMem_;     // slot addr -> imported handle
+    std::map<uint64_t, uint32_t> slotPeerDev_;               // 跨卡导入 slot addr -> 对端 user devId
+    std::map<uint32_t, uint32_t> crossCardPeerCnt_;          // 对端 user devId -> 活跃跨卡句柄计数
     std::vector<aclrtDrvMemHandle> orphanHandles_;           // unmap 成功但 free 失败的遗留句柄
 };
 } // namespace mf

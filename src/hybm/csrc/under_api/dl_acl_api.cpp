@@ -22,6 +22,7 @@ const char *DlAclApi::gAscendAclLibName = "libascendcl.so";
 aclrtGetDeviceFunc DlAclApi::pAclrtGetDevice = nullptr;
 aclrtSetDeviceFunc DlAclApi::pAclrtSetDevice = nullptr;
 aclrtDeviceEnablePeerAccessFunc DlAclApi::pAclrtDeviceEnablePeerAccess = nullptr;
+aclrtDeviceDisablePeerAccessFunc DlAclApi::pAclrtDeviceDisablePeerAccess = nullptr;
 aclrtCreateStreamFunc DlAclApi::pAclrtCreateStream = nullptr;
 aclrtCreateStreamWithConfigFunc DlAclApi::pAclrtCreateStreamWithConfig = nullptr;
 
@@ -102,6 +103,8 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pAclrtGetDevice, aclrtGetDeviceFunc, rtHandle, "aclrtGetDevice");
     DL_LOAD_SYM(pAclrtSetDevice, aclrtSetDeviceFunc, rtHandle, "aclrtSetDevice");
     DL_LOAD_SYM(pAclrtDeviceEnablePeerAccess, aclrtDeviceEnablePeerAccessFunc, rtHandle, "aclrtDeviceEnablePeerAccess");
+    DL_LOAD_SYM(pAclrtDeviceDisablePeerAccess, aclrtDeviceDisablePeerAccessFunc, rtHandle,
+                "aclrtDeviceDisablePeerAccess");
     DL_LOAD_SYM(pAclrtCreateStream, aclrtCreateStreamFunc, rtHandle, "aclrtCreateStream");
     DL_LOAD_SYM(pAclrtCreateStreamWithConfig, aclrtCreateStreamWithConfigFunc, rtHandle, "aclrtCreateStreamWithConfig");
     DL_LOAD_SYM(pAclrtStreamGetId, aclrtStreamGetIdFunc, rtHandle, "aclrtStreamGetId");
@@ -209,6 +212,7 @@ void DlAclApi::CleanupLibrary()
     pAclrtGetDevice = nullptr;
     pAclrtSetDevice = nullptr;
     pAclrtDeviceEnablePeerAccess = nullptr;
+    pAclrtDeviceDisablePeerAccess = nullptr;
     pAclrtCreateStream = nullptr;
     pAclrtCreateStreamWithConfig = nullptr;
     pAclrtDestroyStream = nullptr;

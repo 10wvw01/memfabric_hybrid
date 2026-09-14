@@ -190,6 +190,7 @@ typedef enum aclrtMemMallocPolicy {
 using aclrtSetDeviceFunc = int32_t (*)(int32_t);
 using aclrtGetDeviceFunc = int32_t (*)(int32_t *);
 using aclrtDeviceEnablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
+using aclrtDeviceDisablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
 using aclrtCreateStreamFunc = int (*)(void **);
 using aclrtCreateStreamWithConfigFunc = int (*)(void **, int32_t, uint32_t);
 using aclrtStreamGetIdFunc = int (*)(void *, int32_t *);
@@ -285,6 +286,15 @@ public:
             return BM_UNDER_API_UNLOAD;
         }
         return pAclrtDeviceEnablePeerAccess(peerDeviceId, flags);
+    }
+
+    /* 拆除对端设备的 PCIe P2P 状态(跨卡导入清理路径, 防 D 态挂死; flags 固定 0) */
+    static inline Result AclrtDeviceDisablePeerAccess(int32_t peerDeviceId, uint32_t flags)
+    {
+        if (pAclrtDeviceDisablePeerAccess == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtDeviceDisablePeerAccess(peerDeviceId, flags);
     }
 
     static inline Result AclrtCreateStream(void **stream)
@@ -749,6 +759,7 @@ private:
     static aclrtSetDeviceFunc pAclrtSetDevice;
     static aclrtGetDeviceFunc pAclrtGetDevice;
     static aclrtDeviceEnablePeerAccessFunc pAclrtDeviceEnablePeerAccess;
+    static aclrtDeviceDisablePeerAccessFunc pAclrtDeviceDisablePeerAccess;
     static aclrtCreateStreamFunc pAclrtCreateStream;
     static aclrtCreateStreamWithConfigFunc pAclrtCreateStreamWithConfig;
     static aclrtStreamGetIdFunc pAclrtStreamGetId;
