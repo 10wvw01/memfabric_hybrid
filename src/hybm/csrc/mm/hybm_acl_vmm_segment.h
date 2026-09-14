@@ -106,6 +106,7 @@ private:
     std::map<uint64_t, aclrtDrvMemHandle> mappedGvaMem_;     // slot addr -> imported handle
     std::map<uint64_t, uint32_t> slotPeerDev_;               // 跨卡导入 slot addr -> 对端 user devId
     std::map<uint32_t, uint32_t> crossCardPeerCnt_;          // 对端 user devId -> 活跃跨卡句柄计数
+    std::unordered_set<uint32_t> crossCardEnabledPeers_;     // 已显式 EnablePeerAccess 的跨卡对端(拆除时移除)
     std::vector<aclrtDrvMemHandle> orphanHandles_;           // unmap 成功但 free 失败的遗留句柄
 };
 } // namespace mf

@@ -389,6 +389,18 @@ Result HybmAclVmmSegment::Import(const std::vector<std::string> &allExInfo, void
             BM_LOG_ERROR("imports_ emplace failed, rankId:" << options_.rankId);
             return BM_MALLOC_FAILED;
         }
+        /* 跨卡对端: 登记阶段(组 barrier 前)即显式 EnablePeerAccess——enable 建立双向 P2P 且
+         * import 不隐式建立, 双方须在任一方 mmap 前完成各自 enable, 否则对端 import 必 507899 */
+        if (info.rankId != options_.rankId && !IsDiePair(info.devId) &&
+            crossCardEnabledPeers_.count(info.devId) == 0U) {
+            auto enRet = DlAclApi::AclrtDeviceEnablePeerAccess(static_cast<int32_t>(info.devId), 0);
+            if (enRet != BM_OK) {
+                BM_LOG_ERROR("AclrtDeviceEnablePeerAccess failed, ret:" << enRet << " localRank:" << options_.rankId
+                           << " remoteRank:" << info.rankId << " peerDevId:" << info.devId);
+                return enRet;
+            }
+            crossCardEnabledPeers_.emplace(info.devId);
+        }
         BM_LOG_INFO("acl vmm import info ok, localRank:" << options_.rankId << " remoteRank:" << info.rankId
                    << " devId:" << info.devId << " sliceIndex:" << info.sliceIndex << " size:" << info.size);
     }
@@ -439,7 +451,9 @@ Result HybmAclVmmSegment::ImportOne(const AclVmmExportInfo &im) noexcept
     if (IsDiePair(im.devId)) {
         ret = ImportHandleForDiePair(im, handle);
     } else {
-        // 跨卡: 本进程 ctx 直接 import(隐式双向 P2P, 消耗槽位)
+        /* 跨卡: 双向 P2P 已在 Import 登记阶段显式 enable(组 barrier 前), 此处本进程 ctx 直接
+         * import。注意: 内核 halMemImportFromShareableHandle 对跨卡句柄存在源 VA 映射约束
+         * (drvRetCode 17, 见变更记录), 对称槽位布局下当前被阻塞, 依赖 CANN 侧澄清。 */
         ret = DlAclApi::AclrtMemImportFromShareableHandle(im.shareableHandle, options_.devId, &handle);
         if (ret != BM_OK) {
             BM_LOG_ERROR("cross card import failed, ret:" << ret << " localRank:" << options_.rankId
@@ -581,6 +595,7 @@ void HybmAclVmmSegment::ReleaseCrossCardRef(uint64_t slotAddr) noexcept
     }
     BM_LOG_INFO("cross card P2P torn down, rankId:" << options_.rankId << " remoteRank:" << peerRank
                 << " peerDevId:" << peerDevId);
+    crossCardEnabledPeers_.erase(peerDevId); /* 拆除后 enable 状态失效, 再导入须重新 enable */
 }
 
 void HybmAclVmmSegment::TeardownResidualCrossCardP2p() noexcept
@@ -599,6 +614,7 @@ void HybmAclVmmSegment::TeardownResidualCrossCardP2p() noexcept
     }
     crossCardPeerCnt_.clear();
     slotPeerDev_.clear();
+    crossCardEnabledPeers_.clear(); /* 残留 P2P 已全量拆除, enable 状态同步失效 */
 }
 
 Result HybmAclVmmSegment::Unmap() noexcept

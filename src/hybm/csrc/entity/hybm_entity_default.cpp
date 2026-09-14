@@ -703,6 +703,9 @@ void MemEntityDefault::Unmap() noexcept
         return;
     }
 
+    /* 线程设备绑定: Unmap 释放路径含跨卡 P2P 拆除(DisablePeerAccess), 须在本端设备上下文执行 */
+    (void)SetThreadAclDevice();
+
     if (hbmSegment_ != nullptr) {
         hbmSegment_->Unmap();
     }
@@ -716,6 +719,14 @@ int32_t MemEntityDefault::Mmap() noexcept
     if (!initialized_) {
         BM_LOG_ERROR("the object is not initialized, please check whether Initialize is called.");
         return BM_NOT_INITIALIZED;
+    }
+
+    /* 线程设备绑定: Mmap 常在 join 工作线程执行, 未绑定时 ACL 默认设备 0 与本端 devId 不符
+     * 会导致跨卡 import/enable 在错误设备上下文执行(实测 507899); 对齐本文件其他入口的既有模式 */
+    auto setRet = SetThreadAclDevice();
+    if (setRet != BM_OK) {
+        BM_LOG_ERROR("Mmap SetThreadAclDevice failed, entityId: " << id_);
+        return BM_ERROR;
     }
 
     // in trans scene, two segement work togather, but hbm do not need to mmap, and wrongly mmap will make dram mmap fail

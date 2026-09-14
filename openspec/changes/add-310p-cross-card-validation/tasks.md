@@ -18,15 +18,25 @@
 
 ## 3. 示例与探针跨卡跑法
 
-- [ ] 3.1 07 示例：`RANK_DEV` 改为读环境变量 `RANK_DEV_LIST`（缺省 "0,1" 保持 die 对），README 补跨卡运行段（`RANK_DEV_LIST=0,2`）。验证方式：缺省跑法与既有验收一致，跨卡跑法可启动
-- [ ] 3.2 08 示例：`.asc` 的 devId 选择改为读环境变量 `RANK_DEV_LIST`（缺省 "0,1"），README 补跨卡运行段（含两卡各自部署 kernel 的说明）。验证方式：同上
-- [ ] 3.3 E0b 跨卡变体：从 git 017802a0 恢复 `probe_e0b.cc` 到未跟踪备份目录，dev 映射参数化（A_DEV/B_DEV），构建 probe_e0b_cc。验证方式：产物可执行且源码可对照原验收记录
+- [x] 3.1 07 示例：`RANK_DEV` 改为读环境变量 `RANK_DEV_LIST`（缺省 "0,1" 保持 die 对），README 补跨卡运行段（`RANK_DEV_LIST=0,2`）。验证方式：缺省跑法与既有验收一致，跨卡跑法可启动
+  > 代码与 README 已交付（py/cpp 双版本 + RankDevId 参数校验）；实机跨卡运行被 4.1 阻塞项挡住
+- [x] 3.2 08 示例：`.asc` 的 devId 选择改为读环境变量 `RANK_DEV_LIST`（缺省 "0,1"），README 补跨卡运行段（含两卡各自部署 kernel 的说明）。验证方式：同上
+  > 已交付；两卡部署纪律（deployer 作用域=卡）写入 README
+- [x] 3.3 E0b 跨卡变体：从 git 017802a0 恢复 `probe_e0b.cc` 到未跟踪备份目录，dev 映射参数化（A_DEV/B_DEV），构建 probe_e0b_cc。验证方式：产物可执行且源码可对照原验收记录
+  > 已恢复全量探针源码（probe_e0a/e0b/Makefile/工具链），A_DEV/B_DEV 参数化 + dieId=devId%2；
+  > run_e0b.sh 增跨卡双卡部署分支；链接含 D 态修复的产品库构建通过
 
 ## 4. 实机验收矩阵（跨卡 dev0↔dev2）
 
 - [ ] 4.1 07 跨卡：`RANK_DEV_LIST=0,2` 双 rank 建池三阶段（HBM+DRAM 双池）逐字校验。验证方式：mismatch=0、FAIL 数=0、进程干净退出无 D 态
+  > **阻塞（内核级）**：跨卡池 import 被驱动拒绝（halMemImportFromShareableHandle drvRetCode=17/EEXIST），
+  > 详见 design.md「阻塞项」证据链。前置层已全部打通：topo/带宽复核 PASS、显式双向 enable 修复、
+  > Mmap/Unmap 线程设备绑定修复；探针级跨卡 VMM P2P 双向 import + 数据校验 + 干净退出全通
+  > （cc_probe 模式 0/9/11/13 多变体，3 次以上复现）
 - [ ] 4.2 E0b 跨卡：probe_e0b_cc 双轮变体（本地 src→peer 池 GVA / own 池 GVA→peer 池 GVA）——SMMU 对跨卡导入 VA 的可译性裁决。验证方式：headAfter 前进且数据全对
-- [ ] 4.3 08 跨卡端到端：两卡各自部署编排 kernel 后，`MF_EX08_DEV_LIST=0,2` 三阶段（mode13 闭环 / 串行×8 / mode14 流水）。验证方式：mismatch=0、双侧 mainRet=0、流水时延 < 串行对照、干净退出
+  > **阻塞**：同 4.1（E0b 池建链走同一产品 import 路径）
+- [ ] 4.3 08 跨卡端到端：两卡各自部署编排 kernel 后，`RANK_DEV_LIST=0,2` 三阶段（mode13 闭环 / 串行×8 / mode14 流水）。验证方式：mismatch=0、双侧 mainRet=0、流水时延 < 串行对照、干净退出
+  > **阻塞**：同 4.1
 
 ## 5. 规格与文档同步
 

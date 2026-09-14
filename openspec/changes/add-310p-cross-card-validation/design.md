@@ -27,9 +27,35 @@
 - [F6 跨卡导出必须 P2P policy] → 已满足：`FillMemProp` 固定 `ACL_MEM_P2P_HUGE`（产品代码现状，无需改动）。
 - [DisablePeerAccess 失败阻断清理] → 拆除失败仅记 ERROR 不返回错误（清理路径必须推进，不能因拆不掉卡死其余 unmap）。
 
+## 阻塞项：内核跨卡 import 的源 VA 映射约束（drvRetCode 17）
+
+实机排障（9/14，dev0↔dev2）收敛出**内核级约束**，阻塞 4.1-4.3 全部产品链路验收：
+
+**现象**：产品对称槽位布局（各 rank 物理映射于 `base + rank*maxSize`，对端槽位预留空置）下，
+跨卡 `aclrtMemImportFromShareableHandle` 被驱动拒绝：`halMemImportFromShareableHandle drvRetCode=17`（EEXIST 语义），ACL 层表现为 507899。
+
+**证据链**（cc_probe2 探针，多变体同进程对照）：
+1. 手工链（双方各自 reserve 64MB@0x12c140000000 + malloc+map@win+0 + export）→ 跨卡双向 import + 数据校验全通（模式 0/9/11/13，≥3 次复现；plog 确认 ACL 5 步调用序列与实体链逐项相同）。
+2. 实体链（产品段代码，r1 物理映射于 win+32MB 即对端槽位空置）→ 同参调用下 import 必败（模式 7/12）。
+3. 同进程双句柄对照（模式 12）：实体句柄 FAIL、手工句柄 OK——排除时序/环境/堆踩踏（valgrind 零 Invalid write）。
+4. 预热实验（模式 15）：import 前在对端槽位 VA 临时映射一块**新**物理 → 仍 FAIL——规则进一步收窄为「源 VA 须映射着**导入方自己导出的物理**」。
+5. runtime plog 证实 auto-P2P（EnableP2PWithOtherDevice 双向）成功，失败点在 import ioctl 本身；借导出方 ctx 的方式三同样失败——排除 P2P 使能问题。
+
+**推断**：内核跨卡 import 要求句柄源 VA 在导入方进程已有「自身导出物理」的映射（同卡 die 对路径无此约束，故 07 die 对一直正常）。该约束与产品对称槽位设计结构性冲突（对端槽位必须留给导入句柄）。
+
+**解锁路径**（二选一，需团队决策）：
+- **A. CANN/驱动侧澄清**：向驱动团队提交证据链，确认 drvRetCode 17 是否驱动缺陷（合法 import 被拒）；若修复则产品零改动。
+- **B. 布局重设计**：2-rank 场景改为「own 物理@base+0、对端导入@base+maxSize」（探针已验证此布局内核接受），但破坏 GVA==DVA==HVA 对称不变式，牵动 AddVaInfo/TransformVa/peer 寻址全链——需独立 change 立项设计。
+
+## 顺带发现（独立缺陷，另行修复）
+
+- **exit 时静态析构顺序缺陷**：进程未显式 `hybm_uninit` 而经 `exit()` 退出时，`MemEntityFactory` 静态析构触发段拆除，调用已析构的 `HybmVaManager::RemoveOneVaInfo` → double-free 崩溃（valgrind/gdb 栈实锤，crash 栈：MemEntityFactory::~ → UnReserveMemorySpace → ReleaseSliceMemory → RemoveOneVaInfo）。die 对既有场景显式 uninit 不触发；脏退出路径必现。建议后续 change 修复（析构顺序守护或工厂空转检查）。
+- **产品 join 失败清理路径堆异常**（malloc_consolidate/double-free，与上项同源或相邻）——随上项一并排查。
+
 ## Revision Impact
 
-- `dl_acl_api.{h,cpp}`：+1 符号（typedef/成员/加载/封装/置空五处镜像 Enable）。
-- `hybm_acl_vmm_segment.{h,cpp}`：+2 个私有容器（slotAddr→peerDevId、peerDevId→活跃计数），ImportOne 跨卡分支登记、UnmapOne 成功递减、UnReserve 兜底。
-- UT：stub so 增加 DisablePeerAccess 计数符号，新增跨卡拆除用例（全量拆/die对不拆/部分不拆/uninit兜底）。
+- `dl_acl_api.{h,cpp}`：+1 符号（typedef/成员/加载/封装/置空五处镜像 Enable；**实测 Disable 为单参数签名，Enable 为双参数**，typedef 已按真实签名修正）。
+- `hybm_acl_vmm_segment.{h,cpp}`：+3 个私有容器（slotAddr→peerDevId、peerDevId→活跃计数、已 enable 对端集合），Import 登记阶段显式双向 enable（15 号探针配方），ImportOne 跨卡分支保持本进程 ctx import，UnmapOne 成功递减、归零拆除，UnReserve 兜底扫描。
+- `hybm_entity_default.cpp`：Mmap/Unmap 入口补 SetThreadAclDevice（join 工作线程设备绑定——实测缺绑定时跨卡 enable/import 在错误设备上下文执行）。
+- UT：stub so 增加 DisablePeerAccess 计数符号，新增跨卡拆除 4 用例。
 - 示例 07/08：dev 映射读环境变量 + README 跨卡段。
