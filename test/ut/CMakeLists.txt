@@ -21,7 +21,7 @@ include_directories(
         ${PROJECT_HYBM_SRC_BASE}/csrc/transport/utils
         ${PROJECT_HYBM_SRC_BASE}/csrc/ts_engine
         ${PROJECT_HYBM_SRC_BASE}/csrc/under_api
-        ${PROJECT_HYBM_SRC_BASE}/ops/hybm_kernel
+        ${PROJECT_HYBM_SRC_BASE}/ops/hybm_kernel # 协同模式契约头(hybm_overlap_contract.h)搜索路径
 
         ${PROJECT_UTIL_SRC_BASE}/ptracer/include
         ${PROJECT_UTIL_SRC_BASE}/ptracer/tracers

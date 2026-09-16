@@ -240,14 +240,14 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
  * @param chunks           [in] chunk 数(1~64, 受邮箱槽数约束)
  * @return 0 if successful
  */
-int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva, uint32_t chunks);
+int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva, uint32_t chunks); // 流水提交
 
 /**
  * @brief [310P 协同模式] 等待最近一次协同搬运完成
  * @param handle           [in] shm object
  * @return 0 if successful
  */
-int32_t smem_shm_overlap_wait(smem_shm_t handle);
+int32_t smem_shm_overlap_wait(smem_shm_t handle); // SynchronizeStream 等待
 
 /**
  * @brief [310P 协同模式] 读取最近一次搬运的 kernel 结果(诊断)
@@ -257,14 +257,15 @@ int32_t smem_shm_overlap_wait(smem_shm_t handle);
  * @param headAfter        [out] SQ head(TSFW 消费证据)
  * @return 0 if successful
  */
-int32_t smem_shm_overlap_get_result(smem_shm_t handle, uint32_t *mainRet, uint32_t *stage, uint32_t *headAfter);
+int32_t smem_shm_overlap_get_result(smem_shm_t handle, uint32_t *mainRet, uint32_t *stage,
+                                    uint32_t *headAfter); // 诊断读回
 
 /**
  * @brief [310P 协同模式] 查询协同工作区地址(host 侧获取后作为参数传给 AICore kernel)
  * @param handle           [in] shm object
  * @return 工作区设备地址; 协同模式未就绪时返回 NULL
  */
-void *smem_shm_overlap_get_workspace(smem_shm_t handle);
+void *smem_shm_overlap_get_workspace(smem_shm_t handle); // 未就绪返回 NULL
 
 #ifdef __cplusplus
 }

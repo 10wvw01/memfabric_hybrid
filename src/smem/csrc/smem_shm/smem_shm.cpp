@@ -59,7 +59,7 @@ SMEM_API smem_shm_t smem_shm_create(uint32_t id, uint32_t rankSize, uint32_t ran
     options.rankId = rankId;
     /* devId 必须透传(AI_CORE_INITIATE 场景此前恒 0 —— A3 的 SdmaTransportManager
      * 自取设备未暴露; 310P 协同模式 dieId = devId%2 依赖此值, 对齐 smem_bm.cpp 同款) */
-    options.devId = SmemShmEntryManager::Instance().GetDeviceId();
+    options.devId = SmemShmEntryManager::Instance().GetDeviceId(); // 透传设备号(dieId 依赖)
     options.maxHBMSize = ALIGN_UP(localSize, SMEM_1G_SIZE);
     options.deviceVASpace = localSize;
     options.role = HYBM_ROLE_PEER;
@@ -410,68 +410,67 @@ SMEM_API void smem_shm_global_exit(smem_shm_t handle, int status)
 }
 
 /* ---- 310P AICore×AICPU 协同模式 host API(转发 entry, 实现见 SmemShmEntry) ---- */
-SMEM_API int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva, uint32_t chunks)
+SMEM_API int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva,
+                                         uint32_t chunks) // 流水提交转发
 {
-    SmemShmEntryPtr entry = nullptr;
-    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
-    if (ret != SM_OK || entry == nullptr) {
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
-        return SM_INVALID_PARAM;
+    SmemShmEntryPtr entry = nullptr; // entry 指针(按 handle 反查)
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry); // 反查
+    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
+        return SM_INVALID_PARAM; // 参数非法
     }
-    ret = entry->OverlapLaunch(dstGva, flagDoneGva, chunks);
-    if (ret != SM_OK) {
-        SM_LOG_AND_SET_LAST_ERROR("overlap launch failed, result: " << ret << " chunks: " << chunks);
-        return ret;
+    ret = entry->OverlapLaunch(dstGva, flagDoneGva, chunks); // 转发流水提交
+    if (ret != SM_OK) { // 转发失败
+        SM_LOG_AND_SET_LAST_ERROR("overlap launch failed, result: " << ret << " chunks: " << chunks); // 根因
+        return ret; // 透传失败(根因已记录)
     }
-    return SM_OK;
+    return SM_OK; // 提交成功
 }
 
-SMEM_API int32_t smem_shm_overlap_wait(smem_shm_t handle)
+SMEM_API int32_t smem_shm_overlap_wait(smem_shm_t handle) // 等待转发
 {
-    SmemShmEntryPtr entry = nullptr;
-    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
-    if (ret != SM_OK || entry == nullptr) {
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
-        return SM_INVALID_PARAM;
+    SmemShmEntryPtr entry = nullptr; // entry 指针(按 handle 反查)
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry); // 反查
+    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
+        return SM_INVALID_PARAM; // 参数非法
     }
-    ret = entry->OverlapWait();
-    if (ret != SM_OK) {
-        SM_LOG_AND_SET_LAST_ERROR("overlap wait failed, result: " << ret);
-        return ret;
+    ret = entry->OverlapWait(); // 转发等待
+    if (ret != SM_OK) { // 转发失败
+        SM_LOG_AND_SET_LAST_ERROR("overlap wait failed, result: " << ret); // 根因日志+错误码
+        return ret; // 透传失败(根因已记录)
     }
-    return SM_OK;
+    return SM_OK; // 等待成功
 }
 
-SMEM_API int32_t smem_shm_overlap_get_result(smem_shm_t handle, uint32_t *mainRet, uint32_t *stage,
+SMEM_API int32_t smem_shm_overlap_get_result(smem_shm_t handle, uint32_t *mainRet, uint32_t *stage, // 诊断转发
                                              uint32_t *headAfter)
 {
-    if (mainRet == nullptr || stage == nullptr || headAfter == nullptr) {
-        SM_LOG_AND_SET_LAST_ERROR("invalid param, out pointers must not be NULL");
-        return SM_INVALID_PARAM;
+    if (mainRet == nullptr || stage == nullptr || headAfter == nullptr) { // 出参指针空校验
+        SM_LOG_AND_SET_LAST_ERROR("invalid param, out pointers must not be NULL"); // 根因日志+错误码
+        return SM_INVALID_PARAM; // 参数非法
     }
-    SmemShmEntryPtr entry = nullptr;
-    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
-    if (ret != SM_OK || entry == nullptr) {
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
-        return SM_INVALID_PARAM;
+    SmemShmEntryPtr entry = nullptr; // entry 指针(按 handle 反查)
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry); // 反查
+    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
+        return SM_INVALID_PARAM; // 参数非法
     }
-    ret = entry->OverlapGetResult(*mainRet, *stage, *headAfter);
-    if (ret != SM_OK) {
-        SM_LOG_AND_SET_LAST_ERROR("overlap get result failed, result: " << ret);
-        return ret;
+    ret = entry->OverlapGetResult(*mainRet, *stage, *headAfter); // 转发诊断读回
+    if (ret != SM_OK) { // 转发失败
+        SM_LOG_AND_SET_LAST_ERROR("overlap get result failed, result: " << ret); // 根因日志+错误码
+        return ret; // 透传失败(根因已记录)
     }
-    return SM_OK;
+    return SM_OK; // 读取成功
 }
 
-SMEM_API void *smem_shm_overlap_get_workspace(smem_shm_t handle)
+SMEM_API void *smem_shm_overlap_get_workspace(smem_shm_t handle) // 工作区查询转发
 {
     SmemShmEntryPtr entry = nullptr;
     auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
-    if (ret != SM_OK || entry == nullptr) {
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
-        return nullptr;
+    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
+        return nullptr; // 未就绪/无效返回 NULL
     }
-    return entry->OverlapGetWorkspace();
+    return entry->OverlapGetWorkspace(); // 转发工作区查询
 }
-
-

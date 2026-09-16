@@ -331,49 +331,51 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
 }
 
 /* ---- 310P 协同模式转发(实现细节见 hybm_overlap_capi.cpp) ---- */
-Result SmemShmEntry::OverlapLaunch(void *dstGva, void *flagDoneGva, uint32_t chunks)
+Result SmemShmEntry::OverlapLaunch(void *dstGva, void *flagDoneGva, uint32_t chunks) // 流水提交
 {
-    if (entity_ == nullptr) {
-        SM_LOG_ERROR("overlap launch failed: entity is null, shmId: " << id_);
-        return SM_NOT_INITIALIZED;
+    if (entity_ == nullptr) { // 底层 entity 未建
+        SM_LOG_ERROR("overlap launch failed: entity is null, shmId: " << id_); // 根因日志: shmId
+        return SM_NOT_INITIALIZED; // 未初始化
     }
+    // 统一走流水提交(chunks=1 即单块语义)
     auto ret = hybm_overlap_submit(reinterpret_cast<uint64_t>(dstGva), reinterpret_cast<uint64_t>(flagDoneGva),
                                    chunks);
-    if (ret != 0) {
+    if (ret != 0) { // hybm 提交失败
+        // 根因日志: ret/shmId/dstGva/chunks
         SM_LOG_ERROR("overlap submit failed, ret: " << ret << " shmId: " << id_ << " dstGva: " << dstGva
                                                     << " chunks: " << chunks);
-        return SM_ERROR;
+        return SM_ERROR; // 透传失败(根因已记录)
     }
-    return SM_OK;
+    return SM_OK; // 提交成功
 }
 
-Result SmemShmEntry::OverlapWait()
+Result SmemShmEntry::OverlapWait() // 等待搬运完成
 {
-    auto ret = hybm_overlap_wait();
-    if (ret != 0) {
-        SM_LOG_ERROR("hybm_overlap_wait failed, ret: " << ret << " shmId: " << id_);
-        return SM_ERROR;
+    auto ret = hybm_overlap_wait(); // 转发 hybm C API
+    if (ret != 0) { // 等待失败
+        SM_LOG_ERROR("hybm_overlap_wait failed, ret: " << ret << " shmId: " << id_); // 根因日志: ret/shmId
+        return SM_ERROR; // 透传失败(根因已记录)
     }
-    return SM_OK;
+    return SM_OK; // 等待成功
 }
 
-Result SmemShmEntry::OverlapGetResult(uint32_t &mainRet, uint32_t &stage, uint32_t &headAfter)
+Result SmemShmEntry::OverlapGetResult(uint32_t &mainRet, uint32_t &stage, uint32_t &headAfter) // 诊断读回
 {
-    auto ret = hybm_overlap_get_result(&mainRet, &stage, &headAfter);
-    if (ret != 0) {
-        SM_LOG_ERROR("hybm_overlap_get_result failed, ret: " << ret << " shmId: " << id_);
-        return SM_ERROR;
+    auto ret = hybm_overlap_get_result(&mainRet, &stage, &headAfter); // 转发 hybm C API
+    if (ret != 0) { // 读取失败
+        SM_LOG_ERROR("hybm_overlap_get_result failed, ret: " << ret << " shmId: " << id_); // 根因日志: ret/shmId
+        return SM_ERROR; // 透传失败(根因已记录)
     }
-    return SM_OK;
+    return SM_OK; // 读取成功
 }
 
-void *SmemShmEntry::OverlapGetWorkspace() const
+void *SmemShmEntry::OverlapGetWorkspace() const // 工作区查询
 {
-    hybm_overlap_info_t info = {};
-    if (hybm_overlap_get_info(&info) != 0) {
+    hybm_overlap_info_t info = {}; // 就绪信息快照(零初始化)
+    if (hybm_overlap_get_info(&info) != 0) { // 未就绪(开关关/初始化失败)
         return nullptr; /* 未就绪(开关关/初始化失败), 上层以 nullptr 判定 */
     }
-    return reinterpret_cast<void *>(info.workspace);
+    return reinterpret_cast<void *>(info.workspace); // 返回工作区设备地址
 }
 
 } // namespace smem
