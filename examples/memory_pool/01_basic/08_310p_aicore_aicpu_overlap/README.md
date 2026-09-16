@@ -7,9 +7,9 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 
 - **AICore kernel 产数据**（写池 GVA + `ENTIRE_DATA_CACHE` clean）
 - **GM 邮箱委托**（16B 描述符 `{dataAddr, words}`，vector 直写 + 行 clean）
-- **AICPU 编排 kernel 代投 SDMA SQE 对**（数据 + 8B 标志一次 doorbell，FIFO 保序
-  保证"标志到即数据到"）——设备头原语 `smem_shm_aicore_overlap.h` + host API
-  `smem_shm_overlap_launch*`
+- **AICPU 编排 kernel 代投 SDMA SQE 对**（数据 + 8B 标志，每 chunk 一次 doorbell，
+  FIFO 保序保证"标志到即数据到"）——设备头原语 `smem_shm_aicore_overlap.h` + host API
+  `smem_shm_overlap_launch`
 - **对端 AICore 消费**（dcci 轮询池内标志 → 读改写 INC → 回程）
 
 全内存通知链（邮箱/池内标志/SQE 对），310P3 上 notify/事件对不可用（实测证伪）。
@@ -19,16 +19,16 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 - 验证 SHM API 设备发起语义在 310P 落地：`smem_shm_create(SDMA)` → 传输准备
   （CP 流 + 工作区 + 编排 kernel + 冒烟）全自动完成
 - 验证 AICore 直接 GM 访问 AclVmm 池 GVA（产/读改写/dcci 轮询标志）
-- **三阶段性能语义**：
-  - ① mode13 八步闭环（单 chunk 1MB）——功能正确性（逐字校验）
-  - ② mode13 串行 ×8（同步逐次）——无重叠对照
-  - ③ mode14 多 chunk 流水（8×128KB）——**通信被计算掩盖**（加速比量化）
+- **两阶段验收语义**：
+  - ① 多 chunk 流水（8×128KB）——功能正确性（1MB 逐字校验）
+  - ② 串行 ×8（chunks=1 同步逐次）——无重叠对照
+  - 输出**通信被计算掩盖**的加速比量化（流水稳态 ≈ AICore 单 chunk 计算时间）
 
 ## 使用能力
 
 `smem_shm_create`（SDMA 位 + `MF_310P_SHM_OVERLAP=1`）→ `smem_shm_overlap_get_workspace`
 → AICore kernel（`smem_shm_overlap_notify`/`poll_flag`/`get_flag_addr` 设备头原语）→
-`smem_shm_overlap_launch` / `smem_shm_overlap_launch_pipelined` → `smem_shm_overlap_wait`
+`smem_shm_overlap_launch`（chunks 1~64，chunks=1 即单块）→ `smem_shm_overlap_wait`
 → `smem_shm_overlap_get_result` → `smem_shm_destroy`
 
 ## 规模建议
@@ -49,12 +49,11 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 
 ## 验收标准
 
-1. ①mode13：r0 终态数据 mismatch=0（1024 字逐字），双侧 kernel mainRet=0、AICore
-   状态走满（0xA3/0xB3）、headAfter 前进（TSFW 消费证据）
-2. ③mode14：8 chunk 全量（1MB）逐字校验 mismatch=0；最后一块结果标志到达
-3. **掩盖量化**：③流水总时延 < ②串行总时延（输出加速比；理想情况流水稳态
+1. ①流水：8 chunk 全量（1MB）逐字校验 mismatch=0，双侧 kernel mainRet=0、AICore
+   状态走满（0xD2/0xE1）、headAfter 前进（TSFW 消费证据）
+2. **掩盖量化**：①流水总时延 < ②串行总时延（输出加速比；理想情况流水稳态
    ≈ AICore 单 chunk 计算时间，通信开销不再线性叠加）
-4. `destroy`/`uninit` 干净退出
+3. `destroy`/`uninit` 干净退出
 
 ## 运行（C++，实机验证）
 
@@ -68,7 +67,7 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_overla
 
 # 2. 部署 kernel 到设备(部署链见开发进展文档附录 A.4)
 # 3. 双 rank 运行
-export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v1.json 路径>
+export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v2.json 路径>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:...
 /tmp/ex08 0 & /tmp/ex08 1 & wait
