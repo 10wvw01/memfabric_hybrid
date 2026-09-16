@@ -1,13 +1,14 @@
 // hybm_overlap_contract.h — MemFabric 310P AICore×AICPU 协同 kernel 的 wire 契约
-// (host 探针 ↔ AICPU 编排 kernel 共享, 字段含 64 位设备地址, 错位 = 非法地址)
+// (host ↔ AICPU 编排 kernel 共享, 字段含 64 位设备地址, 错位 = 非法地址)
 //
-// 单一事实源: kernel (aicpu_kernel/hybm_overlap_kernel.cc, hcc) 与 host 侧 (probe_e0a.cc)
-// 一律 include 本头 — static_assert 编译期锁布局, 任一副本漂移即报错。
+// 单一事实源: kernel (hybm_overlap_kernel.cc, hcc) 与 host 侧 (hybm_overlap_prep.cpp /
+// hybm_overlap_capi.cpp) 一律 include 本头 — static_assert 编译期锁布局, 任一副本漂移即报错。
 //
 // 溯源: fork 自 xcclpp main examples/tutorials/aicpu-aicore-310p3/overlap_wire.hpp (MIT),
-// 按 310p-aicore-aicpu-开发进展.md P0-E0a 迁移; 重命名 XcclppAicpuSqe* → HybmOverlap*,
-// 布局未动 (static_assert 尺寸原样)。P1-WP1 迁入 src/hybm/ops/hybm_kernel/ 时本契约
-// 随迁并 hybm 化字段语义注释。
+// 按 310p-aicore-aicpu-开发进展.md P0-E0a 迁移; 重命名 XcclppAicpuSqe* → HybmOverlap*。
+// v2 精简: 仅保留流水编排 —— mode13 闭环由 chunks=1 等价覆盖, role1 编排方与全部
+// 实验位(role/roleRsv/arrivalAddr/readyAddr/reserved)移除; 布局变化, 设备侧版本名
+// 随 MF_OVERLAP_KVER bump(CP1 按文件名 dlopen 缓存纪律)。
 //
 // 约束: 纯 POD (无 STL/无构造函数), 须同时可被 hcc / g++ / bisheng 三种工具链编译。
 //
@@ -21,8 +22,7 @@
 // 提交模式 (param.submitMode)
 // ============================================================================
 enum SubmitMode : uint32_t {
-    SUBMIT_MODE_CHAIN      = 13,   // 八步闭环编排状态机 (单 chunk; 内嵌 CP1 活查询)
-    SUBMIT_MODE_PIPELINE   = 14,   // 多 chunk 流水 (roleRsv[1] = chunk 数)
+    SUBMIT_MODE_PIPELINE = 14, // 多 chunk 流水编排 (chunks = chunk 数; chunks=1 即单块语义)
     // 支持域外的值 kernel 拒绝 (mainRet=950)
 };
 
@@ -30,24 +30,20 @@ enum SubmitMode : uint32_t {
 // kernel 入参 (host 经 aclrtLaunchKernelWithHostArgs 传入)
 // ============================================================================
 struct HybmOverlapParam {
-    uint32_t devId;
-    uint32_t sqId;          // CP 流 SQ id (mode 3 活查询用)
-    int32_t streamId;       // CP 流 id (SQE 的 rt_streamid)
-    uint32_t submitMode;    // SubmitMode
-    uint64_t dstAddr;       // 数据搬运目的基址 (源地址经邮箱描述符传入)
-    uint64_t overflowAddr;
-    uint64_t flagSentinelAddr;
-    uint64_t flagDoneAddr;
-    uint64_t resultAddr;
-    uint32_t reserved[4];
-    // ---- 编排 demo (mode 13/14) 专用字段组 (尾部扩展, mode 3 不读) ----
-    uint64_t mailboxAddr;   // AICore→AICPU 邮箱地址 (16B 描述符 {dataAddr, dataLen}, AICore 写)
-    uint64_t arrivalAddr;   // 卡1: 本地到达标志地址 (SDMA flag-SQE 写, AICPU civac 轮询)
-    uint64_t readyAddr;     // 卡1: 本地 ready 标志地址 (AICPU cvac 写, AICore dcci 轮询)
-    uint64_t timelineAddr;  // 打点: 本执行体 timeline 区 (16×u64, 0=关闭)
-    uint32_t role;          // 0=卡0 发送方 (轮询邮箱→提交正向 SQE 对); 1=卡1 编排方
-                            // (轮询到达→写 ready→轮询邮箱→提交回程 SQE 对)
-    uint32_t roleRsv[3];    // 对齐保留 ([1] = mode14 chunk 数)
+    uint32_t devId;            // CP1 内 HAL devId (die 号 = host 设备号 % 2)
+    uint32_t sqId;             // CP 流 SQ id (活查询用)
+    int32_t streamId;          // CP 流 id (SQE 的 rt_streamid)
+    uint32_t submitMode;       // SubmitMode
+    uint64_t dstAddr;          // 数据搬运目的基址 (源地址经邮箱描述符传入, kernel 内逐 chunk 递增)
+    uint64_t overflowAddr;     // SQE overflow 目标地址 (工作区 64B 槽)
+    uint64_t flagSentinelAddr; // 哨兵源地址 (8B, SQE 对第二支的搬运源)
+    uint64_t flagDoneAddr;     // 标志数组目的基址 (kernel 内逐 chunk +8)
+    uint64_t resultAddr;       // kernel 结果写回地址 (工作区 56B 槽)
+    uint32_t chunks;           // chunk 数 (1~64, 受邮箱槽数约束; 0 视为 1)
+    uint32_t reserved[1];      // 对齐保留
+    uint64_t mailboxAddr;      // AICore→AICPU 邮箱 ring 基址 (16B/slot {dataAddr, dataWords}, AICore 写)
+    uint64_t timelineAddr;     // 打点: 本执行体 timeline 区 (16×u64, 0=关闭)
+    uint32_t reserved2[10];    // 尾部保留 (补齐 120B, 未来扩展)
 };
 
 // 结果结构 (AICPU 写, host 读)
@@ -97,6 +93,6 @@ struct StarsChannelInfo {
 static_assert(sizeof(HybmOverlapParam) == 120, "HybmOverlapParam 布局漂移");
 static_assert(sizeof(HybmOverlapResult) == 56, "HybmOverlapResult 布局漂移");
 static_assert(sizeof(StarsChannelInfo) == 64, "StarsChannelInfo 布局漂移");
-static_assert(offsetof(HybmOverlapParam, mailboxAddr) == 72, "Param demo 扩展组偏移漂移");
-static_assert(offsetof(HybmOverlapParam, role) == 104, "Param role 偏移漂移");
+static_assert(offsetof(HybmOverlapParam, chunks) == 56, "Param chunks 偏移漂移");
+static_assert(offsetof(HybmOverlapParam, mailboxAddr) == 64, "Param mailbox 偏移漂移");
 static_assert(offsetof(HybmOverlapResult, sqRegBase) == 40, "Result sqRegBase 偏移漂移");
