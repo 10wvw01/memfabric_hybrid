@@ -204,29 +204,17 @@ typedef struct {
 int32_t hybm_overlap_get_info(hybm_overlap_info_t *info);
 
 /**
- * @brief 提交一次协同搬运(mode13 role0 语义: AICPU 轮询本端邮箱 → SQE 对
- *        [数据 src(邮箱描述符)→dstAddr + 标志 哨兵→flagDoneAddr] → doorbell)。
- *        邮箱由本端 AICore kernel 写(smem_shm_aicore_overlap.h 的 notify 原语)。
- * @param dstAddr         [in] 数据目的地址(池 GVA)
- * @param flagDoneAddr    [in] 标志目的地址(池 GVA, 对端 AICore dcci 轮询)
- * @return 0 if successful
- */
-int32_t hybm_overlap_submit(uint64_t dstAddr, uint64_t flagDoneAddr);
-
-/**
- * @brief 提交一次多 chunk 流水协同搬运(mode14 role0 语义)
- *
- * AICore kernel 逐 chunk 写邮箱 ring(16B/slot × chunks, 槽序号即 chunk 序号),
- * 本接口触发的 AICPU 编排 kernel 逐 chunk 轮询邮箱 → SQE 对(数据
- * dstAddr+c*chunkBytes + 标志 flagDoneAddr+c*8) → 每 chunk 一次 doorbell。
- * FIFO 保序: 等待最后一块标志到达即全部数据就位。
- *
+ * @brief 提交一次协同搬运(流水语义: AICPU 轮询本端邮箱 → 逐 chunk SQE 对
+ *        [数据 src(邮箱描述符)→dstAddr+c*chunkBytes + 标志 哨兵→flagDoneAddr+c*8]
+ *        → 每 chunk 一次 doorbell)。邮箱由本端 AICore kernel 写
+ *        (smem_shm_aicore_overlap.h 的 notify 原语)。FIFO 保序: 等待最后一块
+ *        标志到达即全部数据就位。chunks=1 即单块闭环语义。
  * @param dstAddr         [in] 数据目的基址(池 GVA, kernel 内按 chunk 递增)
  * @param flagDoneAddr    [in] 标志数组目的基址(池 GVA, 每槽 8B × chunks)
- * @param chunks          [in] chunk 数(上限 64, 受邮箱槽数约束)
+ * @param chunks          [in] chunk 数(1~64, 受邮箱槽数约束)
  * @return 0 if successful
  */
-int32_t hybm_overlap_submit_pipelined(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunks);
+int32_t hybm_overlap_submit(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunks);
 
 /**
  * @brief 等待协同搬运完成(SynchronizeStream)

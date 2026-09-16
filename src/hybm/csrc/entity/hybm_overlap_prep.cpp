@@ -34,7 +34,7 @@ constexpr uint32_t HYBM_OVERLAP_BLOCK_DIM = 1;         /* 单 block(kernel 状�
 constexpr uint32_t HYBM_OVERLAP_LAUNCH_TIMEOUT_S = 25; /* launch attr 超时, < AICPU watchdog 30s */
 constexpr uint32_t HYBM_OVERLAP_SMOKE_WORDS = 256;     /* 冒烟数据量(256 字 = 1KB) */
 constexpr char HYBM_OVERLAP_FUNC_NAME[] = "HybmOverlapRun";
-constexpr char HYBM_OVERLAP_DEFAULT_JSON[] = "libmf_overlap_v1.json"; /* CWD 缺省 json */
+constexpr char HYBM_OVERLAP_DEFAULT_JSON[] = "libmf_overlap_v2.json"; /* CWD 缺省 json(v2 契约) */
 constexpr uint64_t HYBM_OVERLAP_RESULT_MAGIC = 0xA1C0DE01ULL;         /* kernel 存活魔数(契约头同值) */
 } // namespace
 
@@ -330,15 +330,14 @@ Result HybmOverlapPrep::SmokeTest()
     p.devId = dieId_;
     p.sqId = sqId_;
     p.streamId = streamId_;
-    p.submitMode = SUBMIT_MODE_CHAIN;
+    p.submitMode = SUBMIT_MODE_PIPELINE; /* 冒烟走流水模式, chunks=1 即单发自证 */
+    p.chunks = 1;
     p.dstAddr = reinterpret_cast<uint64_t>(dst);
     p.overflowAddr = workspace_ + HYBM_OVERLAP_WS_OVF_OFF;
     p.flagSentinelAddr = workspace_ + HYBM_OVERLAP_WS_SENTINEL_OFF;
     p.flagDoneAddr = reinterpret_cast<uint64_t>(flag);
     p.resultAddr = workspace_ + HYBM_OVERLAP_WS_RESULT_OFF;
-    p.reserved[1] = 0x8U; /* doorbell 强制走 HAL(A.4, 与 P0 探针一致) */
     p.mailboxAddr = workspace_ + HYBM_OVERLAP_WS_MAILBOX_OFF;
-    p.role = 0;
     Result check = BM_ERROR;
     ret = PrepareSmokeData(src, dst, flag, words);
     if (ret == BM_OK) {
