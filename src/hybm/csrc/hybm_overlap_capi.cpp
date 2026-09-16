@@ -26,7 +26,7 @@ constexpr uint64_t HYBM_OVERLAP_SUBMIT_SENTINEL = 0xE0ECA001ULL; // 提交哨兵
 int32_t HybmOverlapSubmitCommon(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunks)
 {
     auto &prep = HybmOverlapPrep::GetInstance(); // 单例引用(就绪判断/工作区/launch 均经它)
-    if (!prep.Ready()) {                         // 未就绪(开关关/初始化失败/冒烟未过)
+    if (!prep.Ready()) {                         // 未就绪(开关关/初始化失败)
         // 根因日志: 目的地址/标志地址/chunks
         BM_LOG_ERROR("overlap not ready, dstAddr: 0x" << std::hex << dstAddr << " flagDoneAddr: 0x"
                                                       << flagDoneAddr << " chunks: " << std::dec << chunks);

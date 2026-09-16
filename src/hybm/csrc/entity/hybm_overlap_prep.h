@@ -22,8 +22,7 @@
  *      特殊段 SDMA 不可翻译, A.4-7), AICore 可直接 GM 访问(E0c 结论);
  *   3. kernel 加载: BinaryLoadFromFile(cpuMode=0)+GetFunction(json 路径:
  *      env MF_310P_OVERLAP_JSON, 缺省 CWD 的 libmf_overlap_v2.json);
- *   4. 冒烟探测(D2): E0a 式单发自证; 不过=功能不可用报错, 不静默降级;
- *   5. Launch/Wait: URMA 同款 KernelArgs+LaunchKernelWithConfig 路径。
+ *   4. Launch/Wait: URMA 同款 KernelArgs+LaunchKernelWithConfig 路径。
  *
  * 生命周期: 多池(多 entity)共享同一份进程级资源, Acquire/Release 引用计数,
  * 归零才真正释放(CP 流销毁/工作区 free/binHandle 卸载)。
@@ -46,8 +45,6 @@ constexpr uint64_t HYBM_OVERLAP_WS_MAILBOX_SLOTS = 64;       /* 邮箱槽数(mod
 constexpr uint64_t HYBM_OVERLAP_WS_SENTINEL_OFF = 1024;      /* 哨兵 8B(SQE 对标志源) */
 constexpr uint64_t HYBM_OVERLAP_WS_RESULT_OFF = 1032;        /* kernel result 64B */
 constexpr uint64_t HYBM_OVERLAP_WS_OVF_OFF = 1096;           /* SQE overflow 目标 64B */
-/* 冒烟自证用哨兵魔数(与 P0 探针同值, 不进入生产数据面) */
-constexpr uint64_t HYBM_OVERLAP_SMOKE_SENTINEL = 0xC0FFEE11ULL; /* 冒烟哨兵魔数(0xC0FFEE11) */
 
 class HybmOverlapPrep { // 协同模式传输准备单例(所有可变状态在 mutex_ 内维护)
 public:
@@ -56,17 +53,17 @@ public:
     /* 开关读取(env MF_310P_SHM_OVERLAP, 取值 "1"/"on" 为开) */
     static bool SwitchOn() noexcept;
 
-    /* 引用计数 +1; 首次进入执行全量初始化(CP 流→工作区→kernel→冒烟)。
+    /* 引用计数 +1; 首次进入执行全量初始化(CP 流→工作区→kernel)。
      * 任一步失败: 计数回退并返回错误(调用方报错, 不静默), 关键参数见 ERROR 日志 */
     Result Acquire(uint16_t devId);
 
     /* 引用计数 -1; 归零执行逆序清理(CP 流/工作区/kernel) */
     void Release();
 
-    /* 冒烟通过标志(ready 才可被数据面使用) */
+    /* 初始化就绪标志(ready 才可被数据面使用) */
     bool Ready() const noexcept
     {
-        return ready_; // 就绪标志只读返回(冒烟通过即置位)
+        return ready_; // 就绪标志只读返回(三步初始化完成即置位)
     }
 
     /* 引用计数只读查询(UT 断言失败后归零/Release 幂等语义用) */
@@ -110,7 +107,6 @@ private:
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
     Result LoadOrchestratorKernel();       /* json 路径解析 + BinaryLoad + GetFunction */
-    Result SmokeTest();                    /* E0a 式单发自证(D2) */
     void Cleanup();                        /* 逆序清理(锁内, 归零时) */
 
     std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行 */
@@ -124,7 +120,7 @@ private:
     uint64_t workspace_{0};         /* 工作区设备地址(HUGE_FIRST) */
     aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
     aclrtFuncHandle funcHandle_{nullptr}; /* HybmOverlapRun 函数句柄 */
-    bool ready_{false};             /* 冒烟通过标志 */
+    bool ready_{false};             /* 初始化就绪标志 */
 };
 } // namespace mf
 } // namespace ock

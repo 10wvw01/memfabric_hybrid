@@ -20,7 +20,7 @@ SQ 激活/不敲铃/ssid 覆盖等实验钩子在当前 host 栈（恒 role0 + d
 - host API 收敛为单一提交接口：`hybm_overlap_submit(dst, flag, chunks)` 与
   `smem_shm_overlap_launch(handle, dst, flag, chunks)`（吸收 _pipelined 变体）；
   smem entry 层三方法收敛为一
-- 冒烟自证切换为流水模式 chunks=1（单发自证语义不变）
+- 初始化冒烟自证移除（就绪门控回归三步准备：CP 流/工作区/kernel 加载，端到端验证由 08 示例阶段①逐字校验承担）
 - 08 示例改两阶段验收：①流水（8×128KB+逐字校验）②串行对照（chunks=1×8 轮+会合），
   掩盖量化口径不变
 - UT 对齐新 API（chunks 边界/未就绪拒绝/无效 handle 用例不变）

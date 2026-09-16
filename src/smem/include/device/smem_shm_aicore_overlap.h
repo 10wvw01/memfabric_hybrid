@@ -83,7 +83,7 @@ SMEM_SHM_INLINE_AICORE __gm__ void *smem_shm_overlap_get_workspace(uint32_t shme
     return *(__gm__ void **)(metaAddr + SMEM_SHM_DEVICE_META_OVERLAP_WORKSPACE_OFFSET); // 读 overlapWorkspace
 }
 
-/* 查询协同模式是否就绪(310P + 开关 + 冒烟通过; 未就绪时上层不应使用本组原语) */
+/* 查询协同模式是否就绪(310P + 开关 + 初始化完成; 未就绪时上层不应使用本组原语) */
 SMEM_SHM_INLINE_AICORE bool smem_shm_overlap_ready(uint32_t shmemId)
 {
     if (shmemId >= SMEM_OBJECT_NUM_MAX) { // shm 序号越界

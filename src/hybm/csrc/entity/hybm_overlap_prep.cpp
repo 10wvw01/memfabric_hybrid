@@ -11,7 +11,7 @@
  */
 
 /* hybm_overlap_prep.cpp — 310P AICore×AICPU 协同模式传输准备(实现)
- * 机制依据: 310p-aicore-aicpu-开发进展.md 附录 A(SQE 配方/CP 流/工作区/冒烟)
+ * 机制依据: 310p-aicore-aicpu-开发进展.md 附录 A(SQE 配方/CP 流/工作区)
  * 与 P0 三实验的实测定论(档案见 310p-aicore-aicpu-开发进展.md)。
  */
 #include "hybm_overlap_prep.h" // 本类声明(工作区布局常量/单例接口/契约头)
@@ -32,10 +32,8 @@ namespace {     // 匿名命名空间(编译单元内私有常量)
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;       /* CP 流标志: SQ 注册进 CP1 trs 表 */
 constexpr uint32_t HYBM_OVERLAP_BLOCK_DIM = 1;                    /* 单 block(kernel 状态机单线程语义) */
 constexpr uint32_t HYBM_OVERLAP_LAUNCH_TIMEOUT_S = 25;            /* launch attr 超时, < AICPU watchdog 30s */
-constexpr uint32_t HYBM_OVERLAP_SMOKE_WORDS = 256;                /* 冒烟数据量(256 字 = 1KB) */
 constexpr char HYBM_OVERLAP_FUNC_NAME[] = "HybmOverlapRun";       /* 编排 kernel 入口符号名 */
 constexpr char HYBM_OVERLAP_DEFAULT_JSON[] = "libmf_overlap_v2.json"; /* CWD 缺省 json(v2 契约) */
-constexpr uint64_t HYBM_OVERLAP_RESULT_MAGIC = 0xA1C0DE01ULL;         /* kernel 存活魔数(契约头同值) */
 } // namespace
 
 HybmOverlapPrep &HybmOverlapPrep::GetInstance() // 单例入口
@@ -63,13 +61,13 @@ Result HybmOverlapPrep::Acquire(uint16_t devId) // 引用计数+1(首次全量�
         refCount_++;  // 计数 +1, 复用既有资源
         return BM_OK; // 复用成功
     }
-    auto ret = InitOnce(devId); // 首次进入: 全量初始化(CP 流→工作区→kernel→冒烟)
+    auto ret = InitOnce(devId); // 首次进入: 全量初始化(CP 流→工作区→kernel)
     if (ret != BM_OK) {         // 任一步失败
         Cleanup(); /* 半初始化资源回收, 保证可重试 */
         return ret; // 透传失败(根因已记录)
     }
     refCount_ = 1; // 初始化成功, 计数置 1
-    ready_ = true; // 冒烟通过, 对外声明就绪
+    ready_ = true; // 三步初始化完成, 对外声明就绪
     // 就绪信息日志: 设备/流/工作区
     BM_LOG_INFO("310P overlap prep ready: devId: " << devId_ << " sqId: " << sqId_
                                                    << " streamId: " << streamId_ << " dieId: " << dieId_
@@ -106,11 +104,7 @@ Result HybmOverlapPrep::InitOnce(uint16_t devId) // 全量初始化(锁内调用
     if (ret != BM_OK) {             // 第 3 步失败
         return ret;                 // 透传失败(根因已记录)
     }
-    ret = SmokeTest(); // 第 4 步: 冒烟自证(不过即整体失败, 不静默)
-    if (ret != BM_OK) { // 第 4 步失败
-        return ret;     // 透传失败(根因已记录)
-    }
-    return BM_OK; // 四步全过, 初始化成功
+    return BM_OK; // 三步全过, 初始化成功(端到端验证由 08 示例阶段①逐字校验承担)
 }
 
 Result HybmOverlapPrep::InitCpStream(uint16_t devId) // 第1步: CP 流
@@ -193,8 +187,7 @@ Result HybmOverlapPrep::LoadOrchestratorKernel() // 第3步: kernel 加载
 Result HybmOverlapPrep::LaunchOrchestrator(const HybmOverlapParam &param) // 提交编排 kernel
 {
     if (funcHandle_ == nullptr || launchStream_ == nullptr) { // 前置: kernel 句柄与提交流任一缺失
-        /* 内部前置: kernel 句柄与提交流就绪即可(冒烟在 ready_ 置位前发生,
-         * ready_ 是"初始化含冒烟全部完成"的对外语义, 不作为内部守卫) */
+        /* 守卫直接检查将使用的句柄与流本身(不依赖 ready_ 对外语义), 缺一即拒 */
         // 根因日志: 前置条件状态
         BM_LOG_ERROR("overlap launch precond failed, funcHandle null: " << (funcHandle_ == nullptr)
                                                                         << " stream null: "
@@ -241,136 +234,6 @@ Result HybmOverlapPrep::WaitOrchestrator() // 同步编排 kernel
         BM_LOG_ERROR("SynchronizeStream(launch) failed, ret: " << ret << " sqId: " << sqId_); // 根因日志: ret/sqId
     }
     return ret; // 同步结果(失败路径根因已记录)
-}
-
-/* 冒烟结果校验(E0a 六判据中除数据逐字比对外全部 + 数据首尾抽样) */
-static Result CheckSmokeResult(const HybmOverlapResult &r, uint64_t flagVal, const uint32_t *dst,
-                               uint32_t words)
-{
-    // 四项硬判据: magic 存活 / mainRet=0 / 阶段=完成 / head 前进(TSFW 消费证据)
-    if (r.magic != HYBM_OVERLAP_RESULT_MAGIC || r.mainRet != 0 || r.stage != STAGE_DONE ||
-        r.headAfter == r.sqTail) { // 判据 4: head 未前进 = SQE 未被消费
-        BM_LOG_ERROR("smoke result bad: magic: 0x" << std::hex << r.magic << std::dec
-                                                   << " mainRet: " << r.mainRet << " stage: " << r.stage
-                                                   << " headBefore: " << r.sqTail
-                                                   << " headAfter: " << r.headAfter); // 根因日志: 四项判据值
-        return BM_ERROR;                                                          // 判据不满足即冒烟失败
-    }
-    if (flagVal != HYBM_OVERLAP_SMOKE_SENTINEL) { // 标志值必须等于预置哨兵
-        BM_LOG_ERROR("smoke flag mismatch: 0x" << std::hex << flagVal); // 根因日志: 实得标志值
-        return BM_ERROR;                                                // 标志错误 = 搬运链路不通
-    }
-    for (uint32_t i = 0; i < words; i += (words / 8U + 1U)) { /* 首尾+等间隔抽样 8 点 */
-        if (dst[i] != (0x5AU << 24) + i) { // 抽样点须命中写入的 pattern
-            // 根因日志: 错点位置与值
-            BM_LOG_ERROR("smoke data mismatch at idx: " << i << " val: 0x" << std::hex << dst[i]);
-            return BM_ERROR; // 数据错误 = 搬运内容不正确
-        }
-    }
-    return BM_OK; // 全部判据通过
-}
-
-/* 冒烟数据准备: dst/flag/result 清零 + pattern/哨兵/邮箱写入工作区与 src */
-static Result PrepareSmokeData(void *src, void *dst, void *flag, uint32_t words)
-{
-    static uint32_t pattern[512]; /* 冒烟数据 pattern(0x5A<<24|idx), 静态免大栈 */
-    for (uint32_t i = 0; i < words; i++) { // 逐字生成 pattern
-        pattern[i] = (0x5AU << 24) + i; /* 与 CheckSmokeResult 抽样基准一致 */
-    }
-    auto ret = DlAclApi::AclrtMemset(dst, words * 4, 0, words * 4); // 清零目的区(防旧数据误判)
-    ret = (ret == BM_OK) ? DlAclApi::AclrtMemset(flag, 8, 0, 8) : ret; // 清零标志位(初值必须 0)
-    if (ret == BM_OK) { // 以上清零均成功
-        // 计算 result 槽地址(工作区基址 + 1032 偏移)
-        auto *wsResult = reinterpret_cast<void *>(HybmOverlapPrep::GetInstance().GetWorkspace() +
-                                                  HYBM_OVERLAP_WS_RESULT_OFF);
-        ret = DlAclApi::AclrtMemset(wsResult, 64, 0, 64); // 清零 kernel result 槽
-    }
-    // pattern 灌入源缓冲(H2D, 1KB)
-    ret = (ret == BM_OK) ? DlAclApi::AclrtMemcpy(src, words * 4, pattern, words * 4, ACL_MEMCPY_HOST_TO_DEVICE)
-                         : ret;
-    if (ret != BM_OK) { // 任一准备步骤失败
-        return ret;     // 透传失败(根因已记录)
-    }
-    const uint64_t ws = HybmOverlapPrep::GetInstance().GetWorkspace(); // 工作区基址(单例查询)
-    uint64_t sent = HYBM_OVERLAP_SMOKE_SENTINEL;                       // 哨兵值(栈上暂存待拷入)
-    uint64_t mb[2] = {reinterpret_cast<uint64_t>(src), words};         // 邮箱描述符 {src 地址, 字数}
-    // 哨兵写入工作区 +1024 槽(SQE 对的标志源, H2D 8B)
-    ret = DlAclApi::AclrtMemcpy(reinterpret_cast<void *>(ws + HYBM_OVERLAP_WS_SENTINEL_OFF), 8, &sent, 8,
-                                ACL_MEMCPY_HOST_TO_DEVICE);
-    // 邮箱描述符写入工作区 +0 槽(AICPU 轮询目标, H2D 16B), 结果即函数结果
-    return (ret == BM_OK) ? DlAclApi::AclrtMemcpy(reinterpret_cast<void *>(ws + HYBM_OVERLAP_WS_MAILBOX_OFF),
-                                                   16, mb, 16, ACL_MEMCPY_HOST_TO_DEVICE)
-                          : ret;
-}
-
-/* 冒烟结果读回与判定: 返回 BM_OK 即冒烟通过(D2) */
-static Result RunSmokeAndCheck(const HybmOverlapParam &p, void *dst, void *flag, uint32_t words)
-{
-    auto &prep = HybmOverlapPrep::GetInstance(); // 单例引用(launch/wait/工作区查询均经它)
-    auto ret = prep.LaunchOrchestrator(p);       // 提交编排 kernel(mode13 单发自证)
-    ret = (ret == BM_OK) ? prep.WaitOrchestrator() : ret; // 同步等待 kernel 完成
-    if (ret != BM_OK) { // 提交或同步失败
-        return ret;     // 透传失败(根因已记录)
-    }
-    const uint64_t ws = prep.GetWorkspace(); // 工作区基址(读回 result 用)
-    HybmOverlapResult r = {};                // kernel 结果读回缓冲(零初始化)
-    uint64_t flagVal = 0;                    // 标志读回值(初值 0)
-    static uint32_t dstHost[512]; /* 读回缓冲(静态免大栈, 冒烟单线程串行) */
-    // D2H: kernel result 64B
-    ret = DlAclApi::AclrtMemcpy(&r, sizeof(r), reinterpret_cast<void *>(ws + HYBM_OVERLAP_WS_RESULT_OFF),
-                                sizeof(r), ACL_MEMCPY_DEVICE_TO_HOST);
-    ret = (ret == BM_OK) ? DlAclApi::AclrtMemcpy(&flagVal, 8, flag, 8, ACL_MEMCPY_DEVICE_TO_HOST) : ret; // D2H: 标志 8B
-    // D2H: 目的数据 1KB
-    ret = (ret == BM_OK) ? DlAclApi::AclrtMemcpy(dstHost, words * 4, dst, words * 4, ACL_MEMCPY_DEVICE_TO_HOST)
-                         : ret;
-    if (ret != BM_OK) { // 任一读回失败
-        BM_LOG_ERROR("smoke readback failed, ret: " << ret); // 根因日志: ret
-        return ret;                                          // 透传失败(根因已记录)
-    }
-    return CheckSmokeResult(r, flagVal, dstHost, words); // 综合判定(四判据+哨兵+抽样)
-}
-
-Result HybmOverlapPrep::SmokeTest() // 第4步: 冒烟自证
-{
-    void *src = nullptr;             // 源缓冲(pattern 出发地)
-    void *dst = nullptr;             // 目的缓冲(SQE 数据搬运目的地)
-    void *flag = nullptr;            // 标志缓冲(SQE 对第二支的写入目标)
-    const uint32_t words = HYBM_OVERLAP_SMOKE_WORDS; // 冒烟数据量 256 字(1KB)
-    auto ret = DlAclApi::AclrtMalloc(&src, words * 4, ACL_MEM_MALLOC_HUGE_FIRST); // 分配源缓冲
-    ret = (ret == BM_OK) ? DlAclApi::AclrtMalloc(&dst, words * 4, ACL_MEM_MALLOC_HUGE_FIRST) : ret; // 分配目的缓冲
-    ret = (ret == BM_OK) ? DlAclApi::AclrtMalloc(&flag, 8, ACL_MEM_MALLOC_HUGE_FIRST) : ret; // 分配标志缓冲
-    if (ret != BM_OK) { // 任一分配失败
-        BM_LOG_ERROR("smoke alloc failed, ret: " << ret << " devId: " << devId_); // 根因日志: ret/devId
-        return ret;                                                               // 透传失败(根因已记录)
-    }
-    HybmOverlapParam p = {}; // kernel 入参(逐字段装配, 见下)
-    p.devId = dieId_;        // CP1 内 HAL devId = die 号
-    p.sqId = sqId_;          // CP 流 SQ id(kernel 内活查询)
-    p.streamId = streamId_;  // CP 流 id(SQE 的 rt_stream_id)
-    p.submitMode = SUBMIT_MODE_PIPELINE; // 冒烟走流水模式, chunks=1 即单发自证
-    p.chunks = 1;                        // 单发自证(邮箱槽 0)
-    p.dstAddr = reinterpret_cast<uint64_t>(dst); // 数据目的地址(独立 dst 缓冲)
-    p.overflowAddr = workspace_ + HYBM_OVERLAP_WS_OVF_OFF; // SQE overflow 目标槽
-    p.flagSentinelAddr = workspace_ + HYBM_OVERLAP_WS_SENTINEL_OFF; // 标志源 = 工作区哨兵槽
-    p.flagDoneAddr = reinterpret_cast<uint64_t>(flag); // 标志目的 = 独立 flag 缓冲
-    p.resultAddr = workspace_ + HYBM_OVERLAP_WS_RESULT_OFF; // 结果写回槽
-    p.mailboxAddr = workspace_ + HYBM_OVERLAP_WS_MAILBOX_OFF; /* 本端 AICore 写(ring) */
-    Result check = BM_ERROR; // 判定结果初值(悲观)
-    ret = PrepareSmokeData(src, dst, flag, words); // 准备 pattern/哨兵/邮箱
-    if (ret == BM_OK) { // 准备成功
-        check = RunSmokeAndCheck(p, dst, flag, words); // 提交+读回+判定
-        /* 复位冒烟占用的工作区槽位(mailbox/result), 生产可见干净初态 */
-        // 清 mailbox 槽(生产可见干净初态)
-        (void)DlAclApi::AclrtMemset(reinterpret_cast<void *>(workspace_ + HYBM_OVERLAP_WS_MAILBOX_OFF), 16, 0, 16);
-        // 清 result 槽(同上)
-        (void)DlAclApi::AclrtMemset(reinterpret_cast<void *>(workspace_ + HYBM_OVERLAP_WS_RESULT_OFF), 64, 0, 64);
-    } else { // 准备失败
-        BM_LOG_ERROR("smoke prepare failed, ret: " << ret << " devId: " << devId_); // 根因日志: ret/devId
-    }
-    (void)DlAclApi::AclrtFree(src);  // 释放冒烟源缓冲
-    (void)DlAclApi::AclrtFree(dst);  // 释放冒烟目的缓冲
-    (void)DlAclApi::AclrtFree(flag); // 释放冒烟标志缓冲
-    return (ret == BM_OK) ? check : ret; // 准备失败透传 ret, 否则返回判定结果
 }
 
 void HybmOverlapPrep::Cleanup() // 逆序清理(锁内, 归零时)

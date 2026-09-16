@@ -139,7 +139,7 @@ struct HybmDeviceMeta {
 };
 
 // overlapFlags 能力位定义
-constexpr uint64_t HYBM_OVERLAP_FLAG_READY = 0x1UL; // bit0: 冒烟通过后 SetHybmDeviceInfo 置位, 设备侧按 meta 偏移 48 读
+constexpr uint64_t HYBM_OVERLAP_FLAG_READY = 0x1UL; // bit0: 初始化成功后置位(SetHybmDeviceInfo), 设备侧 meta 偏移 48 读
 
 typedef struct {
     std::vector<void *> localAddrs;

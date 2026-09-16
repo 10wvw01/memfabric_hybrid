@@ -17,7 +17,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 ## 目标
 
 - 验证 SHM API 设备发起语义在 310P 落地：`smem_shm_create(SDMA)` → 传输准备
-  （CP 流 + 工作区 + 编排 kernel + 冒烟）全自动完成
+  （CP 流 + 工作区 + 编排 kernel）全自动完成
 - 验证 AICore 直接 GM 访问 AclVmm 池 GVA（产/读改写/dcci 轮询标志）
 - **两阶段验收语义**：
   - ① 多 chunk 流水（8×128KB）——功能正确性（1MB 逐字校验）

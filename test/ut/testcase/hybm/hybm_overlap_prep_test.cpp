@@ -14,7 +14,7 @@
  *
  * UT 环境约束决定用例形态(acl_stub 的 aclrtMemcpy 为 no-op, 无设备内存模型;
  * DlRtApi 依赖 libruntime.so 在 mock 环境不可用) —— Acquire 在 UT 下必然失败,
- * 这正是冒烟防护语义的确定性验证: 任何一层资源缺失都不得让 ready_ 置位。
+ * 这正是就绪门控语义的确定性验证: 任何一层资源缺失都不得让 ready_ 置位。
  *
  * 覆盖:
  *   1. Acquire 失败语义: 返回非 0 / ready 不置位 / 引用计数归零可重试 / Release 幂等
@@ -59,7 +59,7 @@ TEST(HybmOverlapPrepTest, AcquireFailsCleanlyAndRetriable)
     EXPECT_EQ(prep.GetRefCountForTest(), 0U); // 计数仍为 0
 }
 
-/* 用例 2: 未就绪时 C API 全拒绝(冒烟防护的外显语义) */
+/* 用例 2: 未就绪时 C API 全拒绝(就绪门控的外显语义) */
 TEST(HybmOverlapPrepTest, CApiRejectWhenNotReady)
 {
     hybm_overlap_info_t info = {}; // 就绪信息出参
