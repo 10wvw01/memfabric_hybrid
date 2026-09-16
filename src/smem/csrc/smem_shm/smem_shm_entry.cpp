@@ -331,26 +331,14 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
 }
 
 /* ---- 310P 协同模式转发(实现细节见 hybm_overlap_capi.cpp) ---- */
-Result SmemShmEntry::OverlapLaunch(void *dstGva, void *flagDoneGva)
-{
-    return OverlapLaunchCommon(dstGva, flagDoneGva, 1);
-}
-
-Result SmemShmEntry::OverlapLaunchPipelined(void *dstGva, void *flagDoneGva, uint32_t chunks)
-{
-    return OverlapLaunchCommon(dstGva, flagDoneGva, chunks);
-}
-
-Result SmemShmEntry::OverlapLaunchCommon(void *dstGva, void *flagDoneGva, uint32_t chunks)
+Result SmemShmEntry::OverlapLaunch(void *dstGva, void *flagDoneGva, uint32_t chunks)
 {
     if (entity_ == nullptr) {
         SM_LOG_ERROR("overlap launch failed: entity is null, shmId: " << id_);
         return SM_NOT_INITIALIZED;
     }
-    auto ret = (chunks == 1) ? hybm_overlap_submit(reinterpret_cast<uint64_t>(dstGva),
-                                                   reinterpret_cast<uint64_t>(flagDoneGva))
-                             : hybm_overlap_submit_pipelined(reinterpret_cast<uint64_t>(dstGva),
-                                                             reinterpret_cast<uint64_t>(flagDoneGva), chunks);
+    auto ret = hybm_overlap_submit(reinterpret_cast<uint64_t>(dstGva), reinterpret_cast<uint64_t>(flagDoneGva),
+                                   chunks);
     if (ret != 0) {
         SM_LOG_ERROR("overlap submit failed, ret: " << ret << " shmId: " << id_ << " dstGva: " << dstGva
                                                     << " chunks: " << chunks);

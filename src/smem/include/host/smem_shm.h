@@ -222,38 +222,25 @@ int32_t smem_shm_register_exit(smem_shm_t handle, void (*exit)(int));
 void smem_shm_global_exit(smem_shm_t handle, int status);
 
 /**
- * @brief [310P AICore×AICPU 协同模式] 提交一次跨端协同搬运
+ * @brief [310P AICore×AICPU 协同模式] 提交一次跨端流水搬运
  *
- * 语义(八步闭环的发起侧, 详见 docs 与 310p 计划): 本端 AICore kernel 先产数据并写
- * 协同邮箱(设备侧头文件 smem_shm_aicore_overlap.h 的 smem_shm_overlap_notify),
- * 本接口触发的 AICPU 编排 kernel 轮询邮箱后提交 SQE 对(数据→dstGva +
- * 8B 标志→flagDoneGva), FIFO 保序保证"标志到即数据到"; 对端 AICore kernel 用
- * smem_shm_overlap_poll_flag 轮询标志后消费。
+ * 语义(详见 docs 与 310p 计划): 本端 AICore kernel 逐 chunk 产数据并写
+ * 协同邮箱 ring(设备侧头文件 smem_shm_aicore_overlap.h 的 smem_shm_overlap_notify,
+ * 槽序号 = chunk 序号), 本接口触发的 AICPU 编排 kernel 逐 chunk 提交 SQE 对
+ * (数据→dstGva+c*chunkBytes + 8B 标志→flagDoneGva+c*8, 每 chunk 一次 doorbell),
+ * FIFO 保序保证"标志到即数据到", 通信与对端 AICore 计算重叠; 对端 AICore kernel 用
+ * smem_shm_overlap_poll_flag 轮询标志后消费。chunks=1 即单块闭环语义。
  *
  * 前置: smem_shm_create 时选用 SDMA 引擎, 环境变量 MF_310P_SHM_OVERLAP=1,
  * 且初始化冒烟通过(否则本接口返回错误, 上层以 smem_get_last_err_msg 排障)。
  *
  * @param handle           [in] shm object
- * @param dstGva           [in] 数据目的地址(对端池 GVA + 数据偏移)
- * @param flagDoneGva      [in] 标志目的地址(对端池 GVA 协同保留区, 见设备头文件槽位约定)
- * @return 0 if successful
- */
-int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva);
-
-/**
- * @brief [310P 协同模式] 提交一次多 chunk 流水搬运(mode14)
- *
- * 本端 AICore kernel 逐 chunk 产数据并写邮箱 ring(槽序号 = chunk 序号),
- * 本接口触发的 AICPU 编排 kernel 逐 chunk 提交 SQE 对(每 chunk 一次 doorbell),
- * 通信与对端 AICore 计算重叠; 等待最后一块标志即全部就位(FIFO 保序)。
- *
- * @param handle           [in] shm object
  * @param dstGva           [in] 数据目的基址(对端池 GVA, kernel 内按 chunk 递增)
- * @param flagDoneGva      [in] 标志数组目的基址(每槽 8B × chunks)
+ * @param flagDoneGva      [in] 标志数组目的基址(每槽 8B × chunks, 协同保留区槽位约定见设备头文件)
  * @param chunks           [in] chunk 数(1~64, 受邮箱槽数约束)
  * @return 0 if successful
  */
-int32_t smem_shm_overlap_launch_pipelined(smem_shm_t handle, void *dstGva, void *flagDoneGva, uint32_t chunks);
+int32_t smem_shm_overlap_launch(smem_shm_t handle, void *dstGva, void *flagDoneGva, uint32_t chunks);
 
 /**
  * @brief [310P 协同模式] 等待最近一次协同搬运完成
