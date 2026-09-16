@@ -40,6 +40,9 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 ## 必要条件
 
 - Atlas 300I Duo（Ascend310P3）+ CANN ≥ 9.1
+- MPI（双 rank 拉起与栅栏；本机两套可用，**编译与启动必须同一套**，混用会段错误：
+  发行版 4.1.2：`/usr/bin/mpirun` + 头/库 `/usr/lib/aarch64-linux-gnu/openmpi/{include,lib}`
+  （编译需 `-DOMPI_SKIP_MPICXX`）；自装 4.1.5：`/usr/local/openmpi` 全套）
 - 协同编排 kernel 已部署到设备 CP1（部署链：CUSTAICPUKernel mode=1 迁移落盘 + 设备内复制到
   `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`，机制与运维纪律见
   `310p-aicore-aicpu-开发进展.md` 附录 A.4；**每次正式运行前须过验证门**——
@@ -53,24 +56,33 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
    状态走满（0xD2/0xE1）、headAfter 前进（TSFW 消费证据）
 2. **掩盖量化**：①流水总时延 < ②串行总时延（输出加速比；理想情况流水稳态
    ≈ AICore 单 chunk 计算时间，通信开销不再线性叠加）
-3. `destroy`/`uninit` 干净退出
+3. `destroy`/`uninit`/`MPI_Finalize` 干净退出
+
+> 注：双 rank 会合已由早期 `/tmp` 文件轮询改为 `MPI_Barrier`（无残留文件，同步粒度
+> 从 1ms 降到微秒级）。串行对照的轮间会合同步改用 MPI 栅栏——对照基线因此更纯粹
+> （原文件轮询开销不再计入串行时延），**加速比数值需重新实机标定**，历史 8.02x
+> 为文件会合口径下测得。
 
 ## 运行（C++，实机验证）
 
 ```bash
-# 1. 仓库根构建 + 示例编译(bisheng host+AICore 统一编译)
+# 1. 仓库根构建 + 示例编译(bisheng host+AICore 统一编译, 含 MPI)
 cmake -B build -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF && cmake --build build -j
 cd examples/memory_pool/01_basic/08_310p_aicore_aicpu_overlap
+#   MPI 取发行版一套(头/库/启动器须同源; 换 /usr/local/openmpi 时改用其路径与启动器)
+MPI_INC=/usr/lib/aarch64-linux-gnu/openmpi/include
+MPI_LIB=/usr/lib/aarch64-linux-gnu/openmpi/lib
 bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_overlap.asc -x none \
-  -o /tmp/ex08 <CANN include 路径> <仓库 include 路径> \
-  -Wl,--start-group <build 下三个静态库> -Wl,--end-group <CANN lib 路径> -lascendcl -lruntime -ldl -pthread -lm
+  -o /tmp/ex08 -DOMPI_SKIP_MPICXX -I$MPI_INC <CANN include 路径> <仓库 include 路径> \
+  -Wl,--start-group <build 下三个静态库> -Wl,--end-group \
+  -L$MPI_LIB -lmpi <CANN lib 路径> -lascendcl -lruntime -ldl -pthread -lm
 
 # 2. 部署 kernel 到设备(部署链见开发进展文档附录 A.4)
-# 3. 双 rank 运行
+# 3. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参)
 export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v2.json 路径>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
-export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:...
-/tmp/ex08 0 & /tmp/ex08 1 & wait
+export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
+mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root
 # 期望输出: 双方 "=== EX08 rN PASS ===" + r0 掩盖量化加速比
 ```
 

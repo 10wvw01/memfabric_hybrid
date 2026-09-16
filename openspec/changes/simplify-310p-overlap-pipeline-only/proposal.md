@@ -24,6 +24,8 @@ SQ 激活/不敲铃/ssid 覆盖等实验钩子在当前 host 栈（恒 role0 + d
 - 08 示例改两阶段验收：①流水（8×128KB+逐字校验）②串行对照（chunks=1×8 轮+会合），
   掩盖量化口径不变
 - UT 对齐新 API（chunks 边界/未就绪拒绝/无效 handle 用例不变）
+- 08 示例双 rank 会合与栅栏改用 MPI（mpirun 拉起 + MPI_Barrier，替代 /tmp 文件轮询；
+  编译/启动需同一套 openmpi 安装，串行对照基线口径变化已在 README 注明）
 
 ## Capabilities
 
