@@ -28,17 +28,17 @@
  * 生命周期: 多池(多 entity)共享同一份进程级资源, Acquire/Release 引用计数,
  * 归零才真正释放(CP 流销毁/工作区 free/binHandle 卸载)。
  */
-#ifndef MEM_FABRIC_HYBRID_HYBM_OVERLAP_PREP_H
-#define MEM_FABRIC_HYBRID_HYBM_OVERLAP_PREP_H
+#ifndef MEM_FABRIC_HYBRID_HYBM_OVERLAP_PREP_H /* 头文件包含守卫(防重复包含) */
+#define MEM_FABRIC_HYBRID_HYBM_OVERLAP_PREP_H /* 同上, 与文件尾 #endif 配对 */
 
-#include <mutex>
+#include <mutex> // 互斥量(串行化单例初始化/清理与引用计数)
 
-#include "dl_acl_api.h"
-#include "hybm_common_include.h"
-#include "hybm_overlap_contract.h"
+#include "dl_acl_api.h"            // ACL 运行时接口封装(dlsym 动态加载 aclrt* 符号)
+#include "hybm_common_include.h"   // hybm 公共类型(Result 错误码/日志宏等)
+#include "hybm_overlap_contract.h" // host↔kernel wire 契约(HybmOverlapParam/Result)
 
-namespace ock {
-namespace mf {
+namespace ock { // MemFabric 总命名空间
+namespace mf {  // hybm 内存池引擎子命名空间
 /* 工作区布局(总 4KB, 偏移常量; 设备侧镜像见 smem_shm_aicore_overlap.h) */
 constexpr uint64_t HYBM_OVERLAP_WS_SIZE = 4096;              /* 工作区总尺寸 */
 constexpr uint64_t HYBM_OVERLAP_WS_MAILBOX_OFF = 0;          /* 邮箱 ring: 16B/slot × 64 */
@@ -47,9 +47,9 @@ constexpr uint64_t HYBM_OVERLAP_WS_SENTINEL_OFF = 1024;      /* 哨兵 8B(SQE �
 constexpr uint64_t HYBM_OVERLAP_WS_RESULT_OFF = 1032;        /* kernel result 64B */
 constexpr uint64_t HYBM_OVERLAP_WS_OVF_OFF = 1096;           /* SQE overflow 目标 64B */
 /* 冒烟自证用哨兵魔数(与 P0 探针同值, 不进入生产数据面) */
-constexpr uint64_t HYBM_OVERLAP_SMOKE_SENTINEL = 0xC0FFEE11ULL;
+constexpr uint64_t HYBM_OVERLAP_SMOKE_SENTINEL = 0xC0FFEE11ULL; /* 冒烟哨兵魔数(0xC0FFEE11) */
 
-class HybmOverlapPrep {
+class HybmOverlapPrep { // 协同模式传输准备单例(所有可变状态在 mutex_ 内维护)
 public:
     static HybmOverlapPrep &GetInstance();     /* 进程级单例入口 */
 
@@ -66,36 +66,36 @@ public:
     /* 冒烟通过标志(ready 才可被数据面使用) */
     bool Ready() const noexcept
     {
-        return ready_;
+        return ready_; // 就绪标志只读返回(冒烟通过即置位)
     }
 
     /* 引用计数只读查询(UT 断言失败后归零/Release 幂等语义用) */
     uint32_t GetRefCountForTest() const noexcept
     {
-        return refCount_;
+        return refCount_; // 引用计数只读返回(仅供 UT 断言)
     }
 
     /* 查询接口(WP4 设备头文件/WP5 host API 装配 param 用) */
     uint32_t GetSqId() const noexcept
     {
-        return sqId_;
+        return sqId_; // CP 流 SQ id(kernel 内活查询用)
     }
 
-    int32_t GetStreamId() const noexcept
+    int32_t GetStreamId() const noexcept // CP 流 id(SQE 的 rt_stream_id)
     {
-        return streamId_;
+        return streamId_; // CP 流 id 只读返回
     }
 
     /* CP1 内 HAL devId = die 号(host 设备号 % 2, 0903 定论见计划 A.3) */
     uint32_t GetDieId() const noexcept
     {
-        return dieId_;
+        return dieId_; // die 号只读返回(devId%2)
     }
 
     /* 工作区设备内存基址(uint64, 设备地址) */
     uint64_t GetWorkspace() const noexcept
     {
-        return workspace_;
+        return workspace_; // 工作区设备地址只读返回
     }
 
     /* AICPU 编排 kernel 提交(URMA 同款 KernelArgs+LaunchKernelWithConfig) */
@@ -105,7 +105,7 @@ public:
     Result WaitOrchestrator();
 
 private:
-    HybmOverlapPrep() = default;
+    HybmOverlapPrep() = default; // 私有默认构造(仅 GetInstance 的静态局部实例可构造)
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */

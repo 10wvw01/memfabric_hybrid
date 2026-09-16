@@ -135,11 +135,11 @@ struct HybmDeviceMeta {
      * SMEM_SHM_DEVICE_META_OVERLAP_*_OFFSET, 字段语义见 smem_shm_aicore_overlap.h) */
     uint64_t overlapWorkspace; // 协同工作区基址(mailbox/sentinel/result/ovf, 普通设备内存)
     uint64_t overlapFlags;     // 能力位图: bit0=310P 协同模式就绪(HYBM_OVERLAP_FLAG_READY)
-    uint64_t reserved[9];
+    uint64_t reserved[9];      // 剩余保留槽(原 11 槽被协同扩展占用 2 槽), 总尺寸保持 128B 不变
 };
 
 // overlapFlags 能力位定义
-constexpr uint64_t HYBM_OVERLAP_FLAG_READY = 0x1UL;
+constexpr uint64_t HYBM_OVERLAP_FLAG_READY = 0x1UL; // bit0: 冒烟通过后 SetHybmDeviceInfo 置位, 设备侧按 meta 偏移 48 读
 
 typedef struct {
     std::vector<void *> localAddrs;
