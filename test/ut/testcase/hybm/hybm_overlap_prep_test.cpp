@@ -18,8 +18,8 @@
  *
  * 覆盖:
  *   1. Acquire 失败语义: 返回非 0 / ready 不置位 / 引用计数归零可重试 / Release 幂等
- *   2. 未就绪时 C API 全拒绝(get_info/submit/submit_pipelined/wait/get_result)
- *   3. submit_pipelined 的 chunks 边界(0/65 拒绝, 1~64 通过参数关)
+ *   2. 未就绪时 C API 全拒绝(get_info/submit/wait/get_result)
+ *   3. submit 的 chunks 边界(0/65 拒绝, 1~64 通过参数关)
  *   4. 工作区布局常量不变式(偏移不重叠, 哨兵区在邮箱区之外)
  *   5. smem 层 overlap API 的无效 handle 拒绝
  */
@@ -64,8 +64,7 @@ TEST(HybmOverlapPrepTest, CApiRejectWhenNotReady)
 {
     hybm_overlap_info_t info = {};
     EXPECT_NE(hybm_overlap_get_info(&info), BM_OK);
-    EXPECT_NE(hybm_overlap_submit(0x1000, 0x2000), BM_OK);
-    EXPECT_NE(hybm_overlap_submit_pipelined(0x1000, 0x2000, 8), BM_OK);
+    EXPECT_NE(hybm_overlap_submit(0x1000, 0x2000, 8), BM_OK);
     EXPECT_NE(hybm_overlap_wait(), BM_OK);
     uint32_t mainRet = 0;
     uint32_t stage = 0;
@@ -74,13 +73,13 @@ TEST(HybmOverlapPrepTest, CApiRejectWhenNotReady)
     EXPECT_NE(hybm_overlap_get_info(nullptr), BM_OK); /* 出参 null 拒绝 */
 }
 
-/* 用例 3: submit_pipelined 的 chunks 边界(0 与 >邮箱槽数拒绝, 参数检查先于就绪检查) */
-TEST(HybmOverlapPrepTest, SubmitPipelinedChunksBounds)
+/* 用例 3: submit 的 chunks 边界(0 与 >邮箱槽数拒绝, 参数检查先于就绪检查) */
+TEST(HybmOverlapPrepTest, SubmitChunksBounds)
 {
-    EXPECT_EQ(hybm_overlap_submit_pipelined(0x1000, 0x2000, 0), BM_INVALID_PARAM);
-    EXPECT_EQ(hybm_overlap_submit_pipelined(0x1000, 0x2000, OVERLAP_WS_SLOTS + 1), BM_INVALID_PARAM);
+    EXPECT_EQ(hybm_overlap_submit(0x1000, 0x2000, 0), BM_INVALID_PARAM);
+    EXPECT_EQ(hybm_overlap_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS + 1), BM_INVALID_PARAM);
     /* 边界值本身通过参数关(随后因未就绪被拒, 验证检查顺序) */
-    EXPECT_NE(hybm_overlap_submit_pipelined(0x1000, 0x2000, OVERLAP_WS_SLOTS), BM_OK);
+    EXPECT_NE(hybm_overlap_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS), BM_OK);
 }
 
 /* 用例 4: 工作区布局常量不变式(偏移不重叠; 违反即布局回归) */
@@ -97,8 +96,7 @@ TEST(HybmOverlapPrepTest, WorkspaceLayoutInvariants)
 /* 用例 5: smem 层 overlap API 的无效 handle 拒绝(不依赖任何初始化) */
 TEST(SmemShmOverlapApiTest, InvalidHandleRejected)
 {
-    EXPECT_NE(smem_shm_overlap_launch(nullptr, nullptr, nullptr), SMEM_OK);
-    EXPECT_NE(smem_shm_overlap_launch_pipelined(nullptr, nullptr, nullptr, 8), SMEM_OK);
+    EXPECT_NE(smem_shm_overlap_launch(nullptr, nullptr, nullptr, 8), SMEM_OK);
     EXPECT_NE(smem_shm_overlap_wait(nullptr), SMEM_OK);
     uint32_t mainRet = 0;
     uint32_t stage = 0;
