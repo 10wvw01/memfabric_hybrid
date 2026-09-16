@@ -11,5 +11,7 @@
 - [x] 08 示例两阶段改造 + README 同步（v2 json/验收标准）
 - [x] UT 对齐新 API（五用例语义不变，SubmitChunksBounds 更名）
 - [x] 主 spec 同步：API 参数与错误语义要求更新为单一提交接口
+- [x] 08 示例 AICore kernel 四角色合并为两角色(role2/3 删除, 单块=流水 chunks=1,
+      host 两阶段共用 role4/5 声明上提; 角色头注释 v1 阶段编号同步修正)
 - [x] 08 示例双 rank 会合改用 MPI_Barrier（rank 由 MPI 分配，去除 /tmp 文件轮询与
       工作目录管理，串行对照轮间会合语义不变、基线口径变纯，加速比需重新实机标定）
