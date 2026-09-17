@@ -130,16 +130,11 @@ struct HybmDeviceMeta {
     uint64_t symmetricSize;
     uint64_t qpInfoAddress;
     uint64_t sdmaWorkSpace;
-    /* 310P AICore×AICPU 协同扩展(占用原 reserved 前 2 槽, 总尺寸不变 128B;
-     * 设备侧读取偏移见 smem_shm_aicore_base_meta.h 的
-     * SMEM_SHM_DEVICE_META_OVERLAP_*_OFFSET, 字段语义见 smem_shm_aicore_sdma.h) */
-    uint64_t sdmaOrchWorkspace; // 310P 协同工作区基址(mailbox/sentinel/result/ovf, 普通设备内存)
-    uint64_t sdmaOrchFlags;     // 能力位图: bit0=310P 协同模式就绪(HYBM_SDMA_ORCH_FLAG_READY)
-    uint64_t reserved[9];      // 剩余保留槽(原 11 槽被协同扩展占用 2 槽), 总尺寸保持 128B 不变
+    /* 310P 协同模式复用本槽: sdmaWorkSpace 承载协同工作区(mailbox/sentinel/result/ovf)
+     * ——与 A3 血统的"设备发起 SDMA 工作区"为同一概念, 两机制平台互斥不同时写;
+     * 设备侧统一经 smem_shm_get_sdma_workspace_address() 读取(见 smem_shm_aicore_base_meta.h) */
+    uint64_t reserved[11];      // 对齐保留槽, 总尺寸 128B 不变
 };
-
-// sdmaOrchFlags 能力位定义
-constexpr uint64_t HYBM_SDMA_ORCH_FLAG_READY = 0x1UL; // bit0: 初始化成功置位(SetHybmDeviceInfo), 设备侧 meta 偏移 48 读
 
 typedef struct {
     std::vector<void *> localAddrs;

@@ -39,15 +39,9 @@
 extern "C" {       // C 链接(供 bisheng 编译的 AICore kernel include)
 #endif
 
-/* ---- meta 扩展字段偏移(与 host 侧 HybmDeviceMeta.sdmaOrchWorkspace/sdmaOrchFlags 对应) ---- */
-/* sdmaOrchWorkspace @ reserved[0](meta 偏移 40), sdmaOrchFlags @ reserved[1](偏移 48) */
-constexpr uint64_t SMEM_SHM_DEVICE_META_SDMA_ORCH_WORKSPACE_OFFSET =
-    SMEM_SHM_DEVICE_META_SDMA_WORKSPACE_OFFSET + sizeof(uint64_t); /* = meta 偏移 40 */
-constexpr uint64_t SMEM_SHM_DEVICE_META_SDMA_ORCH_FLAGS_OFFSET =
-    SMEM_SHM_DEVICE_META_SDMA_ORCH_WORKSPACE_OFFSET + sizeof(uint64_t); /* = meta 偏移 48 */
-
-/* sdmaOrchFlags 能力位(与 hybm_define.h HYBM_SDMA_ORCH_FLAG_READY 同值) */
-constexpr uint64_t SMEM_SHM_SDMA_FLAG_READY = 0x1UL;
+/* meta 工作区槽: 复用 A3 血统的 SDMA_WORKSPACE 偏移(与 HybmDeviceMeta.sdmaWorkSpace
+ * 对应, "设备发起 SDMA 工作区"为跨平台同概念; 设备侧统一经
+ * smem_shm_get_sdma_workspace_address() 读取, 本头的 get_workspace 为其协同别名) */
 
 /* ---- 工作区布局常量(与 hybm_sdma_orchestrator.h 一致) ---- */
 constexpr uint64_t SMEM_SHM_SDMA_WS_MAILBOX_OFF = 0;        /* 邮箱 ring 基址偏移 */
@@ -72,29 +66,18 @@ constexpr uint64_t SMEM_SHM_SDMA_POLL_MAX_ITER = 100000000ULL;
 }                  // extern "C" 结束
 #endif
 
-/* 查询本 shm 的协同工作区地址(mailbox/哨兵所在, 普通设备内存, AICore 可直接 GM 访问) */
+/* 查询本 shm 的协同工作区地址(mailbox/哨兵所在, 普通设备内存, AICore 可直接 GM 访问)。
+ * 为 A3 血统 smem_shm_get_sdma_workspace_address() 的协同别名(同一 meta 槽) */
 SMEM_SHM_INLINE_AICORE __gm__ void *smem_shm_sdma_get_workspace(uint32_t shmemId)
 {
-    if (shmemId >= SMEM_OBJECT_NUM_MAX) { // shm 序号越界
-        return NULL; // 越界返回 NULL
-    }
-    // 本 shm 的 meta 项地址 = meta 基址 + 全局头 + 序号 × 128B
-    uint64_t metaAddr =
-        SMEM_SHM_DEVICE_META_ADDR + SMEM_SHM_DEVICE_GLOBAL_META_SIZE + shmemId * SMEM_SHM_DEVICE_PRE_META_SIZE;
-    return *(__gm__ void **)(metaAddr + SMEM_SHM_DEVICE_META_SDMA_ORCH_WORKSPACE_OFFSET); // 读 sdmaOrchWorkspace
+    return smem_shm_get_sdma_workspace_address(shmemId); // 读 meta 的 sdmaWorkSpace 槽
 }
 
-/* 查询协同模式是否就绪(310P + 开关 + 初始化完成; 未就绪时上层不应使用本组原语) */
+/* 查询协同模式是否就绪(310P + 初始化完成; 未就绪时上层不应使用本组原语)。
+ * 判据 = 工作区非空: 工作区在初始化第二步分配, 失败/释放即归零, 非空即初始化成功 */
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_ready(uint32_t shmemId)
 {
-    if (shmemId >= SMEM_OBJECT_NUM_MAX) { // shm 序号越界
-        return false; // 越界视为未就绪
-    }
-    // 本 shm 的 meta 项地址(同 get_workspace)
-    uint64_t metaAddr =
-        SMEM_SHM_DEVICE_META_ADDR + SMEM_SHM_DEVICE_GLOBAL_META_SIZE + shmemId * SMEM_SHM_DEVICE_PRE_META_SIZE;
-    uint64_t flags = *(__gm__ uint64_t *)(metaAddr + SMEM_SHM_DEVICE_META_SDMA_ORCH_FLAGS_OFFSET); // 读能力位图
-    return (flags & SMEM_SHM_SDMA_FLAG_READY) != 0; // bit0 = 协同就绪
+    return smem_shm_sdma_get_workspace(shmemId) != NULL; // 工作区非空 = 就绪
 }
 
 /* 计算本 rank 池段内协同保留区标志地址

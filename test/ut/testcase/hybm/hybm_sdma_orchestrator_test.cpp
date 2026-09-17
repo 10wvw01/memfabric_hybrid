@@ -86,7 +86,6 @@ TEST(SdmaOrchestratorTest, WorkspaceLayoutInvariants)
     EXPECT_GT(HYBM_SDMA_ORCH_WS_RESULT_OFF, HYBM_SDMA_ORCH_WS_SENTINEL_OFF); // result 在哨兵后
     EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF); // ovf 在 result 后
     EXPECT_LE(HYBM_SDMA_ORCH_WS_OVF_OFF + 64U, HYBM_SDMA_ORCH_WS_SIZE); // 全部落在 4KB 内
-    EXPECT_EQ(HYBM_SDMA_ORCH_FLAG_READY, 0x1UL); /* meta 能力位与设备头文件约定一致 */
 }
 
 /* 用例 5: smem 层 overlap API 的无效 handle 拒绝(不依赖任何初始化) */

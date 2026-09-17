@@ -47,7 +47,8 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
   `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`，机制与运维纪律见
   `310p-aicore-aicpu-开发进展.md` 附录 A.4；**每次正式运行前须过验证门**——
   deployer 保活到期退出会触发清理链删除设备侧文件）
-- 环境变量（均可选）：`MF_SDMA_ORCH_JSON` 显式指定 launch json（缺省依次自动发现：安装前缀 → CWD）；`MF_SDMA_ORCH_DISABLE=1` 显式禁用协同（仅诊断用）
+- 环境变量（均可选）：`MF_SDMA_ORCH_JSON` 显式指定 launch json（缺省依次自动发现：
+  安装前缀 → CWD）；`MF_SDMA_ORCH_DISABLE=1` 显式禁用协同（仅诊断用）
   （json 由主构建 `mf_overlap_kernel` 目标产出）
 
 ## 验收标准
