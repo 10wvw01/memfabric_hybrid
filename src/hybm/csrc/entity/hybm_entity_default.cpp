@@ -1054,7 +1054,7 @@ void MemEntityDefault::SetHybmDeviceInfo(HybmDeviceMeta &info)
         info.sdmaWorkSpace = 0UL;
     }
     /* 310P 协同模式: 工作区复用 sdmaWorkSpace 槽(A3 血统同概念, 平台互斥不同时写);
-     * 未就绪保持零值, 设备侧以"工作区非空"判定协同可用(smem_shm_sdma_ready) */
+     * 未就绪保持零值(host 侧以 smem_shm_sdma_get_workspace(handle) 非空判定可用) */
     if (orchAcquired_) { // 本 entity 持有协同(InitTransManager 已 Acquire)
         auto &prep = SdmaOrchestrator::GetInstance(); // 进程级单例(多 entity 共享同一份协同资源)
         if (prep.Ready()) { // 协同就绪: 填充真实工作区

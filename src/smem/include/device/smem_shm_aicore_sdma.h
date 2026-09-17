@@ -40,8 +40,7 @@ extern "C" {       // C 链接(供 bisheng 编译的 AICore kernel include)
 #endif
 
 /* meta 工作区槽: 复用 A3 血统的 SDMA_WORKSPACE 偏移(与 HybmDeviceMeta.sdmaWorkSpace
- * 对应, "设备发起 SDMA 工作区"为跨平台同概念; 设备侧统一经
- * smem_shm_get_sdma_workspace_address() 读取, 本头的 get_workspace 为其协同别名) */
+ * 对应, "设备发起 SDMA 工作区"为跨平台同概念; host 写入经 SetHybmDeviceInfo) */
 
 /* ---- 工作区布局常量(与 hybm_sdma_orchestrator.h 一致) ---- */
 constexpr uint64_t SMEM_SHM_SDMA_WS_MAILBOX_OFF = 0;        /* 邮箱 ring 基址偏移 */
@@ -66,19 +65,12 @@ constexpr uint64_t SMEM_SHM_SDMA_POLL_MAX_ITER = 100000000ULL;
 }                  // extern "C" 结束
 #endif
 
-/* 查询本 shm 的协同工作区地址(mailbox/哨兵所在, 普通设备内存, AICore 可直接 GM 访问)。
- * 为 A3 血统 smem_shm_get_sdma_workspace_address() 的协同别名(同一 meta 槽) */
-SMEM_SHM_INLINE_AICORE __gm__ void *smem_shm_sdma_get_workspace(uint32_t shmemId)
-{
-    return smem_shm_get_sdma_workspace_address(shmemId); // 读 meta 的 sdmaWorkSpace 槽
-}
-
-/* 查询协同模式是否就绪(310P + 初始化完成; 未就绪时上层不应使用本组原语)。
- * 判据 = 工作区非空: 工作区在初始化第二步分配, 失败/释放即归零, 非空即初始化成功 */
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_ready(uint32_t shmemId)
-{
-    return smem_shm_sdma_get_workspace(shmemId) != NULL; // 工作区非空 = 就绪
-}
+/* 平台事实(310P, 实测): AICore kernel 内 GM 读 meta 区(SDVA)恒返回零值——
+ * meta GVA 仅 host(H2D 写入)与 SDMA(SQE 翻译)可见, AICore load 不可见(A3 无此限制,
+ * 平台差异)。故本头不提供工作区/上下文的 meta 自取原语(A3 血统的
+ * smem_shm_get_sdma_workspace_address/smem_shm_get_global_rank 系列在 310P kernel
+ * 内不可用), 协同工作区/标志地址一律由 host 侧算好经 kernel 参数传入;
+ * host 侧查询用 smem_shm.h 的 smem_shm_sdma_get_workspace(handle)。 */
 
 /* 计算本 rank 池段内协同保留区标志地址
  * (segBase = 本 rank 段基址(gva + symmetricSize*rankId), physSize = 段物理大小, idx = 槽序号) */

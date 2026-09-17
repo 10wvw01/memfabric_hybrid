@@ -1,4 +1,4 @@
-# 08_310p_die_pair_overlap：310P Duo 单卡双 die 2-rank AICore×AICPU 协同
+# 08_310p_aicore_aicpu_sdma：310P Duo 单卡双 die 2-rank 设备发起 SDMA（AICore×AICPU 协同）
 
 ## 场景
 
@@ -74,11 +74,11 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 ```bash
 # 1. 仓库根构建 + 示例编译(bisheng host+AICore 统一编译, 含 MPI)
 cmake -B build -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF && cmake --build build -j
-cd examples/memory_pool/01_basic/08_310p_aicore_aicpu_overlap
+cd examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma
 #   MPI 取发行版一套(头/库/启动器须同源; 换 /usr/local/openmpi 时改用其路径与启动器)
 MPI_INC=/usr/lib/aarch64-linux-gnu/openmpi/include
 MPI_LIB=/usr/lib/aarch64-linux-gnu/openmpi/lib
-bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_overlap.asc -x none \
+bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_sdma.asc -x none \
   -o /tmp/ex08 -DOMPI_SKIP_MPICXX -I$MPI_INC <CANN include 路径> <仓库 include 路径> \
   -Wl,--start-group <build 下三个静态库> -Wl,--end-group \
   -L$MPI_LIB -lmpi <CANN lib 路径> -lascendcl -lruntime -ldl -pthread -lm
