@@ -324,6 +324,26 @@ mpirun --allow-run-as-root -np 2 /tmp/ex08
 - 教训入库：探针/取证代码进入热路径必须重新审视时序；含固定开销的 A/B 测量须做绝对
   时延分解（对照带宽×字节物理下界），相对比值对"两侧共有的固定项"不敏感。
 
+## 〇''、产品化收敛(V2.2, 2026-09-17, 5 提交: 497f2a7e/e5af4bd1/548c7cc1/f442e562/e1d30b9d)
+
+按"带来机制而非代码"与"项目风格统一"原则的产品化收敛(EX09 评审触发的全面审视):
+
+- **命名统一**: overlap(成果词)家族全量改为 sdma 族——类 SdmaOrchestrator、
+  hybm_sdma_*/smem_shm_sdma_* API、smem_shm_sdma_notify/poll_flag 设备原语、
+  MF_SDMA_ORCH_* env、libmf_sdma_orch 产物; 示例目录 08_..._sdma
+- **kernel 原生重写**(KVER v4): 以 hybm_batch_transfer.cc 为母版(Mulan 头/k 前缀
+  常量/extern C 入口 HybmSdmaOrchBatch/函数按域拆分), wire 不变量逐项保留,
+  实机等价验证 PASS(与 v3 对比 mismatch=0/head=14 全一致, 时延同量级)
+- **零配置自动启用**(spec 反转): 310P+SDMA 位即协同(A3 配方必败, 协同为唯一链路),
+  env 转禁用开关 MF_SDMA_ORCH_DISABLE; json 三级发现(env→dladdr 安装前缀→CWD),
+  实机三连验证(自动启用/零配置/显式禁用)全过
+- **meta 槽归一**: 协同工作区复用 A3 血统 sdmaWorkSpace 槽(删 reserved 双字段与
+  FLAG_READY 位, 就绪=工作区非空), spec 元数据需求同步
+- **平台事实新登记**(平台事实.md §3): AICore GM 读 meta 区恒零值(仅 host/SDMA 可见,
+  A3 无此限制)——kernel 自取证伪后的实测定论, 工作区/标志地址须 host 传参
+- spec 域迁移: openspec 310p-shm-overlap→310p-sdma-orch
+- 实机终态: ①流水 4.50ms/②串行 10.26ms/加速比 2.28x(mismatch=0)
+
 ## 一、迁移源与目标架构
 
 ### 1.1 aicpu-aicore-310p3 是什么（main 已合入，真机实测定论）
@@ -664,7 +684,7 @@ export MF_310P_SHM_OVERLAP=1
 读 shadow tail（先 `dc civac`）→ 环满判断（used = tail-head）→ SQE 直写 slot → `dc cvac` 逐 cacheline
 刷 → doorbell（GM 写 `sqRegBase+0x8` 或 `halSqCqConfig`，CP1 内 HAL devId=**die 号**）→ 回写 shadow
 tail。攒批：只推进 shadow tail，整批一次 doorbell（hcomm 生产同款，`dispatcher_aicpu.cc:926-932`）。
-**SQE 对纪律**：数据 SQE + 标志 SQE（8B 哨兵搬运）成对提交、一次 doorbell——FIFO 保序保证标志到即数据到（协同模式跨端通知的基石）。
+**SQE 对纪律**：数据 SQE + 标志 SQE（8B 哨兵搬运）成对提交、一次 doorbell——FIFO 保序保证标志到即数据到（跨端通知基石）。
 
 ### A.3 CP 流与双 kernel launch 模式（host 侧）
 
