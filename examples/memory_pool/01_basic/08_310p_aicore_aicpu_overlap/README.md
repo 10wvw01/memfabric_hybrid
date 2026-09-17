@@ -8,8 +8,8 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 - **AICore kernel 产数据**（写池 GVA + `ENTIRE_DATA_CACHE` clean）
 - **GM 邮箱委托**（16B 描述符 `{dataAddr, words}`，vector 直写 + 行 clean）
 - **AICPU 编排 kernel 代投 SDMA SQE 对**（数据 + 8B 标志，每 chunk 一次 doorbell，
-  FIFO 保序保证"标志到即数据到"）——设备头原语 `smem_shm_aicore_overlap.h` + host API
-  `smem_shm_overlap_launch`
+  FIFO 保序保证"标志到即数据到"）——设备头原语 `smem_shm_aicore_sdma.h` + host API
+  `smem_shm_sdma_submit`
 - **对端 AICore 消费**（dcci 轮询池内标志 → 读改写 INC → 回程）
 
 全内存通知链（邮箱/池内标志/SQE 对），310P3 上 notify/事件对不可用（实测证伪）。
@@ -26,10 +26,10 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 
 ## 使用能力
 
-`smem_shm_create`（SDMA 位 + `MF_310P_SHM_OVERLAP=1`）→ `smem_shm_overlap_get_workspace`
-→ AICore kernel（`smem_shm_overlap_notify`/`poll_flag`/`get_flag_addr` 设备头原语）→
-`smem_shm_overlap_launch`（chunks 1~64，chunks=1 即单块）→ `smem_shm_overlap_wait`
-→ `smem_shm_overlap_get_result` → `smem_shm_destroy`
+`smem_shm_create`（SDMA 位 + `MF_310P_SHM_OVERLAP=1`）→ `smem_shm_sdma_get_workspace`
+→ AICore kernel（`smem_shm_sdma_notify`/`poll_flag`/`get_flag_addr` 设备头原语）→
+`smem_shm_sdma_submit`（chunks 1~64，chunks=1 即单块）→ `smem_shm_sdma_wait`
+→ `smem_shm_sdma_get_result` → `smem_shm_destroy`
 
 ## 规模建议
 

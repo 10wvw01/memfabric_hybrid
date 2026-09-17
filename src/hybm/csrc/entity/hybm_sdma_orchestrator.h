@@ -10,7 +10,7 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* hybm_overlap_prep.h — 310P AICore×AICPU 协同模式传输准备(进程级单例 + 引用计数)
+/* hybm_sdma_orchestrator.h — 310P AICore×AICPU 协同模式传输准备(进程级单例 + 引用计数)
  *
  * 挂载点: MemEntityDefault::InitTransManager 的 [310P + SDMA op 位 + 开关] 分支
  * (六级初始化地图的 L2-④, 见 310p-aicore-aicpu-开发进展.md D4)。
@@ -27,8 +27,8 @@
  * 生命周期: 多池(多 entity)共享同一份进程级资源, Acquire/Release 引用计数,
  * 归零才真正释放(CP 流销毁/工作区 free/binHandle 卸载)。
  */
-#ifndef MEM_FABRIC_HYBRID_HYBM_OVERLAP_PREP_H /* 头文件包含守卫(防重复包含) */
-#define MEM_FABRIC_HYBRID_HYBM_OVERLAP_PREP_H /* 同上, 与文件尾 #endif 配对 */
+#ifndef MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H /* 头文件包含守卫(防重复包含) */
+#define MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H /* 同上, 与文件尾 #endif 配对 */
 
 #include <mutex> // 互斥量(串行化单例初始化/清理与引用计数)
 
@@ -38,17 +38,17 @@
 
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 内存池引擎子命名空间
-/* 工作区布局(总 4KB, 偏移常量; 设备侧镜像见 smem_shm_aicore_overlap.h) */
-constexpr uint64_t HYBM_OVERLAP_WS_SIZE = 4096;              /* 工作区总尺寸 */
-constexpr uint64_t HYBM_OVERLAP_WS_MAILBOX_OFF = 0;          /* 邮箱 ring: 16B/slot × 64 */
-constexpr uint64_t HYBM_OVERLAP_WS_MAILBOX_SLOTS = 64;       /* 邮箱槽数(mode14 chunk 上限) */
-constexpr uint64_t HYBM_OVERLAP_WS_SENTINEL_OFF = 1024;      /* 哨兵 8B(SQE 对标志源) */
-constexpr uint64_t HYBM_OVERLAP_WS_RESULT_OFF = 1032;        /* kernel result 64B */
-constexpr uint64_t HYBM_OVERLAP_WS_OVF_OFF = 1096;           /* SQE overflow 目标 64B */
+/* 工作区布局(总 4KB, 偏移常量; 设备侧镜像见 smem_shm_aicore_sdma.h) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;              /* 工作区总尺寸 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_MAILBOX_OFF = 0;          /* 邮箱 ring: 16B/slot × 64 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_MAILBOX_SLOTS = 64;       /* 邮箱槽数(mode14 chunk 上限) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_SENTINEL_OFF = 1024;      /* 哨兵 8B(SQE 对标志源) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 1032;        /* kernel result 64B */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_OVF_OFF = 1096;           /* SQE overflow 目标 64B */
 
-class HybmOverlapPrep { // 协同模式传输准备单例(所有可变状态在 mutex_ 内维护)
+class SdmaOrchestrator { // 协同模式传输准备单例(所有可变状态在 mutex_ 内维护)
 public:
-    static HybmOverlapPrep &GetInstance();     /* 进程级单例入口 */
+    static SdmaOrchestrator &GetInstance();     /* 进程级单例入口 */
 
     /* 开关读取(env MF_310P_SHM_OVERLAP, 取值 "1"/"on" 为开) */
     static bool SwitchOn() noexcept;
@@ -102,7 +102,7 @@ public:
     Result WaitOrchestrator();
 
 private:
-    HybmOverlapPrep() = default; // 私有默认构造(仅 GetInstance 的静态局部实例可构造)
+    SdmaOrchestrator() = default; // 私有默认构造(仅 GetInstance 的静态局部实例可构造)
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
@@ -125,4 +125,4 @@ private:
 } // namespace mf
 } // namespace ock
 
-#endif // MEM_FABRIC_HYBRID_HYBM_OVERLAP_PREP_H
+#endif // MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H

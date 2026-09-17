@@ -17,8 +17,8 @@ SQ 激活/不敲铃/ssid 覆盖等实验钩子在当前 host 栈（恒 role0 + d
   语义不变）；删除 mode13 case、role1 分支、未用弱符号/结构、全部实验钩子
 - wire 契约 v2：删除 role/roleRsv/arrivalAddr/readyAddr/reserved，新增 chunks 字段，
   static_assert 布局锁重算；设备侧版本名 MF_OVERLAP_KVER 1→2（CP1 dlopen 缓存纪律）
-- host API 收敛为单一提交接口：`hybm_overlap_submit(dst, flag, chunks)` 与
-  `smem_shm_overlap_launch(handle, dst, flag, chunks)`（吸收 _pipelined 变体）；
+- host API 收敛为单一提交接口：`hybm_sdma_submit(dst, flag, chunks)` 与
+  `smem_shm_sdma_submit(handle, dst, flag, chunks)`（吸收 _pipelined 变体）；
   smem entry 层三方法收敛为一
 - 初始化冒烟自证移除（就绪门控回归三步准备：CP 流/工作区/kernel 加载，端到端验证由 08 示例阶段①逐字校验承担）
 - 08 示例改两阶段验收：①流水（8×128KB+逐字校验）②串行对照（chunks=1×8 轮+会合），

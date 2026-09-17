@@ -21,7 +21,7 @@
 #include "hybm_ex_info_transfer.h"
 #include "hybm_gva.h"
 #include "hybm_logger.h"
-#include "hybm_overlap_prep.h" // 310P 协同模式传输准备单例(挂载点/meta 填充/释放均引用)
+#include "hybm_sdma_orchestrator.h" // 310P 协同模式传输准备单例(挂载点/meta 填充/释放均引用)
 #include "mf_fault_injection_point.h"
 #include "hybm_stream_manager.h"
 #include "hybm_va_manager.h"
@@ -1053,14 +1053,14 @@ void MemEntityDefault::SetHybmDeviceInfo(HybmDeviceMeta &info)
         info.qpInfoAddress = 0UL;
         info.sdmaWorkSpace = 0UL;
     }
-    /* 310P 协同模式元数据: 工作区与能力位(AICore 经 smem_shm_aicore_overlap.h 读取) */
-    auto &prep = HybmOverlapPrep::GetInstance(); // 进程级单例(多 entity 共享同一份协同资源)
+    /* 310P 协同模式元数据: 工作区与能力位(AICore 经 smem_shm_aicore_sdma.h 读取) */
+    auto &prep = SdmaOrchestrator::GetInstance(); // 进程级单例(多 entity 共享同一份协同资源)
     if (prep.Ready()) {                          // 协同已就绪: 填充真实工作区与就绪位
-        info.overlapWorkspace = prep.GetWorkspace(); // 工作区设备地址(mailbox/哨兵/result/ovf)
-        info.overlapFlags = HYBM_OVERLAP_FLAG_READY; // 能力位 bit0, 设备侧据此判定就绪
+        info.sdmaOrchWorkspace = prep.GetWorkspace(); // 工作区设备地址(mailbox/哨兵/result/ovf)
+        info.sdmaOrchFlags = HYBM_SDMA_ORCH_FLAG_READY; // 能力位 bit0, 设备侧据此判定就绪
     } else {                                         // 未就绪(开关关或初始化失败): 字段清零
-        info.overlapWorkspace = 0UL; // 零值 = 无协同工作区
-        info.overlapFlags = 0UL;     // 零值 = 协同模式不可用
+        info.sdmaOrchWorkspace = 0UL; // 零值 = 无协同工作区
+        info.sdmaOrchFlags = 0UL;     // 零值 = 协同模式不可用
     }
 }
 
@@ -1250,19 +1250,19 @@ Result MemEntityDefault::InitTransManager()
     }
     if (options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA) { // SDMA 传输位(设备侧搬运引擎)
         // 平台+开关双门控: 310P 且 MF_310P_SHM_OVERLAP 开启才进协同模式
-        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P && HybmOverlapPrep::SwitchOn()) {
+        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P && SdmaOrchestrator::SwitchOn()) {
             /* 310P 协同模式(D4 挂载点): A3 SdmaTransportManager 配方在 310P 不可用
              * (AclnnShmemSdmaStarsQuery 实测 65534), 改做 overlap 准备(CP 流+工作区+
              * kernel, 失败即报错不静默); meta 由 SetHybmDeviceInfo 填充 */
             BM_LOG_INFO("310P overlap mode: AICore x AICPU orchestration instead of SdmaTransportManager, "
                         "entityId: " << id_ << " devId: " << options_.devId);
-            auto ret = HybmOverlapPrep::GetInstance().Acquire(options_.devId); // 首次进入做全量初始化(引用计数+1)
+            auto ret = SdmaOrchestrator::GetInstance().Acquire(options_.devId); // 首次进入做全量初始化(引用计数+1)
             if (ret != BM_OK) { // 准备失败(CP 流/工作区/kernel 任一不过)
                 BM_LOG_ERROR("overlap prep acquire failed, ret: " << ret << " devId: " << options_.devId
                                                                   << " entityId: " << id_);
                 return ret; // 透传失败(根因已记录)
             }
-            overlapAcquired_ = true; // 标记本 entity 持有, ReleaseResources 对称 Release
+            orchAcquired_ = true; // 标记本 entity 持有, ReleaseResources 对称 Release
             return BM_OK;            // 协同模式不创建 SdmaTransportManager
         }
         // 非 310P 或开关关闭: 走 A3 等平台的 SDMA TransportManager 原路径
@@ -1390,10 +1390,10 @@ void MemEntityDefault::ReleaseResources()
         return;
     }
     dataOperator_.reset();
-    if (overlapAcquired_) { // 本 entity 曾 Acquire 协同资源
+    if (orchAcquired_) { // 本 entity 曾 Acquire 协同资源
         /* 与 InitTransManager 的 Acquire 对称(进程级单例引用计数, 归零才真正释放) */
-        HybmOverlapPrep::GetInstance().Release(); // 引用计数-1, 归零逆序清理 CP 流/工作区
-        overlapAcquired_ = false; // 清标记防重复 Release
+        SdmaOrchestrator::GetInstance().Release(); // 引用计数-1, 归零逆序清理 CP 流/工作区
+        orchAcquired_ = false; // 清标记防重复 Release
     }
     if (transportManager_ != nullptr) {
         transportManager_->CloseDevice();

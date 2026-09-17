@@ -4,8 +4,8 @@
 
 ### Requirement: overlap host API 参数与错误语义
 
-公共 overlap API（`smem_shm_overlap_launch`、`smem_shm_overlap_wait`、
-`smem_shm_overlap_get_result`、`smem_shm_overlap_get_workspace`）SHALL 满足：
+公共 overlap API（`smem_shm_sdma_submit`、`smem_shm_sdma_wait`、
+`smem_shm_sdma_get_result`、`smem_shm_sdma_get_workspace`）SHALL 满足：
 出参指针为空时拒绝；提交接口的 chunks 参数 MUST 校验在 1~64 范围（邮箱槽容量
 约束）；参数有效性校验 MUST 先于就绪状态检查执行；无效 shm handle MUST 拒绝；
 传输准备未就绪时所有 overlap API MUST 拒绝并返回明确错误。提交语义为多 chunk

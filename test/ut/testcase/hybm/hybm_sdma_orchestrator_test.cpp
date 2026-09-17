@@ -25,7 +25,7 @@
  */
 #include <gtest/gtest.h> // googletest 框架
 
-#include "hybm_overlap_prep.h" // 被测单例(public 接口: Acquire/Ready/GetRefCountForTest/Release)
+#include "hybm_sdma_orchestrator.h" // 被测单例(public 接口: Acquire/Ready/GetRefCountForTest/Release)
 
 #include "hybm_big_mem.h" // 被测 C API 声明(hybm_overlap_*)
 #include "hybm_define.h"  // BM_OK/BM_INVALID_PARAM 等错误码
@@ -40,9 +40,9 @@ constexpr uint32_t OVERLAP_WS_SLOTS = 64;
 } // namespace
 
 /* 用例 1: Acquire 在资源缺失环境(UT stub)必然失败, 且失败后状态干净可重试 */
-TEST(HybmOverlapPrepTest, AcquireFailsCleanlyAndRetriable)
+TEST(SdmaOrchestratorTest, AcquireFailsCleanlyAndRetriable)
 {
-    auto &prep = HybmOverlapPrep::GetInstance(); // 被测单例
+    auto &prep = SdmaOrchestrator::GetInstance(); // 被测单例
     for (int round = 0; round < 2; round++) { /* 两次: 验证失败后可重试无残留 */
         auto ret = prep.Acquire(0); // 设备 0(stub 环境必然初始化失败)
         EXPECT_NE(ret, BM_OK) << "round " << round << ": UT stub 环境下 Acquire 必须失败"; // 必须失败
@@ -56,49 +56,49 @@ TEST(HybmOverlapPrepTest, AcquireFailsCleanlyAndRetriable)
 }
 
 /* 用例 2: 未就绪时 C API 全拒绝(就绪门控的外显语义) */
-TEST(HybmOverlapPrepTest, CApiRejectWhenNotReady)
+TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
 {
-    hybm_overlap_info_t info = {}; // 就绪信息出参
-    EXPECT_NE(hybm_overlap_get_info(&info), BM_OK); // 未就绪须拒绝
-    EXPECT_NE(hybm_overlap_submit(0x1000, 0x2000, 8), BM_OK); // 提交须拒绝
-    EXPECT_NE(hybm_overlap_wait(), BM_OK); // 等待须拒绝
+    hybm_sdma_info_t info = {}; // 就绪信息出参
+    EXPECT_NE(hybm_sdma_get_info(&info), BM_OK); // 未就绪须拒绝
+    EXPECT_NE(hybm_sdma_submit(0x1000, 0x2000, 8), BM_OK); // 提交须拒绝
+    EXPECT_NE(hybm_sdma_wait(), BM_OK); // 等待须拒绝
     uint32_t mainRet = 0;   // 主返回码出参
     uint32_t stage = 0;     // 阶段出参
     uint32_t headAfter = 0; // head 出参
-    EXPECT_NE(hybm_overlap_get_result(&mainRet, &stage, &headAfter), BM_OK); // 诊断读回须拒绝
-    EXPECT_NE(hybm_overlap_get_info(nullptr), BM_OK); /* 出参 null 拒绝 */
+    EXPECT_NE(hybm_sdma_get_result(&mainRet, &stage, &headAfter), BM_OK); // 诊断读回须拒绝
+    EXPECT_NE(hybm_sdma_get_info(nullptr), BM_OK); /* 出参 null 拒绝 */
 }
 
 /* 用例 3: submit 的 chunks 边界(0 与 >邮箱槽数拒绝, 参数检查先于就绪检查) */
-TEST(HybmOverlapPrepTest, SubmitChunksBounds)
+TEST(SdmaOrchestratorTest, SubmitChunksBounds)
 {
-    EXPECT_EQ(hybm_overlap_submit(0x1000, 0x2000, 0), BM_INVALID_PARAM); // chunks=0 拒绝
-    EXPECT_EQ(hybm_overlap_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS + 1), BM_INVALID_PARAM); // 65 拒绝
+    EXPECT_EQ(hybm_sdma_submit(0x1000, 0x2000, 0), BM_INVALID_PARAM); // chunks=0 拒绝
+    EXPECT_EQ(hybm_sdma_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS + 1), BM_INVALID_PARAM); // 65 拒绝
     /* 边界值本身通过参数关(随后因未就绪被拒, 验证检查顺序) */
-    EXPECT_NE(hybm_overlap_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS), BM_OK); // 64 过参数关
+    EXPECT_NE(hybm_sdma_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS), BM_OK); // 64 过参数关
 }
 
 /* 用例 4: 工作区布局常量不变式(偏移不重叠; 违反即布局回归) */
-TEST(HybmOverlapPrepTest, WorkspaceLayoutInvariants)
+TEST(SdmaOrchestratorTest, WorkspaceLayoutInvariants)
 {
-    EXPECT_EQ(HYBM_OVERLAP_WS_MAILBOX_OFF, 0U); // 邮箱区从头开始
-    EXPECT_GE(HYBM_OVERLAP_WS_SENTINEL_OFF, HYBM_OVERLAP_WS_MAILBOX_OFF + 16U * OVERLAP_WS_SLOTS); // 哨兵不压邮箱
-    EXPECT_GT(HYBM_OVERLAP_WS_RESULT_OFF, HYBM_OVERLAP_WS_SENTINEL_OFF); // result 在哨兵后
-    EXPECT_GT(HYBM_OVERLAP_WS_OVF_OFF, HYBM_OVERLAP_WS_RESULT_OFF); // ovf 在 result 后
-    EXPECT_LE(HYBM_OVERLAP_WS_OVF_OFF + 64U, HYBM_OVERLAP_WS_SIZE); // 全部落在 4KB 内
-    EXPECT_EQ(HYBM_OVERLAP_FLAG_READY, 0x1UL); /* meta 能力位与设备头文件约定一致 */
+    EXPECT_EQ(HYBM_SDMA_ORCH_WS_MAILBOX_OFF, 0U); // 邮箱区从头开始
+    EXPECT_GE(HYBM_SDMA_ORCH_WS_SENTINEL_OFF, HYBM_SDMA_ORCH_WS_MAILBOX_OFF + 16U * OVERLAP_WS_SLOTS); // 哨兵不压邮箱
+    EXPECT_GT(HYBM_SDMA_ORCH_WS_RESULT_OFF, HYBM_SDMA_ORCH_WS_SENTINEL_OFF); // result 在哨兵后
+    EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF); // ovf 在 result 后
+    EXPECT_LE(HYBM_SDMA_ORCH_WS_OVF_OFF + 64U, HYBM_SDMA_ORCH_WS_SIZE); // 全部落在 4KB 内
+    EXPECT_EQ(HYBM_SDMA_ORCH_FLAG_READY, 0x1UL); /* meta 能力位与设备头文件约定一致 */
 }
 
 /* 用例 5: smem 层 overlap API 的无效 handle 拒绝(不依赖任何初始化) */
-TEST(SmemShmOverlapApiTest, InvalidHandleRejected)
+TEST(SmemShmSdmaApiTest, InvalidHandleRejected)
 {
-    EXPECT_NE(smem_shm_overlap_launch(nullptr, nullptr, nullptr, 8), SMEM_OK); // null handle 拒绝
-    EXPECT_NE(smem_shm_overlap_wait(nullptr), SMEM_OK); // 等待拒绝
+    EXPECT_NE(smem_shm_sdma_submit(nullptr, nullptr, nullptr, 8), SMEM_OK); // null handle 拒绝
+    EXPECT_NE(smem_shm_sdma_wait(nullptr), SMEM_OK); // 等待拒绝
     uint32_t mainRet = 0;   // 主返回码出参
     uint32_t stage = 0;     // 阶段出参
     uint32_t headAfter = 0; // head 出参
-    EXPECT_NE(smem_shm_overlap_get_result(nullptr, &mainRet, &stage, &headAfter), SMEM_OK); // 诊断拒绝
-    EXPECT_EQ(smem_shm_overlap_get_workspace(nullptr), nullptr); // 工作区返回 NULL
+    EXPECT_NE(smem_shm_sdma_get_result(nullptr, &mainRet, &stage, &headAfter), SMEM_OK); // 诊断拒绝
+    EXPECT_EQ(smem_shm_sdma_get_workspace(nullptr), nullptr); // 工作区返回 NULL
 }
 } // namespace mf
 } // namespace ock

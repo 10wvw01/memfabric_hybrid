@@ -118,7 +118,7 @@ private:
     std::shared_ptr<MemSegment> dramSegment_{nullptr};
     std::shared_ptr<DataOperator> dataOperator_;
     bool transportPrepared_{false};
-    bool overlapAcquired_{false}; // 310P 协同模式: InitTransManager 已 Acquire, UnInit 需对称 Release
+    bool orchAcquired_{false}; // 310P 协同模式: InitTransManager 已 Acquire, UnInit 需对称 Release
     std::mutex importMutex_;
     transport::TransManagerPtr transportManager_;
     std::unordered_map<uint32_t, EntityExportInfo> importedRanks_;

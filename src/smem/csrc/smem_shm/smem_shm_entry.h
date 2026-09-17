@@ -56,13 +56,13 @@ public:
 
     /* ---- 310P AICore×AICPU 协同模式(转发 hybm C API, 见 smem_shm.h 的 overlap 族) ---- */
     /* 提交一次流水搬运(邮箱 ring 逐 chunk → SQE 对 → 每 chunk doorbell; chunks=1 即单块) */
-    Result OverlapLaunch(void *dstGva, void *flagDoneGva, uint32_t chunks);
+    Result SdmaSubmit(void *dstGva, void *flagDoneGva, uint32_t chunks);
     /* 等待协同搬运完成 */
-    Result OverlapWait();
+    Result SdmaWait();
     /* 读取最近一次搬运的 kernel 结果(诊断) */
-    Result OverlapGetResult(uint32_t &mainRet, uint32_t &stage, uint32_t &headAfter);
+    Result SdmaGetResult(uint32_t &mainRet, uint32_t &stage, uint32_t &headAfter);
     /* 查询协同工作区地址(host 侧传给 AICore kernel 参数用); 未就绪返回 nullptr */
-    void *OverlapGetWorkspace() const;
+    void *SdmaGetWorkspace() const;
 
 private:
     Result CreateGlobalTeam(uint32_t rankSize, uint32_t rankId);

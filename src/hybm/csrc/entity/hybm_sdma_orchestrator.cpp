@@ -14,7 +14,7 @@
  * 机制依据: 310p-aicore-aicpu-开发进展.md 附录 A(SQE 配方/CP 流/工作区)
  * 与 P0 三实验的实测定论(档案见 310p-aicore-aicpu-开发进展.md)。
  */
-#include "hybm_overlap_prep.h" // 本类声明(工作区布局常量/单例接口/契约头)
+#include "hybm_sdma_orchestrator.h" // 本类声明(工作区布局常量/单例接口/契约头)
 
 #include <climits>   // PATH_MAX(realpath 结果缓冲尺寸)
 #include <cstdlib>   // realpath 等 POSIX 原型
@@ -29,25 +29,25 @@ namespace mf {  // hybm 内存池引擎子命名空间
 namespace {     // 匿名命名空间(编译单元内私有常量)
 /* ACL_STREAM_DEVICE_USE_ONLY 的值(acl_rt.h:0x20; CP 流关键 flag, X3/A.3) */
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;       /* CP 流标志: SQ 注册进 CP1 trs 表 */
-constexpr uint32_t HYBM_OVERLAP_BLOCK_DIM = 1;                    /* 单 block(kernel 状态机单线程语义) */
-constexpr uint32_t HYBM_OVERLAP_LAUNCH_TIMEOUT_S = 25;            /* launch attr 超时, < AICPU watchdog 30s */
-constexpr char HYBM_OVERLAP_FUNC_NAME[] = "HybmOverlapRun";       /* 编排 kernel 入口符号名 */
-constexpr char HYBM_OVERLAP_DEFAULT_JSON[] = "libmf_overlap_v3.json"; /* CWD 缺省 json(v3 契约) */
+constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;                    /* 单 block(kernel 状态机单线程语义) */
+constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25;            /* launch attr 超时, < AICPU watchdog 30s */
+constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmOverlapRun";       /* 编排 kernel 入口符号名 */
+constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_overlap_v3.json"; /* CWD 缺省 json(v3 契约) */
 } // namespace
 
-HybmOverlapPrep &HybmOverlapPrep::GetInstance() // 单例入口
+SdmaOrchestrator &SdmaOrchestrator::GetInstance() // 单例入口
 {
-    static HybmOverlapPrep instance;  // C++11 魔法静态(线程安全一次性构造, 进程唯一)
+    static SdmaOrchestrator instance;  // C++11 魔法静态(线程安全一次性构造, 进程唯一)
     return instance;                  // 返回单例引用
 }
 
-bool HybmOverlapPrep::SwitchOn() noexcept // 读开关环境变量
+bool SdmaOrchestrator::SwitchOn() noexcept // 读开关环境变量
 {
     const auto &val = env::MF_310P_SHM_OVERLAP;  // 读环境变量(进程启动时已缓存为 inline 变量)
     return val == "1" || val == "on";            // 仅 "1"/"on" 视为开, 其余(含未设置)一律为关
 }
 
-Result HybmOverlapPrep::Acquire(uint16_t devId) // 引用计数+1(首次全量初始化)
+Result SdmaOrchestrator::Acquire(uint16_t devId) // 引用计数+1(首次全量初始化)
 {
     std::lock_guard<std::mutex> guard(mutex_);  // 加锁: 计数变更与初始化/清理互斥
     if (refCount_ > 0) {                        // 已初始化: 仅做计数累加与设备绑定校验
@@ -74,7 +74,7 @@ Result HybmOverlapPrep::Acquire(uint16_t devId) // 引用计数+1(首次全量�
     return BM_OK; // Acquire 成功
 }
 
-void HybmOverlapPrep::Release() // 引用计数-1(归零清理)
+void SdmaOrchestrator::Release() // 引用计数-1(归零清理)
 {
     std::lock_guard<std::mutex> guard(mutex_); // 与 Acquire 同一把锁串行
     if (refCount_ == 0) {                      // 当前未持有
@@ -87,7 +87,7 @@ void HybmOverlapPrep::Release() // 引用计数-1(归零清理)
     }
 }
 
-Result HybmOverlapPrep::InitOnce(uint16_t devId) // 全量初始化(锁内调用)
+Result SdmaOrchestrator::InitOnce(uint16_t devId) // 全量初始化(锁内调用)
 {
     devId_ = devId;                                                // 绑定设备(后续 Acquire 一致性校验用)
     dieId_ = static_cast<uint32_t>(devId) % 2U; /* CP1 内 HAL devId = die 号(A.3) */
@@ -106,7 +106,7 @@ Result HybmOverlapPrep::InitOnce(uint16_t devId) // 全量初始化(锁内调用
     return BM_OK; // 三步全过, 初始化成功(端到端验证由 08 示例阶段①逐字校验承担)
 }
 
-Result HybmOverlapPrep::InitCpStream(uint16_t devId) // 第1步: CP 流
+Result SdmaOrchestrator::InitCpStream(uint16_t devId) // 第1步: CP 流
 {
     // 创建 CP 流: DEVICE_USE_ONLY 使其 SQ 注册进 CP1 进程 trs 表(AICPU kernel 可查可投的前提, X3/A.3)
     auto ret = DlAclApi::AclrtCreateStreamWithConfig(&cpStream_, 0, HYBM_ACL_STREAM_DEVICE_USE_ONLY);
@@ -132,16 +132,17 @@ Result HybmOverlapPrep::InitCpStream(uint16_t devId) // 第1步: CP 流
     return ret; // 末步结果即函数结果(失败路径根因已记录)
 }
 
-Result HybmOverlapPrep::AllocWorkspace() // 第2步: 工作区
+Result SdmaOrchestrator::AllocWorkspace() // 第2步: 工作区
 {
     void *ws = nullptr; // 工作区设备内存指针(待分配)
-    auto ret = DlAclApi::AclrtMalloc(&ws, HYBM_OVERLAP_WS_SIZE, ACL_MEM_MALLOC_HUGE_FIRST); // 分配 4KB(策略 HUGE_FIRST)
+    auto ret = DlAclApi::AclrtMalloc(&ws, HYBM_SDMA_ORCH_WS_SIZE, // 分配 4KB 工作区(策略 HUGE_FIRST)
+                                     ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != BM_OK) { // 分配失败
         BM_LOG_ERROR("alloc workspace failed, ret: " << ret << " devId: " << devId_
-                                                     << " size: " << HYBM_OVERLAP_WS_SIZE); // 根因日志: ret/devId/size
+                     << " size: " << HYBM_SDMA_ORCH_WS_SIZE); // 根因日志: ret/devId/size
         return ret;                                                                        // 透传失败(根因已记录)
     }
-    ret = DlAclApi::AclrtMemset(ws, HYBM_OVERLAP_WS_SIZE, 0, HYBM_OVERLAP_WS_SIZE); // 清零(邮箱槽初值必须为 0)
+    ret = DlAclApi::AclrtMemset(ws, HYBM_SDMA_ORCH_WS_SIZE, 0, HYBM_SDMA_ORCH_WS_SIZE); // 清零(邮箱槽初值必须为 0)
     if (ret != BM_OK) { // 清零失败
         BM_LOG_ERROR("memset workspace failed, ret: " << ret << " devId: " << devId_); // 根因日志: ret/devId
         (void)DlAclApi::AclrtFree(ws);                                                // 回滚: 释放刚分配的工作区
@@ -151,11 +152,11 @@ Result HybmOverlapPrep::AllocWorkspace() // 第2步: 工作区
     return BM_OK;                                // 工作区就绪
 }
 
-Result HybmOverlapPrep::LoadOrchestratorKernel() // 第3步: kernel 加载
+Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载
 {
     std::string jsonPath = env::MF_310P_OVERLAP_JSON; // 优先取环境变量指定的 launch json 路径
     if (jsonPath.empty()) {                           // 环境变量未设置
-        jsonPath = HYBM_OVERLAP_DEFAULT_JSON;         // 回退 CWD 缺省名 libmf_overlap_v1.json
+        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;         // 回退 CWD 缺省名 libmf_overlap_v1.json
     }
     char resolved[PATH_MAX] = {0}; // realpath 结果缓冲(解析后的绝对路径)
     if (realpath(jsonPath.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) { // 路径不存在或不可读
@@ -175,15 +176,15 @@ Result HybmOverlapPrep::LoadOrchestratorKernel() // 第3步: kernel 加载
         BM_LOG_ERROR("BinaryLoadFromFile failed, ret: " << ret << " json: " << resolved); // 根因日志: ret/json 绝对路径
         return ret;                                                                      // 透传失败(根因已记录)
     }
-    ret = DlAclApi::AclrtBinaryGetFunction(binHandle_, HYBM_OVERLAP_FUNC_NAME, &funcHandle_); // 取入口函数句柄
+    ret = DlAclApi::AclrtBinaryGetFunction(binHandle_, HYBM_SDMA_ORCH_FUNC_NAME, &funcHandle_); // 取入口函数句柄
     if (ret != BM_OK) { // 取函数句柄失败
         // 根因日志: ret/函数名
-        BM_LOG_ERROR("BinaryGetFunction failed, ret: " << ret << " func: " << HYBM_OVERLAP_FUNC_NAME);
+        BM_LOG_ERROR("BinaryGetFunction failed, ret: " << ret << " func: " << HYBM_SDMA_ORCH_FUNC_NAME);
     }
     return ret; // 末步结果即函数结果(失败路径根因已记录)
 }
 
-Result HybmOverlapPrep::LaunchOrchestrator(const HybmOverlapParam &param) // 提交编排 kernel
+Result SdmaOrchestrator::LaunchOrchestrator(const HybmOverlapParam &param) // 提交编排 kernel
 {
     if (funcHandle_ == nullptr || launchStream_ == nullptr) { // 前置: kernel 句柄与提交流任一缺失
         /* 守卫直接检查将使用的句柄与流本身(不依赖 ready_ 对外语义), 缺一即拒 */
@@ -211,12 +212,12 @@ Result HybmOverlapPrep::LaunchOrchestrator(const HybmOverlapParam &param) // 提
     }
     aclrtLaunchKernelAttr attr{}; // launch 属性(仅一项: 超时)
     attr.id = aclrtLaunchKernelAttrId::ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT; // 属性类型 = 超时
-    attr.value.timeout = HYBM_OVERLAP_LAUNCH_TIMEOUT_S; // 25s, 须 < AICPU watchdog 30s
+    attr.value.timeout = HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S; // 25s, 须 < AICPU watchdog 30s
     aclrtLaunchKernelCfg cfg{}; // launch 配置(挂属性数组)
     cfg.attrs = &attr;          // 属性数组首址
     cfg.numAttrs = 1;           // 属性个数
     // 提交编排 kernel(blockDim=1, 带超时属性, 异步不等待)
-    ret = DlAclApi::AclrtLaunchKernelWithConfig(funcHandle_, HYBM_OVERLAP_BLOCK_DIM, launchStream_, &cfg,
+    ret = DlAclApi::AclrtLaunchKernelWithConfig(funcHandle_, HYBM_SDMA_ORCH_BLOCK_DIM, launchStream_, &cfg,
                                                 argsHandle, nullptr);
     if (ret != BM_OK) { // 提交失败
         // 根因日志: ret/sqId/mode
@@ -226,7 +227,7 @@ Result HybmOverlapPrep::LaunchOrchestrator(const HybmOverlapParam &param) // 提
     return ret; // 提交结果(失败路径根因已记录)
 }
 
-Result HybmOverlapPrep::WaitOrchestrator() // 同步编排 kernel
+Result SdmaOrchestrator::WaitOrchestrator() // 同步编排 kernel
 {
     auto ret = DlAclApi::AclrtSynchronizeStream(launchStream_); // 同步提交流(kernel 完成即返回
     if (ret != BM_OK) {                                          // 同步失败
@@ -235,7 +236,7 @@ Result HybmOverlapPrep::WaitOrchestrator() // 同步编排 kernel
     return ret; // 同步结果(失败路径根因已记录)
 }
 
-void HybmOverlapPrep::Cleanup() // 逆序清理(锁内, 归零时)
+void SdmaOrchestrator::Cleanup() // 逆序清理(锁内, 归零时)
 {
     if (cpStream_ != nullptr) { // CP 流存在
         (void)DlAclApi::AclrtDestroyStream(cpStream_); // 销毁 CP 流(SQ 随流注销)
