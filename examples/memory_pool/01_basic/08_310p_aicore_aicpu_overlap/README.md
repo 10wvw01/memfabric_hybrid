@@ -84,7 +84,7 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_overla
 
 # 2. 部署 kernel 到设备(部署链见开发进展文档附录 A.4)
 # 3. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参)
-export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v3.json 路径>
+export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_sdma_orch_v4.json 路径>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root

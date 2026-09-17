@@ -10,7 +10,7 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* hybm_overlap_prep_test — 310P 协同模式传输准备与 C API 的 UT
+/* hybm_sdma_orchestrator_test — 310P 设备发起 SDMA 传输准备与 C API 的 UT
  *
  * UT 环境约束决定用例形态(acl_stub 的 aclrtMemcpy 为 no-op, 无设备内存模型;
  * DlRtApi 依赖 libruntime.so 在 mock 环境不可用) —— Acquire 在 UT 下必然失败,
@@ -27,7 +27,7 @@
 
 #include "hybm_sdma_orchestrator.h" // 被测单例(public 接口: Acquire/Ready/GetRefCountForTest/Release)
 
-#include "hybm_big_mem.h" // 被测 C API 声明(hybm_overlap_*)
+#include "hybm_big_mem.h" // 被测 C API 声明(hybm_sdma_*)
 #include "hybm_define.h"  // BM_OK/BM_INVALID_PARAM 等错误码
 #include "smem.h"         // smem 层公共定义(SMEM_OK)
 #include "smem_shm.h"     // 被测 smem 层 overlap API 声明

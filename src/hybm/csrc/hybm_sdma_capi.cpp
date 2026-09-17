@@ -10,11 +10,11 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* hybm_overlap_capi.cpp — 310P 协同模式 C API 实现(smem_shm 层消费, 声明见 hybm_big_mem.h)
+/* hybm_sdma_capi.cpp — 310P 设备发起 SDMA 的 hybm 层 C API 实现(smem_shm 层消费, 声明见 hybm_big_mem.h)
  * 资源与提交全部经进程级单例 SdmaOrchestrator(初始化在 InitTransManager 挂载点完成)。
  */
 #include "hybm_sdma_orchestrator.h" // 单例(Ready/Get*/Launch/Wait)与工作区布局常量
-#include "hybm_big_mem.h"      // 本文件实现的 C API 声明(hybm_overlap_*)
+#include "hybm_big_mem.h"      // 本文件实现的 C API 声明(hybm_sdma_*)
 
 using namespace ock::mf; // 引入 SdmaOrchestrator/BM_LOG 所在命名空间
 
@@ -23,7 +23,7 @@ namespace { // 匿名命名空间(编译单元私有)
 constexpr uint64_t HYBM_SDMA_ORCH_SUBMIT_SENTINEL = 0xE0ECA001ULL; // 提交哨兵魔数(0xE0ECA001)
 
 /* 流水提交: 装配 param(经 prep 单例) + 哨兵预填 + launch */
-int32_t HybmOverlapSubmitCommon(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunks)
+int32_t SdmaSubmitCommon(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunks)
 {
     auto &prep = SdmaOrchestrator::GetInstance(); // 单例引用(就绪判断/工作区/launch 均经它)
     if (!prep.Ready()) {                         // 未就绪(开关关/初始化失败)
@@ -41,7 +41,7 @@ int32_t HybmOverlapSubmitCommon(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_
         BM_LOG_ERROR("fill sentinel failed, ret: " << ret << " sqId: " << prep.GetSqId()); // 根因日志: ret/sqId
         return ret;                                                                        // 透传失败(根因已记录)
     }
-    HybmOverlapParam p = {};                                // kernel 入参(逐字段装配, 见下)
+    HybmSdmaOrchParam p = {};                                // kernel 入参(逐字段装配, 见下)
     p.devId = prep.GetDieId();                              // CP1 内 HAL devId = die 号
     p.sqId = prep.GetSqId();                                // CP 流 SQ id(kernel 内活查询)
     p.streamId = prep.GetStreamId();                        // CP 流 id(SQE 的 rt_stream_id)
@@ -84,7 +84,7 @@ HYBM_API int32_t hybm_sdma_submit(uint64_t dstAddr, uint64_t flagDoneAddr, uint3
                                         << ") dstAddr: 0x" << std::hex << dstAddr);
         return BM_INVALID_PARAM; // 参数非法
     }
-    return HybmOverlapSubmitCommon(dstAddr, flagDoneAddr, chunks); // 参数合法后统一提交
+    return SdmaSubmitCommon(dstAddr, flagDoneAddr, chunks); // 参数合法后统一提交
 }
 
 HYBM_API int32_t hybm_sdma_wait(void) // 等待搬运完成
@@ -99,7 +99,7 @@ HYBM_API int32_t hybm_sdma_get_result(uint32_t *mainRet, uint32_t *stage, uint32
         BM_LOG_ERROR("overlap not ready, result unavailable"); // 根因日志: 未就绪
         return BM_NOT_INITIALIZED;                              // 未初始化
     }
-    HybmOverlapResult r = {}; // 结果读回缓冲(零初始化)
+    HybmSdmaOrchResult r = {}; // 结果读回缓冲(零初始化)
     // D2H: 从工作区 +1032 槽读回 56B kernel 结果
     auto ret = DlAclApi::AclrtMemcpy(&r, sizeof(r),
                                      reinterpret_cast<void *>(prep.GetWorkspace() + HYBM_SDMA_ORCH_WS_RESULT_OFF),

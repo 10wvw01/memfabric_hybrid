@@ -21,7 +21,7 @@
  *   2. 工作区: mailbox/sentinel/result/ovf, 普通设备内存 HUGE_FIRST(NORMAL_ONLY 落
  *      特殊段 SDMA 不可翻译, A.4-7), AICore 可直接 GM 访问(E0c 结论);
  *   3. kernel 加载: BinaryLoadFromFile(cpuMode=0)+GetFunction(json 路径:
- *      env MF_310P_OVERLAP_JSON, 缺省 CWD 的 libmf_overlap_v3.json);
+ *      env MF_310P_OVERLAP_JSON, 缺省 CWD 的 libmf_sdma_orch_v4.json);
  *   4. Launch/Wait: URMA 同款 KernelArgs+LaunchKernelWithConfig 路径。
  *
  * 生命周期: 多池(多 entity)共享同一份进程级资源, Acquire/Release 引用计数,
@@ -34,7 +34,7 @@
 
 #include "dl_acl_api.h"            // ACL 运行时接口封装(dlsym 动态加载 aclrt* 符号)
 #include "hybm_common_include.h"   // hybm 公共类型(Result 错误码/日志宏等)
-#include "hybm_overlap_contract.h" // host↔kernel wire 契约(HybmOverlapParam/Result)
+#include "hybm_sdma_contract.h" // host↔kernel wire 契约(HybmSdmaOrchParam/Result)
 
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 内存池引擎子命名空间
@@ -96,7 +96,7 @@ public:
     }
 
     /* AICPU 编排 kernel 提交(URMA 同款 KernelArgs+LaunchKernelWithConfig) */
-    Result LaunchOrchestrator(const HybmOverlapParam &param);
+    Result LaunchOrchestrator(const HybmSdmaOrchParam &param);
 
     /* 等待编排 kernel 完成(SynchronizeStream) */
     Result WaitOrchestrator();
@@ -119,7 +119,7 @@ private:
     void *launchStream_{nullptr};   /* 编排 kernel 提交流(普通流) */
     uint64_t workspace_{0};         /* 工作区设备地址(HUGE_FIRST) */
     aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
-    aclrtFuncHandle funcHandle_{nullptr}; /* HybmOverlapRun 函数句柄 */
+    aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchBatch 函数句柄 */
     bool ready_{false};             /* 初始化就绪标志 */
 };
 } // namespace mf

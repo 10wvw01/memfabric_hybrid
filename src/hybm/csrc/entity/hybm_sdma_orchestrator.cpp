@@ -10,7 +10,7 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* hybm_overlap_prep.cpp — 310P AICore×AICPU 协同模式传输准备(实现)
+/* hybm_sdma_orchestrator.cpp — 310P 设备发起 SDMA 的 AICPU 编排资源管理(实现)
  * 机制依据: 310p-aicore-aicpu-开发进展.md 附录 A(SQE 配方/CP 流/工作区)
  * 与 P0 三实验的实测定论(档案见 310p-aicore-aicpu-开发进展.md)。
  */
@@ -31,8 +31,8 @@ namespace {     // 匿名命名空间(编译单元内私有常量)
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;       /* CP 流标志: SQ 注册进 CP1 trs 表 */
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;                    /* 单 block(kernel 状态机单线程语义) */
 constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25;            /* launch attr 超时, < AICPU watchdog 30s */
-constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmOverlapRun";       /* 编排 kernel 入口符号名 */
-constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_overlap_v3.json"; /* CWD 缺省 json(v3 契约) */
+constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchBatch";       /* 编排 kernel 入口符号名 */
+constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v4.json"; /* CWD 缺省 json(v4) */
 } // namespace
 
 SdmaOrchestrator &SdmaOrchestrator::GetInstance() // 单例入口
@@ -156,7 +156,7 @@ Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载
 {
     std::string jsonPath = env::MF_310P_OVERLAP_JSON; // 优先取环境变量指定的 launch json 路径
     if (jsonPath.empty()) {                           // 环境变量未设置
-        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;         // 回退 CWD 缺省名 libmf_overlap_v1.json
+        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;         // 回退 CWD 缺省名 libmf_sdma_orch_v4.json
     }
     char resolved[PATH_MAX] = {0}; // realpath 结果缓冲(解析后的绝对路径)
     if (realpath(jsonPath.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) { // 路径不存在或不可读
@@ -184,7 +184,7 @@ Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载
     return ret; // 末步结果即函数结果(失败路径根因已记录)
 }
 
-Result SdmaOrchestrator::LaunchOrchestrator(const HybmOverlapParam &param) // 提交编排 kernel
+Result SdmaOrchestrator::LaunchOrchestrator(const HybmSdmaOrchParam &param) // 提交编排 kernel
 {
     if (funcHandle_ == nullptr || launchStream_ == nullptr) { // 前置: kernel 句柄与提交流任一缺失
         /* 守卫直接检查将使用的句柄与流本身(不依赖 ready_ 对外语义), 缺一即拒 */
@@ -200,7 +200,7 @@ Result SdmaOrchestrator::LaunchOrchestrator(const HybmOverlapParam &param) // �
         BM_LOG_ERROR("KernelArgsInit failed, ret: " << ret << " sqId: " << sqId_); // 根因日志: ret/sqId
         return ret;                                                               // 透传失败(根因已记录)
     }
-    HybmOverlapParam p = param; /* Append 接口非 const, 本地拷贝(120B) */
+    HybmSdmaOrchParam p = param; /* Append 接口非 const, 本地拷贝(120B) */
     aclrtParamHandle paramHandle = nullptr; // 参数块句柄(Append 输出, 本函数不消费)
     ret = DlAclApi::AclrtKernelArgsAppend(argsHandle, &p, sizeof(p), &paramHandle); // 追加 120B 入参块
     if (ret == BM_OK) {                     // 追加成功后

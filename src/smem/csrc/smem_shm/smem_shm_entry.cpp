@@ -330,7 +330,7 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
     return SM_OK;
 }
 
-/* ---- 310P 协同模式转发(实现细节见 hybm_overlap_capi.cpp) ---- */
+/* ---- 310P 协同模式转发(实现细节见 hybm_sdma_capi.cpp) ---- */
 Result SmemShmEntry::SdmaSubmit(void *dstGva, void *flagDoneGva, uint32_t chunks) // 流水提交
 {
     if (entity_ == nullptr) { // 底层 entity 未建

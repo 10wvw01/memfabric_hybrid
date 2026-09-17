@@ -1,9 +1,0 @@
-{
-    "HybmOverlapRun": {
-        "opInfo": {
-            "opKernelLib": "CUSTAICPUKernel",
-            "kernelSo": "libmf_overlap_aicpu.so",
-            "functionName": "HybmOverlapRun"
-        }
-    }
-}
