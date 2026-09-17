@@ -11,6 +11,9 @@
 - [x] 08 示例两阶段改造 + README 同步（v2 json/验收标准）
 - [x] UT 对齐新 API（五用例语义不变，SubmitChunksBounds 更名）
 - [x] 主 spec 同步：API 参数与错误语义要求更新为单一提交接口
+- [x] 冗余清理: prep 死 include(cstring)/示例 kernel 死参数 physSize/STAGE 历史中间态枚举值/
+      UT 宏 hack(#define private public)移除; 示例标志区魔数改设备头常量; ResetWorkspace 隐晦写法显式化
+      (Result 面包屑字段与 timeline 诊断路径经评估保留)
 - [x] 初始化冒烟自证移除（InitOnce 回归三步；spec 就绪门控语义同步；UT 注释适配方就绪门控表述）
 - [x] 08 示例 AICore kernel 四角色合并为两角色(role2/3 删除, 单块=流水 chunks=1,
       host 两阶段共用 role4/5 声明上提; 角色头注释 v1 阶段编号同步修正)

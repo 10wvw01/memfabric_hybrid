@@ -49,7 +49,7 @@ struct HybmOverlapParam {        // kernel 入参 wire 结构(120B, 纯 POD)
 // 结果结构 (AICPU 写, host 读)
 struct HybmOverlapResult {     // 结果 wire 结构(56B, 诊断面包屑)
     uint32_t magic;        // 0xA1C0DE01: kernel 真正执行过
-    uint32_t stage;        // 3=chInfo 4=submitted 5=done
+    uint32_t stage;        // 1=entry 5=done(v2 仅两态, 3/4 为历史中间态值已废弃)
     int32_t mainRet;       // 主返回码(0=成功, 13xx 段定位)
     int32_t subRet;         // 子返回码(次要错误补充)
     uint32_t sqBaseLow;     // SQ 环基址低 32 位(活查询证据)
@@ -66,10 +66,8 @@ struct HybmOverlapResult {     // 结果 wire 结构(56B, 诊断面包屑)
 constexpr uint32_t HYBM_OVERLAP_RESULT_MAGIC = 0xA1C0DE01; // 结果魔数(与 magic 字段同值)
 
 enum Stage { // 状态机阶段枚举(结果 stage 字段取值)
-    STAGE_ENTRY = 1,     // 入口(kernel 已开始执行)
-    STAGE_CHINFO = 3,   // 通道元数据已读
-    STAGE_SUBMITTED = 4, // SQE 已提交(含 doorbell)
-    STAGE_DONE = 5,      // 完成(head 前进已确认)
+    STAGE_ENTRY = 1, // 入口(kernel 已开始执行)
+    STAGE_DONE = 5,  // 完成(编排完毕, head 前进已确认); 3/4 历史中间态已废弃, 值域不复用
 };
 
 // 通道元数据 (shmem stars_channel_info_t wire 契约, AICPU 查询算子填写)

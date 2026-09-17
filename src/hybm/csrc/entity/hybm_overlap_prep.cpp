@@ -18,7 +18,6 @@
 
 #include <climits>   // PATH_MAX(realpath 结果缓冲尺寸)
 #include <cstdlib>   // realpath 等 POSIX 原型
-#include <cstring>   // 内存原语(结果读回缓冲初始化等)
 #include <string>    // std::string(json 路径承载)
 #include <unistd.h>  // access 路径可达性检查
 

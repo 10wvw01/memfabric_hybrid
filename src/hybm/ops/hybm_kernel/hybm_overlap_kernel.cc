@@ -157,7 +157,7 @@ static int32_t doorbellViaHal(uint32_t devId, uint32_t sqId, uint32_t newTail) /
 }
 
 // ============================================================================
-// SQE 构造 (64B, 双格式)
+// SQE 构造 (64B, 单格式: STARS V2 SDMA; 数据与标志 SQE 同构, 仅地址/长度不同)
 // ============================================================================
 
 // format 0: STARS V2 SDMA SQE (hcomm rtStarsMemcpyAsyncSqeV2_t / shmem stars_sdma_sqe_t 布局)

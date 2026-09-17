@@ -52,6 +52,7 @@ constexpr uint64_t SMEM_SHM_OVERLAP_FLAG_READY = 0x1UL;
 /* ---- 工作区布局常量(与 hybm_overlap_prep.h 一致) ---- */
 constexpr uint64_t SMEM_SHM_OVERLAP_WS_MAILBOX_OFF = 0;        /* 邮箱 ring 基址偏移 */
 constexpr uint64_t SMEM_SHM_OVERLAP_WS_MAILBOX_SLOT_SIZE = 16; /* 16B/slot {dataAddr, words} */
+constexpr uint64_t SMEM_SHM_OVERLAP_WS_MAILBOX_REGION_SIZE = 1024; /* 邮箱 ring 区总大小(64 槽×16B, = SENTINEL_OFF) */
 constexpr uint64_t SMEM_SHM_OVERLAP_WS_SENTINEL_OFF = 1024;    /* 哨兵 8B */
 
 /* ---- 池内协同保留区 ----

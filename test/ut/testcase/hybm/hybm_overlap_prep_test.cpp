@@ -25,11 +25,7 @@
  */
 #include <gtest/gtest.h> // googletest 框架
 
-#define private public    // 打开私有访问(断言单例内部计数/状态用)
-#define protected public  // 打开保护访问(同上)
-#include "hybm_overlap_prep.h" // 被测单例(私有成员直读)
-#undef private            // 恢复 private 宏
-#undef protected          // 恢复 protected 宏
+#include "hybm_overlap_prep.h" // 被测单例(public 接口: Acquire/Ready/GetRefCountForTest/Release)
 
 #include "hybm_big_mem.h" // 被测 C API 声明(hybm_overlap_*)
 #include "hybm_define.h"  // BM_OK/BM_INVALID_PARAM 等错误码
