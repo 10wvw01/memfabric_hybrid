@@ -1249,12 +1249,13 @@ Result MemEntityDefault::InitTransManager()
         return BM_OK;
     }
     if (options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA) { // SDMA 传输位(设备侧搬运引擎)
-        // 平台+开关双门控: 310P 且 MF_310P_SHM_OVERLAP 开启才进协同模式
-        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P && SdmaOrchestrator::SwitchOn()) {
-            /* 310P 协同模式(D4 挂载点): A3 SdmaTransportManager 配方在 310P 不可用
-             * (AclnnShmemSdmaStarsQuery 实测 65534), 改做 overlap 准备(CP 流+工作区+
-             * kernel, 失败即报错不静默); meta 由 SetHybmDeviceInfo 填充 */
-            BM_LOG_INFO("310P overlap mode: AICore x AICPU orchestration instead of SdmaTransportManager, "
+        // 平台门控+显式禁用: 310P 自动启用协同(A3 SdmaTransportManager 配方在 310P
+        // 必败——AclnnShmemSdmaStarsQuery 实测 65534, 协同为该平台唯一可用 SDMA 链路;
+        // MF_SDMA_ORCH_DISABLE=1 仅供诊断场景显式关断, 走 A3 路径即报其原生错误)
+        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P && !SdmaOrchestrator::Disabled()) {
+            /* 310P 协同模式: 改做编排准备(CP 流+工作区+kernel, 失败即报错不静默);
+             * meta 由 SetHybmDeviceInfo 填充 */
+            BM_LOG_INFO("310P sdma orchestrator: device-initiated SDMA instead of SdmaTransportManager, "
                         "entityId: " << id_ << " devId: " << options_.devId);
             auto ret = SdmaOrchestrator::GetInstance().Acquire(options_.devId); // 首次进入做全量初始化(引用计数+1)
             if (ret != BM_OK) { // 准备失败(CP 流/工作区/kernel 任一不过)

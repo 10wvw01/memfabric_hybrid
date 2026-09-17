@@ -11,18 +11,21 @@
  */
 
 /* hybm_sdma_orchestrator.cpp — 310P 设备发起 SDMA 的 AICPU 编排资源管理(实现)
- * 机制依据: 310p-aicore-aicpu-开发进展.md 附录 A(SQE 配方/CP 流/工作区)
- * 与 P0 三实验的实测定论(档案见 310p-aicore-aicpu-开发进展.md)。
+ * 机制档案见 docs/310p/机制档案.md(SQE 配方/CP 流/工作区/通知链)。
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // dladdr(GNU 扩展, 安装前缀自动发现用; 构建系统可能已定义)
+#endif
 #include "hybm_sdma_orchestrator.h" // 本类声明(工作区布局常量/单例接口/契约头)
 
 #include <climits>   // PATH_MAX(realpath 结果缓冲尺寸)
 #include <cstdlib>   // realpath 等 POSIX 原型
+#include <dlfcn.h>   // dladdr(本 so 路径定位)
 #include <string>    // std::string(json 路径承载)
 #include <unistd.h>  // access 路径可达性检查
 
 #include "dl_rt_api.h"     // RtStreamGetSqid(rt 私有符号, 经 libruntime 解析)
-#include "mf_env_define.h" // env::MF_310P_OVERLAP_JSON/MF_310P_SHM_OVERLAP 读取
+#include "mf_env_define.h" // env::MF_SDMA_ORCH_JSON/MF_SDMA_ORCH_DISABLE 读取
 
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 内存池引擎子命名空间
@@ -41,10 +44,10 @@ SdmaOrchestrator &SdmaOrchestrator::GetInstance() // 单例入口
     return instance;                  // 返回单例引用
 }
 
-bool SdmaOrchestrator::SwitchOn() noexcept // 读开关环境变量
+bool SdmaOrchestrator::Disabled() noexcept // 读显式禁用环境变量
 {
-    const auto &val = env::MF_310P_SHM_OVERLAP;  // 读环境变量(进程启动时已缓存为 inline 变量)
-    return val == "1" || val == "on";            // 仅 "1"/"on" 视为开, 其余(含未设置)一律为关
+    const auto &val = env::MF_SDMA_ORCH_DISABLE; // 读环境变量(进程启动时已缓存为 inline 变量)
+    return val == "1" || val == "on";            // 仅 "1"/"on" 视为禁用, 其余(含未设置)一律启用
 }
 
 Result SdmaOrchestrator::Acquire(uint16_t devId) // 引用计数+1(首次全量初始化)
@@ -152,17 +155,44 @@ Result SdmaOrchestrator::AllocWorkspace() // 第2步: 工作区
     return BM_OK;                                // 工作区就绪
 }
 
+/* 安装前缀自动发现: 本 so 所在目录(如 <prefix>/lib64)的同级 hybm/aicpu_kernel 下
+ * 找 launch json(安装布局: so→<prefix>/lib64, json→<prefix>/hybm/aicpu_kernel)。
+ * 命中返回绝对路径, 未命中返回空串(调用方继续回退 CWD)。 */
+static std::string FindInstalledJson()
+{
+    Dl_info info = {}; // 地址→so 映射信息
+    if (dladdr(reinterpret_cast<void *>(&SdmaOrchestrator::GetInstance), &info) == 0 || info.dli_fname == nullptr) {
+        return ""; // 定位本 so 失败(静态链接等场景)
+    }
+    std::string soDir(info.dli_fname); // 本 so 路径
+    auto pos = soDir.find_last_of('/'); // 最后一个目录分隔
+    if (pos == std::string::npos) {
+        return ""; // 无目录分量
+    }
+    soDir.resize(pos); // 本 so 所在目录
+    char resolved[PATH_MAX] = {0}; // realpath 结果缓冲
+    // 候选: <soDir>/../hybm/aicpu_kernel/<json>(lib64 与 hybm/aicpu_kernel 同级于安装前缀)
+    std::string cand = soDir + "/../hybm/aicpu_kernel/" + HYBM_SDMA_ORCH_DEFAULT_JSON;
+    if (realpath(cand.c_str(), resolved) != nullptr && access(resolved, R_OK) == 0) {
+        return std::string(resolved); // 命中安装前缀
+    }
+    return ""; // 未命中(继续回退)
+}
+
 Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载
 {
-    std::string jsonPath = env::MF_310P_OVERLAP_JSON; // 优先取环境变量指定的 launch json 路径
-    if (jsonPath.empty()) {                           // 环境变量未设置
-        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;         // 回退 CWD 缺省名 libmf_sdma_orch_v4.json
+    std::string jsonPath = env::MF_SDMA_ORCH_JSON;  // ① 环境变量显式指定的 launch json 路径
+    if (jsonPath.empty()) {                            // 未设置
+        jsonPath = FindInstalledJson();                // ② 安装前缀自动发现(本 so 同级的 hybm/aicpu_kernel)
+    }
+    if (jsonPath.empty()) {                            // 未发现
+        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;        // ③ CWD 缺省名 libmf_sdma_orch_v4.json
     }
     char resolved[PATH_MAX] = {0}; // realpath 结果缓冲(解析后的绝对路径)
     if (realpath(jsonPath.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) { // 路径不存在或不可读
         // 根因日志: json 路径 + 设置提示
-        BM_LOG_ERROR("overlap kernel json not accessible: " << jsonPath
-                                                            << " (set MF_310P_OVERLAP_JSON?)");
+        BM_LOG_ERROR("sdma orchestrator json not accessible: " << jsonPath
+                                                                 << " (set MF_SDMA_ORCH_JSON?)");
         return BM_FILE_NOT_ACCESS; // 显式报错(kernel 未部署即不可用)
     }
     aclrtBinaryLoadOption loadOption{}; // 二进制加载选项(仅一项: cpuKernelMode)

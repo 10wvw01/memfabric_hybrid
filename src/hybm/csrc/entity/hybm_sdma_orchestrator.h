@@ -21,7 +21,7 @@
  *   2. 工作区: mailbox/sentinel/result/ovf, 普通设备内存 HUGE_FIRST(NORMAL_ONLY 落
  *      特殊段 SDMA 不可翻译, A.4-7), AICore 可直接 GM 访问(E0c 结论);
  *   3. kernel 加载: BinaryLoadFromFile(cpuMode=0)+GetFunction(json 路径:
- *      env MF_310P_OVERLAP_JSON, 缺省 CWD 的 libmf_sdma_orch_v4.json);
+ *      env MF_SDMA_ORCH_JSON, 缺省依次: 安装前缀自动发现 → CWD 的 libmf_sdma_orch_v4.json);
  *   4. Launch/Wait: URMA 同款 KernelArgs+LaunchKernelWithConfig 路径。
  *
  * 生命周期: 多池(多 entity)共享同一份进程级资源, Acquire/Release 引用计数,
@@ -50,8 +50,9 @@ class SdmaOrchestrator { // 协同模式传输准备单例(所有可变状态在
 public:
     static SdmaOrchestrator &GetInstance();     /* 进程级单例入口 */
 
-    /* 开关读取(env MF_310P_SHM_OVERLAP, 取值 "1"/"on" 为开) */
-    static bool SwitchOn() noexcept;
+    /* 显式禁用读取(env MF_SDMA_ORCH_DISABLE, 取值 "1"/"on" 为禁用);
+     * 310P+SDMA 位默认启用协同(A3 配方必败, 协同为唯一可用链路) */
+    static bool Disabled() noexcept;
 
     /* 引用计数 +1; 首次进入执行全量初始化(CP 流→工作区→kernel)。
      * 任一步失败: 计数回退并返回错误(调用方报错, 不静默), 关键参数见 ERROR 日志 */

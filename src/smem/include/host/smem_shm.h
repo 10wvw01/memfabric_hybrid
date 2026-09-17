@@ -231,8 +231,9 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
  * FIFO 保序保证"标志到即数据到", 通信与对端 AICore 计算重叠; 对端 AICore kernel 用
  * smem_shm_sdma_poll_flag 轮询标志后消费。chunks=1 即单块闭环语义。
  *
- * 前置: smem_shm_create 时选用 SDMA 引擎, 环境变量 MF_310P_SHM_OVERLAP=1,
- * 且协同初始化完成(否则本接口返回错误, 上层以 smem_get_last_err_msg 排障)。
+ * 前置: smem_shm_create 时选用 SDMA 引擎(310P 上协同模式自动启用,
+ * MF_SDMA_ORCH_DISABLE=1 可显式禁用), 且协同初始化完成(否则本接口返回错误,
+ * 上层以 smem_get_last_err_msg 排障)。
  *
  * @param handle           [in] shm object
  * @param dstGva           [in] 数据目的基址(对端池 GVA, kernel 内按 chunk 递增)

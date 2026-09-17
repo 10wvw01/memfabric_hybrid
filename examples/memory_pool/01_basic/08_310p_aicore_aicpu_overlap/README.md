@@ -26,7 +26,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 
 ## 使用能力
 
-`smem_shm_create`（SDMA 位 + `MF_310P_SHM_OVERLAP=1`）→ `smem_shm_sdma_get_workspace`
+`smem_shm_create`（SDMA 位，310P 上协同自动启用）→ `smem_shm_sdma_get_workspace`
 → AICore kernel（`smem_shm_sdma_notify`/`poll_flag`/`get_flag_addr` 设备头原语）→
 `smem_shm_sdma_submit`（chunks 1~64，chunks=1 即单块）→ `smem_shm_sdma_wait`
 → `smem_shm_sdma_get_result` → `smem_shm_destroy`
@@ -47,7 +47,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
   `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`，机制与运维纪律见
   `310p-aicore-aicpu-开发进展.md` 附录 A.4；**每次正式运行前须过验证门**——
   deployer 保活到期退出会触发清理链删除设备侧文件）
-- 环境变量：`MF_310P_SHM_OVERLAP=1` + `MF_310P_OVERLAP_JSON=<launch json 路径>`
+- 环境变量（均可选）：`MF_SDMA_ORCH_JSON` 显式指定 launch json（缺省依次自动发现：安装前缀 → CWD）；`MF_SDMA_ORCH_DISABLE=1` 显式禁用协同（仅诊断用）
   （json 由主构建 `mf_overlap_kernel` 目标产出）
 
 ## 验收标准
@@ -84,7 +84,7 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_overla
 
 # 2. 部署 kernel 到设备(部署链见开发进展文档附录 A.4)
 # 3. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参)
-export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_sdma_orch_v4.json 路径>
+export MF_SDMA_ORCH_JSON=<libmf_sdma_orch_v4.json 路径>  # 可选: 缺省自动发现(安装前缀→CWD)
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root

@@ -7,27 +7,34 @@ wire 契约与工作区布局不变式、设备元数据布局兼容，以及开
 
 ## Requirements
 
-### Requirement: 开关门控与显式不支持
+### Requirement: 平台门控与显式禁用
 
-系统 SHALL 通过环境变量 `MF_310P_SHM_OVERLAP` 门控协同模式，默认关闭。开关关闭时，
-310P 上以 SDMA 传输位创建 SHM 实体的请求 SHALL 返回明确的不支持错误，错误日志 MUST
-包含 deviceId 与失败原因；系统 MUST NOT 静默降级到其他链路。开关状态 MUST NOT 影响
-非 310P 平台的任何行为，也 MUST NOT 影响 310P 上不携带 SDMA 传输位的既有路径行为。
+系统 SHALL 在 310P 平台以 SDMA 传输位创建 SHM 实体时自动启用协同模式（A3 SDMA 配方
+在 310P 必败，协同模式是该平台 SDMA 的唯一可用链路，自动启用使用户零配置）。
+环境变量 `MF_SDMA_ORCH_DISABLE` 为显式禁用开关（"1"/"on" 禁用）：禁用时 310P 上以
+SDMA 传输位创建 SHM 实体的请求 SHALL 返回明确的不支持错误，错误日志 MUST 包含
+deviceId 与失败原因；系统 MUST NOT 静默降级到其他链路。禁用状态 MUST NOT 影响非
+310P 平台的任何行为，也 MUST NOT 影响 310P 上不携带 SDMA 传输位的既有路径行为。
 
-#### Scenario: 开关关闭时请求 SDMA SHM
+#### Scenario: 默认自动启用
 
-- **WHEN** 310P 环境下 `MF_310P_SHM_OVERLAP` 未设置（默认关闭），调用方以 SDMA 传输位创建 SHM 实体
+- **WHEN** 310P 环境下未设置任何协同环境变量，调用方以 SDMA 传输位创建 SHM 实体
+- **THEN** 协同模式自动启用，建池成功，无需任何环境变量配置
+
+#### Scenario: 显式禁用时请求 SDMA SHM
+
+- **WHEN** 310P 环境下设置 `MF_SDMA_ORCH_DISABLE=1`，调用方以 SDMA 传输位创建 SHM 实体
 - **THEN** 创建失败并返回明确的不支持错误，ERROR 日志含 deviceId 与失败原因，不发生静默降级
 
-#### Scenario: 开关关闭时存量路径零影响
+#### Scenario: 存量路径零影响
 
-- **WHEN** `MF_310P_SHM_OVERLAP` 未设置，调用方使用 BM API 或不带 SDMA 传输位的 SHM API
+- **WHEN** 任意设置 `MF_SDMA_ORCH_DISABLE`，调用方使用 BM API 或不带 SDMA 传输位的 SHM API
 - **THEN** 行为与本能力引入前完全一致（回归不变式）
 
-#### Scenario: 非 310P 平台不受开关影响
+#### Scenario: 非 310P 平台不受影响
 
-- **WHEN** 在非 310P 平台（如 A3/910B）上设置任意 `MF_310P_SHM_OVERLAP` 取值
-- **THEN** 平台既有路径（含 SDMA 传输准备）行为与开关值无关
+- **WHEN** 在非 310P 平台（如 A3/910B）上设置任意 `MF_SDMA_ORCH_DISABLE` 取值
+- **THEN** 平台既有路径（含 SDMA 传输准备）行为与该变量值无关
 
 ### Requirement: 传输准备与就绪门控
 

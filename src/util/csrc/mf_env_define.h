@@ -65,11 +65,11 @@ inline const std::string MF_CONFIG_STORE_PORT_START =
 inline const std::string MF_CONFIG_STORE_PORT_END =
     GetEnvStr("MF_CONFIG_STORE_PORT_END", "MEMFABRIC_HYBRID_CONFIG_STORE_PORT_END");
 
-// 310P AICore×AICPU 协同模式开关(默认关; 详见 310p-aicore-aicpu-开发进展.md D1)
-// 值 "1"/"on" 为开, SdmaOrchestrator::SwitchOn 读取
-inline const std::string MF_310P_SHM_OVERLAP = GetEnvStr("MF_310P_SHM_OVERLAP");
-// 协同编排 kernel 的 launch json 路径(缺省取 CWD 的 libmf_sdma_orch_v4.json)
-inline const std::string MF_310P_OVERLAP_JSON = GetEnvStr("MF_310P_OVERLAP_JSON"); // LoadOrchestratorKernel 读取
+// 310P 设备发起 SDMA 协同模式显式禁用开关(默认启用: 310P 上 A3 SDMA 配方必败,
+// 协同为该平台唯一可用 SDMA 链路, 故零配置自动启用; 该变量仅供诊断场景显式关断)
+inline const std::string MF_SDMA_ORCH_DISABLE = GetEnvStr("MF_SDMA_ORCH_DISABLE"); // SdmaOrchestrator::Disabled 读取
+// 协同编排 kernel 的 launch json 路径(缺省依次: 安装前缀自动发现 → CWD 的 libmf_sdma_orch_v4.json)
+inline const std::string MF_SDMA_ORCH_JSON = GetEnvStr("MF_SDMA_ORCH_JSON"); // LoadOrchestratorKernel 读取
 inline const std::string MF_GROUP_JOIN_MAX_TIMEOUT = GetEnvStr("MF_GROUP_JOIN_MAX_TIMEOUT");
 inline const std::string MF_GROUP_RETRY_TIME = GetEnvStr("MF_GROUP_RETRY_TIME", "MF_SMEM_GROUP_RETRY_TIME");
 inline const std::string MF_ACC_CHECK_PERIOD_HOURS =
