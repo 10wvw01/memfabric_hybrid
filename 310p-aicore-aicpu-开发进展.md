@@ -1,11 +1,15 @@
 # 310P AICore×AICPU 协同模式开发进展（V2，xcclpp aicpu-aicore-310p3 迁移）
 
-> **文档状态：已冻结为过程记录（2026-09-11）**
+> **文档状态：过程记录（2026-09-11 冻结；2026-09-17 增补 V2.1 轮，见 §〇'）**
 > 技术内容已沉淀至 `docs/310p/`（机制档案 / 部署档案 / 平台事实档案），
 > 行为契约已固化至 `openspec/specs/smem/310p-shm-overlap/`。本文档保留完整的决策、
-> 验收与踩坑历史，不再更新；若与档案冲突，以档案为准。
+> 验收与踩坑历史；〇~九章为 2026-09-10/11 冻结时点快照——其中 mode13 双模式/初始化冒烟/
+> 双入口 API/四角色三阶段/8.02x 等描述已被 §〇' 精简轮**取代**，勿按旧章节理解现状；
+> 若与档案冲突，以档案为准。
 
-> **状态：P0/P1/P2 完成 + P3 核心项完成（2026-09-10：UT 五用例/回归/性能基线即 08 三阶段实测/架构文档更新）；FIP 故障注入集成与 OPP 产品化在 TODO**
+> **状态：P0/P1/P2 完成 + P3 核心项完成（2026-09-10）；V2.1 纯流水精简与产品化收敛完成
+> （2026-09-12~17，14 提交，见 §〇'：API 合并为单一 submit/launch(chunks)、初始化冒烟移除、
+> 示例两角色两阶段+MPI 会合、实机复验加速比 7.87x）；FIP 故障注入集成与 OPP 产品化在 TODO**
 > - **V2 勘正**：迁移源 = xcclpp main `examples/tutorials/aicpu-aicore-310p3/`（**AICore×AICPU 协同**，
 >   AICore 产数据 → AICPU 编排 SDMA 跨卡搬运 → 对端 AICore 消费，计算-通信重叠）。
 >   V1 误选 `aicpu-310p3`（纯 AICPU 搬运、host 每笔 launch、无 AICore 协同）——该方案整体降级为 TODO-0。
@@ -19,11 +23,15 @@
 
 ## 〇、实现总结（2026-09-10 收官，28 提交 / 40 文件 / +6199 行）
 
+> **V2.1 注**：本节为收官时点快照，0.1~0.6 中 mode13 双状态机/五步冒烟/五件套与双入口
+> API/四角色三阶段等形态描述已被 §〇' 精简轮取代，勘正对照见 §〇'.1。
+
 **一句话**：SHM API 在 310P 此前于 `hybm_init`（meta 区 halMem 必败）和 `InitTransManager`
 （A3 SDMA 配方必败）两处断链而完全不可用；本工作迁移 xcclpp 的 AICore×AICPU 协同模式
 （AICore 产数据 → GM 邮箱委托 AICPU 编排 kernel 直投 SDMA SQE → 对端 AICore 消费），
 补齐全部断链并实机验收：八步闭环数据校验 0 mismatch，多 chunk 流水**加速比 8.02x**
-（通信完全被计算掩盖）。以下按"写了什么代码 → 怎么接入 → 怎么跑起来 → 验收证据"展开。
+（通信完全被计算掩盖；**V2.1 注**：8.02x 为文件会合口径，MPI 栅栏口径复测 7.87x，两者
+不可直接比较，见 §〇'）。以下按"写了什么代码 → 怎么接入 → 怎么跑起来 → 验收证据"展开。
 
 ### 0.1 交付物：新写了哪些代码
 
@@ -184,6 +192,86 @@ buffer，不触碰池 GVA；池内真实验证留给验收链（P1 探针/08 示
 5. **host 指针与 `__gm__` 限定**：host 调用侧用普通指针（`static_cast<uint8_t*>`），`__gm__` 限定
    只出现在 kernel 形参；`static_cast<__gm__ T*>` 会报 "casts away qualifiers"。
 
+## 〇'、纯流水精简与产品化收敛（V2.1，2026-09-12 ~ 09-17，14 提交）
+
+**一句话**：PR 评审期收敛——"单块 = 流水 chunks=1"合并策略从产品 kernel 一路贯彻到示例
+（mode13 删除、API 双入口合一、示例角色 4→2），初始化去测试化（冒烟移除），双 rank 会合
+改 MPI；全部变更经实机双 rank 复验**行为等价**（加速比 7.87x 两次复测完全一致）。
+
+### 0'.1 勘正对照表（旧章节描述 → V2.1 现状，冲突时以本表为准）
+
+| 冻结章节描述（09-10 时点） | V2.1 现状 |
+|---|---|
+| kernel 784 行，mode13（八步闭环）/mode14（流水）双状态机 | **438 行**，仅 `SUBMIT_MODE_PIPELINE=14`（域外值 950 拒绝）；mode13 闭环由 chunks=1 等价覆盖，role1/实验钩子全删 |
+| 契约 102 行，`roleRsv[1]`=chunk 数 | **96 行**，显式 `chunks` 字段；`MF_OVERLAP_KVER=2`（设备侧 `libmf_overlap_v2.so`）；STAGE 历史中间态枚举值清理（kernel 仅写 ENTRY/DONE） |
+| prep 私有五步（…→SmokeTest 自证→就绪） | **三步**（CP 流/工作区/kernel 加载，261+128 行），**冒烟移除**（见 0'.3）；`ready_` = 三步完成即置位 |
+| capi 五件套（submit(mode13)/submit_pipelined(mode14)） | **四件套**：`hybm_overlap_get_info` / `hybm_overlap_submit(dst,flag,chunks)` / `wait` / `get_result` |
+| smem 双入口（launch/launch_pipelined，`OverlapLaunchCommon` 分派 mode13/14） | **单一** `smem_shm_overlap_launch(handle,dst,flag,chunks)`，分派层删除 |
+| 08 示例四角色 × 三阶段 + `/tmp` 文件会合 | **两角色**（role4 产/role5 消费）× **两阶段**（①流水 8×128KB 逐字校验 / ②串行 chunks=1×8 轮对照）+ **MPI_Barrier 会合**（`mpirun -np 2`，rank 由 MPI 分配，worldSize 校验） |
+| 加速比 8.02x | **7.87x**（MPI 栅栏口径，2026-09-16/17 两次复测一致；文件口径不可直接比较——栅栏挤掉了串行基线的 1ms 轮询开销，基线更纯） |
+| UT "冒烟防护语义"（110 行） | "就绪门控语义"（104 行，5 用例不变全绿；`#define private public` 宏 hack 已删） |
+| openspec 契约 | 主 spec 两处需求重写（单一提交接口语义 / 就绪门控），change `simplify-310p-overlap-pipeline-only` 全任务完成 |
+
+### 0'.2 变更清单（全部已推送 wgm-dev-310p）
+
+| 提交 | 内容 |
+|---|---|
+| `5a8cc20c` | kernel 纯流水精简（784→437 行，mode13/role1/实验位删除，契约 v2/chunks 字段） |
+| `928c972a` / `8d92ac97` | host 侧 + smem 层 API 合并为单一 submit/launch(chunks) |
+| `ab301e7f` / `dd7e6687` | 08 示例两阶段验收改造 / UT 对齐（五用例语义不变） |
+| `e26f61b5` | openspec 立项 + 主 spec 同步单一提交接口语义 |
+| `aeea4c96` | 08 示例会合改 MPI（替代 /tmp 文件轮询，净 -23 行） |
+| `127b95b5` / `1a789a0a` / `69dd1021` | 逐行中文注释收编 19 文件（原 wgm-dev-916 注释分支删除，改 PR 分支单分支制，strip 比对零语义漂移） |
+| `3d882dfc` | 示例 AICore kernel 四角色合并两角色（role2/3 与 role4/5+chunks=1 逐语句等价，仅面包屑码不同且阶段②不查） |
+| `d618b21e` | **初始化冒烟移除**（三步就绪门控，spec 需求重写，净 -116 行） |
+| `fb7b45fa` | README 补 7.87x 实机复测基准 |
+| `a09148d4` | 冗余清理（死 include/示例 kernel 死参数 physSize/STAGE 中间态枚举/UT 宏 hack/魔数常量化/过时注释） |
+
+### 0'.3 关键决策记录
+
+- **D2 反转（冒烟移除）**：初始化保持精瘦（职责分离），固件契约的端到端验证移交 08 示例
+  阶段①逐字校验。安全性核查：生产 submit 每次**幂等预填自己的哨兵**（0xE0ECA001），冒烟
+  哨兵（0xC0FFEE11）不进生产数据面，删除无隐藏依赖。代价如实登记：固件升级致 SQE 配方
+  失效的暴露点从"建池六判据精确定位"退到"示例首传超时/校验失配"——诊断仍可凭 result
+  面包屑（mainRet/stage/headAfter）分层定位。
+- **保留项**（评估后不动）：Result 56B 诊断面包屑字段（host 暂不读；删除 = 布局锁破裂 +
+  KVER bump v3 + 重部署，成本 > 收益）；kernel `timelineMark` 诊断路径（`timelineAddr` 恒 0
+  关闭，保留为性能打点开关）；SubmitMode 单值枚举（wire 域检查安全网，950 fail-fast）。
+- **MPI 双套纪律**：本机发行版 openmpi 4.1.2（`/usr/bin/mpirun`，编译需 `-DOMPI_SKIP_MPICXX`）
+  与 `/usr/local/openmpi` 4.1.5 并存——**编译与启动必须同一套**（混用段错误，实测）。
+- **注释单分支制**：注释分支内容收编进 PR 分支后删除，评审直接看 PR diff。
+
+### 0'.4 验收与实机复验（2026-09-16 / 09-17 两次，占用态设备）
+
+- **占用态可跑**：设备常驻 ~36GB 负载、hugepages 打满（17427/17427）仍可跑——协同足迹
+  ~70MB（2×32MB 池 + 4KB 工作区），秒级完成。
+- 结果（两次一致）：①流水 8×128KB=104.25ms，**mismatch=0/262144**，head=16（16 条 SQE 全被
+  TSFW 消费，mainRet=0）；②串行×8=820.19ms；**加速比 7.87x**；destroy/uninit/MPI_Finalize
+  干净退出（exit 0）。
+- 验证门：UT Overlap 五用例全绿（hcomm 用例失败经 stash 对照实证为 overlap 测试先行的
+  **顺序污染存量**，与本轮无关）；bisheng 语法门 + 四静态库全量链接 + 单进程规模校验；
+  hcc kernel 交叉编译门。
+
+### 0'.5 部署与构建（V2.1 实测版）
+
+```bash
+# kernel 三产物（standalone 构建，ASCEND_HOME_PATH 须 -D 显式传，环境变量方式无效）
+cmake -S src/hybm/ops -B /tmp/build-kernel -DASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
+make -C /tmp/build-kernel mf_overlap_kernel   # so + CUST 迁移 json + v2 launch json
+
+# 部署（同卡单次；deployer 保活，其退出后清理链"延迟"删设备文件——正式跑前必验）
+./deployer 0 <build-kernel>/hybm_kernel/libmf_overlap_aicpu.json 3600 &
+sleep 22 && ./mini_kfc 0 "cat /home/CustAiCpuUser/lib/libmf_overlap_aicpu.so.* > \
+  /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_overlap_v2.so"
+./mini_kfc 0 "chmod 644 /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_overlap_v2.so"
+./mini_kfc 0 "grep -q HybmOverlapRun /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_overlap_v2.so"
+
+# 08 示例（MPI 双 rank；rank 由 MPI 分配，不再 argv 传参；编译命令见示例 README）
+export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<v2 launch json 绝对路径>
+export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
+mpirun --allow-run-as-root -np 2 /tmp/ex08
+```
+
 ## 一、迁移源与目标架构
 
 ### 1.1 aicpu-aicore-310p3 是什么（main 已合入，真机实测定论）
@@ -316,7 +404,7 @@ Reduce SQE（TODO-4）、CQE（TODO-5）、OPP 产品化（TODO-1）、常驻编
 | # | 决策 | 内容 |
 |---|------|------|
 | D1 | **开关切换** | `MF_310P_SHM_OVERLAP=1` opt-in；关闭或探测失败时 `smem_shm_create`（SDMA 位）在 310P 返回明确不支持错误（控制台 ERROR 含 deviceId/失败步骤）——不静默降级到错误链路 |
-| D2 | **探测回退** | 传输准备 Initialize 内冒烟（CP 流→sqId→kernel 部署加载→一笔 SQE 写读自备 scratch 校验）；冒烟不过 = 功能不可用报错。scratch 自备（此时池内存未分配，六级地图 L2 时序约束） |
+| D2 | **探测回退**（⚠ **V2.1 反转**：初始化冒烟已移除，就绪门控回归三步准备，端到端验证移交 08 示例阶段①逐字校验，见 §〇'.3） | 原设计：传输准备 Initialize 内冒烟（CP 流→sqId→kernel 部署加载→一笔 SQE 写读自备 scratch 校验）；冒烟不过 = 功能不可用报错。scratch 自备（此时池内存未分配，六级地图 L2 时序约束） |
 | D3 | **部署三段演进** | 沿用 V1：P0 外部脚本（deployer+KFC）→ P2 起 opt-in 自部署（按卡分组配置存储锁，X9）→ L0 OPP 终态（三堵墙/解锁条件见 TODO-1） |
 | D4 | **挂载点 = L2-④ `InitTransManager`** | SHM 是 AI_CORE_INITIATE，**跳过 InitDataOperator**（`hybm_entity_default.cpp:1267-1270`）——与 V1（L2-⑤）不同！310P 分支挂在 SDMA 传输准备处（对照 URMA 在 OpenDevice 加载设备 kernel 的同族先例）；CP 流/sqId/工作区/`HybmDeviceMeta` 扩展/kernel 部署加载全部在此完成 |
 | D5 | **通知链定型（全内存方案）** | AICore→AICPU = GM 邮箱（vector 直写 + SINGLE_CACHE_LINE clean）；AICPU→AICore = GM flag（cvac 写 / dcci 轮询）；跨端数据+通知 = SQE 对（数据+8B 标志一次 doorbell，FIFO 保序）。**notify/事件对全弃用**（X5 + 协同实测双重证伪） |
@@ -468,16 +556,19 @@ AICore 侧（bisheng）照 demo kernel 风格。每个 P 完成跑改动覆盖�
 | M2 | P2 验收 | 08 示例闭环+流水 mismatch=0 + 掩盖效果量化表 |
 | M3 | P3 加固 | UT 全绿 + 性能基线报告 + 文档合入 |
 
-## 八、验证执行命令（占位，M1 后补实测版）
+## 八、验证执行命令（V2.1 实测版见 §〇'.5 与 08 示例 README）
+
+> **V2.1 注**：以下 09-10 占位版命令已过时（v1 文件名 / 双进程 argv 传 rank / 文件会合），
+> 留档备查；现行命令以 §〇'.5 为准。
 
 ```bash
-# 部署（同卡单次，X9）
+# 部署（同卡单次，X9）—— 旧版留档
 ./deployer 0 aicpu_kernel/libmf_overlap_kernel.json 3600 &
 sleep 15 && ./mini_kfc 0 "cat /home/CustAiCpuUser/lib/libmf_overlap_kernel.so.* > \
   /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_overlap_v1.so"
 ./mini_kfc 0 "grep -q HybmOverlapRun /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_overlap_v1.so"
 
-# 08 示例（双 rank，AICore bisheng dav-2002 预编译进示例）
+# 08 示例（双 rank，AICore bisheng dav-2002 预编译进示例）—— 旧版留档
 export MF_310P_SHM_OVERLAP=1
 # （构建与运行命令对齐 2-rank 计划第八节模式；二进制勿放 /tmp/p5_e2e——WORK_DIR 自删坑已登记）
 ```
