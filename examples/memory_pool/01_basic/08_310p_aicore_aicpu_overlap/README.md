@@ -53,17 +53,20 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 ## 验收标准
 
 1. ①流水：8 chunk 全量（1MB）逐字校验 mismatch=0，双侧 kernel mainRet=0、AICore
-   状态走满（0xD2/0xE1）、headAfter 前进（TSFW 消费证据）
-2. **掩盖量化**：①流水总时延 < ②串行总时延（输出加速比；理想情况流水稳态
-   ≈ AICore 单 chunk 计算时间，通信开销不再线性叠加）
+   状态走满（0xD2/0xE1）、headAfter 采样前进（TSFW 消费证据快照，kernel 尾部不等待全部消费）
+2. **掩盖量化**：①流水总时延 < ②串行总时延（输出加速比；串行基线含逐轮 launch 与
+   轮间会合开销，加速比度量的是"批量流水 vs 逐轮往返"的合并收益，非纯通算掩盖——
+   纯掩盖收益受 (T计算+T通信)/max(T计算,T通信) ≤ 2x 结构上限约束）
 3. `destroy`/`uninit`/`MPI_Finalize` 干净退出
 
-> 注：双 rank 会合已由早期 `/tmp` 文件轮询改为 `MPI_Barrier`（无残留文件，同步粒度
-> 从 1ms 降到微秒级）。串行对照的轮间会合同步改用 MPI 栅栏——对照基线因此更纯粹
-> （原文件轮询开销不再计入串行时延）。实机复测（2026-09-16，310P3 双 die）：①流水
-> 8×128KB=104.26ms、②串行×8=820.64ms，**加速比 7.87x**（MPI 栅栏口径；历史 8.02x
-> 为文件会合口径，两者不可直接比较。该次为占用态设备所测，功能验收有效，干净设备
-> 的性能基准建议空闲时复测）。
+> 注 1：双 rank 会合已由早期 `/tmp` 文件轮询改为 `MPI_Barrier`（无残留文件，同步粒度
+> 从 1ms 降到微秒级）。
+> 注 2（**v3 kernel 时序修复，2026-09-17**）：v2 及之前 kernel 尾部的 head 前进诊断为
+> "先睡后查 100ms"，每次 launch 固定 +100ms——旧基准 8.02x/7.87x 实为该固定睡眠的
+> launch 次数摊薄（流水 1 次 vs 串行 8 次），并非真实通算掩盖。v3（libmf_overlap_v3）
+> 改为先查后睡 + 100µs 粒度后实机复测：**①流水 8×128KB=6.59ms、②串行×8=16.94ms、
+> 加速比 2.57x**（占用态设备，功能与正确性口径不变，mismatch=0）。历史数字仅作
+> 过程记录，勿作性能口径引用。
 
 ## 运行（C++，实机验证）
 
@@ -81,7 +84,7 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_overla
 
 # 2. 部署 kernel 到设备(部署链见开发进展文档附录 A.4)
 # 3. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参)
-export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v2.json 路径>
+export MF_310P_SHM_OVERLAP=1 MF_310P_OVERLAP_JSON=<libmf_overlap_v3.json 路径>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root

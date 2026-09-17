@@ -21,7 +21,7 @@
  *   2. 工作区: mailbox/sentinel/result/ovf, 普通设备内存 HUGE_FIRST(NORMAL_ONLY 落
  *      特殊段 SDMA 不可翻译, A.4-7), AICore 可直接 GM 访问(E0c 结论);
  *   3. kernel 加载: BinaryLoadFromFile(cpuMode=0)+GetFunction(json 路径:
- *      env MF_310P_OVERLAP_JSON, 缺省 CWD 的 libmf_overlap_v2.json);
+ *      env MF_310P_OVERLAP_JSON, 缺省 CWD 的 libmf_overlap_v3.json);
  *   4. Launch/Wait: URMA 同款 KernelArgs+LaunchKernelWithConfig 路径。
  *
  * 生命周期: 多池(多 entity)共享同一份进程级资源, Acquire/Release 引用计数,

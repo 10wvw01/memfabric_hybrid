@@ -120,10 +120,11 @@ static uint16_t querySsidAndStamp(const HybmOverlapParam* p, HybmOverlapResult* 
     return static_cast<uint16_t>(ssidRaw); // 截断到 u16 返回
 }
 
-// [W1] 预算制轮询助手 — invalidate → 探测 16B 邮箱槽 → 命中即出, 未命中退避重试
+// 预算制轮询助手 — invalidate → 探测 16B 邮箱槽 → 命中即出, 未命中退避重试
 // 命中 = slot[1] (words) != 0
-// 混合退避: 前 kSpinIters 次纯自旋 (覆盖亚毫秒级等待, 见稳态周期优化),
-// 之后 usleep(1000) (预算 ≈ 毫秒数, watchdog 30s 内)。命中后调用方直接读 slot 值。
+// 混合退避: 前 kSpinIters 次纯自旋 (覆盖亚毫秒级等待), 之后 usleep(100) 细粒度退避
+// (生产节奏可为亚毫秒级/chunk, 粗退避会直接抬升流水稳态节拍)。
+// 预算以迭代计: 100µs × 200000 ≈ 20s 裕度 < watchdog 30s。命中后调用方直接读 slot 值。
 static bool pollSlot(uint32_t* budget, volatile uint64_t* slot)
 {
     const uint32_t kSpinIters = 128; // 纯自旋上限(前 128 次不睡)
@@ -134,7 +135,7 @@ static bool pollSlot(uint32_t* budget, volatile uint64_t* slot)
             return true;  // 命中
         }
         if (r >= kSpinIters) { // 自旋额度用完
-            usleep(1000); // 退避 1ms
+            usleep(100); // 退避 100µs(细粒度, 保流水节拍)
         }
     }
     *budget = 0; // 预算耗尽
@@ -362,9 +363,9 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmOverlapRun(void* 
     const uint16_t ssid = querySsidAndStamp(p, result);  // 严禁硬编码, 实时查询
     const uint16_t sqeStreamId = static_cast<uint16_t>(p->streamId); // SQE 的 rt_stream_id
     result->sqTail = localCh.sqHead;  // headBefore 面包屑
-    // [W1] 累计轮询预算: 按 chunk 数放大 (单 chunk 24000 ≈ 20s 同等裕度;
+    // 累计轮询预算: 按 chunk 数放大 (单 chunk 200000 迭代 × 100µs ≈ 20s 同等裕度;
     // 共享预算不放大时, 前 chunk 偏慢会耗尽后续 chunk 预算造成误判超时)
-    uint32_t pollBudget = 24000u * chunks;
+    uint32_t pollBudget = 200000u * chunks;
     timelineMark(p, 0);  // [0] 入口
     uint16_t taskBase = static_cast<uint16_t>(localCh.sqTail);
     volatile uint64_t* mb = reinterpret_cast<volatile uint64_t*>(p->mailboxAddr);
@@ -417,17 +418,19 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmOverlapRun(void* 
         if (c == 0) timelineMark(p, 1);  // [1] 首对 SQE+doorbell
     }
     timelineMark(p, 2);  // [2]: 全部 chunk 编排完
-    // head 前进诊断 (TSFW 消费证据, 2s 上限)
+    // head 前进诊断 (TSFW 消费证据; 上限 2s)
+    // 关键路径纪律: 先查后睡 + 100µs 细粒度退避 —— 本诊断在每次 launch 的尾部落位,
+    // 粗粒度睡眠(如先睡后查/百 ms 级)会以固定时延封顶流水吞吐, 严禁回退
     {
         uint32_t headA = localCh.sqHead; // 轮询值初值(headBefore)
-        for (int i = 0; i < 20; i++) { // 最多 20 轮(约 2s)
-            usleep(100000); // 每轮 100ms
+        for (int i = 0; i < 20000; i++) { // 最多 20000 轮(100µs 粒度 ≈ 2s 上限)
             if (cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &headA, nullptr) == 0 &&
-                headA != localCh.sqHead) { // head 前进即出
+                headA != localCh.sqHead) { // head 前进即出(首轮即查, 典型 µs~ms 命中)
                 break;
             }
+            usleep(100); // 退避 100µs
         }
-        result->headAfter = headA; // 面包屑: 消费后 head
+        result->headAfter = headA; // 面包屑: 消费后 head(未前进时为 headBefore, 不阻塞成功返回)
     }
     result->stage = STAGE_DONE;   // 阶段=完成
     result->mainRet = 0;          // 主返回码=成功

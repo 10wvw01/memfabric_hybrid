@@ -95,7 +95,7 @@ set(OVERLAP_JSON_CUST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/libmf_overlap_aicpu.json"
 set(OVERLAP_JSON_CUST_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_overlap_aicpu.json") # CUST json 构建目录副本
 
 # 设备侧 launch 版本号(缓存变量): launch json 的 kernelSo 与部署链的复制目标名都用它
-set(MF_OVERLAP_KVER "2" CACHE STRING "310P overlap kernel device-side version (CP1 dlopen cache busting)")
+set(MF_OVERLAP_KVER "3" CACHE STRING "310P overlap kernel device-side version (CP1 dlopen cache busting)")
 # launch json 输出路径(文件名带版本号)
 set(OVERLAP_JSON_LAUNCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_overlap_v${MF_OVERLAP_KVER}.json")
 

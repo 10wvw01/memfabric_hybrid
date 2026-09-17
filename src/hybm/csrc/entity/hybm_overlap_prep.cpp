@@ -32,7 +32,7 @@ constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;       /* CP 流标�
 constexpr uint32_t HYBM_OVERLAP_BLOCK_DIM = 1;                    /* 单 block(kernel 状态机单线程语义) */
 constexpr uint32_t HYBM_OVERLAP_LAUNCH_TIMEOUT_S = 25;            /* launch attr 超时, < AICPU watchdog 30s */
 constexpr char HYBM_OVERLAP_FUNC_NAME[] = "HybmOverlapRun";       /* 编排 kernel 入口符号名 */
-constexpr char HYBM_OVERLAP_DEFAULT_JSON[] = "libmf_overlap_v2.json"; /* CWD 缺省 json(v2 契约) */
+constexpr char HYBM_OVERLAP_DEFAULT_JSON[] = "libmf_overlap_v3.json"; /* CWD 缺省 json(v3 契约) */
 } // namespace
 
 HybmOverlapPrep &HybmOverlapPrep::GetInstance() // 单例入口
