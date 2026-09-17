@@ -254,7 +254,7 @@ buffer，不触碰池 GVA；池内真实验证留给验收链（P1 探针/08 示
   **顺序污染存量**，与本轮无关）；bisheng 语法门 + 四静态库全量链接 + 单进程规模校验；
   hcc kernel 交叉编译门。
 
-### 0'.5 部署与构建（V2.1 实测版）
+### 0'.5 部署与构建（V2.1 实测版；V3 起设备侧/launch json 文件名为 libmf_overlap_v3）
 
 ```bash
 # kernel 三产物（standalone 构建，ASCEND_HOME_PATH 须 -D 显式传，环境变量方式无效）
