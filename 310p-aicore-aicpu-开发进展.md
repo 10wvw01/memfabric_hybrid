@@ -344,6 +344,21 @@ mpirun --allow-run-as-root -np 2 /tmp/ex08
 - spec 域迁移: openspec 310p-shm-overlap→310p-sdma-orch
 - 实机终态: ①流水 4.50ms/②串行 10.26ms/加速比 2.28x(mismatch=0)
 
+## 〇'''、部署能力产品化(V2.3, 2026-09-18)
+
+EX09 同事侧暴露"部署工具未入产品分支"阻塞(原作者 ec1ee588 移除探索产物所致), 本轮:
+
+- **工具入库**: `tools/aicpu_kernel_deploy/`(deployer+mini_kfc+Makefile+runbook);
+  deployer 入口名改为参数(修复硬编码 HybmOverlapRun 陈旧名)
+- **初始化自动部署**(spec 已更新): LoadOrchestratorKernel 内嵌部署链——KFC 探测
+  设备文件(mode=0 加载不校验, 须显式探测)→ 缺失则 flock 串行 → 清残留 → CUST 迁移
+  → 设备内 cat 就位 → 完整性校验(入口符号+ls -l/awk 精确尺寸) → 加载;
+  通道异常时按预部署假定降级直载
+- **实机验证**: 零手工部署全链 PASS(2.23x)/幂等复跑免部署 PASS(2.17x)/
+  显式禁用正确失败/UT 4 用例全绿
+- 平台事实档案新增"CP1 部署链"条目(每卡独立 fs/迁移文件名无 pid/getfunc 不可靠/
+  KFC 工具箱清单/cat 空展开挂死等)
+
 ## 一、迁移源与目标架构
 
 ### 1.1 aicpu-aicore-310p3 是什么（main 已合入，真机实测定论）

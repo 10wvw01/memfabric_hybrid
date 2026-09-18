@@ -1,14 +1,14 @@
-# 310P SHM 协同模式能力规范（delta）
+# 310P SHM SDMA 协同模式能力规范（delta）
 
 ## MODIFIED Requirements
 
-### Requirement: overlap host API 参数与错误语义
+### Requirement: sdma 协同 host API 参数与错误语义
 
-公共 overlap API（`smem_shm_sdma_submit`、`smem_shm_sdma_wait`、
+公共 sdma 协同 API（`smem_shm_sdma_submit`、`smem_shm_sdma_wait`、
 `smem_shm_sdma_get_result`、`smem_shm_sdma_get_workspace`）SHALL 满足：
 出参指针为空时拒绝；提交接口的 chunks 参数 MUST 校验在 1~64 范围（邮箱槽容量
 约束）；参数有效性校验 MUST 先于就绪状态检查执行；无效 shm handle MUST 拒绝；
-传输准备未就绪时所有 overlap API MUST 拒绝并返回明确错误。提交语义为多 chunk
+传输准备未就绪时所有 sdma 协同 API MUST 拒绝并返回明确错误。提交语义为多 chunk
 流水编排（chunks=1 即单块闭环语义），系统不再提供独立的单 chunk 提交变体。
 
 #### Scenario: 正常调用
@@ -23,13 +23,13 @@
 
 #### Scenario: 未就绪与无效 handle 均拒绝
 
-- **WHEN** 传输准备未就绪或传入无效 shm handle 时调用任一 overlap API
+- **WHEN** 传输准备未就绪或传入无效 shm handle 时调用任一 sdma 协同 API
 - **THEN** 返回明确错误，不产生部分副作用
 
 ### Requirement: 传输准备与就绪门控
 
 开关开启后，310P 上首次以 SDMA 传输位创建 SHM 实体时，系统 SHALL 自动完成协同传输
-准备（CP 流、协同工作区、编排 kernel 加载），三步准备全部成功即置就绪；任一步失败
+准备（CP 流、协同工作区、编排 kernel 设备侧部署与加载——含 CUST 通道迁移、CP1 搜索路径就位与完整性校验，设备侧已就位时自动跳过），全部准备成功即置就绪；任一步失败
 时系统 MUST NOT 置就绪状态、MUST 返回显式错误（日志含 deviceId 与失败步骤），且该
 失败 MUST 可重试（后续创建请求重新走准备流程）。端到端传输正确性验证由 08 示例
 阶段①的逐字校验承担（初始化内不做自证性提交）。协同传输准备资源 SHALL 在进程级
@@ -37,12 +37,17 @@
 
 #### Scenario: 准备成功后即就绪
 
-- **WHEN** 开关开启，首次 SDMA SHM 创建且三步准备全部成功
-- **THEN** 传输准备就绪，overlap host API 可正常调用
+- **WHEN** 开关开启，首次 SDMA SHM 创建且全部准备成功（含设备侧 kernel 自动部署）
+- **THEN** 传输准备就绪，sdma 协同 host API 可正常调用
+
+#### Scenario: 设备侧 kernel 缺失时自动部署
+
+- **WHEN** 设备 CP1 搜索路径无编排 kernel（未预部署）且迁移三件套就位于 json 同目录
+- **THEN** 初始化自动完成迁移落盘、CP1 搜索路径就位与完整性校验（入口符号+精确尺寸）后加载成功，不要求用户手工部署
 
 #### Scenario: 准备失败显式报错且可重试
 
-- **WHEN** 开关开启但编排 kernel 未部署（或任一准备步骤失败）
+- **WHEN** 开关开启但自动部署通道不可用/校验失败（或任一准备步骤失败）
 - **THEN** 创建/准备返回显式错误且不置就绪，ERROR 日志含 deviceId 与失败步骤；环境修复后再次创建可重新尝试准备
 
 #### Scenario: 多池共享与引用计数释放

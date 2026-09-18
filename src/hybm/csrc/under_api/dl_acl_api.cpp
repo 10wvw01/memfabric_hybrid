@@ -40,6 +40,7 @@ aclrtKernelArgsInitFunc DlAclApi::pAclrtKernelArgsInit = nullptr;
 aclrtKernelArgsAppendFunc DlAclApi::pAclrtKernelArgsAppend = nullptr;
 aclrtKernelArgsFinalizeFunc DlAclApi::pAclrtKernelArgsFinalize = nullptr;
 aclrtLaunchKernelWithConfigFunc DlAclApi::pAclrtLaunchKernelWithConfig = nullptr;
+aclrtLaunchKernelWithHostArgsFunc DlAclApi::pAclrtLaunchKernelWithHostArgs = nullptr;
 aclrtMallocFunc DlAclApi::pAclrtMalloc = nullptr;
 aclrtFreeFunc DlAclApi::pAclrtFree = nullptr;
 aclrtMallocHostFunc DlAclApi::pAclrtMallocHost = nullptr;
@@ -120,6 +121,8 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM_OPTIONAL(pAclrtKernelArgsFinalize, aclrtKernelArgsFinalizeFunc, rtHandle, "aclrtKernelArgsFinalize");
     DL_LOAD_SYM_OPTIONAL(pAclrtLaunchKernelWithConfig, aclrtLaunchKernelWithConfigFunc, rtHandle,
                          "aclrtLaunchKernelWithConfig");
+    DL_LOAD_SYM_OPTIONAL(pAclrtLaunchKernelWithHostArgs, aclrtLaunchKernelWithHostArgsFunc, rtHandle,
+                         "aclrtLaunchKernelWithHostArgs");
     DL_LOAD_SYM(pAclrtMalloc, aclrtMallocFunc, rtHandle, "aclrtMalloc");
     DL_LOAD_SYM(pAclrtFree, aclrtFreeFunc, rtHandle, "aclrtFree");
     DL_LOAD_SYM(pAclrtMallocHost, aclrtMallocHostFunc, rtHandle, "aclrtMallocHost");
@@ -219,6 +222,7 @@ void DlAclApi::CleanupLibrary()
     pAclrtKernelArgsAppend = nullptr;
     pAclrtKernelArgsFinalize = nullptr;
     pAclrtLaunchKernelWithConfig = nullptr;
+    pAclrtLaunchKernelWithHostArgs = nullptr;
     pAclrtMalloc = nullptr;
     pAclrtFree = nullptr;
     pAclrtMallocHost = nullptr;

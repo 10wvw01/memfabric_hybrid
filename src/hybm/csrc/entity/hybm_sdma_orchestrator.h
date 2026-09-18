@@ -20,8 +20,11 @@
  *      kernel 内 halSqCqQuery 可查可投的前提, X3/A.3);
  *   2. 工作区: mailbox/sentinel/result/ovf, 普通设备内存 HUGE_FIRST(NORMAL_ONLY 落
  *      特殊段 SDMA 不可翻译, A.4-7), AICore 可直接 GM 访问(E0c 结论);
- *   3. kernel 加载: BinaryLoadFromFile(cpuMode=0)+GetFunction(json 路径:
- *      env MF_SDMA_ORCH_JSON, 缺省依次: 安装前缀自动发现 → CWD 的 libmf_sdma_orch_v4.json);
+ *   3. kernel 加载: 先按 launch json 直接加载(cpuMode=0, CP1 搜索路径); 失败(设备侧
+ *      未部署, 最常见情形)时自动部署——CUST 通道(cpuMode=1)迁移落盘 + KFC 通道复制
+ *      进 CP1 搜索路径 + 完整性校验(入口符号 + 文件尺寸)——后重试加载
+ *      (json 路径: env MF_SDMA_ORCH_JSON, 缺省依次: 安装前缀自动发现 → CWD 的
+ *      libmf_sdma_orch_v4.json);
  *   4. Launch/Wait: URMA 同款 KernelArgs+LaunchKernelWithConfig 路径。
  *
  * 生命周期: 多池(多 entity)共享同一份进程级资源, Acquire/Release 引用计数,
@@ -41,7 +44,7 @@ namespace mf {  // hybm 内存池引擎子命名空间
 /* 工作区布局(总 4KB, 偏移常量; 设备侧镜像见 smem_shm_aicore_sdma.h) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;              /* 工作区总尺寸 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_MAILBOX_OFF = 0;          /* 邮箱 ring: 16B/slot × 64 */
-constexpr uint64_t HYBM_SDMA_ORCH_WS_MAILBOX_SLOTS = 64;       /* 邮箱槽数(mode14 chunk 上限) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_MAILBOX_SLOTS = 64;       /* 邮箱槽数(chunk 数上限) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_SENTINEL_OFF = 1024;      /* 哨兵 8B(SQE 对标志源) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 1032;        /* kernel result 64B */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_OVF_OFF = 1096;           /* SQE overflow 目标 64B */
@@ -107,7 +110,13 @@ private:
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
-    Result LoadOrchestratorKernel();       /* json 路径解析 + BinaryLoad + GetFunction */
+    Result LoadOrchestratorKernel();       /* json 解析 + 设备侧部署探测(KFC), 缺失自动部署后加载 */
+    Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(cpuMode=0, 日志由调用方分层记) */
+    Result DeployOrchestratorKernel(const std::string &launchJsonPath, const std::string &dst); /* 自动部署 */
+    Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘(出参 so 尺寸) */
+    Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
+    Result KfcExec(const std::string &cmd); /* KFC 通道执行一条设备 OS 命令(仅部署链内部使用) */
+    Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 设备内复制+完整性校验(带重试) */
     void Cleanup();                        /* 逆序清理(锁内, 归零时) */
 
     std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行 */
@@ -121,6 +130,7 @@ private:
     uint64_t workspace_{0};         /* 工作区设备地址(HUGE_FIRST) */
     aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
     aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchBatch 函数句柄 */
+    aclrtBinHandle custBinHandle_{nullptr}; /* CUST 迁移句柄(保活: 持至进程退出, 退出才触发清理链) */
     bool ready_{false};             /* 初始化就绪标志 */
 };
 } // namespace mf
