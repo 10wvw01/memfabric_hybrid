@@ -73,7 +73,8 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 ## 运行（C++，实机验证）
 
 ```bash
-# 1. 仓库根构建主库 + 示例编译(bisheng host+AICore 统一编译, 含 MPI)
+# 1. 仓库根一键构建(主库 + 编排 kernel 三件套 + A3 血统 kernel, NPU 构建自动全含;
+#    需环境变量 ASCEND_HOME_PATH, 无 CANN 工具链的环境自动跳过 kernel 不阻断)
 cmake -B build -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF && cmake --build build -j
 cd examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma
 #   MPI 取发行版一套(头/库/启动器须同源; 换 /usr/local/openmpi 时改用其路径与启动器)
@@ -84,17 +85,10 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_sdma.a
   -Wl,--start-group <build 下四个静态库: libmf_smem/libmf_hybm_core/libacc_tcp_net/libmf_acc_offload> \
   -Wl,--end-group -L$MPI_LIB -lmpi <CANN lib 路径> -lascendcl -lruntime -ldl -pthread -lm
 
-# 2. 编排 kernel 三件套构建(so + CUST 迁移 json + launch json; **独立于主构建**,
-#    ASCEND_HOME_PATH 须经 -D 传入, 环境变量无效)
-cd <仓库根>
-cmake -S src/hybm/ops -B build-kernel -DASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0 && \
-  cmake --build build-kernel -j --target mf_sdma_orch_kernel
-# 产物: build-kernel/hybm_kernel/{libmf_sdma_orch.so, libmf_sdma_orch.json, libmf_sdma_orch_v4.json}
-
-# 3. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参; **设备侧零部署**——初始化自动
+# 2. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参; **设备侧零部署**——初始化自动
 #    探测→CUST 迁移→CP1 搜索路径就位→完整性校验, 全新设备/环境无任何手工部署步骤;
 #    CP1 目录树为 CANN 基线自带, 洁净卡实测可直接写入)
-export MF_SDMA_ORCH_JSON=<build-kernel/hybm_kernel 下 libmf_sdma_orch_v4.json 绝对路径>
+export MF_SDMA_ORCH_JSON=<build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v4.json>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root

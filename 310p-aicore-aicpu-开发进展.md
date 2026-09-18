@@ -358,6 +358,10 @@ EX09 同事侧暴露"部署工具未入产品分支"阻塞(原作者 ec1ee588 �
   显式禁用正确失败/UT 4 用例全绿
 - 平台事实档案新增"CP1 部署链"条目(每卡独立 fs/迁移文件名无 pid/getfunc 不可靠/
   KFC 工具箱清单/cat 空展开挂死等)
+- **构建统一**(同日): kernel 三件套接入主构建(src/CMakeLists 门控 NPU+hcc 工具链,
+  无 CANN 环境优雅跳过), 新环境一条 cmake 命令出全部产物; 顺带修复 ops 路径算术
+  off-by-one(_REPO_ROOT 算到仓库父目录, 构建期被掩盖 install 期爆发)与
+  ASCEND_HOME_PATH "必须 -D 传"限制(现 env 即可); 主构建产物实机 e2e PASS
 
 ## 一、迁移源与目标架构
 

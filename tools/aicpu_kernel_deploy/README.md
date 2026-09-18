@@ -31,8 +31,9 @@ make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0   # 产物: deployer mini_kfc
 ## 手动部署链（kernel 三件套由 `src/hybm/ops` 的 `mf_sdma_orch_kernel` 目标产出）
 
 前置：`libmf_sdma_orch.so`（kernel 本体）+ `libmf_sdma_orch.json`（CUST 迁移 json）+
-`libmf_sdma_orch_v4.json`（launch json），三者同目录（构建目录或安装前缀
-`<prefix>/hybm/aicpu_kernel/`）。
+`libmf_sdma_orch_v4.json`（launch json），三者同目录（主构建产物
+`<build>/src/hybm/ops/hybm_kernel/`、独立构建产物 `<build-kernel>/hybm_kernel/`，
+或安装前缀 `<prefix>/hybm/aicpu_kernel/`）。
 
 ```bash
 cd tools/aicpu_kernel_deploy && make
