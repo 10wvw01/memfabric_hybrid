@@ -65,24 +65,25 @@ deviceId 与失败原因；系统 MUST NOT 静默降级到其他链路。禁用�
 - **WHEN** 同进程先后创建两个 SDMA SHM 实体，随后逐一销毁
 - **THEN** 传输准备只初始化一次（第二池复用），最后一个实体销毁时资源完整释放（CP 流/工作区/kernel 卸载）
 
-### Requirement: sdma 协同 host API 参数与错误语义
+### Requirement: 设备侧邮箱 API 与 host 就绪判定
 
-公共 sdma 协同 API（`smem_shm_sdma_submit`、`smem_shm_sdma_wait`、
-`smem_shm_sdma_get_result`、`smem_shm_sdma_get_workspace`）SHALL 满足：
-出参指针为空时拒绝；提交接口的 chunks 参数 MUST 校验在 1~64 范围（邮箱槽容量
-约束）；参数有效性校验 MUST 先于就绪状态检查执行；无效 shm handle MUST 拒绝；
-传输准备未就绪时所有 sdma 协同 API MUST 拒绝并返回明确错误。提交语义为多 chunk
-流水编排（chunks=1 即单块闭环语义），系统不再提供独立的单 chunk 提交变体。
+V5 邮箱化后数据面完全设备侧自驱。设备侧 API（AICore kernel 内，`smem_shm_sdma_signal/
+wait/quiet`，均以池 gva 为首参）SHALL 满足：signal 投递 {src,dst,len,imm} 请求邮件（满环
+自旋背压，预算耗尽返回 false）；wait 按序消费到达邮件并返回 {dst,len,imm,seq,status}
+（邮件自描述落点，接收方免预约定布局；超时/溢出由 status 表达，戳值 1 基防 seq0 幻影）；
+quiet 等待本端全部投递落地（源缓冲复用前）。host 侧仅保留 `smem_shm_sdma_get_workspace`
+（就绪判定：非空=可用；无效 handle 返回 NULL）；host 侧 submit/wait/get_result MUST NOT
+再提供。到达环深度 1024，溢出 MUST 以错误暴露而非静默覆写。
 
-#### Scenario: 正常调用
+#### Scenario: 设备侧自驱闭环
 
-- **WHEN** 就绪状态下以合法 handle 与参数调用 launch/wait/get_result
-- **THEN** 调用被接受，编排 kernel 按多 chunk 流水语义执行（chunks=1 即单块语义）
+- **WHEN** 双 rank 建池后，AICore kernel 内 signal N 封、对端 wait N 封、回程 signal/wait
+- **THEN** 全程无 host 参与搬运，数据逐字校验通过（08 示例阶段①语义）
 
-#### Scenario: chunks 越界先于就绪检查报错
+#### Scenario: 溢出与超时显式暴露
 
-- **WHEN** 以 chunks=0 或 chunks=65 调用提交接口（即使传输准备未就绪）
-- **THEN** 返回参数错误（参数校验先于就绪检查的语义可观测）
+- **WHEN** 到达环被越界覆写（消费落后超 1024 封）或轮询预算耗尽
+- **THEN** wait 返回 status 非 0 的邮件（OVERRUN/TIMEOUT），不静默丢失
 
 #### Scenario: 未就绪与无效 handle 均拒绝
 

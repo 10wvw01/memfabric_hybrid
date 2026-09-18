@@ -1,9 +1,9 @@
 {
-    "HybmSdmaOrchBatch": {
+    "HybmSdmaOrchEpoch": {
         "opInfo": {
             "opKernelLib": "CUSTAICPUKernel",
             "kernelSo": "libmf_sdma_orch.so",
-            "functionName": "HybmSdmaOrchBatch"
+            "functionName": "HybmSdmaOrchEpoch"
         }
     }
 }

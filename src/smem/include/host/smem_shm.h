@@ -222,47 +222,12 @@ int32_t smem_shm_register_exit(smem_shm_t handle, void (*exit)(int));
 void smem_shm_global_exit(smem_shm_t handle, int status);
 
 /**
- * @brief [310P AICore×AICPU 协同模式] 提交一次跨端流水搬运
+ * @brief [310P 协同模式] 查询协同工作区地址(就绪判定: 非空 = 协同可用)
  *
- * 语义(详见 docs 与 310p 计划): 本端 AICore kernel 逐 chunk 产数据并写
- * 协同邮箱 ring(设备侧头文件 smem_shm_aicore_sdma.h 的 smem_shm_sdma_notify,
- * 槽序号 = chunk 序号), 本接口触发的 AICPU 编排 kernel 逐 chunk 提交 SQE 对
- * (数据→dstGva+c*chunkBytes + 8B 标志→flagDoneGva+c*8, 每 chunk 一次 doorbell),
- * FIFO 保序保证"标志到即数据到", 通信与对端 AICore 计算重叠; 对端 AICore kernel 用
- * smem_shm_sdma_poll_flag 轮询标志后消费。chunks=1 即单块闭环语义。
+ * V5 邮箱化(2026-09-18): host 侧数据面 API(submit/wait/get_result)已废止——搬运由
+ * AICore kernel 内 smem_shm_sdma_signal/wait/quiet 设备侧自驱(见设备侧头文件
+ * smem_shm_aicore_sdma.h), host 仅建池与本就绪判定。
  *
- * 前置: smem_shm_create 时选用 SDMA 引擎(310P 上协同模式自动启用,
- * MF_SDMA_ORCH_DISABLE=1 可显式禁用), 且协同初始化完成(否则本接口返回错误,
- * 上层以 smem_get_last_err_msg 排障)。
- *
- * @param handle           [in] shm object
- * @param dstGva           [in] 数据目的基址(对端池 GVA, kernel 内按 chunk 递增)
- * @param flagDoneGva      [in] 标志数组目的基址(每槽 8B × chunks, 协同保留区槽位约定见设备头文件)
- * @param chunks           [in] chunk 数(1~64, 受邮箱槽数约束)
- * @return 0 if successful
- */
-int32_t smem_shm_sdma_submit(smem_shm_t handle, void *dstGva, void *flagDoneGva, uint32_t chunks); // 流水提交
-
-/**
- * @brief [310P 协同模式] 等待最近一次协同搬运完成
- * @param handle           [in] shm object
- * @return 0 if successful
- */
-int32_t smem_shm_sdma_wait(smem_shm_t handle); // SynchronizeStream 等待
-
-/**
- * @brief [310P 协同模式] 读取最近一次搬运的 kernel 结果(诊断)
- * @param handle           [in] shm object
- * @param mainRet          [out] kernel 主返回码(0=成功)
- * @param stage            [out] 状态机阶段(5=完成)
- * @param headAfter        [out] SQ head(TSFW 消费证据)
- * @return 0 if successful
- */
-int32_t smem_shm_sdma_get_result(smem_shm_t handle, uint32_t *mainRet, uint32_t *stage,
-                                    uint32_t *headAfter); // 诊断读回
-
-/**
- * @brief [310P 协同模式] 查询协同工作区地址(host 侧获取后作为参数传给 AICore kernel)
  * @param handle           [in] shm object
  * @return 工作区设备地址; 协同模式未就绪时返回 NULL
  */

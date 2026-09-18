@@ -34,6 +34,8 @@ constexpr uint64_t SMEM_SHM_DEVICE_META_CONTEXT_OFFSET = SMEM_SHM_DEVICE_META_RA
 constexpr uint64_t SMEM_SHM_DEVICE_META_SYMM_OFFSET = SMEM_SHM_DEVICE_META_CONTEXT_OFFSET + sizeof(uint32_t);
 constexpr uint64_t SMEM_SHM_DEVICE_META_QP_INFO_OFFSET = SMEM_SHM_DEVICE_META_SYMM_OFFSET + sizeof(uint64_t);
 constexpr uint64_t SMEM_SHM_DEVICE_META_SDMA_WORKSPACE_OFFSET = SMEM_SHM_DEVICE_META_QP_INFO_OFFSET + sizeof(uint64_t);
+constexpr uint64_t SMEM_SHM_DEVICE_META_PHYS_SIZE_OFFSET = /* V5: 段物理大小槽 */
+    SMEM_SHM_DEVICE_META_SDMA_WORKSPACE_OFFSET + sizeof(uint64_t);
 
 SMEM_SHM_INLINE_AICORE uint32_t smem_shm_get_global_rank(uint32_t shmemId)
 {
@@ -91,6 +93,18 @@ SMEM_SHM_INLINE_AICORE uint64_t smem_shm_get_sdma_workspace_address(uint32_t shm
     uint64_t metaAddr =
         SMEM_SHM_DEVICE_META_ADDR + SMEM_SHM_DEVICE_GLOBAL_META_SIZE + shmemId * SMEM_SHM_DEVICE_PRE_META_SIZE;
     return *(__gm__ uint64_t *)(metaAddr + SMEM_SHM_DEVICE_META_SDMA_WORKSPACE_OFFSET);
+}
+
+/* V5: 段物理大小(= 建池 localSize; 邮箱保留区定位用, host 建池时写入) */
+SMEM_SHM_INLINE_AICORE uint64_t smem_shm_get_phys_size(uint32_t shmemId)
+{
+    if (shmemId >= SMEM_OBJECT_NUM_MAX) {
+        return 0;
+    }
+
+    uint64_t metaAddr =
+        SMEM_SHM_DEVICE_META_ADDR + SMEM_SHM_DEVICE_GLOBAL_META_SIZE + shmemId * SMEM_SHM_DEVICE_PRE_META_SIZE;
+    return *(__gm__ uint64_t *)(metaAddr + SMEM_SHM_DEVICE_META_PHYS_SIZE_OFFSET);
 }
 
 SMEM_SHM_INLINE_AICORE uint64_t smem_shm_get_extra_context_addr(uint32_t shmemId)

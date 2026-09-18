@@ -214,13 +214,11 @@ int32_t hybm_sdma_get_info(hybm_sdma_info_t *info); // 未就绪(开关关/初�
  * @param chunks          [in] chunk 数(1~64, 受邮箱槽数约束)
  * @return 0 if successful
  */
-int32_t hybm_sdma_submit(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunks); // 流水提交
 
 /**
  * @brief 等待协同搬运完成(SynchronizeStream)
  * @return 0 if successful
  */
-int32_t hybm_sdma_wait(void); // SynchronizeStream 等编排 kernel 完成
 
 /**
  * @brief 读取最近一次协同搬运的 kernel 结果(诊断: mainRet/stage/headAfter)
@@ -229,7 +227,6 @@ int32_t hybm_sdma_wait(void); // SynchronizeStream 等编排 kernel 完成
  * @param headAfter       [out] SQ head(TSFW 消费证据)
  * @return 0 if successful
  */
-int32_t hybm_sdma_get_result(uint32_t *mainRet, uint32_t *stage, uint32_t *headAfter); // 诊断读回
 
 #ifdef __cplusplus
 }

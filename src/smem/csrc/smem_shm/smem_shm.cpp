@@ -409,61 +409,7 @@ SMEM_API void smem_shm_global_exit(smem_shm_t handle, int status)
     entry->GetGroup()->GroupBroadcastExit(status);
 }
 
-/* ---- 310P AICore×AICPU 协同模式 host API(转发 entry, 实现见 SmemShmEntry) ---- */
-SMEM_API int32_t smem_shm_sdma_submit(smem_shm_t handle, void *dstGva, void *flagDoneGva,
-                                         uint32_t chunks) // 流水提交转发
-{
-    SmemShmEntryPtr entry = nullptr; // entry 指针(按 handle 反查)
-    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry); // 反查
-    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
-        return SM_INVALID_PARAM; // 参数非法
-    }
-    ret = entry->SdmaSubmit(dstGva, flagDoneGva, chunks); // 转发流水提交
-    if (ret != SM_OK) { // 转发失败
-        SM_LOG_AND_SET_LAST_ERROR("sdma submit failed, result: " << ret << " chunks: " << chunks); // 根因
-        return ret; // 透传失败(根因已记录)
-    }
-    return SM_OK; // 提交成功
-}
-
-SMEM_API int32_t smem_shm_sdma_wait(smem_shm_t handle) // 等待转发
-{
-    SmemShmEntryPtr entry = nullptr; // entry 指针(按 handle 反查)
-    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry); // 反查
-    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
-        return SM_INVALID_PARAM; // 参数非法
-    }
-    ret = entry->SdmaWait(); // 转发等待
-    if (ret != SM_OK) { // 转发失败
-        SM_LOG_AND_SET_LAST_ERROR("sdma wait failed, result: " << ret); // 根因日志+错误码
-        return ret; // 透传失败(根因已记录)
-    }
-    return SM_OK; // 等待成功
-}
-
-SMEM_API int32_t smem_shm_sdma_get_result(smem_shm_t handle, uint32_t *mainRet, uint32_t *stage, // 诊断转发
-                                             uint32_t *headAfter)
-{
-    if (mainRet == nullptr || stage == nullptr || headAfter == nullptr) { // 出参指针空校验
-        SM_LOG_AND_SET_LAST_ERROR("invalid param, out pointers must not be NULL"); // 根因日志+错误码
-        return SM_INVALID_PARAM; // 参数非法
-    }
-    SmemShmEntryPtr entry = nullptr; // entry 指针(按 handle 反查)
-    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry); // 反查
-    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
-        return SM_INVALID_PARAM; // 参数非法
-    }
-    ret = entry->SdmaGetResult(*mainRet, *stage, *headAfter); // 转发诊断读回
-    if (ret != SM_OK) { // 转发失败
-        SM_LOG_AND_SET_LAST_ERROR("sdma get result failed, result: " << ret); // 根因日志+错误码
-        return ret; // 透传失败(根因已记录)
-    }
-    return SM_OK; // 读取成功
-}
-
+/* ---- 310P AICore×AICPU 协同模式 host API(V5: 数据面设备侧自驱, host 仅就绪判定) ---- */
 SMEM_API void *smem_shm_sdma_get_workspace(smem_shm_t handle) // 工作区查询转发
 {
     SmemShmEntryPtr entry = nullptr;

@@ -235,7 +235,30 @@ int32_t MemEntityDefault::AllocLocalMemory(uint64_t size, hybm_mem_type mType, u
         }
     }
 
-    return UpdateHybmDeviceInfo(0);
+    ret = UpdateHybmDeviceInfo(0); // meta 刷新(含 V5 physSize 槽; ret 复用外层声明)
+    if (ret != BM_OK) {             // meta 刷新失败
+        return ret;                 // 透传失败(根因已记录)
+    }
+    return ConfigureOrchOnce(); // V5: 段就绪后装配邮箱保留区与监督线程(幂等)
+}
+
+/* V5: 段尾保留区初始化 + epoch 监督线程启动(首个 SDMA 池一次绑定;
+ * 幂等: 后续切片分配直接返回) */
+Result MemEntityDefault::ConfigureOrchOnce() noexcept
+{
+    if (!orchAcquired_ || orchConfigured_) { // 非协同 entity 或已配置
+        return BM_OK;                        // 幂等返回
+    }
+    const uint64_t ownSeg = reinterpret_cast<uint64_t>(hbmGva_) + options_.maxHBMSize * options_.rankId; // 本端段基址
+    auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace,
+                                                              options_.maxHBMSize); // 保留区+监督线程
+    if (ret != BM_OK) { // 配置失败(V5 单池约束/非 2 幂 symm/清零失败)
+        BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: "
+                     << options_.rankId << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段
+        return ret; // 透传失败(根因已记录)
+    }
+    orchConfigured_ = true; // 绑定完成
+    return BM_OK;           // 配置成功
 }
 
 int32_t MemEntityDefault::RegisterLocalMemory(const void *ptr, uint64_t size, uint32_t flags,
@@ -1053,12 +1076,13 @@ void MemEntityDefault::SetHybmDeviceInfo(HybmDeviceMeta &info)
         info.qpInfoAddress = 0UL;
         info.sdmaWorkSpace = 0UL;
     }
+    info.physSize = options_.deviceVASpace; /* V5: 段物理大小(设备侧邮箱保留区定位) */
     /* 310P 协同模式: 工作区复用 sdmaWorkSpace 槽(A3 血统同概念, 平台互斥不同时写);
      * 未就绪保持零值(host 侧以 smem_shm_sdma_get_workspace(handle) 非空判定可用) */
     if (orchAcquired_) { // 本 entity 持有协同(InitTransManager 已 Acquire)
         auto &prep = SdmaOrchestrator::GetInstance(); // 进程级单例(多 entity 共享同一份协同资源)
         if (prep.Ready()) { // 协同就绪: 填充真实工作区
-            info.sdmaWorkSpace = prep.GetWorkspace(); // 工作区设备地址(mailbox/哨兵/result/ovf)
+            info.sdmaWorkSpace = prep.GetWorkspace(); // 工作区设备地址(V5: result/overflow)
         }
     }
 }

@@ -54,14 +54,8 @@ public:
 
     Result GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) const;
 
-    /* ---- 310P AICore×AICPU 协同模式(转发 hybm C API, 见 smem_shm.h 的 sdma 协同族) ---- */
-    /* 提交一次流水搬运(邮箱 ring 逐 chunk → SQE 对 → 每 chunk doorbell; chunks=1 即单块) */
-    Result SdmaSubmit(void *dstGva, void *flagDoneGva, uint32_t chunks);
-    /* 等待协同搬运完成 */
-    Result SdmaWait();
-    /* 读取最近一次搬运的 kernel 结果(诊断) */
-    Result SdmaGetResult(uint32_t &mainRet, uint32_t &stage, uint32_t &headAfter);
-    /* 查询协同工作区地址(host 侧传给 AICore kernel 参数用); 未就绪返回 nullptr */
+    /* ---- 310P AICore×AICPU 协同模式(V5: 数据面设备侧自驱, host 仅就绪判定) ---- */
+    /* 查询协同工作区地址(就绪判定: 非空 = 协同可用); 未就绪返回 nullptr */
     void *SdmaGetWorkspace() const;
 
 private:

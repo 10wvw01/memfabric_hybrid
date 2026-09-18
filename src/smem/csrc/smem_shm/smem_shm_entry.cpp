@@ -330,45 +330,9 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
     return SM_OK;
 }
 
-/* ---- 310P 协同模式转发(实现细节见 hybm_sdma_capi.cpp) ---- */
-Result SmemShmEntry::SdmaSubmit(void *dstGva, void *flagDoneGva, uint32_t chunks) // 流水提交
-{
-    if (entity_ == nullptr) { // 底层 entity 未建
-        SM_LOG_ERROR("sdma submit failed: entity is null, shmId: " << id_); // 根因日志: shmId
-        return SM_NOT_INITIALIZED; // 未初始化
-    }
-    // 统一走流水提交(chunks=1 即单块语义)
-    auto ret = hybm_sdma_submit(reinterpret_cast<uint64_t>(dstGva), reinterpret_cast<uint64_t>(flagDoneGva),
-                                   chunks);
-    if (ret != 0) { // hybm 提交失败
-        // 根因日志: ret/shmId/dstGva/chunks
-        SM_LOG_ERROR("sdma submit failed, ret: " << ret << " shmId: " << id_ << " dstGva: " << dstGva
-                                                    << " chunks: " << chunks);
-        return SM_ERROR; // 透传失败(根因已记录)
-    }
-    return SM_OK; // 提交成功
-}
-
-Result SmemShmEntry::SdmaWait() // 等待搬运完成
-{
-    auto ret = hybm_sdma_wait(); // 转发 hybm C API
-    if (ret != 0) { // 等待失败
-        SM_LOG_ERROR("hybm_sdma_wait failed, ret: " << ret << " shmId: " << id_); // 根因日志: ret/shmId
-        return SM_ERROR; // 透传失败(根因已记录)
-    }
-    return SM_OK; // 等待成功
-}
-
-Result SmemShmEntry::SdmaGetResult(uint32_t &mainRet, uint32_t &stage, uint32_t &headAfter) // 诊断读回
-{
-    auto ret = hybm_sdma_get_result(&mainRet, &stage, &headAfter); // 转发 hybm C API
-    if (ret != 0) { // 读取失败
-        SM_LOG_ERROR("hybm_sdma_get_result failed, ret: " << ret << " shmId: " << id_); // 根因日志: ret/shmId
-        return SM_ERROR; // 透传失败(根因已记录)
-    }
-    return SM_OK; // 读取成功
-}
-
+/* ---- 310P 协同模式转发(实现细节见 hybm_sdma_capi.cpp) ----
+ * V5: host 数据面(submit/wait/get_result)已废止——搬运由 AICore kernel 内
+ * smem_shm_sdma_signal/wait/quiet 设备侧自驱; 仅保留工作区查询(就绪判定)。 */
 void *SmemShmEntry::SdmaGetWorkspace() const // 工作区查询
 {
     hybm_sdma_info_t info = {}; // 就绪信息快照(零初始化)

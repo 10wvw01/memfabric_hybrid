@@ -10,24 +10,21 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* smem_shm_aicore_sdma.h — 310P AICore×AICPU 协同模式设备侧原语(AICore kernel 用)
+/* smem_shm_aicore_sdma.h — V5 邮箱化设备侧 API(AICore kernel 用, signal/wait/quiet)
  *
- * 机制(310p-aicore-aicpu-开发进展.md D5/D6 + E0c 实测定论):
- *   AICore 产数据 → GM 邮箱(16B {dataAddr, words}, vector 直写 + 行 clean)委托
- *   AICPU 编排 kernel 代投 SDMA SQE 对(数据 + 8B 标志, FIFO 保序保证标志到即数据到)
- *   → 对端 AICore dcci 轮询池内标志后消费。
+ * 使用形态(与 910B RDMADemo 同构): 用户 kernel 以池 gva 为参数, 三 API 均以 gva 为首参:
+ *   smem_shm_sdma_signal(gva, src, dst, len, imm) → bool   投递搬运请求(满环自旋)
+ *   smem_shm_sdma_wait(gva) → smem_shm_sdma_mail_t         按序消费到达邮件(阻塞自旋)
+ *   smem_shm_sdma_quiet(gva) → bool                        等待全部发出落地(源缓冲复用前)
  *
- * 工作区布局(与 hybm_sdma_orchestrator.h 的 HYBM_SDMA_ORCH_WS_* 常量一致):
- *   +0      mailbox ring(16B/slot × 64)
- *   +1024   哨兵 8B(SQE 对的标志源, host 侧 smem_shm_sdma_submit 预填)
- *   +1032   kernel result 64B
- *   +1096   SQE overflow 目标 64B
+ * 邮箱由 memfabric 全托管(双环在段尾保留区, host 初始化清零): 用户零槽位算术/零清零/
+ * 零标志地址方案; 到达邮件 {dst,len,imm} 自描述, 接收方免预约定布局。
  *
- * 池内标志约定: 对称池每 rank 段的末尾 SMEM_SHM_SDMA_FLAG_REGION_SIZE(2MB)
- * 为协同保留区(用户数据请勿占用), 到达/结果标志在保留区内按 8B 槽位排布。
+ * 环境依赖: 段对称大小须 2 的幂(host 侧建池时校验); rank/symm/phys 从 meta 区自取
+ * (310P meta 可读性已修复, 见平台事实档案)。
  *
- * 约束: 本头文件与 smem_shm_aicore_base_define.h 同风格, 供 bisheng 编译的
- * AICore kernel include; 依赖 AscendC 的 DataCacheCleanAndInvalid(dcci)。
+ * dav-2002 工具链约束(见 base_meta.h 注): 本头全部设备内存访问 = gva 参数的指针算术
+ * + GlobalTensor cache 维护(ex08 验证路径), 严禁运行时整数→指针 cast 与指针物化。
  */
 #ifndef __MEMFABRIC_SMEM_AI_CORE_SDMA_H__ /* 头文件包含守卫(防重复包含) */
 #define __MEMFABRIC_SMEM_AI_CORE_SDMA_H__ /* 同上, 与文件尾 #endif 配对 */
@@ -39,83 +36,176 @@
 extern "C" {       // C 链接(供 bisheng 编译的 AICore kernel include)
 #endif
 
-/* meta 工作区槽: 复用 A3 血统的 SDMA_WORKSPACE 偏移(与 HybmDeviceMeta.sdmaWorkSpace
- * 对应, "设备发起 SDMA 工作区"为跨平台同概念; host 写入经 SetHybmDeviceInfo) */
+/* ---- 段尾保留区布局(与 hybm_sdma_contract.h 镜像, UT 双头 static_assert 锁定) ---- */
+constexpr uint64_t SMEM_SHM_SDMA_RESERVED = 48UL * 1024UL; /* 保留区总大小(替代 V4 的 2MB 标志区) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_RING = 0x0000;     /* 请求环基址(64 槽 × 32B) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_SLOTS = 64;        /* 请求环槽数 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_TAIL = 0x0800;     /* 生产游标(AICore 写) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_HEAD = 0x0808;     /* 消费游标(AICPU 写, 背压读) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET = 0x0810;        /* 完成戳数组(64 × u64, SQE 写) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET_SLOTS = 64;      /* 完成戳数 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_STOP = 0x0A10;         /* epoch 停止标志(host 写) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_STAMP = 0x0A20;    /* 到达戳数组(1024 × u64, SQE 写) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_SLOTS = 1024;      /* 到达环深度 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_MAIL = 0x2A20;     /* 到达邮件数组(1024 × 32B, AICPU 写) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_HEAD = 0xAA20;     /* 到达消费游标(AICore 写) */
 
-/* ---- 工作区布局常量(与 hybm_sdma_orchestrator.h 一致) ---- */
-constexpr uint64_t SMEM_SHM_SDMA_WS_MAILBOX_OFF = 0;        /* 邮箱 ring 基址偏移 */
-constexpr uint64_t SMEM_SHM_SDMA_WS_MAILBOX_SLOT_SIZE = 16; /* 16B/slot {dataAddr, words} */
-constexpr uint64_t SMEM_SHM_SDMA_WS_MAILBOX_REGION_SIZE = 1024; /* 邮箱 ring 区总大小(64 槽×16B, = SENTINEL_OFF) */
-constexpr uint64_t SMEM_SHM_SDMA_WS_SENTINEL_OFF = 1024;    /* 哨兵 8B */
+/* ---- 邮件(wait 出参, 32B) ---- */
+struct smem_shm_sdma_mail_t {
+    uint64_t dst;    /* 数据落点(接收方直接定位, 免预约定布局) */
+    uint64_t len;    /* 数据长度(字节) */
+    uint64_t imm;    /* 用户标签(signal 的 imm 原样透传) */
+    uint32_t seq;    /* 完成序号(诊断) */
+    uint32_t status; /* 0=成功; 1=超时; 2=到达环溢出(生产方越界覆写) */
+};
 
-/* ---- 池内协同保留区 ----
- * 重要: 位置在本 rank 段的"物理映射区"末尾(而非 symmetricSize 末尾 —— 对称段大小
- * 经 1G 对齐, 尾部可能未映射物理页, SDMA/AICore 访问会失败)。
- * physSize = 本 rank 段实际物理大小(即 smem_shm_create 传入的 localSize),
- * 由 host 侧算好地址传入 kernel 更稳妥(推荐), 本助手供 kernel 侧自算场景。 */
-constexpr uint64_t SMEM_SHM_SDMA_FLAG_REGION_SIZE = 2UL * 1024UL * 1024UL; /* 保留区 2MB */
-constexpr uint64_t SMEM_SHM_SDMA_FLAG_ARRIVAL_IDX = 0;                     /* 到达标志槽序号 */
-constexpr uint64_t SMEM_SHM_SDMA_FLAG_RESULT_IDX = 1;                      /* 结果标志槽序号 */
-constexpr uint64_t SMEM_SHM_SDMA_FLAG_SLOT_SIZE = 8;                       /* 每槽 8B */
-
-/* 轮询迭代上限(纯自旋 dcci, E0c 实测 ~139 万次完成八步往返; 上限给出充分裕量) */
+/* 轮询预算(纯自旋 dcci, 与 V4 poll_flag 同款量级) */
 constexpr uint64_t SMEM_SHM_SDMA_POLL_MAX_ITER = 100000000ULL;
+
+/* 到达邮件状态码 */
+constexpr uint32_t SMEM_SHM_SDMA_MAIL_OK = 0;       /* 成功取件 */
+constexpr uint32_t SMEM_SHM_SDMA_MAIL_TIMEOUT = 1;  /* 轮询预算耗尽(无邮件/传输失败) */
+constexpr uint32_t SMEM_SHM_SDMA_MAIL_OVERRUN = 2;  /* 到达环溢出(消费落后超 1024 封) */
 
 #ifdef __cplusplus // C++ 编译环境
 }                  // extern "C" 结束
 #endif
 
-/* meta 区可读性(310P, 实测勘正 2026-09-18): 此前"AICore 读 meta 恒为零"的结论有误,
- * 真因有二且均已在库内修复——① meta 区 AclVmm 映射缺 AclrtMemSetAccess 设备授权
- * (池段有此步故可读, Hybm310PInitMetaGva 遗漏, 已补); ② 设备头 void** 解引用型
- * getter 在 dav-2002 后端读取错误(已改标量 u64 读, 见 base_meta.h 工具链约束)。
- * 修复后 rank/rankSize/symmetricSize/工作区槽均可在 kernel 内正确读取;
- * 协同工作区当前仍由 host 传参(kit 内无运行时整数→指针的安全 cast, 见下)。 */
+/* ---- 内部原语(仅本头使用; 全部 gva 指针算术 + GlobalTensor cache 维护) ---- */
 
-/* 计算本 rank 池段内协同保留区标志地址
- * (segBase = 本 rank 段基址(gva + symmetricSize*rankId), physSize = 段物理大小, idx = 槽序号) */
-SMEM_SHM_INLINE_AICORE __gm__ void *smem_shm_sdma_get_flag_addr(__gm__ void *segBase, uint64_t physSize,
-                                                                   uint64_t idx)
+/* 本端段尾保留区基址(gva + symm*rank + phys - RESERVED) */
+SMEM_SHM_INLINE_AICORE __gm__ uint8_t *SdmaReservedBase(__gm__ void *gva)
 {
-    // 保留区基址 = 段基址 + 物理大小 - 2MB(物理映射区末尾, 非对称尺寸末尾)
-    uint64_t base = reinterpret_cast<uint64_t>(segBase) + physSize - SMEM_SHM_SDMA_FLAG_REGION_SIZE;
-    return reinterpret_cast<__gm__ void *>(base + idx * SMEM_SHM_SDMA_FLAG_SLOT_SIZE); // 槽地址 = 基址+idx×8B
+    const uint64_t symm = smem_shm_get_symmetric_size(0);            // 对称段大小(meta)
+    const uint64_t rank = smem_shm_get_global_rank(0);               // 本端 rank(meta)
+    const uint64_t phys = smem_shm_get_phys_size(0);                 // 段物理大小(meta)
+    return static_cast<__gm__ uint8_t *>(gva) + symm * rank + (phys - SMEM_SHM_SDMA_RESERVED); // 指针算术
 }
 
-/* 邮箱通知: AICore → AICPU(写 16B 描述符 + 单行 clean; AICore→AICPU 可见性天然一致) */
-SMEM_SHM_INLINE_AICORE void smem_shm_sdma_notify(__gm__ void *mailboxSlot, uint64_t dataAddr, uint64_t dataWords)
+/* dcci 失效后读 8B(AICPU/SQE 写 → AICore 读的可见性正解, E0c 定论) */
+SMEM_SHM_INLINE_AICORE uint64_t SdmaReadCell(__gm__ uint8_t *res, uint64_t off)
 {
-    __gm__ uint64_t *slot = reinterpret_cast<__gm__ uint64_t *>(mailboxSlot); // 邮箱槽指针(16B)
-    slot[0] = dataAddr;   // 写数据地址
-    slot[1] = dataWords;  // 写字数(非零即有效描述符)
-    AscendC::GlobalTensor<int32_t> mbGm; // 构造 GM 张量(供 cache 指令寻址)
-    mbGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 4); // 绑定邮箱槽 4 字
-    // 单行 dcci(AICore→AICPU 可见性天然一致, clean 后 AICPU 裸读即见)
-    AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(mbGm);
+    __gm__ uint8_t *cell = res + off;                                        // 指针算术定位
+    AscendC::GlobalTensor<int32_t> t;                                        // GM 张量(cache 指令寻址)
+    t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cell), 2);          // 绑定该 8B
+    AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t); // 失效取新
+    return *reinterpret_cast<__gm__ volatile uint64_t *>(cell);              // volatile 读
 }
 
-/* 标志轮询: dcci + volatile 读(AICPU/SDMA 写 → AICore 读的可见性正解, E0c 实测),
- * 命中返回非零标志值, 超时返回 0; iters 出参为迭代数(时延近似度量, 可传 NULL) */
-SMEM_SHM_INLINE_AICORE uint64_t smem_shm_sdma_poll_flag(__gm__ void *flagAddr, uint64_t *iters)
+/* 写 8B 并 clean(AICore 写 → AICPU/SQE 读) */
+SMEM_SHM_INLINE_AICORE void SdmaWriteCell(__gm__ uint8_t *res, uint64_t off, uint64_t v)
 {
-    __gm__ volatile uint64_t *f = reinterpret_cast<__gm__ volatile uint64_t *>(flagAddr); // 标志指针(volatile)
-    AscendC::GlobalTensor<int32_t> fg; // 构造 GM 张量(供 cache 指令寻址)
-    fg.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(flagAddr), 2); // 绑定标志 2 字
-    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) { // 自旋轮询(上限 1 亿次)
-        // 单行 dcci(读侧失效取新值 — AICPU/SDMA 写后 AICore 读的唯一可靠途径)
-        AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(fg);
-        uint64_t v = *f; // volatile 读标志
-        if (v != 0) { // 命中(非零)
-            if (iters != NULL) { // 调用方要迭代数
-                *iters = i; // 回写迭代数(时延近似度量)
-            }
-            return v; // 返回标志值
+    __gm__ uint8_t *cell = res + off;                                        // 指针算术定位
+    *reinterpret_cast<__gm__ volatile uint64_t *>(cell) = v;                 // volatile 写
+    AscendC::GlobalTensor<int32_t> t;                                        // GM 张量
+    t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cell), 2);          // 绑定该 8B
+    AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t); // 刷出
+}
+
+/* 读 32B 邮件槽(dcci 失效 + 4×volatile 读; 32B 对齐不跨行) */
+SMEM_SHM_INLINE_AICORE void SdmaReadMail(__gm__ uint8_t *slot, uint64_t *f0, uint64_t *f1, uint64_t *f2,
+                                         uint64_t *f3)
+{
+    AscendC::GlobalTensor<int32_t> t;                                        // GM 张量
+    t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);          // 绑定 32B(4 字)
+    AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t); // 失效取新
+    __gm__ volatile uint64_t *q = reinterpret_cast<__gm__ volatile uint64_t *>(slot); // 槽视角
+    *f0 = q[0]; // 字段 0
+    *f1 = q[1]; // 字段 1
+    *f2 = q[2]; // 字段 2
+    *f3 = q[3]; // 字段 3
+}
+
+/* ============================ 公开 API ============================ */
+
+/* 投递一封搬运请求邮件(源→目的, 带用户标签)。
+ * 满环时自旋等待(背压); 预算耗尽返回 false(邮件未投递, 消费方 wait 将超时暴露)。
+ * 返回 true=已投递。len 由框架内部按搬运粒度补齐, 用户无须对齐。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
+                                                 uint64_t len, uint64_t imm)
+{
+    __gm__ uint8_t *res = SdmaReservedBase(gva);                        // 保留区基址
+    const uint64_t tail = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_TAIL); // 生产游标(自写, 直接读)
+    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {        // 满环自旋背压
+        const uint64_t head = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_HEAD); // AICPU 消费游标
+        if (tail - head < SMEM_SHM_SDMA_RS_REQ_SLOTS) {                 // 有空槽
+            break;                                                      // 退出自旋
         }
     }
-    if (iters != NULL) { // 超时也回写迭代数
-        *iters = SMEM_SHM_SDMA_POLL_MAX_ITER; // 回写上限值(超时标记)
+    const uint64_t head = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_HEAD); // 复查(预算耗尽路径)
+    if (tail - head >= SMEM_SHM_SDMA_RS_REQ_SLOTS) {                    // 仍满(预算耗尽)
+        return false;                                                   // 投递失败(上层可见)
     }
-    return 0; // 超时返回 0
+    __gm__ uint8_t *slot = res + SMEM_SHM_SDMA_RS_REQ_RING +            // 请求环槽(指针算术)
+                           (tail % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 32;
+    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 0) = reinterpret_cast<uint64_t>(src); // 源地址
+    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 8) = reinterpret_cast<uint64_t>(dst); // 目的地址
+    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 16) = len;                            // 字节数
+    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 24) = imm;                            // 用户标签
+    AscendC::GlobalTensor<int32_t> t;                                   // GM 张量
+    t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);     // 绑定 32B 槽
+    AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t); // 刷出(AICPU 可见)
+    SdmaWriteCell(res, SMEM_SHM_SDMA_RS_REQ_TAIL, tail + 1);            // 推进生产游标
+    return true;                                                        // 投递成功
+}
+
+/* 按序消费下一封到达邮件(阻塞自旋, 预算耗尽/溢出由 status 表达)。
+ * 邮件 {dst,len,imm} 自描述: 接收方直接定位数据, 免预约定布局。 */
+SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait(__gm__ void *gva)
+{
+    smem_shm_sdma_mail_t m = {0, 0, 0, 0, SMEM_SHM_SDMA_MAIL_TIMEOUT};   // 出参(默认超时态)
+    __gm__ uint8_t *res = SdmaReservedBase(gva);                        // 保留区基址
+    const uint64_t head = SdmaReadCell(res, SMEM_SHM_SDMA_RS_ARR_HEAD); // 消费游标(自写, 直接读)
+    const uint64_t expect = head + 1; /* 期望戳(1 基: 戳=seq+1, 0=空——防 seq0 幻影) */
+    uint64_t stamp = 0;                // 戳快照
+    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {        // 戳轮询(SQE 写 → dcci)
+        stamp = SdmaReadCell(res, SMEM_SHM_SDMA_RS_ARR_STAMP +
+                                    (head % SMEM_SHM_SDMA_RS_ARR_SLOTS) * 8);
+        if (stamp == expect) {                                          // 第 head 封已落地
+            break;                                                      // 命中
+        }
+        if (stamp > expect && (stamp - expect) < SMEM_SHM_SDMA_RS_ARR_SLOTS) { // 越界覆写(生产方领先超环深)
+            m.status = SMEM_SHM_SDMA_MAIL_OVERRUN;                      // 溢出错(不静默)
+            m.seq = static_cast<uint32_t>(head);                        // 诊断序号
+            return m;                                                   // 立即返回
+        }
+    }
+    if (stamp != expect) {                                              // 预算耗尽仍无邮件
+        m.status = SMEM_SHM_SDMA_MAIL_TIMEOUT;                          // 超时
+        m.seq = static_cast<uint32_t>(head);                            // 诊断序号
+        return m;                                                       // 返回超时态
+    }
+    __gm__ uint8_t *slot = res + SMEM_SHM_SDMA_RS_ARR_MAIL +            // 到达邮件槽(指针算术)
+                           (head % SMEM_SHM_SDMA_RS_ARR_SLOTS) * 32;
+    uint64_t f0 = 0, f1 = 0, f2 = 0, f3 = 0;                            // 字段暂存
+    SdmaReadMail(slot, &f0, &f1, &f2, &f3);                             // 读 32B 邮件
+    m.dst = f1;                                                         // 数据落点(f0=戳值诊断用)
+    m.len = f2;                                                         // 数据长度
+    m.imm = f3;                                                         // 用户标签
+    m.seq = static_cast<uint32_t>(f0 - 1);                              // 序号(0 基, 诊断; f0 为 1 基戳)
+    m.status = SMEM_SHM_SDMA_MAIL_OK;                                   // 成功
+    SdmaWriteCell(res, SMEM_SHM_SDMA_RS_ARR_HEAD, head + 1);            // 推进消费游标
+    return m;                                                           // 返回邮件
+}
+
+/* 等待本端全部已投递请求落地(quiet: 源缓冲复用/改写前调用)。
+ * 依据: 完成戳按 SQE FIFO 序落地, 末封戳到即全部到。返回 true=全部落地。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet(__gm__ void *gva)
+{
+    __gm__ uint8_t *res = SdmaReservedBase(gva);                        // 保留区基址
+    const uint64_t tail = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_TAIL); // 已投递总数
+    if (tail == 0) {                                                    // 无投递
+        return true;                                                    // 平凡完成
+    }
+    const uint64_t expect = tail; /* 末封戳(1 基: 末封 seq=tail-1 → 戳=tail) */
+    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {        // 完成戳轮询(SQE 写 → dcci)
+        const uint64_t stamp = SdmaReadCell(res, SMEM_SHM_SDMA_RS_QUIET +
+                                            ((tail - 1) % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8);
+        if (stamp == expect) {                                          // 末封已落地(FIFO 即全部)
+            return true;                                                // 全部落地
+        }
+    }
+    return false;                                                       // 预算耗尽(传输异常)
 }
 
 #endif // __MEMFABRIC_SMEM_AI_CORE_SDMA_H__

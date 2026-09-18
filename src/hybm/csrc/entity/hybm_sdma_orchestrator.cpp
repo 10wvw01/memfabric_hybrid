@@ -20,6 +20,7 @@
 
 #include <climits>   // PATH_MAX(realpath 结果缓冲尺寸)
 #include <cerrno>    // errno(锁文件打开失败诊断)
+#include <chrono>    // chrono(监督线程退避)
 #include <cstdio>    // snprintf(临时 json 路径构造)
 #include <cstdlib>   // realpath 等 POSIX 原型
 #include <cstring>   // strncpy(KFC 命令缓冲拷贝)
@@ -43,8 +44,8 @@ namespace {     // 匿名命名空间(编译单元内私有常量)
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;       /* CP 流标志: SQ 注册进 CP1 trs 表 */
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;                    /* 单 block(kernel 状态机单线程语义) */
 constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25;            /* launch attr 超时, < AICPU watchdog 30s */
-constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchBatch";       /* 编排 kernel 入口符号名 */
-constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v4.json"; /* CWD 缺省 json(v4) */
+constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch";       /* V5 epoch 消费 kernel 入口符号名 */
+constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v5.json"; /* CWD 缺省 json(v5) */
 constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
 constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
 /* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 各卡路径同名, 须在本卡设备上部署) */
@@ -401,7 +402,8 @@ Result SdmaOrchestrator::LoadKfcChannel(aclrtFuncHandle &fh)
     static constexpr char KFC_JSON_CONTENT[] =
         "{\"K\":{\"opInfo\":{\"opKernelLib\":\"KFCKernel\",\"kernelSo\":\"kfc_min.so\","
         "\"functionName\":\"system\"}}}";
-    if (write(fd, KFC_JSON_CONTENT, sizeof(KFC_JSON_CONTENT) - 1) != static_cast<ssize_t>(sizeof(KFC_JSON_CONTENT) - 1)) {
+    const ssize_t wantLen = static_cast<ssize_t>(sizeof(KFC_JSON_CONTENT) - 1); // 期望写入长度
+    if (write(fd, KFC_JSON_CONTENT, sizeof(KFC_JSON_CONTENT) - 1) != wantLen) {
         // 根因日志: 写入长度不符(磁盘满等)
         BM_LOG_ERROR("kfc tmpfile write failed, errno: " << errno << " json: " << path);
         (void)close(fd);   // 关闭描述符
@@ -489,7 +491,48 @@ Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint6
     return BM_ERROR; // 部署失败
 }
 
-Result SdmaOrchestrator::LaunchOrchestrator(const HybmSdmaOrchParam &param) // 提交编排 kernel
+Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize) // 保留区初始化
+{
+    std::lock_guard<std::mutex> guard(mutex_); // 与 Acquire/Release 串行
+    if (configured_) {                         // 二次配置(第二池)
+        // V5 约束: 双环一次绑定, 每进程单 SDMA 池
+        BM_LOG_ERROR("sdma orch already configured, second pool unsupported in V5, devId: " << devId_);
+        return BM_INVALID_PARAM; // 显式拒绝(根因已记录)
+    }
+    if (symSize == 0 || (symSize & (symSize - 1)) != 0) { // 2 的幂校验(对端段基址掩码算术依赖)
+        // 根因日志: symSize
+        BM_LOG_ERROR("symSize not power of two, symSize: " << symSize);
+        return BM_INVALID_PARAM; // 显式拒绝
+    }
+    const uint64_t resBase = ownSegGva + physSize - HYBM_SDMA_ORCH_RESERVED; // 保留区基址
+    // 保留区整体清零(双环/游标/戳/停止标志从零起步)
+    auto ret = DlAclApi::AclrtMemset(reinterpret_cast<void *>(resBase), HYBM_SDMA_ORCH_RESERVED, 0,
+                                     HYBM_SDMA_ORCH_RESERVED);
+    if (ret != BM_OK) { // 清零失败(段映射异常)
+        BM_LOG_ERROR("memset orch reserved failed, ret: " << ret << " resBase: 0x" << std::hex << resBase
+                                                          << " size: " << HYBM_SDMA_ORCH_RESERVED);
+        return ret; // 透传失败(根因已记录)
+    }
+    epochParam_ = HybmSdmaOrchParam{};                    // 参数清零后逐字段装配
+    epochParam_.devId = devId_;                           // 设备号
+    epochParam_.sqId = sqId_;                             // CP 流 SQ id
+    epochParam_.streamId = streamId_;                     // CP 流 id
+    epochParam_.reqBase = resBase + HYBM_SDMA_ORCH_RS_REQ_RING;     // 请求环基址
+    epochParam_.quietBase = resBase + HYBM_SDMA_ORCH_RS_QUIET;      // 完成戳基址
+    epochParam_.stopAddr = workspace_ + HYBM_SDMA_ORCH_WS_STOP_OFF; // 停止标志(工作区自有: 销毁序安全)
+    epochParam_.overflowAddr = workspace_ + HYBM_SDMA_ORCH_WS_OVF_OFF;   // overflow(工作区)
+    epochParam_.resultAddr = workspace_ + HYBM_SDMA_ORCH_WS_RESULT_OFF; // 结果区(工作区)
+    epochParam_.symSize = symSize;                        // 对称段大小(掩码算术)
+    epochParam_.physSize = physSize;                      // 段物理大小
+    configured_ = true;                                   // 绑定完成
+    stopFlag_ = false;                                    // 停止标志复位
+    supervisor_ = std::thread(&SdmaOrchestrator::SupervisorLoop, this); // 监督线程启动
+    BM_LOG_INFO("sdma orch configured, devId: " << devId_ << " reqBase: 0x" << std::hex << epochParam_.reqBase
+              << " arrivalDepth: " << HYBM_SDMA_ORCH_RS_ARR_SLOTS);
+    return BM_OK;                                         // 配置完成
+}
+
+Result SdmaOrchestrator::LaunchEpoch() // 提交一纪 epoch kernel(监督线程内)
 {
     if (funcHandle_ == nullptr || launchStream_ == nullptr) { // 前置: kernel 句柄与提交流任一缺失
         /* 守卫直接检查将使用的句柄与流本身(不依赖 ready_ 对外语义), 缺一即拒 */
@@ -505,9 +548,9 @@ Result SdmaOrchestrator::LaunchOrchestrator(const HybmSdmaOrchParam &param) // �
         BM_LOG_ERROR("KernelArgsInit failed, ret: " << ret << " sqId: " << sqId_); // 根因日志: ret/sqId
         return ret;                                                               // 透传失败(根因已记录)
     }
-    HybmSdmaOrchParam p = param; /* Append 接口非 const, 本地拷贝(120B) */
+    HybmSdmaOrchParam p = epochParam_; /* Append 接口非 const, 本地拷贝(72B) */
     aclrtParamHandle paramHandle = nullptr; // 参数块句柄(Append 输出, 本函数不消费)
-    ret = DlAclApi::AclrtKernelArgsAppend(argsHandle, &p, sizeof(p), &paramHandle); // 追加 120B 入参块
+    ret = DlAclApi::AclrtKernelArgsAppend(argsHandle, &p, sizeof(p), &paramHandle); // 追加 72B 入参块
     if (ret == BM_OK) {                     // 追加成功后
         ret = DlAclApi::AclrtKernelArgsFinalize(argsHandle); // 封包(此后不可再 Append)
     }
@@ -521,28 +564,72 @@ Result SdmaOrchestrator::LaunchOrchestrator(const HybmSdmaOrchParam &param) // �
     aclrtLaunchKernelCfg cfg{}; // launch 配置(挂属性数组)
     cfg.attrs = &attr;          // 属性数组首址
     cfg.numAttrs = 1;           // 属性个数
-    // 提交编排 kernel(blockDim=1, 带超时属性, 异步不等待)
+    // 提交 epoch kernel(blockDim=1, 带超时属性, 异步不等待; 监督线程稍后 sync)
     ret = DlAclApi::AclrtLaunchKernelWithConfig(funcHandle_, HYBM_SDMA_ORCH_BLOCK_DIM, launchStream_, &cfg,
                                                 argsHandle, nullptr);
     if (ret != BM_OK) { // 提交失败
-        // 根因日志: ret/sqId/mode
-        BM_LOG_ERROR("LaunchKernelWithConfig failed, ret: " << ret << " sqId: " << sqId_
-                                                            << " mode: " << param.submitMode);
+        BM_LOG_ERROR("LaunchKernelWithConfig(epoch) failed, ret: " << ret << " sqId: " << sqId_); // 根因
     }
     return ret; // 提交结果(失败路径根因已记录)
 }
 
-Result SdmaOrchestrator::WaitOrchestrator() // 同步编排 kernel
+void SdmaOrchestrator::SupervisorLoop() // 监督线程主循环(epoch 续命直至停止)
 {
-    auto ret = DlAclApi::AclrtSynchronizeStream(launchStream_); // 同步提交流(kernel 完成即返回
-    if (ret != BM_OK) {                                          // 同步失败
-        BM_LOG_ERROR("SynchronizeStream(launch) failed, ret: " << ret << " sqId: " << sqId_); // 根因日志: ret/sqId
+    /* ACL 上下文为线程局部: 子线程须先绑定设备(否则 launch 报 107002 上下文无效) */
+    if (DlAclApi::AclrtSetDevice(devId_) != BM_OK) { // 绑定失败
+        BM_LOG_ERROR("supervisor set device failed, devId: " << devId_); // 根因日志: devId
+        return; // 放弃续命
     }
-    return ret; // 同步结果(失败路径根因已记录)
+    uint32_t errors = 0; // 连续失败计数
+    while (!stopFlag_.load()) { // 停止标志轮询
+        auto ret = LaunchEpoch(); // 提交一纪
+        if (ret != BM_OK) {       // 提交失败
+            BM_LOG_ERROR("epoch launch failed, ret: " << ret << " sqId: " << sqId_); // 根因
+            if (++errors > 16) {  // 连续 16 次失败
+                BM_LOG_ERROR("epoch launch failed 16 times, supervisor exit, sqId: " << sqId_); // 根因
+                return;           // 放弃续命(数据面将停在背压/超时)
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 100ms 退避
+            continue;             // 重试
+        }
+        ret = DlAclApi::AclrtSynchronizeStream(launchStream_); // 等 epoch 结束(时限/停止/错误)
+        if (ret != BM_OK) {       // sync 异常(watchdog 杀/错误退出)
+            HybmSdmaOrchResult r = {}; // 结果快照
+            (void)DlAclApi::AclrtMemcpy(&r, sizeof(r), reinterpret_cast<void *>(workspace_), sizeof(r),
+                                         ACL_MEMCPY_DEVICE_TO_HOST); // D2H 诊断
+            if (stopFlag_.load()) { // 停止窗口内的失败(段先于编排器销毁, kernel 读段被杀——预期自愈)
+                BM_LOG_INFO("epoch faulted during shutdown (expected, self-healed), ret: " << ret); // 信息级
+                continue;         // 下一纪读到停止标志即净退
+            }
+            // 根因日志: ret/mainRet/exitReason/consumed
+            BM_LOG_ERROR("epoch sync failed, ret: " << ret << " mainRet: " << r.mainRet
+                         << " exitReason: " << r.exitReason << " consumed: " << r.consumed);
+            if (++errors > 16) {  // 连续 16 次失败
+                return;           // 放弃续命
+            }
+            continue;             // 续命重试(瞬态错误可恢复)
+        }
+        errors = 0;               // 成功一纪, 失败计数清零
+    }
+}
+
+void SdmaOrchestrator::StopSupervisor() // 停止监督线程(写设备停止标志 + join)
+{
+    if (!supervisor_.joinable()) { // 线程未启动
+        return;                    // 无需停止
+    }
+    stopFlag_ = true;              // host 侧停止标志
+    if (configured_ && epochParam_.stopAddr != 0) { // 设备侧停止标志已装配
+        // 写非零值(epoch kernel ≤100µs 轮询间隔内退出; memset 字节语义, 非零即停)
+        (void)DlAclApi::AclrtMemset(reinterpret_cast<void *>(epochParam_.stopAddr), 8, 1, 8);
+    }
+    supervisor_.join();            // 等线程退出(≤ 一个轮询间隔 + sync 返回)
 }
 
 void SdmaOrchestrator::Cleanup() // 逆序清理(锁内, 归零时)
 {
+    StopSupervisor(); // 先停监督线程(其使用 launchStream_, 必须先于流销毁)
+    configured_ = false; // 配置状态复位(允许后续重配置)
     if (cpStream_ != nullptr) { // CP 流存在
         (void)DlAclApi::AclrtDestroyStream(cpStream_); // 销毁 CP 流(SQ 随流注销)
         cpStream_ = nullptr; // 置空防重复销毁
