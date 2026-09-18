@@ -22,6 +22,9 @@ make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0   # 产物: deployer mini_kfc
 - `deployer`：`aclrtBinaryLoadFromFile(cpuMode=1)` 本身不落盘，`aclrtBinaryGetFunction`
   才触发 CUST 迁移通道把 `.so` 写到设备 `/home/CustAiCpuUser/lib/<so>.<devId>.<vfId>.<pid>`；
   **迁移进程退出会触发清理链延迟删除设备侧文件**（故需保活）。
+- **json 基名配对（实测约束）**：CUST 加载器要求 json 文件基名与 `.so` 同名
+  （异名 `load ret=107000`，即使内容与 `.so` 逐字节一致）；部署 json 须命名为
+  `<soname>.json`（如 `libmf_wd_probe.json` 配 `libmf_wd_probe.so`）。
 - CUST 落盘路径不在 CP1 搜索路径内，须由 `mini_kfc` 在设备 OS 内复制到
   `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/` 并 `chmod 644`。
 - `mini_kfc`：KFC 通道（json 声明 `KFCKernel` + `functionName: "system"` + 不存在的

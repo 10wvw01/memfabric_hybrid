@@ -374,10 +374,15 @@ EX09 同事侧暴露"部署工具未入产品分支"阻塞(原作者 ec1ee588 �
   绑定型错位), 常量折叠立即解引用/kernel 传参/指针算术正常(910B 后端无此限制)
 - EX_META 探针(四路判别+D2H 对照+双 rank)全 PASS; ex08 e2e 回归 PASS(2.48x)
 
-**V5 邮箱化设计拍板**(signal/wait 新 API): signal(src,dst,len,+imm) 投递请求邮件;
-wait() 无参按序消费到达邮件(内容含 seq/dst/len/status, 32B/封, seq 自校验替代共享
-tail); 背压=自旋; MTE 跨 die 不可用(用户定论, 不验证); quiet(发送方完成语义)待定;
-到达环选址与常驻消费(watchdog 实证 P0b)待实验。
+**V5 邮箱化设计拍板**(signal/wait/quiet 新 API): signal(src,dst,len,imm) 投递请求
+邮件; wait() 无参按序消费到达邮件(内容含 seq/dst/len/status, 32B/封, seq 自校验
+替代共享 tail); 背压=自旋; 对齐不足框架补齐; MTE 跨 die 不可用(用户定论, 不验证);
+quiet(发送方完成语义)已拍板加入; wait 无参自举依赖 meta 修复(已达成)+常量地址窗口。
+
+**P0b watchdog 实证**(wd_probe 心跳探针三连): watchdog ~30s 为真实设备侧硬杀
+(attr 超时非设备杀/host 语义; 有界运行干净完成; 杀后调度器可恢复)——长驻消费
+定型为 **~25s epoch + host 监督线程立即续命**(环+游标语义下续命间隙无损);
+另实证 CUST 迁移要求 json 基名与 .so 同名(异名 load 107000)。
 
 ## 一、迁移源与目标架构
 
