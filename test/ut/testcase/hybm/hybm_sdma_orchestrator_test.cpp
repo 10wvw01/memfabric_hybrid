@@ -31,6 +31,8 @@
 #include "hybm_define.h"  // BM_OK/BM_INVALID_PARAM 等错误码
 #include "smem.h"         // smem 层公共定义(SMEM_OK)
 #include "smem_shm.h"     // 被测 smem 层 sdma 协同 API 声明
+/* 设备头(smem_shm_aicore_sdma.h)含 AscendC 原语不可进 host UT; 其镜像常量由本用例
+ * 以钉死值锁定(双头漂移会在实机 e2e 的 kernel↔设备头失配中暴露) */
 
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 引擎子命名空间
@@ -55,49 +57,45 @@ TEST(SdmaOrchestratorTest, AcquireFailsCleanlyAndRetriable)
     EXPECT_EQ(prep.GetRefCountForTest(), 0U); // 计数仍为 0
 }
 
-/* 用例 2: 未就绪时 C API 全拒绝(就绪门控的外显语义) */
+/* 用例 2: 未就绪时 C API 拒绝(就绪门控的外显语义; V5 数据面 API 已废止) */
 TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
 {
     hybm_sdma_info_t info = {}; // 就绪信息出参
     EXPECT_NE(hybm_sdma_get_info(&info), BM_OK); // 未就绪须拒绝
-    EXPECT_NE(hybm_sdma_submit(0x1000, 0x2000, 8), BM_OK); // 提交须拒绝
-    EXPECT_NE(hybm_sdma_wait(), BM_OK); // 等待须拒绝
-    uint32_t mainRet = 0;   // 主返回码出参
-    uint32_t stage = 0;     // 阶段出参
-    uint32_t headAfter = 0; // head 出参
-    EXPECT_NE(hybm_sdma_get_result(&mainRet, &stage, &headAfter), BM_OK); // 诊断读回须拒绝
     EXPECT_NE(hybm_sdma_get_info(nullptr), BM_OK); /* 出参 null 拒绝 */
 }
 
-/* 用例 3: submit 的 chunks 边界(0 与 >邮箱槽数拒绝, 参数检查先于就绪检查) */
-TEST(SdmaOrchestratorTest, SubmitChunksBounds)
+/* 用例 3: V5 双头布局锁(hybm 契约与 smem 设备头镜像一致; 违反即布局回归) */
+TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 {
-    EXPECT_EQ(hybm_sdma_submit(0x1000, 0x2000, 0), BM_INVALID_PARAM); // chunks=0 拒绝
-    EXPECT_EQ(hybm_sdma_submit(0x1000, 0x2000, SDMA_ORCH_WS_SLOTS + 1), BM_INVALID_PARAM); // 65 拒绝
-    /* 边界值本身通过参数关(随后因未就绪被拒, 验证检查顺序) */
-    EXPECT_NE(hybm_sdma_submit(0x1000, 0x2000, SDMA_ORCH_WS_SLOTS), BM_OK); // 64 过参数关
+    /* 保留区偏移钉死(与设备头 smem_shm_aicore_sdma.h 镜像值一致; 漂移即回归) */
+    EXPECT_EQ(HYBM_SDMA_ORCH_RESERVED, 48UL * 1024UL);
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_REQ_RING, 0x0000U);
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_REQ_TAIL, 0x0800U);
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_REQ_HEAD, 0x0808U);
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_QUIET, 0x0810U);
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_ARR_STAMP, 0x0A20U);
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_ARR_MAIL, 0x2A20U);
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_ARR_HEAD, 0xAA20U);
+    /* 布局不变式: 区块不重叠且落在保留区内 */
+    EXPECT_GE(HYBM_SDMA_ORCH_RS_REQ_TAIL, HYBM_SDMA_ORCH_RS_REQ_RING + 32U * SDMA_ORCH_WS_SLOTS); // 游标不压环
+    EXPECT_GT(HYBM_SDMA_ORCH_RS_QUIET, HYBM_SDMA_ORCH_RS_REQ_HEAD);                               // 戳不压游标
+    EXPECT_GT(HYBM_SDMA_ORCH_RS_ARR_STAMP, HYBM_SDMA_ORCH_RS_QUIET + 8U * 64U);                   // 到达戳不压完成戳
+    EXPECT_GE(HYBM_SDMA_ORCH_RS_ARR_MAIL, HYBM_SDMA_ORCH_RS_ARR_STAMP + 8U * 1024U);              // 邮件不压戳
+    EXPECT_LE(HYBM_SDMA_ORCH_RS_ARR_HEAD + 8U, HYBM_SDMA_ORCH_RESERVED);                          // 全落在 48KB 内
+    /* 环深度契约 */
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_REQ_SLOTS, 64U);   // 请求环 64
+    EXPECT_EQ(HYBM_SDMA_ORCH_RS_ARR_SLOTS, 1024U); // 到达环 1024
+    /* 工作区布局(V5 精简: result/ovf/stop) */
+    EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);                       // ovf 在 result 后
+    EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U);                   // stop 不压 ovf
+    EXPECT_LE(HYBM_SDMA_ORCH_WS_STOP_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);                       // 落在 4KB 内
 }
 
-/* 用例 4: 工作区布局常量不变式(偏移不重叠; 违反即布局回归) */
-TEST(SdmaOrchestratorTest, WorkspaceLayoutInvariants)
-{
-    EXPECT_EQ(HYBM_SDMA_ORCH_WS_MAILBOX_OFF, 0U); // 邮箱区从头开始
-    EXPECT_GE(HYBM_SDMA_ORCH_WS_SENTINEL_OFF, HYBM_SDMA_ORCH_WS_MAILBOX_OFF + 16U * SDMA_ORCH_WS_SLOTS); // 哨兵不压邮箱
-    EXPECT_GT(HYBM_SDMA_ORCH_WS_RESULT_OFF, HYBM_SDMA_ORCH_WS_SENTINEL_OFF); // result 在哨兵后
-    EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF); // ovf 在 result 后
-    EXPECT_LE(HYBM_SDMA_ORCH_WS_OVF_OFF + 64U, HYBM_SDMA_ORCH_WS_SIZE); // 全部落在 4KB 内
-}
-
-/* 用例 5: smem 层 sdma 协同 API 的无效 handle 拒绝(不依赖任何初始化) */
+/* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; V5 仅存 host API) */
 TEST(SmemShmSdmaApiTest, InvalidHandleRejected)
 {
-    EXPECT_NE(smem_shm_sdma_submit(nullptr, nullptr, nullptr, 8), SMEM_OK); // null handle 拒绝
-    EXPECT_NE(smem_shm_sdma_wait(nullptr), SMEM_OK); // 等待拒绝
-    uint32_t mainRet = 0;   // 主返回码出参
-    uint32_t stage = 0;     // 阶段出参
-    uint32_t headAfter = 0; // head 出参
-    EXPECT_NE(smem_shm_sdma_get_result(nullptr, &mainRet, &stage, &headAfter), SMEM_OK); // 诊断拒绝
-    EXPECT_EQ(smem_shm_sdma_get_workspace(nullptr), nullptr); // 工作区返回 NULL
+    EXPECT_EQ(smem_shm_sdma_get_workspace(nullptr), nullptr); // 工作区返回 NULL(就绪判定)
 }
 } // namespace mf
 } // namespace ock

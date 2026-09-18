@@ -384,6 +384,25 @@ quiet(发送方完成语义)已拍板加入; wait 无参自举依赖 meta 修复
 定型为 **~25s epoch + host 监督线程立即续命**(环+游标语义下续命间隙无损);
 另实证 CUST 迁移要求 json 基名与 .so 同名(异名 load 107000)。
 
+## 〇''、V5 邮箱化实施(V2.5, 2026-09-18)
+
+signal/wait/quiet 新 API 全量落地(契约 v5 + epoch kernel + 设备头 + host 层 + 示例):
+
+- **API**: 设备侧三件套均以 gva 为首参(910B RDMADemo 同构, 免 dav-2002 cast 缺陷——
+  P0c 实证: 运行时整数立即解引用(T1)可用/物化指针(T2)恒偏/AICore 内联 asm 被后端拒);
+  host 数据面(submit/wait/get_result)废止, 仅存 get_workspace 就绪判定
+- **双环**: 段尾保留区 48KB(替代 2MB 标志区, 用户段几乎全量归还)——请求环 64×32B
+  (本端 signal 写/AICPU 读) + 到达环 1024×32B(对端 AICPU 写邮件像/SQE 写 1 基戳,
+  本端 wait 按序消费) + 完成戳 64(quiet); 戳 SQE 的源=邮件像首字段(零暂存)
+- **epoch kernel**: HybmSdmaOrchEpoch 消费循环(~22s 自限) + SQE 三连(数据/到达戳/
+  完成戳) + SQ 满退避; host 监督线程续命(watchdog 30s 实证约束下的常驻形态),
+  停止标志置工作区(段先于编排器销毁的 teardown 顺序安全)
+- **实机调试三题**: ① 监督线程须 SetDevice 绑上下文(107002) ② 戳值 1 基(seq0=0 与
+  清零槽不可辨致幻影邮件, 恰一块数据错) ③ signal 目的字节偏移单位错(块内 1/8 数据错)
+- **验证**: mismatch=0 PASS + 干净退出(exit=0, teardown 窗口一条 INFO 自愈日志) +
+  UT 4 用例全绿 + spec 域需求重写(设备侧邮箱 API 模型) + 双头布局钉死值锁
+- 拍板项全落地: imm 标签/自旋背压/对齐框架补齐/quiet/到达邮件自描述
+
 ## 一、迁移源与目标架构
 
 ### 1.1 aicpu-aicore-310p3 是什么（main 已合入，真机实测定论）
