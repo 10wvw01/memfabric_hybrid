@@ -421,7 +421,7 @@ SMEM_API int32_t smem_shm_sdma_submit(smem_shm_t handle, void *dstGva, void *fla
     }
     ret = entry->SdmaSubmit(dstGva, flagDoneGva, chunks); // 转发流水提交
     if (ret != SM_OK) { // 转发失败
-        SM_LOG_AND_SET_LAST_ERROR("overlap launch failed, result: " << ret << " chunks: " << chunks); // 根因
+        SM_LOG_AND_SET_LAST_ERROR("sdma submit failed, result: " << ret << " chunks: " << chunks); // 根因
         return ret; // 透传失败(根因已记录)
     }
     return SM_OK; // 提交成功
@@ -437,7 +437,7 @@ SMEM_API int32_t smem_shm_sdma_wait(smem_shm_t handle) // 等待转发
     }
     ret = entry->SdmaWait(); // 转发等待
     if (ret != SM_OK) { // 转发失败
-        SM_LOG_AND_SET_LAST_ERROR("overlap wait failed, result: " << ret); // 根因日志+错误码
+        SM_LOG_AND_SET_LAST_ERROR("sdma wait failed, result: " << ret); // 根因日志+错误码
         return ret; // 透传失败(根因已记录)
     }
     return SM_OK; // 等待成功
@@ -458,7 +458,7 @@ SMEM_API int32_t smem_shm_sdma_get_result(smem_shm_t handle, uint32_t *mainRet, 
     }
     ret = entry->SdmaGetResult(*mainRet, *stage, *headAfter); // 转发诊断读回
     if (ret != SM_OK) { // 转发失败
-        SM_LOG_AND_SET_LAST_ERROR("overlap get result failed, result: " << ret); // 根因日志+错误码
+        SM_LOG_AND_SET_LAST_ERROR("sdma get result failed, result: " << ret); // 根因日志+错误码
         return ret; // 透传失败(根因已记录)
     }
     return SM_OK; // 读取成功

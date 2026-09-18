@@ -334,7 +334,7 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
 Result SmemShmEntry::SdmaSubmit(void *dstGva, void *flagDoneGva, uint32_t chunks) // 流水提交
 {
     if (entity_ == nullptr) { // 底层 entity 未建
-        SM_LOG_ERROR("overlap launch failed: entity is null, shmId: " << id_); // 根因日志: shmId
+        SM_LOG_ERROR("sdma submit failed: entity is null, shmId: " << id_); // 根因日志: shmId
         return SM_NOT_INITIALIZED; // 未初始化
     }
     // 统一走流水提交(chunks=1 即单块语义)
@@ -342,7 +342,7 @@ Result SmemShmEntry::SdmaSubmit(void *dstGva, void *flagDoneGva, uint32_t chunks
                                    chunks);
     if (ret != 0) { // hybm 提交失败
         // 根因日志: ret/shmId/dstGva/chunks
-        SM_LOG_ERROR("overlap submit failed, ret: " << ret << " shmId: " << id_ << " dstGva: " << dstGva
+        SM_LOG_ERROR("sdma submit failed, ret: " << ret << " shmId: " << id_ << " dstGva: " << dstGva
                                                     << " chunks: " << chunks);
         return SM_ERROR; // 透传失败(根因已记录)
     }

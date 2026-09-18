@@ -21,7 +21,7 @@
  *   2. 未就绪时 C API 全拒绝(get_info/submit/wait/get_result)
  *   3. submit 的 chunks 边界(0/65 拒绝, 1~64 通过参数关)
  *   4. 工作区布局常量不变式(偏移不重叠, 哨兵区在邮箱区之外)
- *   5. smem 层 overlap API 的无效 handle 拒绝
+ *   5. smem 层 sdma 协同 API 的无效 handle 拒绝
  */
 #include <gtest/gtest.h> // googletest 框架
 
@@ -30,13 +30,13 @@
 #include "hybm_big_mem.h" // 被测 C API 声明(hybm_sdma_*)
 #include "hybm_define.h"  // BM_OK/BM_INVALID_PARAM 等错误码
 #include "smem.h"         // smem 层公共定义(SMEM_OK)
-#include "smem_shm.h"     // 被测 smem 层 overlap API 声明
+#include "smem_shm.h"     // 被测 smem 层 sdma 协同 API 声明
 
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 引擎子命名空间
 namespace {     // 匿名命名空间(用例私有常量)
 /* 工作区槽数上限(prep 头文件与设备头文件一致性由布局用例守护) */
-constexpr uint32_t OVERLAP_WS_SLOTS = 64;
+constexpr uint32_t SDMA_ORCH_WS_SLOTS = 64;
 } // namespace
 
 /* 用例 1: Acquire 在资源缺失环境(UT stub)必然失败, 且失败后状态干净可重试 */
@@ -73,22 +73,22 @@ TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
 TEST(SdmaOrchestratorTest, SubmitChunksBounds)
 {
     EXPECT_EQ(hybm_sdma_submit(0x1000, 0x2000, 0), BM_INVALID_PARAM); // chunks=0 拒绝
-    EXPECT_EQ(hybm_sdma_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS + 1), BM_INVALID_PARAM); // 65 拒绝
+    EXPECT_EQ(hybm_sdma_submit(0x1000, 0x2000, SDMA_ORCH_WS_SLOTS + 1), BM_INVALID_PARAM); // 65 拒绝
     /* 边界值本身通过参数关(随后因未就绪被拒, 验证检查顺序) */
-    EXPECT_NE(hybm_sdma_submit(0x1000, 0x2000, OVERLAP_WS_SLOTS), BM_OK); // 64 过参数关
+    EXPECT_NE(hybm_sdma_submit(0x1000, 0x2000, SDMA_ORCH_WS_SLOTS), BM_OK); // 64 过参数关
 }
 
 /* 用例 4: 工作区布局常量不变式(偏移不重叠; 违反即布局回归) */
 TEST(SdmaOrchestratorTest, WorkspaceLayoutInvariants)
 {
     EXPECT_EQ(HYBM_SDMA_ORCH_WS_MAILBOX_OFF, 0U); // 邮箱区从头开始
-    EXPECT_GE(HYBM_SDMA_ORCH_WS_SENTINEL_OFF, HYBM_SDMA_ORCH_WS_MAILBOX_OFF + 16U * OVERLAP_WS_SLOTS); // 哨兵不压邮箱
+    EXPECT_GE(HYBM_SDMA_ORCH_WS_SENTINEL_OFF, HYBM_SDMA_ORCH_WS_MAILBOX_OFF + 16U * SDMA_ORCH_WS_SLOTS); // 哨兵不压邮箱
     EXPECT_GT(HYBM_SDMA_ORCH_WS_RESULT_OFF, HYBM_SDMA_ORCH_WS_SENTINEL_OFF); // result 在哨兵后
     EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF); // ovf 在 result 后
     EXPECT_LE(HYBM_SDMA_ORCH_WS_OVF_OFF + 64U, HYBM_SDMA_ORCH_WS_SIZE); // 全部落在 4KB 内
 }
 
-/* 用例 5: smem 层 overlap API 的无效 handle 拒绝(不依赖任何初始化) */
+/* 用例 5: smem 层 sdma 协同 API 的无效 handle 拒绝(不依赖任何初始化) */
 TEST(SmemShmSdmaApiTest, InvalidHandleRejected)
 {
     EXPECT_NE(smem_shm_sdma_submit(nullptr, nullptr, nullptr, 8), SMEM_OK); // null handle 拒绝

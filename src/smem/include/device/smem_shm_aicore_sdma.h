@@ -29,8 +29,8 @@
  * 约束: 本头文件与 smem_shm_aicore_base_define.h 同风格, 供 bisheng 编译的
  * AICore kernel include; 依赖 AscendC 的 DataCacheCleanAndInvalid(dcci)。
  */
-#ifndef __MEMFABRIC_SMEM_AI_CORE_OVERLAP_H__ /* 头文件包含守卫(防重复包含) */
-#define __MEMFABRIC_SMEM_AI_CORE_OVERLAP_H__ /* 同上, 与文件尾 #endif 配对 */
+#ifndef __MEMFABRIC_SMEM_AI_CORE_SDMA_H__ /* 头文件包含守卫(防重复包含) */
+#define __MEMFABRIC_SMEM_AI_CORE_SDMA_H__ /* 同上, 与文件尾 #endif 配对 */
 
 #include "smem_shm_aicore_base_define.h" // AICore 基础类型与内联宏(SMEM_SHM_INLINE_AICORE)
 #include "smem_shm_aicore_base_meta.h"   // meta 区布局常量与设备侧读取原语
@@ -118,4 +118,4 @@ SMEM_SHM_INLINE_AICORE uint64_t smem_shm_sdma_poll_flag(__gm__ void *flagAddr, u
     return 0; // 超时返回 0
 }
 
-#endif // __MEMFABRIC_SMEM_AI_CORE_OVERLAP_H__
+#endif // __MEMFABRIC_SMEM_AI_CORE_SDMA_H__

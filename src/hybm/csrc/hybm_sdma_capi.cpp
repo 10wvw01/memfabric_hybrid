@@ -28,7 +28,7 @@ int32_t SdmaSubmitCommon(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunk
     auto &prep = SdmaOrchestrator::GetInstance(); // 单例引用(就绪判断/工作区/launch 均经它)
     if (!prep.Ready()) {                         // 未就绪(开关关/初始化失败)
         // 根因日志: 目的地址/标志地址/chunks
-        BM_LOG_ERROR("overlap not ready, dstAddr: 0x" << std::hex << dstAddr << " flagDoneAddr: 0x"
+        BM_LOG_ERROR("sdma orch not ready, dstAddr: 0x" << std::hex << dstAddr << " flagDoneAddr: 0x"
                                                       << flagDoneAddr << " chunks: " << std::dec << chunks);
         return BM_NOT_INITIALIZED; // 未就绪直接拒绝(不静默降级)
     }
@@ -60,12 +60,12 @@ int32_t SdmaSubmitCommon(uint64_t dstAddr, uint64_t flagDoneAddr, uint32_t chunk
 HYBM_API int32_t hybm_sdma_get_info(hybm_sdma_info_t *info) // 查询就绪信息
 {
     if (info == nullptr) { // 出参指针空校验
-        BM_LOG_ERROR("overlap get info failed: info is null"); // 根因日志: 空指针
+        BM_LOG_ERROR("sdma orch get info failed: info is null"); // 根因日志: 空指针
         return BM_INVALID_PARAM;                               // 参数非法
     }
     auto &prep = SdmaOrchestrator::GetInstance(); // 单例引用
     if (!prep.Ready()) {                         // 未就绪
-        BM_LOG_ERROR("overlap not ready (switch off or init failed)"); // 根因日志: 未就绪原因(开关/初始化)
+        BM_LOG_ERROR("sdma orch not ready (switch off or init failed)"); // 根因日志: 未就绪原因(开关/初始化)
         return BM_NOT_INITIALIZED;                                     // 未初始化
     }
     info->sqId = prep.GetSqId();           // 填 CP 流 SQ id
@@ -96,7 +96,7 @@ HYBM_API int32_t hybm_sdma_get_result(uint32_t *mainRet, uint32_t *stage, uint32
 {
     auto &prep = SdmaOrchestrator::GetInstance(); // 单例引用
     if (!prep.Ready()) {                         // 未就绪时结果不可读
-        BM_LOG_ERROR("overlap not ready, result unavailable"); // 根因日志: 未就绪
+        BM_LOG_ERROR("sdma orch not ready, result unavailable"); // 根因日志: 未就绪
         return BM_NOT_INITIALIZED;                              // 未初始化
     }
     HybmSdmaOrchResult r = {}; // 结果读回缓冲(零初始化)
@@ -105,7 +105,7 @@ HYBM_API int32_t hybm_sdma_get_result(uint32_t *mainRet, uint32_t *stage, uint32
                                      reinterpret_cast<void *>(prep.GetWorkspace() + HYBM_SDMA_ORCH_WS_RESULT_OFF),
                                      sizeof(r), ACL_MEMCPY_DEVICE_TO_HOST);
     if (ret != BM_OK) { // 读回失败
-        BM_LOG_ERROR("read overlap result failed, ret: " << ret << " sqId: " << prep.GetSqId()); // 根因日志: ret/sqId
+        BM_LOG_ERROR("read sdma orch result failed, ret: " << ret << " sqId: " << prep.GetSqId()); // 根因日志: ret/sqId
         return ret;                                                                              // 透传失败(根因已记录)
     }
     if (mainRet != nullptr) { // 调用方关心主返回码

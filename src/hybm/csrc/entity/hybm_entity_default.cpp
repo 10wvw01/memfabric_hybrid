@@ -1258,7 +1258,7 @@ Result MemEntityDefault::InitTransManager()
                         "entityId: " << id_ << " devId: " << options_.devId);
             auto ret = SdmaOrchestrator::GetInstance().Acquire(options_.devId); // 首次进入做全量初始化(引用计数+1)
             if (ret != BM_OK) { // 准备失败(CP 流/工作区/kernel 任一不过)
-                BM_LOG_ERROR("overlap prep acquire failed, ret: " << ret << " devId: " << options_.devId
+                BM_LOG_ERROR("sdma orchestrator acquire failed, ret: " << ret << " devId: " << options_.devId
                                                                   << " entityId: " << id_);
                 return ret; // 透传失败(根因已记录)
             }

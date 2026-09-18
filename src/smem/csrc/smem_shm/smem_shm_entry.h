@@ -54,7 +54,7 @@ public:
 
     Result GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) const;
 
-    /* ---- 310P AICore×AICPU 协同模式(转发 hybm C API, 见 smem_shm.h 的 overlap 族) ---- */
+    /* ---- 310P AICore×AICPU 协同模式(转发 hybm C API, 见 smem_shm.h 的 sdma 协同族) ---- */
     /* 提交一次流水搬运(邮箱 ring 逐 chunk → SQE 对 → 每 chunk doorbell; chunks=1 即单块) */
     Result SdmaSubmit(void *dstGva, void *flagDoneGva, uint32_t chunks);
     /* 等待协同搬运完成 */
