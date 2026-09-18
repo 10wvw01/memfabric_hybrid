@@ -66,6 +66,28 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
  * HybmAclVmmSegment 同款 API 配方(ReserveMemAddress + MallocPhysical + MapMem)。
  * meta 区地址 HYBM_DEVICE_META_ADDR 是设备侧头文件(smem_shm_aicore_base_meta.h)
  * 硬编码的约定地址, 必须 expectPtr 精确命中, 偏移即失败。 */
+/* meta 区设备访问授权: AclVmm 映射默认仅 host 上下文可访问(H2D 拷贝通道走进程
+ * 自有权限, 故 UpdateHybmDeviceInfo 写入"成功"), AICore 的 SMMU 翻译需要显式
+ * SetAccess 授权才可读 —— 池段(HybmAclVmmSegment::MapPhysicalToOwnSlot)一直有
+ * 这一步(池 GVA AICore 可读的前提), meta 区 310P 移植时遗漏, 导致设备侧 getter
+ * 读零(smem_shm_get_global_rank 等失效)。 */
+static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
+{
+    aclrtMemAccessDesc acc{};                                            // 访问权限描述符
+    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;  // 读写权限
+    acc.location.id = static_cast<uint32_t>(deviceId);                   // 授权设备号
+    acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE; // 授权类型: 设备侧
+    auto ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, &acc, 1);
+    if (ret != BM_OK) { // 授权失败
+        // 根因日志: ret/addr/size/deviceId
+        BM_LOG_ERROR("set meta device access failed, ret: " << ret << " addr: 0x" << std::hex
+                                                            << HYBM_DEVICE_META_ADDR << " size: 0x" << allocSize
+                                                            << " deviceId: " << deviceId);
+        return BM_ERROR; // 透传失败(根因已记录)
+    }
+    return BM_OK; // 授权成功(AICore SMMU 可翻译 meta VA)
+}
+
 int32_t Hybm310PInitMetaGva(uint16_t deviceId, void **globalMemoryBase, size_t allocSize, void **allocHandle)
 {
     // 第一步: 在约定地址 HYBM_DEVICE_META_ADDR 预留 VA 窗口(expectPtr 精确指定)
@@ -109,10 +131,17 @@ int32_t Hybm310PInitMetaGva(uint16_t deviceId, void **globalMemoryBase, size_t a
                                                  << " size: 0x" << allocSize << " deviceId: " << deviceId);
         (void)DlAclApi::AclrtFreePhysical(handle);                  // 回滚: 释放刚分配的物理页
         (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);  // 回滚: 释放已预留的 VA 窗口
-        return BM_ERROR;                                            // 透传失败(根因已记录)
+        return BM_ERROR;                                             // 透传失败(根因已记录)
+    }
+    // 第四步: 设备侧访问授权(AICore SMMU 可读, 与池段同款; 遗漏此步=设备侧 getter 读零)
+    if (MetaSetDeviceAccess(deviceId, allocSize) != BM_OK) {
+        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR)); // 回滚: 解除映射
+        (void)DlAclApi::AclrtFreePhysical(handle);                  // 回滚: 释放物理页
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);  // 回滚: 释放 VA 窗口
+        return BM_ERROR;                                             // 透传失败(根因已记录)
     }
     *allocHandle = handle; // 物理句柄交调用方保管(uninit 释放用)
-    return BM_OK;          // 三步全部成功
+    return BM_OK;          // 四步全部成功
 }
 
 int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags){

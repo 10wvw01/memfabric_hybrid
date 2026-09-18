@@ -363,6 +363,22 @@ EX09 同事侧暴露"部署工具未入产品分支"阻塞(原作者 ec1ee588 �
   off-by-one(_REPO_ROOT 算到仓库父目录, 构建期被掩盖 install 期爆发)与
   ASCEND_HOME_PATH "必须 -D 传"限制(现 env 即可); 主构建产物实机 e2e PASS
 
+## 〇、meta 可读性勘正与邮箱化决策(V2.4, 2026-09-18)
+
+邮箱封装设计讨论中用户质疑"AICore 读 meta 恒为零"的合理性, 复查证伪——**该"平台
+事实"实为两层库内软件缺陷**:
+- ① `Hybm310PInitMetaGva` 缺 `AclrtMemSetAccess` 设备授权(池段同款配方有此步故可读),
+  补一行后 rank/rankSize/symm 立即可读
+- ② 设备头 `__gm__ void**` 解引用 getter 在 dav-2002 后端读错, 改标量 u64 读修复
+- 新登记工具链约束: 运行时整数→__gm__ 指针 cast 在 dav-2002 错位(+0x2000/-O2 变量
+  绑定型错位), 常量折叠立即解引用/kernel 传参/指针算术正常(910B 后端无此限制)
+- EX_META 探针(四路判别+D2H 对照+双 rank)全 PASS; ex08 e2e 回归 PASS(2.48x)
+
+**V5 邮箱化设计拍板**(signal/wait 新 API): signal(src,dst,len,+imm) 投递请求邮件;
+wait() 无参按序消费到达邮件(内容含 seq/dst/len/status, 32B/封, seq 自校验替代共享
+tail); 背压=自旋; MTE 跨 die 不可用(用户定论, 不验证); quiet(发送方完成语义)待定;
+到达环选址与常驻消费(watchdog 实证 P0b)待实验。
+
 ## 一、迁移源与目标架构
 
 ### 1.1 aicpu-aicore-310p3 是什么（main 已合入，真机实测定论）

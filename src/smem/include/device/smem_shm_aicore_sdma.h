@@ -65,12 +65,12 @@ constexpr uint64_t SMEM_SHM_SDMA_POLL_MAX_ITER = 100000000ULL;
 }                  // extern "C" 结束
 #endif
 
-/* 平台事实(310P, 实测): AICore kernel 内 GM 读 meta 区(SDVA)恒返回零值——
- * meta GVA 仅 host(H2D 写入)与 SDMA(SQE 翻译)可见, AICore load 不可见(A3 无此限制,
- * 平台差异)。故本头不提供工作区/上下文的 meta 自取原语(A3 血统的
- * smem_shm_get_sdma_workspace_address/smem_shm_get_global_rank 系列在 310P kernel
- * 内不可用), 协同工作区/标志地址一律由 host 侧算好经 kernel 参数传入;
- * host 侧查询用 smem_shm.h 的 smem_shm_sdma_get_workspace(handle)。 */
+/* meta 区可读性(310P, 实测勘正 2026-09-18): 此前"AICore 读 meta 恒为零"的结论有误,
+ * 真因有二且均已在库内修复——① meta 区 AclVmm 映射缺 AclrtMemSetAccess 设备授权
+ * (池段有此步故可读, Hybm310PInitMetaGva 遗漏, 已补); ② 设备头 void** 解引用型
+ * getter 在 dav-2002 后端读取错误(已改标量 u64 读, 见 base_meta.h 工具链约束)。
+ * 修复后 rank/rankSize/symmetricSize/工作区槽均可在 kernel 内正确读取;
+ * 协同工作区当前仍由 host 传参(kit 内无运行时整数→指针的安全 cast, 见下)。 */
 
 /* 计算本 rank 池段内协同保留区标志地址
  * (segBase = 本 rank 段基址(gva + symmetricSize*rankId), physSize = 段物理大小, idx = 槽序号) */
