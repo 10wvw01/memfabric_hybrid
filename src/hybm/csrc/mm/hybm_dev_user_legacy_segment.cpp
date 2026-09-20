@@ -147,11 +147,7 @@ Result HybmDevUserLegacySegment::RegisterMemory(const void *addr, uint64_t size,
             if (ret != 0) {
                 BM_LOG_ERROR("set shm(" << name << ") for sdid=" << remoteDev.second.sdid
                                         << " pid=" << remoteDev.second.pid << " failed: " << ret);
-                if (is310P) {
-                    DlAclApi::AclrtIpcMemClose(name);
-                } else {
-                    DlAclApi::RtIpcDestroyMemoryName(name);
-                }
+                DlAclApi::RtIpcDestroyMemoryName(name);
                 return BM_DL_FUNCTION_FAILED;
             }
             BM_LOG_INFO("set shm(" << name << ") for sdid=" << remoteDev.second.sdid << " pid=" << remoteDev.second.pid
