@@ -82,26 +82,21 @@ Result CheckTopologyP2PSlots(StorePtr &store, uint32_t rankId, uint32_t devId, u
         return SM_ERROR;
     }
 
-    /* check P2P slot budget: count cross-card inbound slots per card */
-    std::map<uint32_t, uint32_t> requiredPerCard;
-    for (size_t i = 0; i < rankTopos.size(); i++) {
-        uint32_t cardI = rankTopos[i].second / 2U;
-        for (size_t j = 0; j < rankTopos.size(); j++) {
-            if (i == j) {
-                continue;
-            }
-            uint32_t cardJ = rankTopos[j].second / 2U;
-            if (cardI != cardJ) {
-                requiredPerCard[cardI]++;
-            }
-        }
+    /* check P2P slot budget: count cross-card inbound slots per card.
+     * For card C with r ranks, each rank imports from (totalRanks - r) ranks on
+     * other cards, so inbound slots = r * (totalRanks - r). O(n) via bucketing. */
+    std::map<uint32_t, uint32_t> ranksPerCard;
+    for (const auto &topo : rankTopos) {
+        ranksPerCard[topo.second / 2U]++;
     }
 
     bool feasible = true;
-    for (const auto &card : requiredPerCard) {
-        if (card.second > P2P_SLOTS_PER_CARD) {
+    for (const auto &card : ranksPerCard) {
+        uint32_t required = card.second * (static_cast<uint32_t>(rankTopos.size()) - card.second);
+        if (required > P2P_SLOTS_PER_CARD) {
             SM_LOG_ERROR("[" << logTag << "] P2P slot budget exceeded: cardId:" << card.first
-                             << " required:" << card.second << " limit:" << P2P_SLOTS_PER_CARD
+                             << " ranks:" << card.second << " required:" << required
+                             << " limit:" << P2P_SLOTS_PER_CARD
                              << " rank:" << rankId << " worldSize:" << rankSize);
             feasible = false;
         }
