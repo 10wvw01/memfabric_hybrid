@@ -21,6 +21,7 @@ namespace mf {
 constexpr uint8_t MAX_DEVICE_COUNT = 16;
 
 extern aclrtDrvMemHandle HybmLookupVmmHandle(void *addr);
+extern int32_t HybmExportVmmShareableHandle(void *addr, uint64_t *shareableHandle);
 HybmDevUserLegacySegment::HybmDevUserLegacySegment(const MemSegmentOptions &options, int eid) noexcept
     : HybmDevLegacySegment{options, eid}
 {}
@@ -109,19 +110,24 @@ Result HybmDevUserLegacySegment::RegisterMemory(const void *addr, uint64_t size,
     Result ret = 0;
     uint64_t shareableHandle = 0;
 
-    auto drvHandle = HybmLookupVmmHandle(const_cast<void *>(addr));
-    if (is310P && drvHandle != nullptr) {
-        ret =
-            DlAclApi::AclrtMemExportToShareableHandle(drvHandle, aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
-                                                      ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &shareableHandle);
-        if (ret != 0 || shareableHandle == 0) {
-            BM_LOG_ERROR("AclrtMemExportToShareableHandle failed, ret:" << ret << " addr:0x" << std::hex << addr
-                                                                        << " size:" << size);
+    if (is310P) {
+        /* atomically look up + export VMM handle under lock to prevent UAF:
+         * if we returned a handle copy and used it outside the lock, another
+         * thread could call hybm_free_vmm_buffer which erases the entry and
+         * calls AclrtFreePhysical on the same handle */
+        auto exportRet = HybmExportVmmShareableHandle(const_cast<void *>(addr), &shareableHandle);
+        if (exportRet == 0 && shareableHandle != 0) {
+            BM_LOG_INFO("VMM export shareable handle, addr:0x" << std::hex << addr << " size:" << size);
+        } else if (exportRet == -1) {
+            /* not a VMM buffer, fall through to IPC key path below */
+            shareableHandle = 0;
+        } else {
+            BM_LOG_ERROR("HybmExportVmmShareableHandle failed, ret:" << exportRet << " addr:0x" << std::hex << addr
+                                                                       << " size:" << size);
             return BM_DL_FUNCTION_FAILED;
         }
-        BM_LOG_INFO("VMM export shareable handle:" << shareableHandle << " addr:0x" << std::hex << addr
-                                                   << " size:" << size);
-    } else if (is310P) {
+    }
+    if (is310P && shareableHandle == 0) {
         ret = DlAclApi::AclrtIpcMemGetExportKey(const_cast<void *>(addr), size, name, sizeof(name),
                                                 ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
         if (ret != 0) {
@@ -129,7 +135,7 @@ Result HybmDevUserLegacySegment::RegisterMemory(const void *addr, uint64_t size,
                                                                  << " size: " << size);
             return BM_DL_FUNCTION_FAILED;
         }
-    } else {
+    } else if (!is310P) {
         ret = DlAclApi::RtIpcSetMemoryName(addr, size, name, sizeof(name));
         if (ret != 0) {
             BM_LOG_ERROR("RtIpcSetMemoryName failed, ret: " << ret << " addr: 0x" << std::hex << addr
