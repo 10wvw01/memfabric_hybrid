@@ -499,6 +499,11 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
         BM_LOG_DEBUG("310P3 export: sliceIdx:" << slice->index_ << " va:0x" << std::hex << slice->vAddress_ << " size:"
                                                << std::dec << slice->size_ << " handle:" << pos->second.handle
                                                << " deviceId_:" << deviceId_ << " logicDeviceId_:" << logicDeviceId_);
+        /* DISABLE_PID_VALIDATION is required for multi-process sharing: each rank
+         * runs as a separate process with a different PID. The shareable handle is
+         * exchanged via the trusted config store (TCP/etcd) and is NOT logged (see
+         * PR#2 #10). If untrusted peers gain access to the store URL, they could
+         * import device memory — mitigate by restricting store URL to trusted network. */
         ret = DlAclApi::AclrtMemExportToShareableHandle(reinterpret_cast<aclrtDrvMemHandle>(pos->second.handle),
                                                         aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
                                                         ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &shareable);
