@@ -56,6 +56,7 @@ private:
     Result CopyD2H(void *dest, const void *src, uint64_t length) noexcept;
     Result CopyByDirection(void *dest, const void *src, uint64_t length, hybm_data_copy_direction direction) noexcept;
     Result BatchCopyD2D(hybm_batch_copy_params &params) noexcept;
+    Result BatchCopyNonD2D(hybm_batch_copy_params &params, int32_t kind) noexcept;
     Result InnerWait(const ExtOptions &options, int32_t waitId) noexcept;
 
     uint32_t rankId_;
