@@ -18,6 +18,7 @@
 #include "hybm.h"
 #include "hybm_ptracer.h"
 #include "hybm_common_include.h"
+#include "hybm_vmm_handle_registry.h"
 #include "mf_env_define.h"
 #include "hybm_gva.h"
 #include "hybm_version.h"
@@ -37,50 +38,7 @@ int32_t initedDeviceId = -1;
 void *g_allocHandle = nullptr;
 
 std::mutex initMutex;
-
-struct VmmHandleEntry {
-    aclrtDrvMemHandle handle{nullptr};
-    uint32_t deviceId{0};
-};
-
-std::unordered_map<void *, VmmHandleEntry> g_vmmHandleMap;
-std::mutex g_vmmMutex;
 } // namespace
-
-namespace ock {
-namespace mf {
-aclrtDrvMemHandle HybmLookupVmmHandle(void *addr)
-{
-    std::lock_guard<std::mutex> lock(g_vmmMutex);
-    auto it = g_vmmHandleMap.find(addr);
-    return (it != g_vmmHandleMap.end()) ? it->second.handle : nullptr;
-}
-
-/* Atomically look up a VMM handle and export it to a shareable handle under the
- * same lock. This prevents UAF: the caller no longer uses a handle copy outside
- * the lock while another thread may call hybm_free_vmm_buffer which erases the
- * entry and calls AclrtFreePhysical on the same handle.
- * Returns 0 on success, -1 if addr is not a VMM buffer, or ACL error code on export failure. */
-int32_t HybmExportVmmShareableHandle(void *addr, uint64_t *shareableHandle)
-{
-    std::lock_guard<std::mutex> lock(g_vmmMutex);
-    auto it = g_vmmHandleMap.find(addr);
-    if (it == g_vmmHandleMap.end()) {
-        return -1;
-    }
-    uint64_t sh = 0;
-    auto ret = DlAclApi::AclrtMemExportToShareableHandle(it->second.handle,
-                                                         aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
-                                                         ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &sh);
-    if (ret != 0) {
-        BM_LOG_ERROR("HybmExportVmmShareableHandle export failed, ret:" << ret << " addr:0x" << std::hex << addr);
-        return ret;
-    }
-    *shareableHandle = sh;
-    return 0;
-}
-} // namespace mf
-} // namespace ock
 
 int32_t HybmGetInitDeviceId()
 {
@@ -395,10 +353,7 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(g_vmmMutex);
-        g_vmmHandleMap[va] = {handle, deviceId};
-    }
+    VmmHandleRegistry::Register(va, handle, deviceId);
 
     BM_LOG_INFO("hybm_alloc_vmm_buffer success, deviceId:" << deviceId << " va:" << va << " size:" << alignedSize
                                                            << " handle:" << handle);
@@ -414,16 +369,9 @@ HYBM_API void hybm_free_vmm_buffer(void *addr, size_t size)
 
     aclrtDrvMemHandle handle = nullptr;
     uint32_t deviceId = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_vmmMutex);
-        auto it = g_vmmHandleMap.find(addr);
-        if (it == g_vmmHandleMap.end()) {
-            BM_LOG_WARN("hybm_free_vmm_buffer: addr not found in registry, addr:" << addr);
-            return;
-        }
-        handle = it->second.handle;
-        deviceId = it->second.deviceId;
-        g_vmmHandleMap.erase(it);
+    if (!VmmHandleRegistry::Unregister(addr, handle, deviceId)) {
+        BM_LOG_WARN("hybm_free_vmm_buffer: addr not found in registry, addr:" << addr);
+        return;
     }
 
     auto setRet = DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId), true);

@@ -14,14 +14,13 @@
 #include "hybm_networks_common.h"
 #include "hybm_ex_info_transfer.h"
 #include "hybm_va_manager.h"
+#include "hybm_vmm_handle_registry.h"
 #include "hybm_dev_user_legacy_segment.h"
 
 namespace ock {
 namespace mf {
 constexpr uint8_t MAX_DEVICE_COUNT = 16;
 
-extern aclrtDrvMemHandle HybmLookupVmmHandle(void *addr);
-extern int32_t HybmExportVmmShareableHandle(void *addr, uint64_t *shareableHandle);
 HybmDevUserLegacySegment::HybmDevUserLegacySegment(const MemSegmentOptions &options, int eid) noexcept
     : HybmDevLegacySegment{options, eid}
 {}
@@ -115,7 +114,7 @@ Result HybmDevUserLegacySegment::RegisterMemory(const void *addr, uint64_t size,
          * if we returned a handle copy and used it outside the lock, another
          * thread could call hybm_free_vmm_buffer which erases the entry and
          * calls AclrtFreePhysical on the same handle */
-        auto exportRet = HybmExportVmmShareableHandle(const_cast<void *>(addr), &shareableHandle);
+        auto exportRet = VmmHandleRegistry::ExportShareableHandle(const_cast<void *>(addr), &shareableHandle);
         if (exportRet == 0 && shareableHandle != 0) {
             BM_LOG_INFO("VMM export shareable handle, addr:0x" << std::hex << addr << " size:" << size);
         } else if (exportRet == -1) {
