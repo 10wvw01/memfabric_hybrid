@@ -406,7 +406,14 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         desc[0].type = MEM_ACCESS_TYPE_READWRITE;
         ret = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(allocAddr), size, desc, 1);
         if (ret != BM_OK) {
-            BM_LOG_ERROR("HalMemSetAccess failed: " << ret);
+            BM_LOG_ERROR("HalMemSetAccess failed: " << ret << " addr:0x" << std::hex << allocAddr
+                                                    << " size:" << size << " segType:" << options_.segType);
+            /* unmap before releasing handle to avoid dangling mapping */
+            if (Is310PAclPath()) {
+                DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+            } else {
+                DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
+            }
             ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
             slices_.erase(slice->index_);
             return BM_DL_FUNCTION_FAILED;
