@@ -86,7 +86,8 @@ private:
     Result DeployOrchestratorKernel(const std::string &launchJsonPath, const std::string &dst); /* 自动部署 */
     Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
     Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
-    Result KfcExec(const std::string &cmd); /* KFC 通道执行一条设备 OS 命令(仅部署链内部使用) */
+    /* KFC 通道执行一条设备 OS 命令; probe=true 时"文件缺失"退出码降级为 INFO(首轮探测预期, 仅部署链内部使用) */
+    Result KfcExec(const std::string &cmd, bool probe = false);
     Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 设备内复制+完整性校验 */
     Result LaunchEpoch();                  /* 提交一纪 epoch kernel(监督线程内) */
     void SupervisorLoop();                 /* 监督线程主循环(续命直至停止) */

@@ -270,7 +270,7 @@ Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载(设�
     }
     /* 注意: mode=0 加载不校验设备侧文件(dlopen 惰性到 launch), 须以 KFC 探测文件存在性为闸门 */
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + ExtractDeviceSoName(resolved);
-    const auto gate = KfcExec("test -f " + dst); // 设备侧文件存在性探测(一条 KFC 往返)
+    const auto gate = KfcExec("test -f " + dst, true); // 设备侧文件存在性探测(文件缺失为首轮预期, 降级 INFO)
     if (gate != HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR && gate != BM_OK) { // 非"文件缺失"语义 = 通道异常
         // KFC 不可用(锁定环境): 按预部署假定直接加载, 文件若真缺失由数据面 wait 显式报错
         BM_LOG_ERROR("kfc channel unavailable (ret: " << gate << "), assume pre-deployed, dst: " << dst);
@@ -309,7 +309,7 @@ Result SdmaOrchestrator::TryLoadKernel(const std::string &jsonPath) // 单次加
 Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &launchJsonPath, const std::string &dst) // 自动部署
 {
     DeployFlockGuard lock; // host 侧进程间互斥(双 rank 并发部署防复制竞态)
-    if (KfcExec("test -f " + dst) == BM_OK) { // 锁内复查: 对端进程可能刚部署完
+    if (KfcExec("test -f " + dst, true) == BM_OK) { // 锁内复查: 对端进程可能刚部署完(缺失为预期, 降级 INFO)
         auto ret = TryLoadKernel(launchJsonPath); // 复用对端部署成果, 直接加载
         if (ret == BM_OK) { // 加载成功
             BM_LOG_INFO("kernel deployed by peer process, devId: " << devId_); // 免重复迁移
@@ -431,7 +431,7 @@ Result SdmaOrchestrator::LoadKfcChannel(aclrtFuncHandle &fh)
     return ret; // 通道装载结果(失败路径根因已记录)
 }
 
-Result SdmaOrchestrator::KfcExec(const std::string &cmd) // KFC 通道执行一条设备 OS 命令
+Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe) // KFC 通道执行一条设备 OS 命令
 {
     if (cmd.size() >= HYBM_SDMA_ORCH_CMD_BUF_SIZE) { // 命令超长(受控常量拼接, 理论不达)
         BM_LOG_ERROR("kfc cmd too long, len: " << cmd.size()); // 根因日志: 长度
@@ -458,7 +458,11 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd) // KFC 通道执行一�
     }
     ret = DlAclApi::AclrtSynchronizeStream(launchStream_); // 同步取回命令结果
     if (ret != BM_OK) { // sync 非 0 = 命令退出码非 0(或流错误)
-        BM_LOG_ERROR("kfc cmd failed, sync: " << ret << " cmd: " << cmd); // 根因: sync/cmd
+        if (probe && ret == HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR) { // 探测命令遇"文件缺失"退出码 = 首轮预期情况
+            BM_LOG_INFO("kfc probe miss (expected on first run), sync: " << ret << " cmd: " << cmd); // 信息级免误导
+        } else {
+            BM_LOG_ERROR("kfc cmd failed, sync: " << ret << " cmd: " << cmd); // 根因: sync/cmd
+        }
     }
     return ret; // 命令结果(失败路径根因已记录)
 }
