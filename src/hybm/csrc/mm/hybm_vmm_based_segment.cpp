@@ -806,7 +806,8 @@ Result HybmVmmBasedSegment::Mmap() noexcept
                 BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
                                       << " shareable:" << shareable << " sameCard:" << sameCard
                                       << " deviceId:" << deviceId_ << " segType:" << options_.segType);
-                DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(lva));
+                /* do NOT pre-release lva here: it stays in reservedLva_ and will be
+                 * released by UnReserveMemorySpace. Pre-releasing causes double-free. */
                 return BM_ERROR;
             }
             mapHandle = aclHandle;
