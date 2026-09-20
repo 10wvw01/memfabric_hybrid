@@ -255,7 +255,7 @@ Result HybmConnBasedSegment::Mmap() noexcept
 
         uint64_t hva = 0;
         if (import.shmName[0] != '\0') {
-            int shmFd = shm_open(import.shmName, O_RDWR, 0666);
+            int shmFd = shm_open(import.shmName, O_RDWR, 0600);
             if (shmFd < 0) {
                 BM_LOG_ERROR("310P3 remote DRAM shm_open failed, name:" << import.shmName << " errno:" << errno
                                                                          << " rankId:" << import.rankId);
@@ -472,7 +472,7 @@ void *HybmConnBasedSegment::AllocMemory(void *sliceAddr, uint64_t lvOffset, uint
     uint64_t mmapOffset = options_.shmFd < 0 ? 0 : lvOffset;
 
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P && !shmName_.empty() && mmapFd < 0) {
-        int shmFd = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0666);
+        int shmFd = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0600);
         if (shmFd >= 0) {
             if (ftruncate(shmFd, static_cast<off_t>(lvOffset + size)) != 0) {
                 BM_LOG_WARN("310P3 shm_open ftruncate failed, errno:" << errno);
