@@ -219,6 +219,8 @@ Result HybmConnBasedSegment::Import(const std::vector<std::string> &allExInfo, v
             BM_LOG_ERROR("deserialize imported info(" << i << ") failed.");
             return BM_INVALID_PARAM;
         }
+        /* ensure shmName is null-terminated: remote peer data may fill all 64 bytes */
+        deserializedInfos[i].shmName[sizeof(deserializedInfos[i].shmName) - 1] = '\0';
         if (addresses != nullptr) {
             addresses[i] = reinterpret_cast<void *>(deserializedInfos[i].gva);
         }
@@ -238,6 +240,15 @@ Result HybmConnBasedSegment::Mmap() noexcept
     for (const auto &import : imports_) {
         if (import.rankId == options_.rankId) {
             continue;
+        }
+        /* validate remote gva falls within reserved GVA space before MAP_FIXED,
+         * preventing malicious peer from overwriting arbitrary local mappings */
+        auto gvaBase = reinterpret_cast<uint64_t>(globalVirtualAddress_);
+        if (import.size == 0 || import.gva < gvaBase || import.gva + import.size > gvaBase + totalVirtualSize_) {
+            BM_LOG_ERROR("invalid remote gva from rank:" << import.rankId << " gva:" << VaToStr(import.gva)
+                                                          << " size:" << import.size << " gvaBase:" << VaToStr(gvaBase)
+                                                          << " totalSize:" << totalVirtualSize_);
+            return BM_INVALID_PARAM;
         }
         mappedGvaMem_.insert(import.gva);
         mappedGvaSize_[import.gva] = import.size;
