@@ -332,6 +332,13 @@ Result HostDataOpAclMemcpy::Wait(int32_t waitId) noexcept
 
 void HostDataOpAclMemcpy::TransformVa(void *&src, void *&dst, hybm_data_copy_direction direction) noexcept
 {
+    /* validate direction before indexing DirectionSrcMemType/DirectionDestMemType arrays,
+     * which are sized HYBM_DATA_COPY_DIRECTION_BUTT. Invalid direction is caught by
+     * CopyByDirection/IsXxxDirection downstream, but we must not read out-of-bounds here. */
+    if (direction >= HYBM_DATA_COPY_DIRECTION_BUTT) {
+        BM_LOG_ERROR("invalid direction:" << direction << " rankId:" << rankId_);
+        return;
+    }
     uint32_t srcType = (DirectionSrcMemType[direction] == HYBM_MEM_TYPE_HOST) ? HVM_HVA : HVM_DVA;
     uint32_t dstType = (DirectionDestMemType[direction] == HYBM_MEM_TYPE_HOST) ? HVM_HVA : HVM_DVA;
 
