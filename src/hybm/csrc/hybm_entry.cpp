@@ -55,6 +55,30 @@ aclrtDrvMemHandle HybmLookupVmmHandle(void *addr)
     auto it = g_vmmHandleMap.find(addr);
     return (it != g_vmmHandleMap.end()) ? it->second.handle : nullptr;
 }
+
+/* Atomically look up a VMM handle and export it to a shareable handle under the
+ * same lock. This prevents UAF: the caller no longer uses a handle copy outside
+ * the lock while another thread may call hybm_free_vmm_buffer which erases the
+ * entry and calls AclrtFreePhysical on the same handle.
+ * Returns 0 on success, -1 if addr is not a VMM buffer, or ACL error code on export failure. */
+int32_t HybmExportVmmShareableHandle(void *addr, uint64_t *shareableHandle)
+{
+    std::lock_guard<std::mutex> lock(g_vmmMutex);
+    auto it = g_vmmHandleMap.find(addr);
+    if (it == g_vmmHandleMap.end()) {
+        return -1;
+    }
+    uint64_t sh = 0;
+    auto ret = DlAclApi::AclrtMemExportToShareableHandle(it->second.handle,
+                                                         aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
+                                                         ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &sh);
+    if (ret != 0) {
+        BM_LOG_ERROR("HybmExportVmmShareableHandle export failed, ret:" << ret << " addr:0x" << std::hex << addr);
+        return ret;
+    }
+    *shareableHandle = sh;
+    return 0;
+}
 } // namespace mf
 } // namespace ock
 
