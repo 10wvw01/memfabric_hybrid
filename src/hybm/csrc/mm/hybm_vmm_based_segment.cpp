@@ -502,8 +502,7 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
         ret = DlAclApi::AclrtMemExportToShareableHandle(reinterpret_cast<aclrtDrvMemHandle>(pos->second.handle),
                                                         aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
                                                         ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &shareable);
-        BM_LOG_DEBUG("310P3 export: AclrtMemExportToShareableHandle ret=" << ret << " shareable=0x" << std::hex
-                                                                          << shareable);
+        BM_LOG_DEBUG("310P3 export: AclrtMemExportToShareableHandle ret=" << ret);
         if (ret != 0) {
             BM_LOG_ERROR("AclrtMemExportToShareableHandle failed, ret:" << ret << " sliceIdx:" << slice->index_
                                                                         << " va:0x" << std::hex << slice->vAddress_
@@ -781,8 +780,8 @@ Result HybmVmmBasedSegment::Mmap() noexcept
             uint64_t shareable = 0;
             memcpy(&shareable, im.shareHandle.share_info, sizeof(shareable));
             bool sameCard = IsSameCard(im.devicePhyId);
-            BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step1: rank:" << im.rankId << " shareable:0x"
-                                 << std::hex << shareable << " devId:" << std::dec << deviceId_
+            BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step1: rank:" << im.rankId
+                                 << " devId:" << std::dec << deviceId_
                                  << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
                                  << " peerDevicePhyId:" << im.devicePhyId);
             if (sameCard) {
@@ -811,7 +810,7 @@ Result HybmVmmBasedSegment::Mmap() noexcept
             }
             if (ret != BM_OK || aclHandle == nullptr) {
                 BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
-                                      << " shareable:" << shareable << " sameCard:" << sameCard
+                                      << " sameCard:" << sameCard
                                       << " deviceId:" << deviceId_ << " segType:" << options_.segType);
                 /* do NOT pre-release lva here: it stays in reservedLva_ and will be
                  * released by UnReserveMemorySpace. Pre-releasing causes double-free. */

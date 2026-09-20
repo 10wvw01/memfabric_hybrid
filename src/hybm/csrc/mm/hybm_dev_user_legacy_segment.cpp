@@ -623,7 +623,7 @@ Result HybmDevUserLegacySegment::ImportVmmSlice(const UserHbmExportSliceInfo &sl
     address = lva;
 
     BM_LOG_INFO("VMM import success, rank:" << sliceInfo.rankId << " lva:" << lva
-                                            << " shareable:" << sliceInfo.shareableHandle << " sameCard:" << sameCard);
+                                            << " sameCard:" << sameCard);
     return BM_OK;
 }
 
