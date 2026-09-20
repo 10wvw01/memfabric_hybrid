@@ -144,8 +144,6 @@ private:
     Result RegisterOneMemory(const void *address, uint64_t size, uint32_t flags);
     void CleanupRegisteredSlices() noexcept;
     Result TopologyPreflight();
-    Result GatherTopologyRecords(uint32_t rankSize, std::vector<std::pair<uint32_t, uint32_t>> &rankTopos);
-    Result CheckP2PSlotBudget(const std::vector<std::pair<uint32_t, uint32_t>> &rankTopos, uint32_t rankSize);
     hybm_options GenerateHybmOptions();
     Result TransformAddr(Local2GlobalMap &maps, std::vector<void *> &addr, void *remoteAddrs[],
                          const size_t dataSizes[], uint32_t size);

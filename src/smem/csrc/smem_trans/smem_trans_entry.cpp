@@ -33,6 +33,7 @@
 #include "smem_trans_entry_manager.h"
 #include "mf_fault_injection_point.h"
 #include "smem_trans_entry.h"
+#include "topology_preflight.h"
 
 namespace ock {
 namespace smem {
@@ -907,109 +908,7 @@ Result SmemTransEntry::TopologyPreflight()
     }
 
     const uint32_t rankSize = globalGroup_ != nullptr ? globalGroup_->GetRankSize() : 0U;
-    if (rankSize <= 1U) {
-        return SM_OK;
-    }
-
-    SM_LOG_INFO("[rank " << rankId_ << "] 310P3 TRANS topology preflight: devId:" << config_.deviceId
-                         << " rankSize:" << rankSize);
-
-    std::vector<std::pair<uint32_t, uint32_t>> rankTopos;
-    auto ret = GatherTopologyRecords(rankSize, rankTopos);
-    if (ret != SM_OK) {
-        return ret;
-    }
-    return CheckP2PSlotBudget(rankTopos, rankSize);
-}
-
-Result SmemTransEntry::GatherTopologyRecords(uint32_t rankSize, std::vector<std::pair<uint32_t, uint32_t>> &rankTopos)
-{
-    const std::string topoPrefix = "TOPO_";
-    std::string topoVal = std::to_string(rankId_) + ":" + std::to_string(config_.deviceId);
-    auto ret = store_->Set(topoPrefix + std::to_string(rankId_), std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
-    if (ret != 0) {
-        SM_LOG_ERROR("Set topology key failed, ret:" << ret << " rank:" << rankId_);
-        return SM_ERROR;
-    }
-
-    std::unordered_map<std::string, std::string> topoMap;
-    auto gatherStart = std::chrono::steady_clock::now();
-    while (true) {
-        topoMap.clear();
-        ret = store_->PrefixGet(topoPrefix, topoMap);
-        if (ret != 0) {
-            SM_LOG_ERROR("PrefixGet topology failed, ret:" << ret << " rank:" << rankId_);
-            return SM_ERROR;
-        }
-        if (topoMap.size() >= rankSize) {
-            break;
-        }
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gatherStart)
-                .count();
-        if (elapsed >= 5000) {
-            SM_LOG_ERROR("topology gather timeout, got:" << topoMap.size() << "/" << rankSize
-                                                         << " rank:" << rankId_);
-            return SM_ERROR;
-        }
-        usleep(100 * 1000);
-    }
-
-    for (const auto &kv : topoMap) {
-        uint32_t r = 0;
-        uint32_t d = 0;
-        if (sscanf(kv.second.c_str(), "%u:%u", &r, &d) != 2) {
-            SM_LOG_ERROR("parse topology record failed:" << kv.first << " val:" << kv.second);
-            continue;
-        }
-        rankTopos.emplace_back(r, d);
-    }
-    if (rankTopos.size() < 2) {
-        SM_LOG_ERROR("topology records too few:" << rankTopos.size() << " rank:" << rankId_);
-        return SM_ERROR;
-    }
-    if (rankTopos.size() < rankSize) {
-        SM_LOG_ERROR("topology records incomplete:" << rankTopos.size() << "/" << rankSize << " rank:" << rankId_);
-        return SM_ERROR;
-    }
-    return SM_OK;
-}
-
-Result SmemTransEntry::CheckP2PSlotBudget(const std::vector<std::pair<uint32_t, uint32_t>> &rankTopos,
-                                          uint32_t rankSize)
-{
-    constexpr uint32_t p2pSlotsPerCard = 8U;
-    std::map<uint32_t, uint32_t> requiredPerCard;
-    for (size_t i = 0; i < rankTopos.size(); i++) {
-        uint32_t cardI = rankTopos[i].second / 2U;
-        for (size_t j = 0; j < rankTopos.size(); j++) {
-            if (i == j) {
-                continue;
-            }
-            uint32_t cardJ = rankTopos[j].second / 2U;
-            if (cardI != cardJ) {
-                requiredPerCard[cardI]++;
-            }
-        }
-    }
-
-    bool feasible = true;
-    for (const auto &card : requiredPerCard) {
-        if (card.second > p2pSlotsPerCard) {
-            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first << " required:" << card.second
-                                                             << " limit:" << p2pSlotsPerCard << " rank:" << rankId_
-                                                             << " worldSize:" << rankSize);
-            feasible = false;
-        }
-    }
-    if (!feasible) {
-        SM_LOG_ERROR("topology preflight FAILED for TRANS rank:" << rankId_ << " worldSize:" << rankSize);
-        return SM_NO_RESOURCES;
-    }
-
-    SM_LOG_INFO("topology preflight PASS: rank:" << rankId_ << " worldSize:" << rankSize
-                                                 << " cross-card slots per card all <= " << p2pSlotsPerCard);
-    return SM_OK;
+    return CheckTopologyP2PSlots(store_, rankId_, config_.deviceId, rankSize, 5000, "TRANS");
 }
 
 hybm_options SmemTransEntry::GenerateHybmOptions()
