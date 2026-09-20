@@ -811,15 +811,95 @@ void *smem_shm_sdma_get_workspace(smem_shm_t handle);
 |handle|SHM对象handle|
 |返回值|协同工作区设备地址；协同未就绪（非310P/初始化失败/已禁用）或handle无效时返回NULL|
 
-设备侧编程模型（AICore kernel 内使用，include `smem_shm_aicore_sdma.h`）：
+设备侧编程模型（AICore kernel 内使用，`#include "smem_shm_aicore_sdma.h"`，bisheng 编译，与
+910B `roce_write/poll_cq/quiet` 同构）。三件套均以池 gva（`smem_shm_create` 出参，经 kernel 参数
+传入）为首参——框架以 gva 为锚定位段尾保留区内的双环邮箱，用户无须关心任何队列/槽位/地址细节。
 
-|设备原语|语义|
+##### smem_shm_sdma_signal
+
+投递一封搬运请求邮件。异步：函数返回仅表示请求已入环，实际搬运由 AICPU 编排 kernel 代投的
+SDMA 完成（同一队列 FIFO 保序）。请求环深度 64，满环时自旋等待对端消费（背压）。
+
+```c
+bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
+                          uint64_t len, uint64_t imm);
+```
+
+|参数/返回值|含义|
 |-|-|
-|`smem_shm_sdma_signal(gva, src, dst, len, imm)`|投递一封搬运请求邮件（32B描述符写入请求环，异步，满环自旋背压）|
-|`smem_shm_sdma_wait(gva)`|按序消费下一封到达邮件（阻塞自旋；邮件`{dst,len,imm,seq,status}`自描述数据落点，接收方免预约定布局）|
-|`smem_shm_sdma_quiet(gva)`|等待本端全部已投递请求落地（源缓冲复用/改写前调用）|
+|gva|池基址（`smem_shm_create` 出参，框架定位保留区邮箱的锚）|
+|src|搬运源地址（本端池 GVA，任意 SMMU 可译地址）|
+|dst|搬运目的地址（对端池 GVA）|
+|len|搬运字节数（须 4 字节对齐，长度直传搬运引擎）|
+|imm|用户标签（64 位，原样透传到对端 `wait` 收到的邮件，用于对账/分派）|
+|返回值|true=已投递；false=满环自旋预算耗尽（邮件未投递，对端 `wait` 将以超时暴露）|
 
-> 完整用法示例见 `examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma/`（一键运行 `bash run.sh`）。
+投递前须将源数据区做 cache clean（`DataCacheCleanAndInvalid`），保证搬运引擎经一致性域读到新数据。
+
+##### smem_shm_sdma_wait
+
+按序消费下一封到达邮件（FIFO：到达顺序=对端投递顺序）。阻塞自旋直至命中或预算耗尽。邮件自
+描述数据落点，接收方无须与发送方预约定布局。
+
+```c
+smem_shm_sdma_mail_t smem_shm_sdma_wait(__gm__ void *gva);
+
+struct smem_shm_sdma_mail_t {
+    uint64_t dst;    /* 数据落点 */
+    uint64_t len;    /* 数据长度（字节） */
+    uint64_t imm;    /* 用户标签（signal 的 imm 原样透传） */
+    uint32_t seq;    /* 完成序号（诊断） */
+    uint32_t status; /* 0=成功 1=超时 2=到达环溢出 */
+};
+```
+
+|字段|含义|
+|-|-|
+|dst|数据落点地址（直接据此定位数据，免预约定布局）|
+|len|数据长度|
+|imm|发送方 `signal` 的 imm 标签，原样回带|
+|seq|完成序号（0 基，诊断用）|
+|status|0=成功；1=轮询预算耗尽（无邮件或传输失败）；2=到达环溢出（消费落后超过 1024 封，邮件被越界覆写，不静默丢失）|
+
+到达环深度 1024：消费方应持续 `wait`，长期不消费将触发溢出（status=2 显式报错）。
+
+##### smem_shm_sdma_quiet
+
+等待本端全部已投递请求落地（完成证据按 FIFO 序落地，末封到即全部到）。典型时机：**源缓冲区
+复用/改写之前**——确认数据已被搬走，避免新旧数据竞争。
+
+```c
+bool smem_shm_sdma_quiet(__gm__ void *gva);
+```
+
+|参数/返回值|含义|
+|-|-|
+|gva|池基址（同上）|
+|返回值|true=全部已落地（无投递时平凡为 true）；false=轮询预算耗尽（传输异常）|
+
+##### 使用约束
+
+- 前提：310P 上以 `SMEMS_DATA_OP_SDMA` 建池且 `smem_shm_sdma_get_workspace` 返回非 NULL（就绪判定）；
+- gva 必须为本次建池的出参（段尾保留区按 gva/段布局定位，跨池混用未定义）；
+- 池对称段大小须为 2 的幂（建池时框架校验）；V5 约束：每进程一个 SDMA 池（第二个池建池报错）；
+- 典型收发闭环（发送方产数据→对端改写→回传）：
+
+```c
+/* 发送方 kernel 内: 产数据 + clean + 投递, 复用源缓冲前 quiet, 再收回件 */
+ExCleanRegion(chunk, words);                                    /* 源数据 clean */
+smem_shm_sdma_signal(gva, chunk, peerChunk, bytes, seqTag);     /* 投递 */
+smem_shm_sdma_quiet(gva);                                       /* 全部落地(可复用 chunk) */
+smem_shm_sdma_mail_t m = smem_shm_sdma_wait(gva);               /* 收回件 */
+
+/* 接收方 kernel 内: 按序收件, 邮件自描述落点 */
+smem_shm_sdma_mail_t m = smem_shm_sdma_wait(gva);               /* status==0 才消费 */
+__gm__ uint32_t *p = (__gm__ uint32_t *)m.dst;                  /* 免预约定布局 */
+ExCleanRegion(p, m.len / 4);                                    /* 改写后 clean */
+smem_shm_sdma_signal(gva, p, peerReturnAddr, m.len, m.imm);     /* 回件(imm 回带对账) */
+```
+
+> 完整用法示例见 `examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma/`（一键运行 `bash run.sh`）；
+> 环境变量（`MF_SDMA_ORCH_JSON`/`MF_SDMA_ORCH_DISABLE`）见 `docs/environment_variables.md`。
 
 > [!CAUTION] 注意
 > 如下接口对外封装了相同含义的Python接口，详细信息可参考`src/smem/csrc/python_wrapper/mk_transfer_adapter/csrc/pytransfer.cpp`。

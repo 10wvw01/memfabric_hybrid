@@ -120,7 +120,7 @@ SMEM_SHM_INLINE_AICORE void SdmaReadMail(__gm__ uint8_t *slot, uint64_t *f0, uin
 
 /* 投递一封搬运请求邮件(源→目的, 带用户标签)。
  * 满环时自旋等待(背压); 预算耗尽返回 false(邮件未投递, 消费方 wait 将超时暴露)。
- * 返回 true=已投递。len 由框架内部按搬运粒度补齐, 用户无须对齐。 */
+ * 返回 true=已投递。len 须 4 字节对齐(SDMA 搬运粒度, 长度直传 SQE 不做补齐)。 */
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
                                                  uint64_t len, uint64_t imm)
 {
