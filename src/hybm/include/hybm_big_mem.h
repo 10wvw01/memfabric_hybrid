@@ -187,7 +187,7 @@ int32_t hybm_set_extra_context(hybm_entity_t e, const void *context, uint32_t si
 int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va);
 
 /**
- * @brief 310P AICore×AICPU 协同模式信息(进程级, 详见 310p-aicore-aicpu-开发进展.md)
+ * @brief 310P AICore×AICPU 协同模式信息(进程级, 机制见 docs/310p/机制档案.md)
  */
 typedef struct {           /* 进程级协同模式就绪信息(SdmaOrchestrator 单例的查询快照) */
     uint64_t workspace;     /* 协同工作区设备地址(非空 = 协同就绪) */
