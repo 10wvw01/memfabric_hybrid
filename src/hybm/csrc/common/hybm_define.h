@@ -207,33 +207,6 @@ typedef struct {
 
 enum HybmGvaVersion : uint32_t { HYBM_GVA_V1 = 0, HYBM_GVA_V2 = 1, HYBM_GVA_V3 = 2, HYBM_GVA_V4 = 3, HYBM_GVA_UNKNOWN };
 
-enum D2dCopyMode {
-    D2D_COPY_SQE = 0,
-    D2D_COPY_ACL_ASYNC_ONLY = 1,
-};
-
-struct HybmPlatformCapability {
-    D2dCopyMode d2dCopy = D2D_COPY_SQE;
-    bool hostRegister = false;
-    bool sameCardNeedsP2P = false;
-    uint32_t p2pSlotsPerCard = 0;
-};
-
-static inline HybmPlatformCapability GetPlatformCapability(AscendSocType socType) noexcept
-{
-    switch (socType) {
-        case ASCEND_310P:
-            return HybmPlatformCapability{D2D_COPY_ACL_ASYNC_ONLY, false, false, 8};
-        default:
-            return HybmPlatformCapability{D2D_COPY_SQE, true, true, 0};
-    }
-}
-
-static inline bool Is310PSupported(AscendSocType socType) noexcept
-{
-    return socType == ASCEND_310P;
-}
-
 } // namespace mf
 } // namespace ock
 
