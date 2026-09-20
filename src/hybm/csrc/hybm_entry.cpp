@@ -251,7 +251,7 @@ HYBM_API int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDe
     /* 310P3 Duo: deviceId/2 identifies the physical card.
      * dev0/dev1 → card0, dev2/dev3 → card1, etc.
      * Same card = no P2P needed. */
-    if ((localDeviceId / 2) == (peerDeviceId / 2)) {
+    if (IsSamePhysicalCard(localDeviceId, peerDeviceId)) {
         BM_LOG_INFO("hybm_enable_peer_access: same card by deviceId/2, local:" << localDeviceId
                                                                                << " peer:" << peerDeviceId);
         return 0;
@@ -359,7 +359,7 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
         if (d == deviceId) {
             continue;
         }
-        if ((d / 2U) == (deviceId / 2U)) {
+        if (IsSamePhysicalCard(d, deviceId)) {
             continue;
         }
         aclrtMemAccessDesc desc{
