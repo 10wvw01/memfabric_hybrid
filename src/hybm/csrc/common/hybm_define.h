@@ -110,6 +110,19 @@ enum AscendSocType {
 /* Integer constants for C API consumers that cannot include this enum */
 constexpr int32_t SOC_TYPE_310P = 4;
 
+/* 310P3 Duo: two dies per physical card. deviceId/2 identifies the physical card.
+ * dev0/dev1 → card0, dev2/dev3 → card1, etc.
+ * Encapsulate the /2 division to avoid magic numbers scattered across the codebase. */
+static inline uint32_t PhysicalCardId(uint32_t deviceId) noexcept
+{
+    return deviceId / 2U;
+}
+
+static inline bool IsSamePhysicalCard(uint32_t devA, uint32_t devB) noexcept
+{
+    return PhysicalCardId(devA) == PhysicalCardId(devB);
+}
+
 enum DeviceSystemInfoType {
     INFO_TYPE_VERSION = 1,
     INFO_TYPE_PHY_CHIP_ID = 18,

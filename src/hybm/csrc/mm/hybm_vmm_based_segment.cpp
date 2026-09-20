@@ -371,7 +371,7 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
             if (dev == static_cast<uint32_t>(deviceId_)) {
                 continue;
             }
-            if (dev / 2U == static_cast<uint32_t>(deviceId_) / 2U) {
+            if (IsSamePhysicalCard(dev, static_cast<uint32_t>(deviceId_))) {
                 continue;
             }
             aclrtMemAccessDesc desc{};

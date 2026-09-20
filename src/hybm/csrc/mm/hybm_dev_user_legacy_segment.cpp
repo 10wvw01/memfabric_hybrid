@@ -525,7 +525,7 @@ Result HybmDevUserLegacySegment::ImportSliceInfo(const std::string &info, MemSli
         }
 
         if (is310P) {
-            bool sameCard = (deviceId_ / 2U) == (sliceInfo.devicePhyId / 2U);
+            bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), sliceInfo.devicePhyId);
             uint64_t importFlag =
                 sameCard ? ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT : ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS;
             ret = DlAclApi::AclrtIpcMemImportByKey(&address, sliceInfo.name, importFlag);
@@ -573,7 +573,7 @@ Result HybmDevUserLegacySegment::ImportVmmSlice(const UserHbmExportSliceInfo &sl
         return BM_DL_FUNCTION_FAILED;
     }
 
-    bool sameCard = (deviceId_ / 2U) == (sliceInfo.devicePhyId / 2U);
+    bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), sliceInfo.devicePhyId);
     if (sameCard) {
         BM_LOG_INFO("310P3 VMM import same-card: SetDevice(exporter:" << sliceInfo.devicePhyId
                                                                       << ") for rank:" << sliceInfo.rankId);

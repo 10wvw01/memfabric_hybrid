@@ -334,7 +334,7 @@ Result HybmAclVmmSegment::GetExportSliceSize(size_t &size) noexcept
 bool HybmAclVmmSegment::IsDiePair(uint32_t peerDevId) const noexcept
 {
     // 310P Duo: 同卡双 die 共享 PCIe 设备, user devId/2 相同即同卡 die 对
-    return peerDevId / 2U == static_cast<uint32_t>(options_.devId) / 2U;
+    return IsSamePhysicalCard(peerDevId, static_cast<uint32_t>(options_.devId));
 }
 
 uint64_t HybmAclVmmSegment::OwnSlotBase() const noexcept
