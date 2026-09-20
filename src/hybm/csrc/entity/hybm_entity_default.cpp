@@ -244,7 +244,7 @@ int32_t MemEntityDefault::AllocLocalMemory(uint64_t size, hybm_mem_type mType, u
 
 /* V5: 段尾保留区初始化 + epoch 监督线程启动(首个 SDMA 池一次绑定;
  * 幂等: 后续切片分配直接返回) */
-Result MemEntityDefault::ConfigureOrchOnce() noexcept
+Result MemEntityDefault::ConfigureOrchOnce()
 {
     if (!orchAcquired_ || orchConfigured_) { // 非协同 entity 或已配置
         return BM_OK;                        // 幂等返回

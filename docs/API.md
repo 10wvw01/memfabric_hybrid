@@ -795,7 +795,7 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
 
 310P 上 `smem_shm_create` 选择 `SMEMS_DATA_OP_SDMA` 时自动启用设备发起协同模式（默认启用，可用环境变量
 `MF_SDMA_ORCH_DISABLE=1` 显式禁用）。V5 邮箱化后数据面全部由 AICore kernel 内设备侧原语自驱（头文件
-`src/smem/include/device/smem_shm_aicore_sdma.h`），host 侧仅保留就绪判定接口；设备侧编排 kernel 三件套
+`src/smem/include/device/smem_shm_aicore_base_sdma.h`），host 侧仅保留就绪判定接口；设备侧编排 kernel 三件套
 在首次建池时自动部署并校验，无需手工部署。
 
 #### smem_shm_sdma_get_workspace
@@ -811,7 +811,7 @@ void *smem_shm_sdma_get_workspace(smem_shm_t handle);
 |handle|SHM对象handle|
 |返回值|协同工作区设备地址；协同未就绪（非310P/初始化失败/已禁用）或handle无效时返回NULL|
 
-设备侧编程模型（AICore kernel 内使用，`#include "smem_shm_aicore_sdma.h"`，bisheng 编译，与
+设备侧编程模型（AICore kernel 内使用，`#include "smem_shm_aicore_base_sdma.h"`，bisheng 编译，与
 910B `roce_write/poll_cq/quiet` 同构）。三件套均以池 gva（`smem_shm_create` 出参，经 kernel 参数
 传入）为首参——框架以 gva 为锚定位段尾保留区内的双环邮箱，用户无须关心任何队列/槽位/地址细节。
 

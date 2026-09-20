@@ -61,7 +61,7 @@ public:
     /* 初始化就绪标志(ready 且 configured 才完整可用) */
     bool Ready() const noexcept
     {
-        return ready_; // 就绪标志只读返回
+        return ready_.load(std::memory_order_acquire); // 原子读(与锁内写并发安全)
     }
 
     /* 引用计数只读查询(UT 断言失败后归零/Release 幂等语义用) */
@@ -73,7 +73,7 @@ public:
     /* 工作区设备内存基址(uint64, 设备地址; meta 槽承载, host 侧就绪判定用) */
     uint64_t GetWorkspace() const noexcept
     {
-        return workspace_; // 工作区设备地址只读返回
+        return workspace_.load(std::memory_order_acquire); // 原子读(与锁内写并发安全)
     }
 
 private:
@@ -94,7 +94,7 @@ private:
     void StopSupervisor();                 /* 停止监督线程(写设备停止标志+join) */
     void Cleanup();                        /* 逆序清理(锁内, 归零时) */
 
-    std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行 */
+    std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行(ready_/workspace_ 另以原子保护) */
     uint32_t refCount_{0};          /* 引用计数(entity 池级) */
     bool configured_{false};        /* 保留区已配置(ConfigureOrch 一次绑定) */
     std::atomic<bool> stopFlag_{false}; /* 监督线程停止标志(host 侧) */
@@ -106,11 +106,12 @@ private:
     int32_t streamId_{0};           /* CP 流 id(SQE 的 rt_stream_id) */
     void *cpStream_{nullptr};       /* CP 流句柄(DEVICE_USE_ONLY) */
     void *launchStream_{nullptr};   /* epoch kernel 提交流(监督线程独占) */
-    uint64_t workspace_{0};         /* 工作区设备地址(result/overflow) */
     aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
     aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchEpoch 函数句柄 */
     aclrtBinHandle custBinHandle_{nullptr}; /* CUST 迁移句柄(保活: 持至进程退出) */
-    bool ready_{false};             /* 初始化就绪标志 */
+    aclrtFuncHandle kfcFuncHandle_{nullptr}; /* KFC 通道句柄缓存(首次装载后复用, 免每次部署重装) */
+    std::atomic<bool> ready_{false};       /* 就绪标志(原子: 无锁读与锁内写并发) */
+    std::atomic<uint64_t> workspace_{0};   /* 工作区设备地址(原子: 同上) */
 };
 } // namespace mf
 } // namespace ock

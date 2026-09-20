@@ -32,9 +32,6 @@ HYBM_API int32_t hybm_sdma_get_info(hybm_sdma_info_t *info) // 查询就绪信�
         BM_LOG_ERROR("sdma orch not ready (switch off or init failed)"); // 根因日志: 未就绪原因
         return BM_NOT_INITIALIZED;                                     // 未初始化
     }
-    info->sqId = 0;                   // V5: 仅供诊断占位(SQE 装配已内聚到 epoch kernel)
-    info->streamId = 0;               // V5: 同上
-    info->dieId = 0;                  // V5: 同上
-    info->workspace = prep.GetWorkspace(); // 填工作区设备地址(非空 = 协同可用)
+    info->workspace = prep.GetWorkspace(); // 填工作区设备地址(非空 = 协同就绪)
     return BM_OK;                     // 查询成功
 }

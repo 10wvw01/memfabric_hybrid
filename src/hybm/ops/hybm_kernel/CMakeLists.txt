@@ -19,6 +19,7 @@ set(AICPU_INCLUDE_DIRS
     ${PROJECT_HYBM_SRC_BASE}/include
     ${PROJECT_HYBM_SRC_BASE}/csrc/common
     ${PROJECT_HYBM_SRC_BASE}/csrc/under_api
+    ${PROJECT_HYBM_SRC_BASE}/../smem/include/device # 共享布局头 smem_shm_sdma_layout.h(单一事实源)
     ${_ASCEND_INC_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -95,7 +96,7 @@ set(SDMA_ORCH_JSON_CUST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/libmf_sdma_orch.json") 
 set(SDMA_ORCH_JSON_CUST_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.json") # CUST json 构建目录副本
 
 # 设备侧 launch 版本号(缓存变量): launch json 的 kernelSo 与部署链的复制目标名都用它
-set(MF_SDMA_ORCH_KVER "5" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
+set(MF_SDMA_ORCH_KVER "6" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
 # launch json 输出路径(文件名带版本号)
 set(SDMA_ORCH_JSON_LAUNCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch_v${MF_SDMA_ORCH_KVER}.json")
 
@@ -103,6 +104,7 @@ add_custom_command( # 编排 kernel so 编译(hcc 交叉编译)
     OUTPUT ${SDMA_ORCH_SO_OUTPUT} # 产物: 设备侧 so
     COMMAND ${AICPU_COMPILER} # aarch64 交叉编译器
         -shared -O2 -std=c++17 -fPIC # 共享库/O2/C++17/位置无关
+        ${AICPU_INC_FLAGS} # include 路径(含 smem 布局头共享目录)
         -o ${SDMA_ORCH_SO_OUTPUT} # 输出目标
         ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # kernel 源文件
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # 依赖: kernel 源

@@ -10,7 +10,7 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* smem_shm_aicore_sdma.h — V5 邮箱化设备侧 API(AICore kernel 用, signal/wait/quiet)
+/* smem_shm_aicore_base_sdma.h — V5 邮箱化设备侧 API(AICore kernel 用, signal/wait/quiet)
  *
  * 使用形态(与 910B RDMADemo 同构): 用户 kernel 以池 gva 为参数, 三 API 均以 gva 为首参:
  *   smem_shm_sdma_signal(gva, src, dst, len, imm) → bool   投递搬运请求(满环自旋)
@@ -26,29 +26,16 @@
  * dav-2002 工具链约束(见 base_meta.h 注): 本头全部设备内存访问 = gva 参数的指针算术
  * + GlobalTensor cache 维护(ex08 验证路径), 严禁运行时整数→指针 cast 与指针物化。
  */
-#ifndef __MEMFABRIC_SMEM_AI_CORE_SDMA_H__ /* 头文件包含守卫(防重复包含) */
-#define __MEMFABRIC_SMEM_AI_CORE_SDMA_H__ /* 同上, 与文件尾 #endif 配对 */
+#ifndef __MEMFABRIC_SMEM_AI_CORE_BASE_SDMA_H__ /* 头文件包含守卫(防重复包含) */
+#define __MEMFABRIC_SMEM_AI_CORE_BASE_SDMA_H__ /* 同上, 与文件尾 #endif 配对 */
 
 #include "smem_shm_aicore_base_define.h" // AICore 基础类型与内联宏(SMEM_SHM_INLINE_AICORE)
 #include "smem_shm_aicore_base_meta.h"   // meta 区布局常量与设备侧读取原语
+#include "smem_shm_sdma_layout.h"        // 段尾保留区布局单一事实源(三端共享)
 
 #ifdef __cplusplus // C++ 编译环境
 extern "C" {       // C 链接(供 bisheng 编译的 AICore kernel include)
 #endif
-
-/* ---- 段尾保留区布局(与 hybm_sdma_contract.h 镜像, UT 双头 static_assert 锁定) ---- */
-constexpr uint64_t SMEM_SHM_SDMA_RESERVED = 48UL * 1024UL; /* 保留区总大小(替代 V4 的 2MB 标志区) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_RING = 0x0000;     /* 请求环基址(64 槽 × 32B) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_SLOTS = 64;        /* 请求环槽数 */
-constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_TAIL = 0x0800;     /* 生产游标(AICore 写) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_HEAD = 0x0808;     /* 消费游标(AICPU 写, 背压读) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET = 0x0810;        /* 完成戳数组(64 × u64, SQE 写) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET_SLOTS = 64;      /* 完成戳数 */
-constexpr uint64_t SMEM_SHM_SDMA_RS_STOP = 0x0A10;         /* epoch 停止标志(host 写) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_STAMP = 0x0A20;    /* 到达戳数组(1024 × u64, SQE 写) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_SLOTS = 1024;      /* 到达环深度 */
-constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_MAIL = 0x2A20;     /* 到达邮件数组(1024 × 32B, AICPU 写) */
-constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_HEAD = 0xAA20;     /* 到达消费游标(AICore 写) */
 
 /* ---- 邮件(wait 出参, 32B) ---- */
 struct smem_shm_sdma_mail_t {
@@ -59,8 +46,27 @@ struct smem_shm_sdma_mail_t {
     uint32_t status; /* 0=成功; 1=超时; 2=到达环溢出(生产方越界覆写) */
 };
 
-/* 轮询预算(纯自旋 dcci, 与 V4 poll_flag 同款量级) */
+/* 轮询预算(探测次数上限; 与渐进退避配合, 超时为错误路径) */
 constexpr uint64_t SMEM_SHM_SDMA_POLL_MAX_ITER = 100000000ULL;
+/* 渐进退避: 前 SPIN_ITERS 轮纯自旋保低延迟, 之后插入空转退避并渐进加倍(上限 MAX),
+ * 降低等待期间 AICore 周期浪费(AICore 无 usleep, 以编译屏障空转近似) */
+constexpr uint64_t SMEM_SHM_SDMA_SPIN_ITERS = 4096;   /* 纯自旋轮数 */
+constexpr uint32_t SMEM_SHM_SDMA_BACKOFF_START = 64;  /* 退避起始空转数 */
+constexpr uint32_t SMEM_SHM_SDMA_BACKOFF_MAX = 16384; /* 退避上限空转数 */
+
+/* 轮询退避(每轮探测后调用; delay 由调用方持有渐增) */
+SMEM_SHM_INLINE_AICORE void SdmaPollBackoff(uint64_t iter, uint32_t &delay)
+{
+    if (iter < SMEM_SHM_SDMA_SPIN_ITERS) { /* 自旋期(保低延迟) */
+        return;                            /* 不退避 */
+    }
+    for (uint32_t i = 0; i < delay; i++) { /* 空转退避 */
+        __asm__ __volatile__("" ::: "memory"); /* 编译屏障防空转被优化 */
+    }
+    if ((iter & 0xFFu) == 0 && delay < SMEM_SHM_SDMA_BACKOFF_MAX) { /* 每 256 轮 */
+        delay <<= 1; /* 退避加倍(至上限) */
+    }
+}
 
 /* 到达邮件状态码 */
 constexpr uint32_t SMEM_SHM_SDMA_MAIL_OK = 0;       /* 成功取件 */
@@ -73,8 +79,9 @@ constexpr uint32_t SMEM_SHM_SDMA_MAIL_OVERRUN = 2;  /* 到达环溢出(消费落
 
 /* ---- 内部原语(仅本头使用; 全部 gva 指针算术 + GlobalTensor cache 维护) ---- */
 
-/* 本端段尾保留区基址(gva + symm*rank + phys - RESERVED) */
-SMEM_SHM_INLINE_AICORE __gm__ uint8_t *SdmaReservedBase(__gm__ void *gva)
+/* 预计算本端段尾保留区基址(kernel 入口一次计算, 三件套 _at 变体复用;
+ * 免每调用 3 次 meta 区 GM 读——symm/rank/phys 在 kernel 生命周期内不变) */
+SMEM_SHM_INLINE_AICORE __gm__ uint8_t *smem_shm_sdma_reserved(__gm__ void *gva)
 {
     const uint64_t symm = smem_shm_get_symmetric_size(0);            // 对称段大小(meta)
     const uint64_t rank = smem_shm_get_global_rank(0);               // 本端 rank(meta)
@@ -118,19 +125,19 @@ SMEM_SHM_INLINE_AICORE void SdmaReadMail(__gm__ uint8_t *slot, uint64_t *f0, uin
 
 /* ============================ 公开 API ============================ */
 
-/* 投递一封搬运请求邮件(源→目的, 带用户标签)。
- * 满环时自旋等待(背压); 预算耗尽返回 false(邮件未投递, 消费方 wait 将超时暴露)。
- * 返回 true=已投递。len 须 4 字节对齐(SDMA 搬运粒度, 长度直传 SQE 不做补齐)。 */
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
-                                                 uint64_t len, uint64_t imm)
+
+/* signal 的预计算基址变体(res = smem_shm_sdma_reserved(gva) 缓存值) */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_at(__gm__ uint8_t *res, __gm__ void *src, __gm__ void *dst,
+                                                    uint64_t len, uint64_t imm)
 {
-    __gm__ uint8_t *res = SdmaReservedBase(gva);                        // 保留区基址
     const uint64_t tail = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_TAIL); // 生产游标(自写, 直接读)
+    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;                       // 退避档位(渐进)
     for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {        // 满环自旋背压
         const uint64_t head = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_HEAD); // AICPU 消费游标
         if (tail - head < SMEM_SHM_SDMA_RS_REQ_SLOTS) {                 // 有空槽
             break;                                                      // 退出自旋
         }
+        SdmaPollBackoff(i, delay);                                      // 渐进退避
     }
     const uint64_t head = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_HEAD); // 复查(预算耗尽路径)
     if (tail - head >= SMEM_SHM_SDMA_RS_REQ_SLOTS) {                    // 仍满(预算耗尽)
@@ -149,26 +156,29 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *
     return true;                                                        // 投递成功
 }
 
-/* 按序消费下一封到达邮件(阻塞自旋, 预算耗尽/溢出由 status 表达)。
- * 邮件 {dst,len,imm} 自描述: 接收方直接定位数据, 免预约定布局。 */
-SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait(__gm__ void *gva)
+
+/* wait 的预计算基址变体(res = smem_shm_sdma_reserved(gva) 缓存值) */
+SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait_at(__gm__ uint8_t *res)
 {
     smem_shm_sdma_mail_t m = {0, 0, 0, 0, SMEM_SHM_SDMA_MAIL_TIMEOUT};   // 出参(默认超时态)
-    __gm__ uint8_t *res = SdmaReservedBase(gva);                        // 保留区基址
     const uint64_t head = SdmaReadCell(res, SMEM_SHM_SDMA_RS_ARR_HEAD); // 消费游标(自写, 直接读)
     const uint64_t expect = head + 1; /* 期望戳(1 基: 戳=seq+1, 0=空——防 seq0 幻影) */
     uint64_t stamp = 0;                // 戳快照
+    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START; // 退避档位(渐进)
     for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {        // 戳轮询(SQE 写 → dcci)
         stamp = SdmaReadCell(res, SMEM_SHM_SDMA_RS_ARR_STAMP +
                                     (head % SMEM_SHM_SDMA_RS_ARR_SLOTS) * 8);
         if (stamp == expect) {                                          // 第 head 封已落地
             break;                                                      // 命中
         }
-        if (stamp > expect && (stamp - expect) < SMEM_SHM_SDMA_RS_ARR_SLOTS) { // 越界覆写(生产方领先超环深)
+        /* 溢出判定: 戳超前期望即该槽已被越环覆写(正常时序槽值只能 ==expect 或上一轮
+         * 旧值 <expect; 任何超前都意味着消费落后至少一整环, 差值大小不影响结论) */
+        if (stamp > expect) {                                           // 越界覆写
             m.status = SMEM_SHM_SDMA_MAIL_OVERRUN;                      // 溢出错(不静默)
             m.seq = static_cast<uint32_t>(head);                        // 诊断序号
             return m;                                                   // 立即返回
         }
+        SdmaPollBackoff(i, delay);                                      // 渐进退避
     }
     if (stamp != expect) {                                              // 预算耗尽仍无邮件
         m.status = SMEM_SHM_SDMA_MAIL_TIMEOUT;                          // 超时
@@ -188,24 +198,53 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait(__gm__ void *gva)
     return m;                                                           // 返回邮件
 }
 
-/* 等待本端全部已投递请求落地(quiet: 源缓冲复用/改写前调用)。
- * 依据: 完成戳按 SQE FIFO 序落地, 末封戳到即全部到。返回 true=全部落地。 */
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet(__gm__ void *gva)
+
+/* quiet 的预计算基址变体(res = smem_shm_sdma_reserved(gva) 缓存值) */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(__gm__ uint8_t *res)
 {
-    __gm__ uint8_t *res = SdmaReservedBase(gva);                        // 保留区基址
     const uint64_t tail = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_TAIL); // 已投递总数
     if (tail == 0) {                                                    // 无投递
         return true;                                                    // 平凡完成
     }
     const uint64_t expect = tail; /* 末封戳(1 基: 末封 seq=tail-1 → 戳=tail) */
+    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START; // 退避档位(渐进)
     for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {        // 完成戳轮询(SQE 写 → dcci)
         const uint64_t stamp = SdmaReadCell(res, SMEM_SHM_SDMA_RS_QUIET +
                                             ((tail - 1) % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8);
         if (stamp == expect) {                                          // 末封已落地(FIFO 即全部)
             return true;                                                // 全部落地
         }
+        SdmaPollBackoff(i, delay);                                      // 渐进退避
     }
     return false;                                                       // 预算耗尽(传输异常)
 }
 
-#endif // __MEMFABRIC_SMEM_AI_CORE_SDMA_H__
+/* ======================= gva 便捷封装(转发 _at 变体) ======================= */
+
+/* 投递一封搬运请求邮件(源→目的, 带用户标签)。
+ * 满环时渐进退避自旋(背压); 预算耗尽返回 false(邮件未投递, 消费方 wait 将超时暴露)。
+ * 返回 true=已投递。len 须 4 字节对齐(SDMA 搬运粒度, 长度直传 SQE 不做补齐)。
+ * 高频路径可 kernel 入口 smem_shm_sdma_reserved(gva) 预计算后走 _at 变体,
+ * 免每调用 3 次 meta 区 GM 读(值 kernel 生命周期内不变)。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
+                                                 uint64_t len, uint64_t imm)
+{
+    return smem_shm_sdma_signal_at(smem_shm_sdma_reserved(gva), src, dst, len, imm); // 预计算基址转发
+}
+
+/* 按序消费下一封到达邮件(阻塞自旋+渐进退避, 预算耗尽/溢出由 status 表达)。
+ * 邮件 {dst,len,imm} 自描述: 接收方直接定位数据, 免预约定布局。
+ * 高频路径走 _at 变体(见 signal 注)。 */
+SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait(__gm__ void *gva)
+{
+    return smem_shm_sdma_wait_at(smem_shm_sdma_reserved(gva)); // 预计算基址转发
+}
+
+/* 等待本端全部已投递请求落地(quiet: 源缓冲复用/改写前调用)。
+ * 依据: 完成戳按 SQE FIFO 序落地, 末封戳到即全部到。返回 true=全部落地。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet(__gm__ void *gva)
+{
+    return smem_shm_sdma_quiet_at(smem_shm_sdma_reserved(gva)); // 预计算基址转发
+}
+
+#endif // __MEMFABRIC_SMEM_AI_CORE_BASE_SDMA_H__

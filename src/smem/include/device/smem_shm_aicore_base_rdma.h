@@ -116,7 +116,9 @@ struct HybmDeviceMeta {
     uint32_t extraContextSize;
     uint64_t symmetricSize;
     uint64_t qpInfoAddress;
-    uint64_t reserved[12]; // total 128B, equal HYBM_DEVICE_PRE_META_SIZE
+    uint64_t sdmaWorkSpace; /* 槽偏移 32(与 host 侧 hybm_define.h 同名 struct 同步) */
+    uint64_t physSize;      /* 槽偏移 40(V5: 段物理大小) */
+    uint64_t reserved[10]; // total 128B, equal HYBM_DEVICE_PRE_META_SIZE
 };
 
 /**

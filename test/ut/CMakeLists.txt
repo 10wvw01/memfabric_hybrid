@@ -5,6 +5,7 @@ file(GLOB_RECURSE UT_SOURCE_FILES *.cpp
 
 include_directories(
         ${PROJECT_HYBM_SRC_BASE}/include
+        ${PROJECT_HYBM_SRC_BASE}/../smem/include/device # 共享布局头 smem_shm_sdma_layout.h
         ${PROJECT_HYBM_SRC_BASE}/csrc/common
         ${PROJECT_HYBM_SRC_BASE}/csrc/data_operation
         ${PROJECT_HYBM_SRC_BASE}/csrc/data_operation/host

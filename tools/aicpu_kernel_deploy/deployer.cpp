@@ -10,10 +10,32 @@
  * See the Mulan PSL v2 for more details.
  */
 
+/*
+ * This file derives from the xcclpp project (aicpu-310p3/deployer.cpp), which is
+ * licensed under the MIT License. The original copyright and permission notice:
+ *
+ * Copyright (c) xcclpp authors. All rights reserved.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 /* deployer — CP1 部署链工具(手动/诊断用): 经 CUSTAICPUKernel 迁移通道把 kernel .so 落到设备
  *
  * 溯源: fork 自 xcclpp aicpu-310p3/deployer.cpp(MIT), 按 P0-E0a 迁移;
- *       入口名改为参数传入(默认 HybmSdmaOrchBatch, 与产品 json 一致)。
+ *       入口名改为参数传入(默认 HybmSdmaOrchEpoch, 与产品 json functionName 一致)。
  * 机制: aclrtBinaryLoadFromFile(cpuMode=1) 本身不落盘 —— aclrtBinaryGetFunction 才触发
  *       CopySoAndNameToCurrentDevice → batchLoadsoFrombuf → 设备写
  *       /home/CustAiCpuUser/lib/<so名>.<devId>.<vfId>.<hostPid>;
@@ -35,7 +57,7 @@ int main(int argc, char **argv)
     const char *json = argc >= 3 ? argv[2] : "libmf_sdma_orch.json"; // CUST 迁移 json 路径
     int secs = argc >= 4 ? atoi(argv[3]) : 600;                 // 保活时长(秒)
     // 入口函数名(默认产品编排 kernel 入口; 传错名时文件仍会落盘但 getfunc 返回非 0)
-    const char *funcName = argc >= 5 ? argv[4] : "HybmSdmaOrchBatch";
+    const char *funcName = argc >= 5 ? argv[4] : "HybmSdmaOrchEpoch";
     if (aclInit(nullptr) != ACL_SUCCESS) {                      // ACL 初始化
         printf("[E] aclInit\n");                                // 失败提示
         return 1;                                               // 失败退出

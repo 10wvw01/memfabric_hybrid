@@ -19,6 +19,8 @@
 #include "hybm_sdma_orchestrator.h" // 本类声明(工作区布局常量/单例接口/契约头)
 
 #include <climits>   // PATH_MAX(realpath 结果缓冲尺寸)
+#include <cctype>    // isalnum(deviceSoName 白名单校验)
+#include <cctype>    // isalnum(deviceSoName 白名单校验)
 #include <cerrno>    // errno(锁文件打开失败诊断)
 #include <chrono>    // chrono(监督线程退避)
 #include <cstdio>    // snprintf(临时 json 路径构造)
@@ -93,7 +95,7 @@ Result SdmaOrchestrator::Acquire(uint16_t devId) // 引用计数+1(首次全量�
     // 就绪信息日志: 设备/流/工作区
     BM_LOG_INFO("310P sdma orchestrator ready: devId: " << devId_ << " sqId: " << sqId_
                                                    << " streamId: " << streamId_ << " dieId: " << dieId_
-                                                   << " workspace: 0x" << std::hex << workspace_);
+                                                   << " workspace: 0x" << std::hex << workspace_.load());
     return BM_OK; // Acquire 成功
 }
 
@@ -203,7 +205,10 @@ static std::string FindInstalledJson()
  * (双进程同时 cat 同一目标可能产生拼接/校验误判); 锁文件打开失败不致命(单进程无影响) */
 class DeployFlockGuard {
 public:
-    DeployFlockGuard() : fd_(open(HYBM_SDMA_ORCH_DEPLOY_LOCK, O_CREAT | O_RDWR, 0666)) // 打开/创建锁文件
+    /* O_NOFOLLOW: 拒绝跟随预置符号链接(防锁文件劫持); O_CLOEXEC: 子进程不继承;
+     * 0600: 属主读写(收紧权限, 免其他用户篡改) */
+    DeployFlockGuard()
+        : fd_(open(HYBM_SDMA_ORCH_DEPLOY_LOCK, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600)) // 打开/创建锁文件
     {
         if (fd_ < 0) { // 打开失败(极罕见: /tmp 不可写)
             BM_LOG_INFO("deploy lock open failed, errno: " << errno); // 信息级(尽力而为, 不阻断)
@@ -249,7 +254,23 @@ static std::string ExtractDeviceSoName(const std::string &jsonPath)
     if (base.size() > 5 && base.compare(base.size() - 5, 5, ".json") == 0) { // 以 .json 结尾
         base.resize(base.size() - 5); // 去扩展名
     }
-    return base + ".so"; // v4 → v4.so(命名约定)
+    return base + ".so"; // v6 → v6.so(命名约定)
+}
+
+/* deviceSoName 白名单校验(仅 [A-Za-z0-9._-], 长度 1~64): 名字来自 launch json 的
+ * kernelSo 字段, 拼入 KFC 命令串经设备 OS system() 执行——不做校验存在 shell
+ * 注入风险(分号/管道/反引号); json 由本仓构建产出, 校验是纵深防御 */
+static bool IsValidDeviceSoName(const std::string &name)
+{
+    if (name.empty() || name.size() > 64) { // 长度界
+        return false;                       // 拒绝
+    }
+    for (char c : name) { // 逐字符白名单
+        if (std::isalnum(static_cast<unsigned char>(c)) == 0 && c != '.' && c != '_' && c != '-') {
+            return false; // 非白名单字符
+        }
+    }
+    return true; // 合法
 }
 
 Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载(设备侧部署探测 + 自动部署)
@@ -259,7 +280,7 @@ Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载(设�
         jsonPath = FindInstalledJson();                // ② 安装前缀自动发现(本 so 同级的 hybm/aicpu_kernel)
     }
     if (jsonPath.empty()) {                            // 未发现
-        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;        // ③ CWD 缺省名 libmf_sdma_orch_v4.json
+        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;        // ③ CWD 缺省名 libmf_sdma_orch_v6.json
     }
     char resolved[PATH_MAX] = {0}; // realpath 结果缓冲(解析后的绝对路径)
     if (realpath(jsonPath.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) { // 路径不存在或不可读
@@ -269,7 +290,14 @@ Result SdmaOrchestrator::LoadOrchestratorKernel() // 第3步: kernel 加载(设�
         return BM_FILE_NOT_ACCESS; // 显式报错(kernel 未部署即不可用)
     }
     /* 注意: mode=0 加载不校验设备侧文件(dlopen 惰性到 launch), 须以 KFC 探测文件存在性为闸门 */
-    const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + ExtractDeviceSoName(resolved);
+    const std::string devSoName = ExtractDeviceSoName(resolved); // 设备侧目标名(json kernelSo 字段)
+    if (!IsValidDeviceSoName(devSoName)) {                       // 白名单校验(防 shell 注入)
+        // 根因日志: 非法名字
+        BM_LOG_ERROR("invalid device so name (whitelist [A-Za-z0-9._-]): " << devSoName
+                     << " json: " << resolved);
+        return BM_INVALID_PARAM; // 拒绝部署
+    }
+    const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + devSoName;
     const auto gate = KfcExec("test -f " + dst, true); // 设备侧文件存在性探测(文件缺失为首轮预期, 降级 INFO)
     if (gate != HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR && gate != BM_OK) { // 非"文件缺失"语义 = 通道异常
         // KFC 不可用(锁定环境): 按预部署假定直接加载, 文件若真缺失由数据面 wait 显式报错
@@ -387,6 +415,10 @@ Result SdmaOrchestrator::MigrateViaCustChannel(const std::string &dir, uint64_t 
  * 与扩展名冲突, 故用 pid+计数排它创建; CWD 可能只读, 用 /tmp) */
 Result SdmaOrchestrator::LoadKfcChannel(aclrtFuncHandle &fh)
 {
+    if (kfcFuncHandle_ != nullptr) { // 已缓存(首次装载后复用, 免每次部署重装)
+        fh = kfcFuncHandle_;         // 直接复用
+        return BM_OK;                // 缓存命中
+    }
     fh = nullptr; // 出参先置空(失败时调用方见空句柄)
     char path[64] = {0}; // 临时 json 路径(唯一, 带扩展名)
     int fd = -1;         // 文件描述符
@@ -425,7 +457,9 @@ Result SdmaOrchestrator::LoadKfcChannel(aclrtFuncHandle &fh)
         return ret; // 透传失败(根因已记录)
     }
     ret = DlAclApi::AclrtBinaryGetFunction(bh, "K", &fh); // 取 op "K" 的函数句柄
-    if (ret != BM_OK) { // 取句柄失败
+    if (ret == BM_OK) { // 装载成功
+        kfcFuncHandle_ = fh; // 缓存句柄(部署链全程复用, 免每次部署重装)
+    } else { // 取句柄失败
         BM_LOG_ERROR("kfc getfunc failed, ret: " << ret); // 根因日志: ret
     }
     return ret; // 通道装载结果(失败路径根因已记录)
@@ -508,31 +542,38 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
         BM_LOG_ERROR("symSize not power of two, symSize: " << symSize);
         return BM_INVALID_PARAM; // 显式拒绝
     }
-    const uint64_t resBase = ownSegGva + physSize - HYBM_SDMA_ORCH_RESERVED; // 保留区基址
+    const uint64_t resBase = ownSegGva + physSize - SMEM_SHM_SDMA_RESERVED; // 保留区基址
     // 保留区整体清零(双环/游标/戳/停止标志从零起步)
-    auto ret = DlAclApi::AclrtMemset(reinterpret_cast<void *>(resBase), HYBM_SDMA_ORCH_RESERVED, 0,
-                                     HYBM_SDMA_ORCH_RESERVED);
+    auto ret = DlAclApi::AclrtMemset(reinterpret_cast<void *>(resBase), SMEM_SHM_SDMA_RESERVED, 0,
+                                     SMEM_SHM_SDMA_RESERVED);
     if (ret != BM_OK) { // 清零失败(段映射异常)
         BM_LOG_ERROR("memset orch reserved failed, ret: " << ret << " resBase: 0x" << std::hex << resBase
-                                                          << " size: " << HYBM_SDMA_ORCH_RESERVED);
+                                                          << " size: " << SMEM_SHM_SDMA_RESERVED);
         return ret; // 透传失败(根因已记录)
     }
     epochParam_ = HybmSdmaOrchParam{};                    // 参数清零后逐字段装配
     epochParam_.devId = devId_;                           // 设备号
     epochParam_.sqId = sqId_;                             // CP 流 SQ id
     epochParam_.streamId = streamId_;                     // CP 流 id
-    epochParam_.reqBase = resBase + HYBM_SDMA_ORCH_RS_REQ_RING;     // 请求环基址
-    epochParam_.quietBase = resBase + HYBM_SDMA_ORCH_RS_QUIET;      // 完成戳基址
-    epochParam_.stopAddr = workspace_ + HYBM_SDMA_ORCH_WS_STOP_OFF; // 停止标志(工作区自有: 销毁序安全)
-    epochParam_.overflowAddr = workspace_ + HYBM_SDMA_ORCH_WS_OVF_OFF;   // overflow(工作区)
-    epochParam_.resultAddr = workspace_ + HYBM_SDMA_ORCH_WS_RESULT_OFF; // 结果区(工作区)
+    epochParam_.reqBase = resBase + SMEM_SHM_SDMA_RS_REQ_RING;     // 请求环基址
+    epochParam_.quietBase = resBase + SMEM_SHM_SDMA_RS_QUIET;      // 完成戳基址
+    const uint64_t wsBase = workspace_.load(); // 工作区基址快照(锁内)
+    epochParam_.stopAddr = wsBase + HYBM_SDMA_ORCH_WS_STOP_OFF; // 停止标志(工作区自有: 销毁序安全)
+    epochParam_.overflowAddr = wsBase + HYBM_SDMA_ORCH_WS_OVF_OFF;   // overflow(工作区)
+    epochParam_.resultAddr = wsBase + HYBM_SDMA_ORCH_WS_RESULT_OFF; // 结果区(工作区)
     epochParam_.symSize = symSize;                        // 对称段大小(掩码算术)
     epochParam_.physSize = physSize;                      // 段物理大小
-    configured_ = true;                                   // 绑定完成
     stopFlag_ = false;                                    // 停止标志复位
-    supervisor_ = std::thread(&SdmaOrchestrator::SupervisorLoop, this); // 监督线程启动
+    try {                                                 // thread 构造可能抛 system_error(资源不足)
+        supervisor_ = std::thread(&SdmaOrchestrator::SupervisorLoop, this); // 监督线程启动
+    } catch (const std::system_error &e) {                // 启动失败
+        // 根因日志: errno/devId(未置 configured_, 状态一致可重试)
+        BM_LOG_ERROR("start supervisor thread failed, errno: " << e.code().value() << " devId: " << devId_);
+        return BM_ERROR;                                  // 透传失败
+    }
+    configured_ = true;                                   // 绑定完成(线程启动成功后置位)
     BM_LOG_INFO("sdma orch configured, devId: " << devId_ << " reqBase: 0x" << std::hex << epochParam_.reqBase
-              << " arrivalDepth: " << HYBM_SDMA_ORCH_RS_ARR_SLOTS);
+              << " arrivalDepth: " << SMEM_SHM_SDMA_RS_ARR_SLOTS);
     return BM_OK;                                         // 配置完成
 }
 
@@ -599,7 +640,7 @@ void SdmaOrchestrator::SupervisorLoop() // 监督线程主循环(epoch 续命直
         ret = DlAclApi::AclrtSynchronizeStream(launchStream_); // 等 epoch 结束(时限/停止/错误)
         if (ret != BM_OK) {       // sync 异常(watchdog 杀/错误退出)
             HybmSdmaOrchResult r = {}; // 结果快照
-            (void)DlAclApi::AclrtMemcpy(&r, sizeof(r), reinterpret_cast<void *>(workspace_), sizeof(r),
+            (void)DlAclApi::AclrtMemcpy(&r, sizeof(r), reinterpret_cast<void *>(workspace_.load()), sizeof(r),
                                          ACL_MEMCPY_DEVICE_TO_HOST); // D2H 诊断
             if (stopFlag_.load()) { // 停止窗口内的失败(段先于编排器销毁, kernel 读段被杀——预期自愈)
                 BM_LOG_INFO("epoch faulted during shutdown (expected, self-healed), ret: " << ret); // 信息级
@@ -643,7 +684,7 @@ void SdmaOrchestrator::Cleanup() // 逆序清理(锁内, 归零时)
         launchStream_ = nullptr; // 置空防重复销毁
     }
     if (workspace_ != 0) { // 工作区已分配
-        (void)DlAclApi::AclrtFree(reinterpret_cast<void *>(workspace_)); // 释放 4KB 工作区
+        (void)DlAclApi::AclrtFree(reinterpret_cast<void *>(workspace_.load())); // 释放 4KB 工作区
         workspace_ = 0;   // 清零标记未分配
     }
     /* binHandle_ 无对应卸载接口(DlAclApi 未封装), 随进程生命周期释放 */

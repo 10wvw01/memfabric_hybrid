@@ -189,12 +189,9 @@ int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va);
 /**
  * @brief 310P AICore×AICPU 协同模式信息(进程级, 详见 310p-aicore-aicpu-开发进展.md)
  */
-typedef struct {       /* 进程级协同模式就绪信息(SdmaOrchestrator 单例的查询快照) */
-    uint32_t sqId;      /* CP 流 SQ id(kernel 内活查询用) */
-    int32_t streamId;   /* CP 流 id(SQE 的 rt_stream_id) */
-    uint32_t dieId;     /* die 号 = 设备号 % 2(CP1 内 HAL devId) */
-    uint64_t workspace; /* 协同工作区设备地址(mailbox/sentinel/result/ovf) */
-} hybm_sdma_info_t; /* 供 host 装配 AICore kernel 参数与诊断用 */
+typedef struct {           /* 进程级协同模式就绪信息(SdmaOrchestrator 单例的查询快照) */
+    uint64_t workspace;     /* 协同工作区设备地址(非空 = 协同就绪) */
+} hybm_sdma_info_t; /* V5: 仅就绪判定(数据面设备侧自驱, SQE 装配已内聚 epoch kernel) */
 
 /**
  * @brief 查询协同模式就绪信息(未就绪返回非 0)
@@ -203,30 +200,6 @@ typedef struct {       /* 进程级协同模式就绪信息(SdmaOrchestrator 单
  */
 int32_t hybm_sdma_get_info(hybm_sdma_info_t *info); // 未就绪(开关关/初始化失败)返回非 0
 
-/**
- * @brief 提交一次协同搬运(流水语义: AICPU 轮询本端邮箱 → 逐 chunk SQE 对
- *        [数据 src(邮箱描述符)→dstAddr+c*chunkBytes + 标志 哨兵→flagDoneAddr+c*8]
- *        → 每 chunk 一次 doorbell)。邮箱由本端 AICore kernel 写
- *        (smem_shm_aicore_sdma.h 的 notify 原语)。FIFO 保序: 等待最后一块
- *        标志到达即全部数据就位。chunks=1 即单块闭环语义。
- * @param dstAddr         [in] 数据目的基址(池 GVA, kernel 内按 chunk 递增)
- * @param flagDoneAddr    [in] 标志数组目的基址(池 GVA, 每槽 8B × chunks)
- * @param chunks          [in] chunk 数(1~64, 受邮箱槽数约束)
- * @return 0 if successful
- */
-
-/**
- * @brief 等待协同搬运完成(SynchronizeStream)
- * @return 0 if successful
- */
-
-/**
- * @brief 读取最近一次协同搬运的 kernel 结果(诊断: mainRet/stage/headAfter)
- * @param mainRet         [out] kernel 主返回码(0=成功, 13xx/14xx 段见计划附录 A.6)
- * @param stage           [out] 状态机阶段(5=STAGE_DONE)
- * @param headAfter       [out] SQ head(TSFW 消费证据)
- * @return 0 if successful
- */
 
 #ifdef __cplusplus
 }

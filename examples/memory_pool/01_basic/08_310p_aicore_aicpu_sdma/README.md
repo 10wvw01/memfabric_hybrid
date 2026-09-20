@@ -5,14 +5,15 @@
 Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内存池上，
 演示**设备发起的计算-通信协同**（与 07 的 host 编排互补）：
 
-- **AICore kernel 产数据**（写池 GVA + `ENTIRE_DATA_CACHE` clean）
-- **GM 邮箱委托**（16B 描述符 `{dataAddr, words}`，vector 直写 + 行 clean）
-- **AICPU 编排 kernel 代投 SDMA SQE 对**（数据 + 8B 标志，每 chunk 一次 doorbell，
-  FIFO 保序保证"标志到即数据到"）——设备头原语 `smem_shm_aicore_sdma.h` + host API
-  `smem_shm_sdma_submit`
-- **对端 AICore 消费**（dcci 轮询池内标志 → 读改写 INC → 回程）
+- **AICore kernel 产数据**（写池 GVA + 逐行 clean）→ `smem_shm_sdma_signal` 投递搬运
+- **AICPU epoch 编排 kernel 常驻消费**（监督线程 ~22s 自限续命，watchdog 30s 实证约束）：
+  消费段尾保留区请求环 → SQE 三连（数据 + 到达戳 + 完成戳，批末 doorbell，FIFO 保序）
+- **对端 AICore `smem_shm_sdma_wait` 按序收件**（邮件 {dst,len,imm} 自描述落点 → 读改写 INC →
+  回程 signal）；源缓冲复用前 `smem_shm_sdma_quiet`
+- **host 零数据面**：仅建池/起 kernel/收结果（V5：`smem_shm_sdma_submit/wait/get_result` 已废止，
+  设备侧原语见 `smem_shm_aicore_base_sdma.h`）
 
-全内存通知链（邮箱/池内标志/SQE 对），310P3 上 notify/事件对不可用（实测证伪）。
+全内存通知链（双环邮箱/戳 SQE 对），段尾保留区 48KB 由 memfabric 全托管。
 
 ## 目标
 
@@ -24,18 +25,19 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
   - ② 串行 ×8（chunks=1 同步逐次）——无重叠对照
   - 输出**通信被计算掩盖**的加速比量化（流水稳态 ≈ AICore 单 chunk 计算时间）
 
-## 使用能力
+## 使用能力（V5 设备侧自驱）
 
 `smem_shm_create`（SDMA 位，310P 上协同自动启用）→ `smem_shm_sdma_get_workspace`
-→ AICore kernel（`smem_shm_sdma_notify`/`poll_flag`/`get_flag_addr` 设备头原语）→
-`smem_shm_sdma_submit`（chunks 1~64，chunks=1 即单块）→ `smem_shm_sdma_wait`
-→ `smem_shm_sdma_get_result` → `smem_shm_destroy`
+（就绪判定）→ AICore kernel 内 `smem_shm_sdma_signal/`wait`/`quiet`（设备头原语，
+gva 首参；高频路径 `smem_shm_sdma_reserved(gva)` 预计算 + `_at` 变体）→
+`smem_shm_destroy`。host 无数据面调用。
 
 ## 规模建议
 
 - world_size=2 固定（同卡 die 对映射 dev0/dev1）
-- 单 chunk ≤ 1MB（AICPU SQE 上限）；chunk 数 ≤ 64（邮箱槽数）
-- 每 rank 段末尾 2MB 为协同标志保留区（勿存放用户数据）
+- 单次搬运 ≤ 1MB（AICPU SQE 上限）；len 须 4 字节对齐
+- 请求环深 64（满环 signal 背压自旋）；到达环深 1024（消费须及时，溢出 wait 显式报错）
+- 每 rank 段末尾 48KB 为邮箱保留区（memfabric 托管，勿存放用户数据）
 
 ## 必要条件
 
@@ -44,7 +46,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
   发行版 4.1.2：`/usr/bin/mpirun` + 头/库 `/usr/lib/aarch64-linux-gnu/openmpi/{include,lib}`
   （编译需 `-DOMPI_SKIP_MPICXX`）；自装 4.1.5：`/usr/local/openmpi` 全套）
 - 协同编排 kernel 三件套（`libmf_sdma_orch.so` + `libmf_sdma_orch.json` +
-  `libmf_sdma_orch_v4.json`）位于 launch json 同目录（构建目录或安装前缀）——
+  `libmf_sdma_orch_v6.json`）位于 launch json 同目录（构建目录或安装前缀）——
   **初始化自动部署**：设备侧缺失时库内自动完成 CUST 迁移落盘 + CP1 搜索路径就位 +
   完整性校验（符号+尺寸），无需手工部署；手动/诊断部署链见
   `tools/aicpu_kernel_deploy/`（预部署与通道排查用）

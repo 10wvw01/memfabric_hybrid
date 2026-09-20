@@ -12,51 +12,27 @@
 
 /* hybm_sdma_contract.h — V5 wire 契约(host↔epoch kernel 单一事实源)
  *
- * V5 邮箱化重构(2026-09-18): 批处理契约(chunks/dstBase/flagBase)废止, 改为
- * 双环邮箱 + epoch 常驻消费:
- *   - 请求环(段尾保留区): AICore 经 smem_shm_sdma_signal 投递 {src,dst,len,imm}
- *   - 到达环(对端段尾保留区): AICPU 写邮件内容, SQE 戳(seq)保序落地, 对端 AICore
- *     经 smem_shm_sdma_wait 按序消费
- *   - 完成戳(本端段尾保留区): quiet 语义(发送方确认全部落地)
- *   - 执行模型: epoch kernel(~25s 自限时, watchdog 30s 实证约束) + host 监督续命
+ * 本文件在 xcclpp aicpu-aicore-310p3(MIT)原型基础上重写, 仅保留 SQE 配方与
+ * 协同机制思想; 段尾保留区布局经共享布局头 smem_shm_sdma_layout.h 与设备侧
+ * 原语头共用单一事实源(无镜像漂移)。
  *
- * 保留区布局(两端对称, 段基 + physSize - HYBM_SDMA_ORCH_RESERVED 起):
- *   +0x0000  请求环 64 槽 × 32B(本端 AICore 写, AICPU 读)
- *   +0x0800  reqTail u64(生产游标, AICore 写)
- *   +0x0808  reqHead u64(消费游标, AICPU 写, AICore 背压读)
- *   +0x0810  完成戳 64 × u64(SQE 写, AICore quiet 轮询)
- *   +0x0A10  stopFlag u64(host 写, AICPU epoch 退出)
- *   +0x0A20  到达戳 1024 × u64(SQE 写, 对端 AICore wait 轮询)
- *   +0x2A20  到达邮件 1024 × 32B(对端 AICPU 写, 本端 AICore 读)
- *   +0xAA20  arrHead u64(到达消费游标, 本端 AICore 写)
- * 注意: 本布局与 smem_shm_aicore_sdma.h 的设备侧镜像常量必须一致
- * (UT WorkspaceLayoutInvariants 双头 static_assert 锁定)。
+ * V5 邮箱化(2026-09-18): 批处理契约(chunks/dstBase/flagBase)废止, 改为
+ * 双环邮箱 + epoch 常驻消费; host 数据面 API 废止(signal/wait/quiet 设备侧自驱)。
  */
 #ifndef HYBM_SDMA_CONTRACT_V5_H
 #define HYBM_SDMA_CONTRACT_V5_H
 
 #include <cstdint> // 定宽整型
 
+#include "smem_shm_sdma_layout.h" // 段尾保留区布局单一事实源(与设备侧共用, 无镜像)
+
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 内存池引擎子命名空间
 
-/* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 5; /* V5: 双环邮箱 + epoch 消费 */
+/* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
-/* ---- 段尾保留区(替代 V4 的 2MB 标志区, 用户段几乎全量归还) ---- */
-constexpr uint64_t HYBM_SDMA_ORCH_RESERVED = 48UL * 1024UL; /* 保留区总大小 */
-/* 保留区内偏移(见文件头布局图) */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_REQ_RING = 0x0000;   /* 请求环基址 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_REQ_SLOTS = 64;      /* 请求环槽数 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_REQ_TAIL = 0x0800;   /* 生产游标 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_REQ_HEAD = 0x0808;   /* 消费游标 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_QUIET = 0x0810;      /* 完成戳数组 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_QUIET_SLOTS = 64;    /* 完成戳数 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_STOP = 0x0A10;       /* epoch 停止标志 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_ARR_STAMP = 0x0A20;  /* 到达戳数组 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_ARR_SLOTS = 1024;    /* 到达环深度 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_ARR_MAIL = 0x2A20;   /* 到达邮件数组 */
-constexpr uint64_t HYBM_SDMA_ORCH_RS_ARR_HEAD = 0xAA20;   /* 到达消费游标 */
+/* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 6; /* V6: 契约/布局共享头化+批铃+尾查询校验 */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
