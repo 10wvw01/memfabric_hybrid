@@ -131,7 +131,7 @@ HYBM_API void hybm_uninit()
 
     ptracer_uninit();
     auto socType = DlAclApi::GetAscendSocType();
-    if (socType == AscendSocType::ASCEND_310P) { // 平台分派: 310P 分支(先于 V4 判断)
+    if (socType == AscendSocType::ASCEND_310P) { // 平台分派: 310P 分支(先于 GVA V4 分支)
         /* 310P: 与 Hybm310PInitMetaGva 对称的 AclVmm 释放路径 */
         if (g_baseAddr != 0) { // meta 区已建立才需要释放
             // 解除 meta 区固定约定 VA 上的映射(建链时 AclrtMapMem 的逆操作)

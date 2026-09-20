@@ -35,7 +35,7 @@
  * SOFTWARE.
  */
 
-/* hybm_sdma_orch_kernel.cc — V5 epoch 消费 kernel(310P 设备发起 SDMA)
+/* hybm_sdma_orch_kernel.cc — epoch 消费 kernel(310P 设备发起 SDMA)
  *
  * 执行模型(watchdog ~30s 实证约束): 每 epoch 自限 ~22s, host 监督线程到期续命;
  * 环+游标语义使续命间隙无损(邮件只延迟不丢失)。

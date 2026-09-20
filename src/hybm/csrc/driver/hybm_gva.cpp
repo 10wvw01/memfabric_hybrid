@@ -192,9 +192,8 @@ int32_t hybm_init_hbm_gva(uint16_t deviceId, uint64_t flags, uint64_t &baseAddre
 
     void *globalMemoryBase = nullptr;
     size_t allocSize = HYBM_DEVICE_INFO_SIZE; // 申请meta空间
-    if (socType == AscendSocType::ASCEND_310P) { // 平台分派: 310P 分支(必须先于 V4 判断)
-        /* 310P: halMem* 不可用, 走 AclVmm 创建(判断须先于 V4 —— 310P 驱动被映射为 V4
-         * 但无 halMem 语义, 2-rank 计划 F2/F16 定论) */
+    if (socType == AscendSocType::ASCEND_310P) { // 平台分派: 310P 分支(须先于 GVA V4 分支判断)
+        /* 310P: halMem* 不可用, 走 AclVmm 创建(判断须先于 GVA V4 分支) */
         ret = Hybm310PInitMetaGva(deviceId, &globalMemoryBase, allocSize, allocHandle); // AclVmm 建链
     } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         ret = HybmModernInitMetaGva(&globalMemoryBase, allocSize, allocHandle);

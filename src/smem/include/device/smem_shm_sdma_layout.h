@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-/* ---- 段尾保留区(替代 V4 的 2MB 标志区, 用户段几乎全量归还) ---- */
+/* ---- 段尾保留区(用户段几乎全量归还, 仅占用 48KB) ---- */
 constexpr uint64_t SMEM_SHM_SDMA_RESERVED = 48UL * 1024UL; /* 保留区总大小 */
 /* 保留区内偏移(见文件头布局图) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_REQ_RING = 0x0000;   /* 请求环基址 */

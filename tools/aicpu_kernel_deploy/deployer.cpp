@@ -34,8 +34,7 @@
 
 /* deployer — CP1 部署链工具(手动/诊断用): 经 CUSTAICPUKernel 迁移通道把 kernel .so 落到设备
  *
- * 溯源: fork 自 xcclpp aicpu-310p3/deployer.cpp(MIT), 按 P0-E0a 迁移;
- *       入口名改为参数传入(默认 HybmSdmaOrchEpoch, 与产品 json functionName 一致)。
+ * 入口名经参数传入(默认 HybmSdmaOrchEpoch, 与产品 json functionName 一致)。
  * 机制: aclrtBinaryLoadFromFile(cpuMode=1) 本身不落盘 —— aclrtBinaryGetFunction 才触发
  *       CopySoAndNameToCurrentDevice → batchLoadsoFrombuf → 设备写
  *       /home/CustAiCpuUser/lib/<so名>.<devId>.<vfId>.<hostPid>;

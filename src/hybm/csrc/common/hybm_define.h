@@ -130,10 +130,10 @@ struct HybmDeviceMeta {
     uint64_t symmetricSize;
     uint64_t qpInfoAddress;
     uint64_t sdmaWorkSpace;
-    /* 310P 协同模式复用本槽: sdmaWorkSpace 承载协同工作区(V5: result/overflow)
+    /* 310P 协同模式复用本槽: sdmaWorkSpace 承载协同工作区(result/overflow)
      * ——与 A3 血统的"设备发起 SDMA 工作区"为同一概念, 两机制平台互斥不同时写;
      * 设备侧统一经 smem_shm_get_sdma_workspace_address() 读取(见 smem_shm_aicore_base_meta.h) */
-    uint64_t physSize;          /* V5: 段物理大小(=建池 localSize; 设备侧邮箱保留区定位) */
+    uint64_t physSize;          /* 段物理大小(=建池 localSize; 设备侧邮箱保留区定位) */
     uint64_t reserved[10];      // 对齐保留槽, 总尺寸 128B 不变
 };
 

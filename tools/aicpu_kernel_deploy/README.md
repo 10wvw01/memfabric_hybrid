@@ -6,10 +6,7 @@
 > 首次加载失败时自动走迁移+就位+校验），常规使用**无需本工具**；
 > 本工具用于预部署、部署链排查、以及非产品 kernel 的手动落盘。
 
-## 溯源
-
-fork 自 xcclpp `aicpu-310p3/`（MIT 许可），按 P0-E0a 迁移；`deployer` 的入口函数名
-改为参数传入（默认 `HybmSdmaOrchBatch`，与产品 json 一致），其余行为一致。
+`deployer` 的入口函数名经参数传入（默认 `HybmSdmaOrchEpoch`，与产品 json 一致）。
 
 ## 构建
 

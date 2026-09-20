@@ -45,7 +45,7 @@ namespace {
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;       /* 单 block(kernel 状态机单线程语义) */
 constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25; /* launch attr 超时, 须 < AICPU watchdog 30s */
-constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* V5 epoch 消费 kernel 入口符号 */
+constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费 kernel 入口符号 */
 constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v6.json"; /* CWD 缺省 json(与 KVER 同步) */
 constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
 constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
@@ -522,8 +522,8 @@ Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint6
 Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize)
 {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (configured_) { /* V5 约束: 双环一次绑定, 每进程单 SDMA 池 */
-        BM_LOG_ERROR("sdma orch already configured, second pool unsupported in V5, devId: " << devId_);
+    if (configured_) { /* 约束: 双环一次绑定, 每进程单 SDMA 池 */
+        BM_LOG_ERROR("sdma orch already configured, second pool unsupported, devId: " << devId_);
         return BM_INVALID_PARAM;
     }
     if (symSize == 0 || (symSize & (symSize - 1)) != 0) { // 2 的幂(对端段基址掩码算术依赖)

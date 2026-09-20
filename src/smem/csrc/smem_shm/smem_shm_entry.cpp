@@ -331,7 +331,7 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
 }
 
 /* ---- 310P 协同模式转发(实现细节见 hybm_sdma_capi.cpp) ----
- * V5: host 数据面(submit/wait/get_result)已废止——搬运由 AICore kernel 内
+ * host 数据面(submit/wait/get_result)已废止——搬运由 AICore kernel 内
  * smem_shm_sdma_signal/wait/quiet 设备侧自驱; 仅保留工作区查询(就绪判定)。 */
 void *SmemShmEntry::SdmaGetWorkspace() const // 工作区查询
 {

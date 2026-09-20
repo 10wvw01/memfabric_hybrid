@@ -56,7 +56,7 @@ TEST(SdmaOrchestratorTest, AcquireFailsCleanlyAndRetriable)
     EXPECT_EQ(prep.GetRefCountForTest(), 0U); // 计数仍为 0
 }
 
-/* 用例 2: 未就绪时 C API 拒绝(就绪门控的外显语义; V5 数据面 API 已废止) */
+/* 用例 2: 未就绪时 C API 拒绝(就绪门控的外显语义; 数据面 API 已废止) */
 TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
 {
     hybm_sdma_info_t info = {}; // 就绪信息出参
@@ -64,7 +64,7 @@ TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
     EXPECT_NE(hybm_sdma_get_info(nullptr), BM_OK); /* 出参 null 拒绝 */
 }
 
-/* 用例 3: V5 双头布局锁(hybm 契约与 smem 设备头镜像一致; 违反即布局回归) */
+/* 用例 3: 双头布局锁(hybm 契约与 smem 设备头镜像一致; 违反即布局回归) */
 TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 {
     /* 布局头钉死值(单一事实源; 漂移即回归) */
@@ -85,13 +85,13 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
     /* 环深度契约 */
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);   // 请求环 64
     EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_SLOTS, 1024U); // 到达环 1024
-    /* 工作区布局(V5 精简: result/ovf/stop) */
+    /* 工作区布局(result/ovf/stop) */
     EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);                       // ovf 在 result 后
     EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U);                   // stop 不压 ovf
     EXPECT_LE(HYBM_SDMA_ORCH_WS_STOP_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);                       // 落在 4KB 内
 }
 
-/* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; V5 仅存 host API) */
+/* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; 仅存 host API) */
 TEST(SmemShmSdmaApiTest, InvalidHandleRejected)
 {
     EXPECT_EQ(smem_shm_sdma_get_workspace(nullptr), nullptr); // 工作区返回 NULL(就绪判定)

@@ -12,7 +12,7 @@
 
 /* hybm_sdma_orchestrator.h — 310P AICore×AICPU 协同模式传输准备(进程级单例 + 引用计数)
  *
- * V5 邮箱化(2026-09-18): host 侧 submit/wait 数据面 API 废止(搬运由 AICore 经
+ * 邮箱化: host 侧 submit/wait 数据面 API 废止(搬运由 AICore 经
  * smem_shm_sdma_signal/wait/quiet 设备侧自驱), 本类职责收敛为:
  *   1. 传输准备(CP 流/工作区/epoch kernel 加载, 含设备侧自动部署);
  *   2. ConfigureOrch: 段尾保留区初始化(双环清零) + epoch 参数装配;
@@ -20,7 +20,7 @@
  *      实证约束下的实现形态, 环+游标语义使续命间隙无损。
  *
  * 生命周期: 多池共享进程级资源, Acquire/Release 引用计数; ConfigureOrch 一次绑定
- * (V5 约束: 每进程单 SDMA 池, 双环位于首个配置池的段尾保留区)。
+ * (约束: 每进程单 SDMA 池, 双环位于首个配置池的段尾保留区)。
  */
 #ifndef MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H
 #define MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H
@@ -35,7 +35,7 @@
 
 namespace ock {
 namespace mf {
-/* 工作区布局(V5 精简: 哨兵退役——戳 SQE 的源改为到达邮件像首字段) */
+/* 工作区布局(哨兵退役——戳 SQE 的源改为到达邮件像首字段) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;         /* 工作区总尺寸 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 0;      /* epoch 结果区 64B(诊断) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_OVF_OFF = 64;        /* SQE overflow 目标 64B */

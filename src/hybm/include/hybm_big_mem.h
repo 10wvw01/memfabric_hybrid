@@ -191,7 +191,7 @@ int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va);
  */
 typedef struct {           /* 进程级协同模式就绪信息(SdmaOrchestrator 单例的查询快照) */
     uint64_t workspace;     /* 协同工作区设备地址(非空 = 协同就绪) */
-} hybm_sdma_info_t; /* V5: 仅就绪判定(数据面设备侧自驱, SQE 装配已内聚 epoch kernel) */
+} hybm_sdma_info_t; /* 仅就绪判定(数据面设备侧自驱, SQE 装配已内聚 epoch kernel) */
 
 /**
  * @brief 查询协同模式就绪信息(未就绪返回非 0)

@@ -12,11 +12,11 @@
 
 /* hybm_sdma_capi.cpp — 310P 设备发起 SDMA 的 hybm 层 C API 实现(smem_shm 层消费, 声明见 hybm_big_mem.h)
  *
- * V5 邮箱化(2026-09-18): host 侧数据面 API(submit/wait/get_result)废止——搬运由 AICore
+ * host 侧数据面 API(submit/wait/get_result)废止——搬运由 AICore
  * kernel 内 smem_shm_sdma_signal/wait/quiet 设备侧自驱, host 不再参与提交; 本文件仅保留
  * 就绪信息查询(get_info, 工作区非空 = 协同可用, smem_shm_sdma_get_workspace 的实现基础)。
  */
-#include "hybm_sdma_orchestrator.h" // 单例(Ready/GetWorkspace)与 V5 契约
+#include "hybm_sdma_orchestrator.h" // 单例(Ready/GetWorkspace)与 wire 契约
 #include "hybm_big_mem.h"           // 本文件实现的 C API 声明(hybm_sdma_get_info)
 
 using namespace ock::mf; // 引入 SdmaOrchestrator/BM_LOG 所在命名空间

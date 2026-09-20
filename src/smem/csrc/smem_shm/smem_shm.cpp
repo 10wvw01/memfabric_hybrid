@@ -409,7 +409,7 @@ SMEM_API void smem_shm_global_exit(smem_shm_t handle, int status)
     entry->GetGroup()->GroupBroadcastExit(status);
 }
 
-/* ---- 310P AICore×AICPU 协同模式 host API(V5: 数据面设备侧自驱, host 仅就绪判定) ---- */
+/* ---- 310P AICore×AICPU 协同模式 host API(数据面设备侧自驱, host 仅就绪判定) ---- */
 SMEM_API void *smem_shm_sdma_get_workspace(smem_shm_t handle) // 工作区查询转发
 {
     SmemShmEntryPtr entry = nullptr;

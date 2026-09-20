@@ -10,17 +10,16 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* hybm_sdma_contract.h — V5 wire 契约(host↔epoch kernel 单一事实源)
+/* hybm_sdma_contract.h — wire 契约(host↔epoch kernel 单一事实源)
  *
- * 本文件在 xcclpp aicpu-aicore-310p3(MIT)原型基础上重写, 仅保留 SQE 配方与
- * 协同机制思想; 段尾保留区布局经共享布局头 smem_shm_sdma_layout.h 与设备侧
+ * 段尾保留区布局经共享布局头 smem_shm_sdma_layout.h 与设备侧
  * 原语头共用单一事实源(无镜像漂移)。
  *
- * V5 邮箱化(2026-09-18): 批处理契约(chunks/dstBase/flagBase)废止, 改为
- * 双环邮箱 + epoch 常驻消费; host 数据面 API 废止(signal/wait/quiet 设备侧自驱)。
+ * 邮箱化契约: 双环邮箱 + epoch 常驻消费(批处理 chunks/dstBase/flagBase 形态已废止);
+ * host 数据面 API 废止(signal/wait/quiet 设备侧自驱)。
  */
-#ifndef HYBM_SDMA_CONTRACT_V5_H
-#define HYBM_SDMA_CONTRACT_V5_H
+#ifndef HYBM_SDMA_CONTRACT_H
+#define HYBM_SDMA_CONTRACT_H
 
 #include <cstdint>
 
@@ -32,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 6; /* V6: 契约/布局共享头化+批铃+尾查询校验 */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 6; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -75,16 +74,16 @@ struct HybmSdmaOrchResult {
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
-constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0005u; /* V5 魔数 */
+constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0005u; /* 结果区存活魔数 */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_DEADLINE = 0;          /* 时限退出(正常续命) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_STOP = 1;              /* 停止退出(析构) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_ERROR = 2;             /* 错误退出 */
 
-/* SQE 配方与 HAL 弱符号沿用 V4(STARS V2 64B, hcomm 源码比对定论), 见 kernel 实现 */
+/* SQE 配方与 HAL 弱符号(STARS V2 64B, hcomm 源码比对定论), 见 kernel 实现 */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;        /* 空闲退避 100µs */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000;   /* epoch 循环上限(≈22s 空闲) */
 
 } // namespace mf
 } // namespace ock
 
-#endif // HYBM_SDMA_CONTRACT_V5_H
+#endif // HYBM_SDMA_CONTRACT_H

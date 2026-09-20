@@ -10,7 +10,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
   消费段尾保留区请求环 → SQE 三连（数据 + 到达戳 + 完成戳，批末 doorbell，FIFO 保序）
 - **对端 AICore `smem_shm_sdma_wait` 按序收件**（邮件 {dst,len,imm} 自描述落点 → 读改写 INC →
   回程 signal）；源缓冲复用前 `smem_shm_sdma_quiet`
-- **host 零数据面**：仅建池/起 kernel/收结果（V5：`smem_shm_sdma_submit/wait/get_result` 已废止，
+- **host 零数据面**：仅建池/起 kernel/收结果（`smem_shm_sdma_submit/wait/get_result` 已废止，
   设备侧原语见 `smem_shm_aicore_base_sdma.h`）
 
 全内存通知链（双环邮箱/戳 SQE 对），段尾保留区 48KB 由 memfabric 全托管。
@@ -25,7 +25,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
   - ② 串行 ×8（chunks=1 同步逐次）——无重叠对照
   - 输出**通信被计算掩盖**的加速比量化（流水稳态 ≈ AICore 单 chunk 计算时间）
 
-## 使用能力（V5 设备侧自驱）
+## 使用能力（设备侧自驱）
 
 `smem_shm_create`（SDMA 位，310P 上协同自动启用）→ `smem_shm_sdma_get_workspace`
 （就绪判定）→ AICore kernel 内 `smem_shm_sdma_signal/`wait`/`quiet`（设备头原语，
@@ -94,7 +94,7 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_sdma.a
 # 2. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参; **设备侧零部署**——初始化自动
 #    探测→CUST 迁移→CP1 搜索路径就位→完整性校验, 全新设备/环境无任何手工部署步骤;
 #    CP1 目录树为 CANN 基线自带, 洁净卡实测可直接写入)
-export MF_SDMA_ORCH_JSON=<build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v5.json>
+export MF_SDMA_ORCH_JSON=<build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v6.json>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root

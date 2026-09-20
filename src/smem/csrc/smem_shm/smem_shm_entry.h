@@ -54,7 +54,7 @@ public:
 
     Result GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) const;
 
-    /* ---- 310P AICore×AICPU 协同模式(V5: 数据面设备侧自驱, host 仅就绪判定) ---- */
+    /* ---- 310P AICore×AICPU 协同模式(数据面设备侧自驱, host 仅就绪判定) ---- */
     /* 查询协同工作区地址(就绪判定: 非空 = 协同可用); 未就绪返回 nullptr */
     void *SdmaGetWorkspace() const;
 

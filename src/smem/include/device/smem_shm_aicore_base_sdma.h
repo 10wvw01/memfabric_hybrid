@@ -10,7 +10,7 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* smem_shm_aicore_base_sdma.h — V5 邮箱化设备侧 API(AICore kernel 用, signal/wait/quiet)
+/* smem_shm_aicore_base_sdma.h — 邮箱化设备侧 API(AICore kernel 用, signal/wait/quiet)
  *
  * 使用形态(与 910B RDMADemo 同构), 三 API 均以池 gva 为首参:
  *   smem_shm_sdma_signal(gva, src, dst, len, imm) → bool   投递搬运请求(满环自旋背压)

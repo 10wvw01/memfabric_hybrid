@@ -34,7 +34,6 @@
 
 /* mini_kfc — KFC 通道工具(诊断用): host 一条 launch, 设备 OS 内执行任意 shell 命令
  *
- * 溯源: fork 自 xcclpp aicpu-310p3/mini_kfc.cpp(MIT), 按 P0-E0a 迁移, 行为逐字节一致。
  * 机制: json 声明 KFCKernel + functionName "system" + kernelSo 指向不存在的 .so
  *       → CP1 内 KFC handler dlopen 失败不报错、回退 dlsym(RTLD_DEFAULT) 命中 libc
  *       的 system() → param(host args 透传的命令串)成为其参数。零部署零上传。

@@ -794,7 +794,7 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
 ### 9. 310P设备发起SDMA协同（AICore×AICPU）
 
 310P 上 `smem_shm_create` 选择 `SMEMS_DATA_OP_SDMA` 时自动启用设备发起协同模式（默认启用，可用环境变量
-`MF_SDMA_ORCH_DISABLE=1` 显式禁用）。V5 邮箱化后数据面全部由 AICore kernel 内设备侧原语自驱（头文件
+`MF_SDMA_ORCH_DISABLE=1` 显式禁用）。数据面全部由 AICore kernel 内设备侧原语自驱（头文件
 `src/smem/include/device/smem_shm_aicore_base_sdma.h`），host 侧仅保留就绪判定接口；设备侧编排 kernel 三件套
 在首次建池时自动部署并校验，无需手工部署。
 
@@ -881,7 +881,7 @@ bool smem_shm_sdma_quiet(__gm__ void *gva);
 
 - 前提：310P 上以 `SMEMS_DATA_OP_SDMA` 建池且 `smem_shm_sdma_get_workspace` 返回非 NULL（就绪判定）；
 - gva 必须为本次建池的出参（段尾保留区按 gva/段布局定位，跨池混用未定义）；
-- 池对称段大小须为 2 的幂（建池时框架校验）；V5 约束：每进程一个 SDMA 池（第二个池建池报错）；
+- 池对称段大小须为 2 的幂（建池时框架校验）；约束：每进程一个 SDMA 池（第二个池建池报错）；
 - 典型收发闭环（发送方产数据→对端改写→回传）：
 
 ```c
