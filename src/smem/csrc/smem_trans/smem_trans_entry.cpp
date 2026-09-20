@@ -24,7 +24,6 @@
 #include "hybm.h"
 #include "hybm_big_mem.h"
 #include "hybm_data_op.h"
-#include "hybm_define.h"
 #include "mf_env_define.h"
 #include "mf_env_util.h"
 #include "smem_net_common.h"
@@ -677,7 +676,7 @@ Result SmemTransEntry::BatchQuantTransfer(smem_trans_quant_copy_param_t *params,
     SM_VALIDATE_RETURN(params->dataSizes != nullptr, "invalid dataSizes, which is null", SM_INVALID_PARAM);
     SM_VALIDATE_RETURN(params->batchSize != 0, "invalid batchSize, which is 0", SM_INVALID_PARAM);
     auto quantSocType = hybm_get_soc_type();
-    if (quantSocType == ock::mf::SOC_TYPE_310P) {
+    if (quantSocType == HYBM_SOC_TYPE_310P) {
         SM_LOG_ERROR("quant write is not supported on 310P, socType:" << quantSocType);
         return SM_ERROR;
     }
@@ -900,7 +899,7 @@ Result SmemTransEntry::DeregisterLocalMemory(const void *address)
 
 Result SmemTransEntry::TopologyPreflight()
 {
-    if (hybm_get_soc_type() != ock::mf::SOC_TYPE_310P) {
+    if (hybm_get_soc_type() != HYBM_SOC_TYPE_310P) {
         return SM_OK;
     }
     if ((config_.dataOpType & SMEMB_DATA_OP_SDMA) == 0U) {

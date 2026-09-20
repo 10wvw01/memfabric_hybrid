@@ -18,6 +18,13 @@
 extern "C" {
 #endif
 
+/* SoC type constants returned by hybm_get_soc_type() */
+#define HYBM_SOC_TYPE_UNKNOWN 0
+#define HYBM_SOC_TYPE_910B    1
+#define HYBM_SOC_TYPE_910C    2
+#define HYBM_SOC_TYPE_950     3
+#define HYBM_SOC_TYPE_310P    4
+
 /**
  * @brief Initialize hybrid big memory library
  *

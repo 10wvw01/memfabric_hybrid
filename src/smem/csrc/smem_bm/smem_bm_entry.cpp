@@ -17,7 +17,6 @@
 #include "hybm_def.h"
 #include "hybm_big_mem.h"
 #include "hybm_data_op.h"
-#include "hybm_define.h"
 #include "hybm.h"
 #include "topology_preflight.h"
 #include "mf_env_define.h"
@@ -445,7 +444,7 @@ void SmemBmEntry::InvokeEventCb(uint32_t rankId, smem_bm_group_event_t event)
 
 Result SmemBmEntry::TopologyPreflight()
 {
-    if (hybm_get_soc_type() != ock::mf::SOC_TYPE_310P) {
+    if (hybm_get_soc_type() != HYBM_SOC_TYPE_310P) {
         return SM_OK;
     }
     if ((coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) == 0U) {
@@ -530,7 +529,7 @@ Result SmemBmEntry::Leave(uint32_t flags)
 {
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
     /* 310P3 HBM pool: reject dynamic leave (shrink not supported in P1) */
-    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) != 0U &&
+    if (hybm_get_soc_type() == HYBM_SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) != 0U &&
         coreOptions_.maxHBMSize > 0) {
         SM_LOG_ERROR("leave not supported for 310P3 HBM pool, poolId:" << options_.id << " rank:" << options_.rank);
         return SM_INVALID_PARAM;
@@ -547,7 +546,7 @@ Result SmemBmEntry::ExtendLocalMem(smem_bm_mem_type memType, uint64_t size)
     SM_ASSERT_RETURN(memType == SMEM_MEM_TYPE_DEVICE || memType == SMEM_MEM_TYPE_HOST, SM_INVALID_PARAM);
     SM_ASSERT_RETURN(size > 0, SM_INVALID_PARAM);
     /* 310P3 HOST_SHM DRAM: localDRAMSize==maxDramSize, no room for extend */
-    if (hybm_get_soc_type() == ock::mf::SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_HOST_SHM) != 0U &&
+    if (hybm_get_soc_type() == HYBM_SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_HOST_SHM) != 0U &&
         memType == SMEM_MEM_TYPE_HOST) {
         SM_LOG_ERROR("extend not supported for 310P3 HOST_SHM DRAM pool, poolId:" << options_.id);
         return SM_INVALID_PARAM;
