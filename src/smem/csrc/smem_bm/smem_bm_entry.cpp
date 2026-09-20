@@ -19,6 +19,7 @@
 #include "hybm_data_op.h"
 #include "hybm_define.h"
 #include "hybm.h"
+#include "topology_preflight.h"
 #include "mf_env_define.h"
 #include "mf_env_util.h"
 #include "smem_store_factory.h"
@@ -454,119 +455,8 @@ Result SmemBmEntry::TopologyPreflight()
         return SM_OK;
     }
 
-    const uint32_t rankId = options_.rank;
-    const uint32_t rankSize = options_.rankSize;
-    const uint32_t devId = coreOptions_.devId;
-    const std::string topoPrefix = "TOPO_";
-
-    SM_LOG_INFO("[rank " << rankId << "] 310P3 topology preflight: devId:" << devId << " rankSize:" << rankSize);
-
-    auto ret = PublishBmTopologyRecord(topoPrefix);
-    if (ret != SM_OK) {
-        return ret;
-    }
-
-    std::vector<std::pair<uint32_t, uint32_t>> rankTopos;
-    ret = GatherBmTopologyRecords(topoPrefix, rankSize, rankTopos);
-    if (ret != SM_OK) {
-        return ret;
-    }
-    return CheckBmP2PSlotBudget(rankTopos, rankSize);
-}
-
-Result SmemBmEntry::PublishBmTopologyRecord(const std::string &topoPrefix)
-{
-    const uint32_t rankId = options_.rank;
-    const uint32_t devId = coreOptions_.devId;
-    std::string topoKey = topoPrefix + std::to_string(rankId);
-    std::string topoVal = std::to_string(rankId) + ":" + std::to_string(devId);
-    auto ret = _configStore->Set(topoKey, std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
-    if (ret != 0) {
-        SM_LOG_ERROR("Set topology key failed:" << ret << " rank:" << rankId << " key:" << topoKey);
-        return SM_ERROR;
-    }
-    return SM_OK;
-}
-
-Result SmemBmEntry::GatherBmTopologyRecords(const std::string &topoPrefix, uint32_t rankSize,
-                                            std::vector<std::pair<uint32_t, uint32_t>> &rankTopos)
-{
-    const uint32_t rankId = options_.rank;
-    std::unordered_map<std::string, std::string> topoMap;
-    const int64_t gatherTimeoutMs = static_cast<int64_t>(options_.controlOperationTimeout) * 1000;
-    auto gatherStart = std::chrono::steady_clock::now();
-    while (true) {
-        topoMap.clear();
-        auto ret = _configStore->PrefixGet(topoPrefix, topoMap);
-        if (ret != 0) {
-            SM_LOG_ERROR("PrefixGet topology failed:" << ret << " rank:" << rankId);
-            return SM_ERROR;
-        }
-        if (topoMap.size() >= rankSize) {
-            break;
-        }
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gatherStart)
-                .count();
-        if (elapsed >= gatherTimeoutMs) {
-            SM_LOG_ERROR("topology gather timeout:" << elapsed << "ms rank:" << rankId
-                                                    << " got:" << topoMap.size() << "/" << rankSize);
-            return SM_ERROR;
-        }
-        usleep(100 * 1000);
-    }
-
-    for (const auto &kv : topoMap) {
-        uint32_t r = 0;
-        uint32_t d = 0;
-        if (sscanf(kv.second.c_str(), "%u:%u", &r, &d) != 2) {
-            SM_LOG_ERROR("parse topology record failed:" << kv.first << " val:" << kv.second);
-            continue;
-        }
-        rankTopos.emplace_back(r, d);
-    }
-    if (rankTopos.size() < rankSize) {
-        SM_LOG_ERROR("topology records incomplete:" << rankTopos.size() << "/" << rankSize << " rank:" << rankId);
-        return SM_ERROR;
-    }
-    return SM_OK;
-}
-
-Result SmemBmEntry::CheckBmP2PSlotBudget(const std::vector<std::pair<uint32_t, uint32_t>> &rankTopos, uint32_t rankSize)
-{
-    constexpr uint32_t p2pSlotsPerCard = 8U;
-    const uint32_t rankId = options_.rank;
-    std::map<uint32_t, uint32_t> requiredPerCard;
-    for (size_t i = 0; i < rankTopos.size(); i++) {
-        uint32_t cardI = rankTopos[i].second / 2U;
-        for (size_t j = 0; j < rankTopos.size(); j++) {
-            if (i == j) {
-                continue;
-            }
-            uint32_t cardJ = rankTopos[j].second / 2U;
-            if (cardI != cardJ) {
-                requiredPerCard[cardI]++;
-            }
-        }
-    }
-
-    bool feasible = true;
-    for (const auto &card : requiredPerCard) {
-        if (card.second > p2pSlotsPerCard) {
-            SM_LOG_ERROR("P2P slot budget exceeded: cardId:" << card.first << " required:" << card.second
-                                                             << " limit:" << p2pSlotsPerCard << " poolId:" << options_.id
-                                                             << " worldSize:" << rankSize);
-            feasible = false;
-        }
-    }
-    if (!feasible) {
-        SM_LOG_ERROR("topology preflight FAILED for pool:" << options_.id << " rank:" << rankId
-                                                           << " worldSize:" << rankSize);
-        return SM_NO_RESOURCES;
-    }
-    SM_LOG_INFO("topology preflight PASS: rank:" << rankId << " worldSize:" << rankSize
-                                                 << " inbound cross-card slots per card all <= " << p2pSlotsPerCard);
-    return SM_OK;
+    const int64_t timeoutMs = static_cast<int64_t>(options_.controlOperationTimeout) * 1000;
+    return CheckTopologyP2PSlots(_configStore, options_.rank, coreOptions_.devId, options_.rankSize, timeoutMs, "BM");
 }
 
 Result SmemBmEntry::Join(uint32_t flags)

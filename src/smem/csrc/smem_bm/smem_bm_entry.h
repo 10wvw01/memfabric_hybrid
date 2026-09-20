@@ -119,10 +119,6 @@ private:
     Result GroupOpBarrier(int32_t input, std::string logTag);
     Result LeaveHandle(uint32_t rk);
     Result TopologyPreflight();
-    Result PublishBmTopologyRecord(const std::string &topoPrefix);
-    Result GatherBmTopologyRecords(const std::string &topoPrefix, uint32_t rankSize,
-                                   std::vector<std::pair<uint32_t, uint32_t>> &rankTopos);
-    Result CheckBmP2PSlotBudget(const std::vector<std::pair<uint32_t, uint32_t>> &rankTopos, uint32_t rankSize);
     void InvokeEventCb(uint32_t rankId, smem_bm_group_event_t event);
 
 private:
