@@ -308,7 +308,20 @@ Result HostDataOpAclMemcpy::DataCopyAsync(hybm_copy_params &params, hybm_data_co
                                                                                          << " rankId:" << rankId_);
         return BM_INVALID_PARAM;
     }
-    auto ret = CopyByDirection(params.dest, params.src, params.dataSize, direction);
+    /* no user stream: submit to internal stream_ without per-item sync,
+     * then let InnerWait/Wait do a single SyncStream (batch submit → single sync) */
+    int32_t kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
+    if (IsD2DDirection(direction)) {
+        kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
+    } else if (IsH2DDirection(direction)) {
+        kind = ACL_MEMCPY_HOST_TO_DEVICE;
+    } else if (IsD2HDirection(direction)) {
+        kind = ACL_MEMCPY_DEVICE_TO_HOST;
+    } else {
+        BM_LOG_ERROR("DataCopyAsync unsupported direction:" << direction << " rankId:" << rankId_);
+        return BM_INVALID_PARAM;
+    }
+    auto ret = DlAclApi::AclrtMemcpyAsync(params.dest, params.dataSize, params.src, params.dataSize, kind, stream_);
     if (ret != BM_OK) {
         BM_LOG_ERROR("DataCopyAsync submit failed, ret:" << ret << " rankId:" << rankId_);
         return ret;
