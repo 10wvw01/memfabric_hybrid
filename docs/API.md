@@ -791,6 +791,36 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
 |handle|SHM对象handle|
 |status|退出状态|
 
+### 9. 310P设备发起SDMA协同（AICore×AICPU）
+
+310P 上 `smem_shm_create` 选择 `SMEMS_DATA_OP_SDMA` 时自动启用设备发起协同模式（默认启用，可用环境变量
+`MF_SDMA_ORCH_DISABLE=1` 显式禁用）。V5 邮箱化后数据面全部由 AICore kernel 内设备侧原语自驱（头文件
+`src/smem/include/device/smem_shm_aicore_sdma.h`），host 侧仅保留就绪判定接口；设备侧编排 kernel 三件套
+在首次建池时自动部署并校验，无需手工部署。
+
+#### smem_shm_sdma_get_workspace
+
+查询SDMA协同工作区地址，兼作协同模式就绪判定。
+
+```c
+void *smem_shm_sdma_get_workspace(smem_shm_t handle);
+```
+
+|参数/返回值|含义|
+|-|-|
+|handle|SHM对象handle|
+|返回值|协同工作区设备地址；协同未就绪（非310P/初始化失败/已禁用）或handle无效时返回NULL|
+
+设备侧编程模型（AICore kernel 内使用，include `smem_shm_aicore_sdma.h`）：
+
+|设备原语|语义|
+|-|-|
+|`smem_shm_sdma_signal(gva, src, dst, len, imm)`|投递一封搬运请求邮件（32B描述符写入请求环，异步，满环自旋背压）|
+|`smem_shm_sdma_wait(gva)`|按序消费下一封到达邮件（阻塞自旋；邮件`{dst,len,imm,seq,status}`自描述数据落点，接收方免预约定布局）|
+|`smem_shm_sdma_quiet(gva)`|等待本端全部已投递请求落地（源缓冲复用/改写前调用）|
+
+> 完整用法示例见 `examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma/`（一键运行 `bash run.sh`）。
+
 > [!CAUTION] 注意
 > 如下接口对外封装了相同含义的Python接口，详细信息可参考`src/smem/csrc/python_wrapper/mk_transfer_adapter/csrc/pytransfer.cpp`。
 
