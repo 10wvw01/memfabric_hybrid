@@ -78,6 +78,7 @@ private:
     Result MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept;
     Result HalMemCreateAdapterFromHost(size_t size, drv_mem_handle_t **handle, drv_mem_prop prop);
     uint64_t ReserveLva(const HostSdmaExportInfo &im);
+    Result MmapImport310P(const HostSdmaExportInfo &im, uint64_t lva, void *&mapHandle) noexcept;
     void ReleaseP2PLeases(const std::set<uint32_t> &removedRanks = {}) noexcept;
     bool Is310PAclPath() const noexcept;
     void ReleaseHandle(drv_mem_handle_t *handle) noexcept;

@@ -702,6 +702,76 @@ uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
     return reinterpret_cast<uint64_t>(lva);
 }
 
+Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_t lva, void *&mapHandle) noexcept
+{
+    /* Minimal ACL path — exactly as p3_store_repro test that PASS:
+     * 1. SetDevice(local, force=true)
+     * 2. If same-card: SetDevice(exporter, force=true) for ctx trick
+     * 3. AclrtMemImportFromShareableHandle
+     * 4. If same-card: SetDevice(local) to restore
+     * No pre-enable P2P, no retry, no mutex, no CreateContext */
+    uint64_t shareable = 0;
+    memcpy(&shareable, im.shareHandle.share_info, sizeof(shareable));
+    bool sameCard = IsSameCard(im.devicePhyId);
+    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step1: rank:" << im.rankId
+                         << " devId:" << std::dec << deviceId_
+                         << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
+                         << " peerDevicePhyId:" << im.devicePhyId);
+    if (sameCard) {
+        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ctx trick: SetDevice(exporter:" << im.devicePhyId
+                             << ") for rank:" << im.rankId);
+        DlAclApi::AclrtSetDevice(static_cast<int32_t>(im.devicePhyId), true);
+    }
+    /* Check P2P accessibility before import */
+    {
+        int32_t canAccess = -1;
+        auto canRet = DlAclApi::AclrtDeviceCanAccessPeer(&canAccess, deviceId_, static_cast<int32_t>(im.devicePhyId));
+        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 CanAccessPeer: ret:" << canRet
+                             << " canAccess:" << canAccess << " local:" << deviceId_
+                             << " peer:" << im.devicePhyId << " sameCard:" << sameCard);
+    }
+    aclrtDrvMemHandle aclHandle = nullptr;
+    auto ret = DlAclApi::AclrtMemImportFromShareableHandle(shareable, deviceId_, &aclHandle);
+    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step2: AclrtMemImportFromShareableHandle"
+                         << " ret:" << ret << " handle:" << aclHandle << " rank:" << im.rankId
+                         << " deviceId:" << deviceId_);
+    if (sameCard) {
+        DlAclApi::AclrtSetDevice(deviceId_);
+    }
+    if (ret != BM_OK || aclHandle == nullptr) {
+        BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
+                              << " sameCard:" << sameCard
+                              << " deviceId:" << deviceId_ << " segType:" << options_.segType);
+        /* do NOT pre-release lva here: it stays in reservedLva_ and will be
+         * released by UnReserveMemorySpace. Pre-releasing causes double-free. */
+        return BM_ERROR;
+    }
+    mapHandle = aclHandle;
+    ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(lva), im.size, 0,
+                                reinterpret_cast<aclrtDrvMemHandle>(mapHandle), 0);
+    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step3: AclrtMapMem ret:" << ret
+                         << " rank:" << im.rankId << " lva:" << VaToStr(lva) << " size:" << im.size);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("[rank " << options_.rankId << "] AclrtMapMem failed:" << ret << " rank:" << im.rankId
+                              << " va:" << VaToStr(lva) << " size:" << im.size
+                              << " segType:" << options_.segType);
+        ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
+        return BM_ERROR;
+    }
+    /* SetAccess on imported VA for local device */
+    aclrtMemAccessDesc impDesc{};
+    impDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    impDesc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+    impDesc.location.id = static_cast<uint32_t>(deviceId_);
+    auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(lva), im.size, &impDesc, 1);
+    if (saRet != BM_OK) {
+        BM_LOG_WARN("[rank " << options_.rankId << "] AclrtMemSetAccess on imported VA failed:" << saRet
+                             << " rank:" << im.rankId << " va:" << VaToStr(lva) << " size:" << im.size
+                             << " segType:" << options_.segType);
+    }
+    return BM_OK;
+}
+
 Result HybmVmmBasedSegment::Mmap() noexcept
 {
     if (imports_.empty()) {
@@ -776,73 +846,9 @@ Result HybmVmmBasedSegment::Mmap() noexcept
         Result ret = BM_OK;
 
         if (Is310PAclPath()) {
-            /* Minimal ACL path — exactly as p3_store_repro test that PASS:
-             * 1. SetDevice(local, force=true)
-             * 2. If same-card: SetDevice(exporter, force=true) for ctx trick
-             * 3. AclrtMemImportFromShareableHandle
-             * 4. If same-card: SetDevice(local) to restore
-             * No pre-enable P2P, no retry, no mutex, no CreateContext */
-            uint64_t shareable = 0;
-            memcpy(&shareable, im.shareHandle.share_info, sizeof(shareable));
-            bool sameCard = IsSameCard(im.devicePhyId);
-            BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step1: rank:" << im.rankId
-                                 << " devId:" << std::dec << deviceId_
-                                 << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
-                                 << " peerDevicePhyId:" << im.devicePhyId);
-            if (sameCard) {
-                BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ctx trick: SetDevice(exporter:" << im.devicePhyId
-                                     << ") for rank:" << im.rankId);
-                DlAclApi::AclrtSetDevice(static_cast<int32_t>(im.devicePhyId), true);
-            }
-            /* Check P2P accessibility before import */
-            {
-                int32_t canAccess = -1;
-                auto canRet =
-                    DlAclApi::AclrtDeviceCanAccessPeer(&canAccess, deviceId_, static_cast<int32_t>(im.devicePhyId));
-                BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 CanAccessPeer: ret:" << canRet
-                                     << " canAccess:" << canAccess << " local:" << deviceId_
-                                     << " peer:" << im.devicePhyId << " sameCard:" << sameCard);
-            }
-            aclrtDrvMemHandle aclHandle = nullptr;
-            ret = DlAclApi::AclrtMemImportFromShareableHandle(shareable, deviceId_, &aclHandle);
-            BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step2: AclrtMemImportFromShareableHandle"
-                                 << " ret:" << ret << " handle:" << aclHandle << " rank:" << im.rankId
-                                 << " deviceId:" << deviceId_);
-            if (sameCard) {
-                BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ctx trick: SetDevice(local:" << deviceId_
-                                     << ") restore after rank:" << im.rankId);
-                DlAclApi::AclrtSetDevice(deviceId_);
-            }
-            if (ret != BM_OK || aclHandle == nullptr) {
-                BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
-                                      << " sameCard:" << sameCard
-                                      << " deviceId:" << deviceId_ << " segType:" << options_.segType);
-                /* do NOT pre-release lva here: it stays in reservedLva_ and will be
-                 * released by UnReserveMemorySpace. Pre-releasing causes double-free. */
-                return BM_ERROR;
-            }
-            mapHandle = aclHandle;
-            ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(lva), im.size, 0,
-                                        reinterpret_cast<aclrtDrvMemHandle>(mapHandle), 0);
-            BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step3: AclrtMapMem ret:" << ret
-                                 << " rank:" << im.rankId << " lva:" << VaToStr(lva) << " size:" << im.size);
+            ret = MmapImport310P(im, lva, mapHandle);
             if (ret != BM_OK) {
-                BM_LOG_ERROR("[rank " << options_.rankId << "] AclrtMapMem failed:" << ret << " rank:" << im.rankId
-                                      << " va:" << VaToStr(lva) << " size:" << im.size
-                                      << " segType:" << options_.segType);
-                ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
-                return BM_ERROR;
-            }
-            /* SetAccess on imported VA for local device */
-            aclrtMemAccessDesc impDesc{};
-            impDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-            impDesc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-            impDesc.location.id = static_cast<uint32_t>(deviceId_);
-            auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(lva), im.size, &impDesc, 1);
-            if (saRet != BM_OK) {
-                BM_LOG_WARN("[rank " << options_.rankId << "] AclrtMemSetAccess on imported VA failed:" << saRet
-                                     << " rank:" << im.rankId << " va:" << VaToStr(lva) << " size:" << im.size
-                                     << " segType:" << options_.segType);
+                return ret;
             }
         } else {
             drv_mem_handle_t *handle = nullptr;
