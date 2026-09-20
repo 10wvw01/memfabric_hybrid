@@ -265,6 +265,36 @@ Result HostDataOpAclMemcpy::BatchCopyD2D(hybm_batch_copy_params &params) noexcep
     return BM_OK;
 }
 
+Result HostDataOpAclMemcpy::BatchCopyNonD2D(hybm_batch_copy_params &params, int32_t kind) noexcept
+{
+    /* same pattern as BatchCopyD2D: batch submit then single SyncStream,
+     * with per-item sync fallback on stream sync failure */
+    for (uint32_t i = 0; i < params.batchSize; ++i) {
+        auto ret = DlAclApi::AclrtMemcpyAsync(params.destinations[i], params.dataSizes[i], params.sources[i],
+                                              params.dataSizes[i], kind, stream_);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("batch submit failed, ret:" << ret << " index:" << i << " rankId:" << rankId_
+                                                     << " size:" << params.dataSizes[i]);
+            (void)SyncStream();
+            return ret;
+        }
+    }
+    auto ret = SyncStream();
+    if (ret != BM_OK) {
+        BM_LOG_WARN("batch copy async+sync failed, retry sync per-item, rankId:" << rankId_);
+        for (uint32_t i = 0; i < params.batchSize; ++i) {
+            ret = DlAclApi::AclrtMemcpy(params.destinations[i], params.dataSizes[i], params.sources[i],
+                                        params.dataSizes[i], kind);
+            if (ret != BM_OK) {
+                BM_LOG_ERROR("batch copy sync fallback failed, ret:" << ret << " index:" << i << " rankId:" << rankId_
+                                                                     << " size:" << params.dataSizes[i]);
+                return ret;
+            }
+        }
+    }
+    return BM_OK;
+}
+
 Result HostDataOpAclMemcpy::BatchDataCopy(hybm_batch_copy_params &params, hybm_data_copy_direction direction,
                                           const ExtOptions &options) noexcept
 {
@@ -275,15 +305,14 @@ Result HostDataOpAclMemcpy::BatchDataCopy(hybm_batch_copy_params &params, hybm_d
     if (IsD2DDirection(direction)) {
         return BatchCopyD2D(params);
     }
-    for (uint32_t i = 0; i < params.batchSize; ++i) {
-        auto ret = CopyByDirection(params.destinations[i], params.sources[i], params.dataSizes[i], direction);
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("batch copy item failed, ret:" << ret << " index:" << i << " rankId:" << rankId_
-                                                        << " size:" << params.dataSizes[i]);
-            return ret;
-        }
+    if (IsH2DDirection(direction)) {
+        return BatchCopyNonD2D(params, ACL_MEMCPY_HOST_TO_DEVICE);
     }
-    return InnerWait(options, 0);
+    if (IsD2HDirection(direction)) {
+        return BatchCopyNonD2D(params, ACL_MEMCPY_DEVICE_TO_HOST);
+    }
+    BM_LOG_ERROR("BatchDataCopy unsupported direction:" << direction << " rankId:" << rankId_);
+    return BM_INVALID_PARAM;
 }
 
 Result HostDataOpAclMemcpy::DataCopyAsync(hybm_copy_params &params, hybm_data_copy_direction direction,
