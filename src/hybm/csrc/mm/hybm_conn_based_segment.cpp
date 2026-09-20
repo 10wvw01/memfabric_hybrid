@@ -237,6 +237,22 @@ Result HybmConnBasedSegment::Import(const std::vector<std::string> &allExInfo, v
 
 Result HybmConnBasedSegment::Mmap() noexcept
 {
+    /* rollback helper: unmap and clean up all successfully mapped imports on error */
+    auto rollbackMapped = [this]() {
+        for (auto gva : shmMappedGva_) {
+            auto sizeIt = mappedGvaSize_.find(gva);
+            if (sizeIt != mappedGvaSize_.end()) {
+                munmap(reinterpret_cast<void *>(gva), sizeIt->second);
+            }
+        }
+        for (auto gva : mappedGvaMem_) {
+            HybmVaManager::GetInstance().RemoveOneVaInfo(gva);
+        }
+        mappedGvaMem_.clear();
+        mappedGvaSize_.clear();
+        shmMappedGva_.clear();
+    };
+
     for (const auto &import : imports_) {
         if (import.rankId == options_.rankId) {
             continue;
@@ -248,10 +264,9 @@ Result HybmConnBasedSegment::Mmap() noexcept
             BM_LOG_ERROR("invalid remote gva from rank:" << import.rankId << " gva:" << VaToStr(import.gva)
                                                           << " size:" << import.size << " gvaBase:" << VaToStr(gvaBase)
                                                           << " totalSize:" << totalVirtualSize_);
+            rollbackMapped();
             return BM_INVALID_PARAM;
         }
-        mappedGvaMem_.insert(import.gva);
-        mappedGvaSize_[import.gva] = import.size;
 
         uint64_t hva = 0;
         if (import.shmName[0] != '\0') {
@@ -259,6 +274,7 @@ Result HybmConnBasedSegment::Mmap() noexcept
             if (shmFd < 0) {
                 BM_LOG_ERROR("310P3 remote DRAM shm_open failed, name:" << import.shmName << " errno:" << errno
                                                                          << " rankId:" << import.rankId);
+                rollbackMapped();
                 return BM_ERROR;
             }
             void *targetAddr = reinterpret_cast<void *>(import.gva);
@@ -267,6 +283,7 @@ Result HybmConnBasedSegment::Mmap() noexcept
             if (mapped != targetAddr) {
                 BM_LOG_ERROR("310P3 remote DRAM mmap failed, rankId:" << import.rankId << " errno:" << errno
                                                                       << " shmName:" << import.shmName);
+                rollbackMapped();
                 return BM_ERROR;
             }
             hva = import.gva;
@@ -275,9 +292,19 @@ Result HybmConnBasedSegment::Mmap() noexcept
                         << import.rankId << " name:" << import.shmName << " gva:" << VaToStr(import.gva));
         }
 
+        /* track mapped gva after successful shm mapping to ensure rollback only
+         * touches actually-mapped entries */
+        mappedGvaMem_.insert(import.gva);
+        mappedGvaSize_[import.gva] = import.size;
+
         auto ret = HybmVaManager::GetInstance().AddVaInfoFromExternal(
             {import.gva, 0, hva, import.size, HYBM_MEM_TYPE_HOST}, options_.rankId, import.rankId);
-        BM_ASSERT_LOG_AND_RETURN(ret == BM_OK, "ret = " << ret, ret);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("AddVaInfoFromExternal failed, ret:" << ret << " rankId:" << import.rankId
+                                                              << " gva:" << VaToStr(import.gva));
+            rollbackMapped();
+            return ret;
+        }
     }
     imports_.clear();
     return 0;
