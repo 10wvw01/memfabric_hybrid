@@ -105,5 +105,5 @@ mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root
 
 - **07**：host 编排（BM API + `HostDataOpAclMemcpy`），数据面全在 host 线程
 - **08**（本示例）：设备发起协同（SHM API + AICore×AICPU），通信与计算可重叠
-- 机制验收与配方档案：仓库根目录 `310p-aicore-aicpu-开发进展.md`
-  （〇章实现总结 + E0a/E0b/E0c/P1 四级验收记录 + 附录 A 配方速查）
+- 机制配方与平台事实档案：`docs/310p/机制档案.md`（SQE 配方/提交链/状态机/错误码）、
+  `docs/310p/平台事实.md`（协同模式实测事实）
