@@ -24,12 +24,12 @@ using namespace ock::mf; // 引入 SdmaOrchestrator/BM_LOG 所在命名空间
 HYBM_API int32_t hybm_sdma_get_info(hybm_sdma_info_t *info) // 查询就绪信息
 {
     if (info == nullptr) { // 出参指针空校验
-        BM_LOG_ERROR("sdma orch get info failed: info is null"); // 根因日志: 空指针
+        BM_LOG_ERROR("sdma orch get info failed: info is null");
         return BM_INVALID_PARAM;                               // 参数非法
     }
     auto &prep = SdmaOrchestrator::GetInstance(); // 单例引用
     if (!prep.Ready()) {                         // 未就绪
-        BM_LOG_ERROR("sdma orch not ready (switch off or init failed)"); // 根因日志: 未就绪原因
+        BM_LOG_ERROR("sdma orch not ready (switch off or init failed)");
         return BM_NOT_INITIALIZED;                                     // 未初始化
     }
     info->workspace = prep.GetWorkspace(); // 填工作区设备地址(非空 = 协同就绪)

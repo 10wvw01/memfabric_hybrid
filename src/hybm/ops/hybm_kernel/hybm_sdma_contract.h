@@ -22,12 +22,12 @@
 #ifndef HYBM_SDMA_CONTRACT_V5_H
 #define HYBM_SDMA_CONTRACT_V5_H
 
-#include <cstdint> // 定宽整型
+#include <cstdint>
 
-#include "smem_shm_sdma_layout.h" // 段尾保留区布局单一事实源(与设备侧共用, 无镜像)
+#include "smem_shm_sdma_layout.h" // 段尾保留区布局单一事实源(与设备侧共用)
 
-namespace ock { // MemFabric 总命名空间
-namespace mf {  // hybm 内存池引擎子命名空间
+namespace ock {
+namespace mf {
 
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 

@@ -22,19 +22,19 @@
  * 生命周期: 多池共享进程级资源, Acquire/Release 引用计数; ConfigureOrch 一次绑定
  * (V5 约束: 每进程单 SDMA 池, 双环位于首个配置池的段尾保留区)。
  */
-#ifndef MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H /* 头文件包含守卫(防重复包含) */
-#define MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H /* 同上, 与文件尾 #endif 配对 */
+#ifndef MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H
+#define MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H
 
-#include <atomic>   // 原子布尔(监督线程停止标志)
-#include <mutex>    // 互斥量(串行化单例初始化/清理与引用计数)
-#include <thread>   // 监督线程(epoch 续命)
+#include <atomic>
+#include <mutex>
+#include <thread>
 
-#include "dl_acl_api.h"          // ACL 运行时接口封装(dlsym 动态加载 aclrt* 符号)
-#include "hybm_common_include.h" // hybm 公共类型(Result 错误码/日志宏等)
-#include "hybm_sdma_contract.h"  // V5 wire 契约(HybmSdmaOrchParam/Result + 保留区布局)
+#include "dl_acl_api.h"
+#include "hybm_common_include.h"
+#include "hybm_sdma_contract.h"
 
-namespace ock { // MemFabric 总命名空间
-namespace mf {  // hybm 内存池引擎子命名空间
+namespace ock {
+namespace mf {
 /* 工作区布局(V5 精简: 哨兵退役——戳 SQE 的源改为到达邮件像首字段) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;         /* 工作区总尺寸 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 0;      /* epoch 结果区 64B(诊断) */
@@ -61,23 +61,23 @@ public:
     /* 初始化就绪标志(ready 且 configured 才完整可用) */
     bool Ready() const noexcept
     {
-        return ready_.load(std::memory_order_acquire); // 原子读(与锁内写并发安全)
+        return ready_.load(std::memory_order_acquire);
     }
 
     /* 引用计数只读查询(UT 断言失败后归零/Release 幂等语义用) */
     uint32_t GetRefCountForTest() const noexcept
     {
-        return refCount_; // 引用计数只读返回(仅供 UT 断言)
+        return refCount_;
     }
 
     /* 工作区设备内存基址(uint64, 设备地址; meta 槽承载, host 侧就绪判定用) */
     uint64_t GetWorkspace() const noexcept
     {
-        return workspace_.load(std::memory_order_acquire); // 原子读(与锁内写并发安全)
+        return workspace_.load(std::memory_order_acquire);
     }
 
 private:
-    SdmaOrchestrator() = default; // 私有默认构造(仅 GetInstance 的静态局部实例可构造)
+    SdmaOrchestrator() = default;
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */

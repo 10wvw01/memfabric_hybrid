@@ -29,13 +29,13 @@
  *   +0xAA20  arrHead u64(到达消费游标, 本端 AICore 写)
  * 注意: 戳值 1 基(seq+1), 0 保留为"空"(防 seq0 与清零槽不可辨的幻影邮件)。
  */
-#ifndef __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__ /* 头文件包含守卫(防重复包含) */
-#define __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__ /* 同上, 与文件尾 #endif 配对 */
+#ifndef __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__
+#define __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__
 
-#include <cstdint> /* 定宽整型 */
+#include <cstdint>
 
-#ifdef __cplusplus /* C++ 编译环境 */
-extern "C" {       /* C 链接(供 bisheng kernel 与 host UT 双端 include) */
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 /* ---- 段尾保留区(替代 V4 的 2MB 标志区, 用户段几乎全量归还) ---- */
@@ -53,8 +53,8 @@ constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_SLOTS = 1024;    /* 到达环深度 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_MAIL = 0x2A20;   /* 到达邮件数组 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_HEAD = 0xAA20;   /* 到达消费游标 */
 
-#ifdef __cplusplus /* C++ 编译环境 */
-}                  /* extern "C" 结束 */
+#ifdef __cplusplus
+}
 #endif
 
 #endif // __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__

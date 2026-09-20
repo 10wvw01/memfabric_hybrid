@@ -237,7 +237,7 @@ int32_t MemEntityDefault::AllocLocalMemory(uint64_t size, hybm_mem_type mType, u
 
     ret = UpdateHybmDeviceInfo(0); // meta 刷新(含 V5 physSize 槽; ret 复用外层声明)
     if (ret != BM_OK) {             // meta 刷新失败
-        return ret;                 // 透传失败(根因已记录)
+        return ret;
     }
     return ConfigureOrchOnce(); // V5: 段就绪后装配邮箱保留区与监督线程(幂等)
 }
@@ -255,7 +255,7 @@ Result MemEntityDefault::ConfigureOrchOnce()
     if (ret != BM_OK) { // 配置失败(V5 单池约束/非 2 幂 symm/清零失败)
         BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: "
                      << options_.rankId << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段
-        return ret; // 透传失败(根因已记录)
+        return ret;
     }
     orchConfigured_ = true; // 绑定完成
     return BM_OK;           // 配置成功
@@ -1284,7 +1284,7 @@ Result MemEntityDefault::InitTransManager()
             if (ret != BM_OK) { // 准备失败(CP 流/工作区/kernel 任一不过)
                 BM_LOG_ERROR("sdma orchestrator acquire failed, ret: " << ret << " devId: " << options_.devId
                                                                   << " entityId: " << id_);
-                return ret; // 透传失败(根因已记录)
+                return ret;
             }
             orchAcquired_ = true; // 标记本 entity 持有, ReleaseResources 对称 Release
             return BM_OK;            // 协同模式不创建 SdmaTransportManager

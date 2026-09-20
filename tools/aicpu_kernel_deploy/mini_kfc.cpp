@@ -48,61 +48,61 @@
 #include <cstring>
 #include <cstdlib>
 
-#include "acl/acl.h"    // ACL 运行时(初始化/设备)
-#include "acl/acl_rt.h" // aclrt* 二进制加载/launch 接口
+#include "acl/acl.h"
+#include "acl/acl_rt.h"
 
 int main(int argc, char **argv)
 {
-    int dev = argc >= 2 ? atoi(argv[1]) : 0;               // 目标设备号(命令在该设备 CP1 内执行)
-    const char *cmd = argc >= 3 ? argv[2] : "echo hello";  // 待执行的 shell 命令(单条短命令)
-    if (aclInit(nullptr) != ACL_SUCCESS) {                 // ACL 初始化
-        printf("[E] aclInit\n");                           // 失败提示
-        return 1;                                          // 失败退出
+    int dev = argc >= 2 ? atoi(argv[1]) : 0;
+    const char *cmd = argc >= 3 ? argv[2] : "echo hello";
+    if (aclInit(nullptr) != ACL_SUCCESS) {
+        printf("[E] aclInit\n");
+        return 1;
     }
-    if (aclrtSetDevice(dev) != ACL_SUCCESS) {              // 绑定目标设备
-        printf("[E] SetDevice(%d)\n", dev);                // 失败提示(设备号)
-        return 1;                                          // 失败退出
+    if (aclrtSetDevice(dev) != ACL_SUCCESS) {
+        printf("[E] SetDevice(%d)\n", dev);
+        return 1;
     }
     // 最小 KFC json(functionName=system, kernelSo 指向不存在文件触发 dlsym 回退)
-    FILE *f = fopen("kfc_min.json", "w");                  // 在 CWD 写临时 json
-    if (f == nullptr) {                                    // 写文件失败
-        printf("[E] write kfc_min.json\n");                // 失败提示(权限/CWD)
-        return 1;                                          // 失败退出
+    FILE *f = fopen("kfc_min.json", "w");
+    if (f == nullptr) {
+        printf("[E] write kfc_min.json\n");
+        return 1;
     }
     fprintf(f, "{\"K\":{\"opInfo\":{\"opKernelLib\":\"KFCKernel\",\"kernelSo\":\"kfc_min.so\","
-               "\"functionName\":\"system\"}}}");          // KFC 路由声明(op 名 K)
-    fclose(f);                                             // 落盘关闭
-    aclrtBinaryLoadOptions lo = {};                        // 二进制加载选项容器
-    aclrtBinaryLoadOption opt = {};                        // 单项选项
-    opt.type = ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;     // 选项类型 = CPU kernel 模式
-    opt.value.cpuKernelMode = 0;                           // mode=0: 不迁移, 直接按 json 路由
-    lo.numOpt = 1;                                         // 选项个数
-    lo.options = &opt;                                     // 挂接选项数组
-    aclrtBinHandle bh = nullptr;                           // 二进制句柄(出参)
-    if (aclrtBinaryLoadFromFile("kfc_min.json", &lo, &bh) != 0) { // 按 json 加载
-        printf("[E] load\n");                              // 失败提示
-        return 1;                                          // 失败退出
+               "\"functionName\":\"system\"}}}");
+    fclose(f);
+    aclrtBinaryLoadOptions lo = {};
+    aclrtBinaryLoadOption opt = {};
+    opt.type = ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
+    opt.value.cpuKernelMode = 0; // mode=0: 不迁移, 直接按 json 路由
+    lo.numOpt = 1;
+    lo.options = &opt;
+    aclrtBinHandle bh = nullptr;
+    if (aclrtBinaryLoadFromFile("kfc_min.json", &lo, &bh) != 0) {
+        printf("[E] load\n");
+        return 1;
     }
-    aclrtFuncHandle fh = nullptr;                          // 函数句柄(出参)
-    if (aclrtBinaryGetFunction(bh, "K", &fh) != 0) {       // 取 op "K" 的函数句柄
-        printf("[E] func\n");                              // 失败提示
-        return 1;                                          // 失败退出
+    aclrtFuncHandle fh = nullptr;
+    if (aclrtBinaryGetFunction(bh, "K", &fh) != 0) {
+        printf("[E] func\n");
+        return 1;
     }
-    aclrtStream s = nullptr;                               // 承载本次 launch 的流
-    aclrtCreateStream(&s);                                 // 创建流
-    char buf[1024];                                        // 命令串缓冲(launch 参数)
-    strncpy(buf, cmd, 1023);                               // 拷贝命令(留 1 字节终止)
-    buf[sizeof(buf) - 1] = '\0';                           // strncpy 不保证终止, strlen 前必须显式补
-    // 控制字符校验: 含控制字符的命令一定是误传(防误用)
-    for (const char *p = buf; *p; p++) {                   // 逐字节扫描命令串
-        if ((unsigned char)*p < 0x20 && *p != '\t') {      // 非法控制字符(放行 tab)
-            printf("[E] cmd 含控制字符 (0x%02x)\n", (unsigned char)*p); // 失败提示(字符值)
-            return 1;                                      // 失败退出
+    aclrtStream s = nullptr;
+    aclrtCreateStream(&s);
+    char buf[1024];
+    strncpy(buf, cmd, 1023);
+    buf[sizeof(buf) - 1] = '\0'; // strncpy 不保证终止, strlen 前必须显式补
+    // 含控制字符的命令一定是误传(放行 tab)
+    for (const char *p = buf; *p; p++) {
+        if ((unsigned char)*p < 0x20 && *p != '\t') {
+            printf("[E] cmd 含控制字符 (0x%02x)\n", (unsigned char)*p);
+            return 1;
         }
     }
     // 命令串作为 host args 透传 → CP1 内 system() 执行; 退出码经 stream sync 传回
     aclError r = aclrtLaunchKernelWithHostArgs(fh, 1, s, nullptr, buf, strlen(buf) + 1, nullptr, 0);
-    aclError sr = aclrtSynchronizeStream(s);               // 同步取回命令退出码
-    printf("cmd='%s' launch=%d sync=%d\n", cmd, (int)r, (int)sr); // 打印结果(解析 sync= 判定)
-    return 0;                                              // 恒 0(结果看 stdout 的 sync=)
+    aclError sr = aclrtSynchronizeStream(s);
+    printf("cmd='%s' launch=%d sync=%d\n", cmd, (int)r, (int)sr);
+    return 0; // 恒 0, 结果看 stdout 的 sync=
 }

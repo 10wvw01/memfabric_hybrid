@@ -415,7 +415,7 @@ SMEM_API void *smem_shm_sdma_get_workspace(smem_shm_t handle) // 工作区查询
     SmemShmEntryPtr entry = nullptr;
     auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
     if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
-        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret); // 根因日志+错误码
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
         return nullptr; // 未就绪/无效返回 NULL
     }
     return entry->SdmaGetWorkspace(); // 转发工作区查询

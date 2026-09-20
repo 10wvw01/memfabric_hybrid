@@ -79,69 +79,64 @@ static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE; // 授权类型: 设备侧
     auto ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, &acc, 1);
     if (ret != BM_OK) { // 授权失败
-        // 根因日志: ret/addr/size/deviceId
         BM_LOG_ERROR("set meta device access failed, ret: " << ret << " addr: 0x" << std::hex
                                                             << HYBM_DEVICE_META_ADDR << " size: 0x" << allocSize
                                                             << " deviceId: " << deviceId);
-        return BM_ERROR; // 透传失败(根因已记录)
+        return BM_ERROR;
     }
-    return BM_OK; // 授权成功(AICore SMMU 可翻译 meta VA)
+    return BM_OK;
 }
 
 int32_t Hybm310PInitMetaGva(uint16_t deviceId, void **globalMemoryBase, size_t allocSize, void **allocHandle)
 {
-    // 第一步: 在约定地址 HYBM_DEVICE_META_ADDR 预留 VA 窗口(expectPtr 精确指定)
+    // 第一步: 在约定地址 HYBM_DEVICE_META_ADDR 预留 VA 窗口
     auto ret = DlAclApi::AclrtReserveMemAddress(globalMemoryBase, allocSize, 0,
                                                 reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), 0);
     if (ret != BM_OK) { // 预留失败
-        // 根因日志: ret/size/deviceId
         BM_LOG_ERROR("reserve meta va failed, ret: " << ret << " size: 0x" << std::hex << allocSize
                                                      << " deviceId: " << deviceId);
-        return BM_ERROR; // 透传失败(根因已记录)
+        return BM_ERROR;
     }
-    // 校验预留基址必须精确命中约定地址(设备侧头文件硬编码依赖, 偏移即失败)
+    // 基址须精确命中约定地址(设备侧头文件硬编码依赖, 偏移即失败)
     if (*globalMemoryBase != reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR)) {
-        // 根因日志: 实得基址/期望基址/deviceId
         BM_LOG_ERROR("meta va base mismatch, got: 0x" << std::hex << *globalMemoryBase << " expect: 0x"
                                                       << HYBM_DEVICE_META_ADDR << " deviceId: " << deviceId);
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase); // 回滚: 释放刚预留的 VA 窗口
-        return BM_ERROR;                                            // 透传失败(根因已记录)
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
+        return BM_ERROR;
     }
-    aclrtPhysicalMemProp prop{}; // 物理内存属性描述符(零初始化后逐字段填写)
+    aclrtPhysicalMemProp prop{};
     prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;      /* F10: 310P 仅 NONE 可用 */
     prop.allocationType = aclrtMemAllocationType::ACL_MEM_ALLOCATION_TYPE_PINNED; /* 物理页钉住不换出 */
     prop.memAttr = aclrtMemAttr::ACL_MEM_P2P_HUGE;                       /* F10: P2P_HUGE 实测可用 */
     prop.location.id = static_cast<uint32_t>(deviceId);                  /* 内存归属设备号 */
     prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE; /* 归属类型: 设备内存 */
-    aclrtDrvMemHandle handle = nullptr; // 物理内存句柄(成功后经 allocHandle 出参带出)
-    // 第二步: 按上述属性分配 meta 区物理页
+    aclrtDrvMemHandle handle = nullptr; // 经 allocHandle 出参带出
+    // 第二步: 分配 meta 区物理页
     ret = DlAclApi::AclrtMallocPhysical(&handle, allocSize, &prop, 0);
     if (ret != BM_OK) { // 分配失败
-        // 根因日志: ret/size/deviceId
         BM_LOG_ERROR("malloc meta physical failed, ret: " << ret << " size: 0x" << std::hex << allocSize
                                                           << " deviceId: " << deviceId);
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase); // 回滚: 释放已预留的 VA 窗口
-        return BM_ERROR;                                           // 透传失败(根因已记录)
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
+        return BM_ERROR;
     }
-    // 第三步: 物理页映射到约定 VA(建链完成, 与 hybm_uninit 的 310P 分支对称)
+    // 第三步: 物理页映射到约定 VA(与 hybm_uninit 的 310P 分支对称)
     ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, 0, handle, 0);
     if (ret != BM_OK) { // 映射失败
-        // 根因日志: ret/addr/size/deviceId
         BM_LOG_ERROR("map meta va failed, ret: " << ret << " addr: 0x" << std::hex << HYBM_DEVICE_META_ADDR
                                                  << " size: 0x" << allocSize << " deviceId: " << deviceId);
-        (void)DlAclApi::AclrtFreePhysical(handle);                  // 回滚: 释放刚分配的物理页
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);  // 回滚: 释放已预留的 VA 窗口
-        return BM_ERROR;                                             // 透传失败(根因已记录)
+        (void)DlAclApi::AclrtFreePhysical(handle);
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
+        return BM_ERROR;
     }
     // 第四步: 设备侧访问授权(AICore SMMU 可读, 与池段同款; 遗漏此步=设备侧 getter 读零)
     if (MetaSetDeviceAccess(deviceId, allocSize) != BM_OK) {
-        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR)); // 回滚: 解除映射
-        (void)DlAclApi::AclrtFreePhysical(handle);                  // 回滚: 释放物理页
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);  // 回滚: 释放 VA 窗口
-        return BM_ERROR;                                             // 透传失败(根因已记录)
+        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR));
+        (void)DlAclApi::AclrtFreePhysical(handle);
+        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
+        return BM_ERROR;
     }
-    *allocHandle = handle; // 物理句柄交调用方保管(uninit 释放用)
-    return BM_OK;          // 四步全部成功
+    *allocHandle = handle; // 交调用方保管(uninit 释放用)
+    return BM_OK;
 }
 
 int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags){
