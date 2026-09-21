@@ -28,19 +28,22 @@
 
 | 层 | 判定 | 证据 |
 |---|---|---|
-| 池层（4 段对称 GVA 空间） | ✅ 可行，需补跨卡使能 | 见下方池层证据链 |
-| SDMA SQE 跨卡通路 | ⚠ 高可信，差一个探针 | 见下方 SQE 证据链 |
+| 池层（4 段对称 GVA 空间） | ✅ 可行 | 见下方池层证据链 |
+| SDMA SQE 跨卡通路 | ✅ 已实证 | 见下方 SQE 证据链 |
 | 邮箱协议层 | ❌ 现设计不支持，需重设计 | 见下方邮箱分析 |
 | 部署/资源层 | ✅ 免改 | 每卡独立设备 OS，自动部署按本 rank devId 落各卡；meta 区每进程一份 |
 
 **池层证据链**：方案文档 rank 矩阵明确"两卡四 die 4 rank 全互联"为一期目标；
 槽位预算每卡 2 rank × 2 对端 = **4/8**（16_vmm_matrix 实证每卡 8 槽上限，die 对
-import 免费）；缺口为跨卡 import 前需**双向** `rtEnableP2P`（15_peer_needed
-ENABLE_BOTH 实证单向必败 507899；hcomm 同款：PXI 拓扑 → enable → DEFAULT import）。
+import 免费）。跨卡使能按路径分：IPC 路径需**双向** `rtEnableP2P`（15_peer_needed
+ENABLE_BOTH 实证单向必败 507899）；本池 VMM shareable handle 路径实测（04_vmm_cross）
+**免 EPA** 即可跨卡 import + D2D 读写，配额仍隐式消耗。
 
-**SQE 证据链**：配方出自 hcomm `AddOneMemcpySqeV2`（机制档案配方节），hcomm 在 310P
-跨卡跑 AllReduceRing 大数据——同配方跨卡已被生产验证；但本库未自发过跨卡 SQE，
-streamid 跨卡取值未定案 → P0 探针一次定案。
+**SQE 证据链**（三层）：① xcclpp 原型 `aicpu-aicore-310p3` 跨卡实测——人工验证手册
+§3.2 明文 dev0↔dev2 跨卡 runbook，机制结论"跨卡导出内存必须 P2P policy、跨卡通知
+用 SDMA flag-SQE 对"即出自这些运行；② 平台事实 S 表（E0b）：SMMU 可译 AclVmm 池
+GVA（含导入映射），数据 SQE 的 src/dst 直接用池地址成立；③ hcomm 同配方
+（`AddOneMemcpySqeV2`）跨卡 AllReduceRing 生产验证。
 
 **邮箱分析**：到达环为单生产者 FIFO——对端 epoch 用**其自身请求序号**戳我的到达环
 `seq%1024` 槽，我的 wait 按本端消费游标对齐；多对端时序号互踩、跨对端无全局 FIFO。
@@ -49,17 +52,33 @@ quiet 环为本端 epoch 自写（多对端安全）、请求环为本端单生�
 
 ## 3. 设计
 
-### 3.1 编址
+### 3.1 xcclpp 跨卡配方参照（已实证，照抄）
+
+原型 `overlap_demo_mpi` 的跨卡四件套（`overlap_demo_mpi.asc` + 人工验证手册）：
+
+| # | 做法 | 出处 |
+|---|---|---|
+| 1 | 跨卡 SDMA 写目标内存一律 P2P policy 分配（IPC 路径；普通分配跨卡 import 507899） | asc:481-484 |
+| 2 | `aclrtGetDevicesTopo` 探测分派 importFlag：HCCS（die 对）DEFAULT / PCIe（跨卡）ENABLE_PEER_ACCESS | asc:635-641 |
+| 3 | host 传 `dieId = myDev % 2` 进 kernel；streamid 按 die 分支（die0→0x7F45 / die1→0xBF45） | asc:654-672 |
+| 4 | 跨卡通知 = SDMA flag-SQE 对（数据+8B 标志一次 doorbell，FIFO 保序）；NOTIFY_RECORD 跨卡弃用 | README 通知链定型 |
+
+与本池（VMM 路径）的对应关系：①由 `ACL_MEM_P2P_HUGE` 物理页天然满足；②仅 IPC
+import 需要，VMM 免 EPA（见 §2 池层证据链）；③④已被 2-rank 实现继承，4-rank
+修正点见 §3.5。
+
+### 3.2 编址
 
 4 段对称 GVA：`gva + symSize * rank`，rank ∈ {0..3}；symSize 2 的幂约束不变（掩码算术依赖）。
 
-### 3.2 池层补强（引用方案文档，仅列协同层相关点）
+### 3.3 池层补强（引用方案文档，仅列协同层相关点）
 
-- 建池时按 `aclrtGetDevicesTopo` 分派：die 对（HCCS）跳过 enable；跨卡（PXI）双向
-  `rtEnableP2P` 后 DEFAULT import——hcomm 模式照搬；
-- 槽位预检：4-rank 拓扑下每卡 4/8，富余；不可行拓扑确定性失败（方案文档目标 4 语义）。
+- 4 段对称映射 + 槽位预检：4-rank 拓扑下每卡 4/8，富余；不可行拓扑确定性失败
+  （方案文档目标 4 语义）；
+- 跨卡 import 按 §3.1 配方分派：本池 VMM 路径免 EPA（04_vmm_cross 实测），
+  IPC 参照路径才需双向 enable。
 
-### 3.3 邮箱协议 4-rank 化（核心改造）
+### 3.4 邮箱协议 4-rank 化（核心改造）
 
 - **保留区 48KB → 128KB**：内含 N-1 = 3 个**按对端划分的到达环**（每环 1024×8B 戳 +
   1024×32B 邮件，SPSC 语义原样复用 2-rank 已验证原语）+ 本端请求环/quiet 环不变；
@@ -70,12 +89,16 @@ quiet 环为本端 epoch 自写（多对端安全）、请求环为本端单生�
   quiet 免改（本端自写）；
 - **布局单一事实源**：`smem_shm_sdma_layout.h` 三端（设备头/契约/UT）同步，UT 布局锁更新。
 
-### 3.4 streamid 推导
+### 3.5 streamid 推导（xcclpp 原样配方，定案）
 
-`(devId == 0) ? 0x7F45 : 0xBF45` → 按 `dieId = devId % 2` 映射（每卡 CP1 内 die0/die1
-各取一值）；跨卡取值由 P0 探针定案后固化。
+kernel 内 `(devId == 0) ? 0x7F45 : 0xBF45` 的分支依据是 **die 号**（每卡 CP1 内
+die0/die1 各取一值）。当前 `epochParam_.devId` 误传全量设备号——2-rank 时
+dev0/dev1 恰与 die 号重合而掩盖，4-rank 下 dev2（卡1 die0）将错拿 die1 值。
+修正：host 传 `dieId_`（orchestrator 已有 `dieId_ = devId % 2` 字段），kernel 按
+dieId 分支；kernel 内 HAL 调用（doorbell/查询）本就以 die 号为语义（A.3），
+传 dieId 同时修正其取值。
 
-### 3.5 版本纪律
+### 3.6 版本纪律
 
 wire/布局变更 → `MF_SDMA_ORCH_KVER` bump；已部署旧版本 kernel 与新库不混载
 （CP1 按文件名 dlopen 缓存，版本号即缓存键）。
@@ -84,20 +107,18 @@ wire/布局变更 → `MF_SDMA_ORCH_KVER` bump；已部署旧版本 kernel 与�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| **P0 跨卡 SQE 探针** | 4 进程池 + dev0→dev2 单封邮件，定案 streamid 取值 | 跨卡邮件落地 + 戳序正确；不通过则止步 |
-| **P1 池层 4-rank** | topo 探测分派 + 双向 EPA + 4 段映射 | 4 进程建池 + host D2D 全互连校验 + 槽位不超限 |
-| **P2 邮箱多 peer 化** | 布局 128KB + KVER bump + epoch 路由 + wait API | UT 全绿 + 2-rank e2e 回归（mismatch=0） |
+| **P1 池层 4-rank** | 4 段映射 + 跨卡 import（VMM 免 EPA）+ 槽位预检 | 4 进程建池 + D2D 全互连 + 槽位不超限 + 复跑 |
+| **P2 邮箱多 peer 化** | 布局 128KB + KVER bump + epoch 路由 + dieId 修正 | UT 全绿 + 2-rank 回归 + 跨卡邮件用例 |
 | **P3 示例与端到端** | 08 示例扩 4-rank（或新 09 示例） | 4-rank mismatch=0 + 干净退出 + 流水加速比记录 + 2-rank 回归 |
 
 ## 5. 风险
 
 | # | 风险 | 应对 |
 |---|---|---|
-| R1 | 跨卡 SQE 未自证（hcomm 证据是间接的） | P0 探针先行，一票否决制 |
-| R2 | streamid 跨卡取值未知 | P0 一并定案 |
-| R3 | 跨卡带宽 ~10–14 GB/s（die 对 17–19）低于 die 对，加速比受其主导 | P3 如实记录，不承诺与 2-rank 持平 |
-| R4 | 多进程建池启动时序敏感（2-rank 已证） | 16_vmm_matrix 8 rank 并发建池实测无失败，利好；P1 验收含复跑 |
-| R5 | 保留区扩容改变段尾布局，旧 kernel 混载风险 | KVER bump 纪律（同版本号不混载，3.5） |
+| R1 | epochParam 误传全量 devId（2-rank 恰好掩盖，4-rank 错路由） | P2 传 dieId 修正（§3.5），跨卡邮件用例回归 |
+| R2 | 跨卡带宽 ~10–14 GB/s（die 对 17–19）低于 die 对，加速比受其主导 | P3 如实记录，不承诺与 2-rank 持平 |
+| R3 | 多进程建池启动时序敏感（2-rank 已证） | 16_vmm_matrix 8 rank 并发建池实测无失败，利好；P1 验收含复跑 |
+| R4 | 保留区扩容改变段尾布局，旧 kernel 混载风险 | KVER bump 纪律（同版本号不混载，§3.6） |
 
 ## 6. 开放问题（评审定）
 
