@@ -131,7 +131,25 @@ HYBM_API void hybm_uninit()
 
     ptracer_uninit();
     auto socType = DlAclApi::GetAscendSocType();
-    if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
+    if (socType == AscendSocType::ASCEND_310P) { // 平台分派: 310P 分支(先于 GVA V4 分支)
+        /* 310P: 与 Hybm310PInitMetaGva 对称的 AclVmm 释放路径 */
+        if (g_baseAddr != 0) { // meta 区已建立才需要释放
+            // 解除 meta 区固定约定 VA 上的映射(建链时 AclrtMapMem 的逆操作)
+            auto ret = DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR));
+            // 记录解除映射结果(失败也继续清理, 尽力而为)
+            BM_LOG_INFO("unmap meta info res: " << ret);
+            if (g_allocHandle != nullptr) { // 物理内存句柄存在才释放
+                // 释放 meta 区背后的物理页(建链时 AclrtMallocPhysical 的逆操作)
+                ret = DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
+                g_allocHandle = nullptr; // 置空句柄防重复释放
+                BM_LOG_INFO("free meta physical res: " << ret); // 记录物理页释放结果
+            }
+            // 释放预留的 meta VA 窗口(建链时 AclrtReserveMemAddress 的逆操作)
+            ret = DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
+            BM_LOG_INFO("release meta va res: " << ret);  // 记录 VA 窗口释放结果
+            g_baseAddr = 0ULL;                            // 清零标记 meta 区已完全释放
+        }
+    } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         if (g_baseAddr != 0) {
             auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
             BM_LOG_INFO("unmap meta info res: " << ret);

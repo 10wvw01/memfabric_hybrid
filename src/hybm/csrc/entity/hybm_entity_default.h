@@ -118,6 +118,9 @@ private:
     std::shared_ptr<MemSegment> dramSegment_{nullptr};
     std::shared_ptr<DataOperator> dataOperator_;
     bool transportPrepared_{false};
+    bool orchAcquired_{false};  // 310P 协同模式: InitTransManager 已 Acquire, UnInit 需对称 Release
+    bool orchConfigured_{false}; // 段尾保留区已配置(ConfigureOrchOnce 一次绑定)
+    Result ConfigureOrchOnce(); /* 段就绪后装配邮箱保留区+监督线程(幂等; 内部经线程启动可失败) */
     std::mutex importMutex_;
     transport::TransManagerPtr transportManager_;
     std::unordered_map<uint32_t, EntityExportInfo> importedRanks_;

@@ -57,6 +57,9 @@ SMEM_API smem_shm_t smem_shm_create(uint32_t id, uint32_t rankSize, uint32_t ran
     }
     options.rankCount = rankSize;
     options.rankId = rankId;
+    /* devId 必须透传(AI_CORE_INITIATE 场景此前恒 0 —— A3 的 SdmaTransportManager
+     * 自取设备未暴露; 310P 协同模式 dieId = devId%2 依赖此值, 对齐 smem_bm.cpp 同款) */
+    options.devId = SmemShmEntryManager::Instance().GetDeviceId(); // 透传设备号(dieId 依赖)
     options.maxHBMSize = ALIGN_UP(localSize, SMEM_1G_SIZE);
     options.deviceVASpace = localSize;
     options.role = HYBM_ROLE_PEER;
@@ -404,4 +407,16 @@ SMEM_API void smem_shm_global_exit(smem_shm_t handle, int status)
         return;
     }
     entry->GetGroup()->GroupBroadcastExit(status);
+}
+
+/* ---- 310P AICore×AICPU 协同模式 host API(数据面设备侧自驱, host 仅就绪判定) ---- */
+SMEM_API void *smem_shm_sdma_get_workspace(smem_shm_t handle) // 工作区查询转发
+{
+    SmemShmEntryPtr entry = nullptr;
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    if (ret != SM_OK || entry == nullptr) { // handle 无效或查不到
+        SM_LOG_AND_SET_LAST_ERROR("input handle is invalid, result: " << ret);
+        return nullptr; // 未就绪/无效返回 NULL
+    }
+    return entry->SdmaGetWorkspace(); // 转发工作区查询
 }

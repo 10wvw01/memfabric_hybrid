@@ -19,6 +19,7 @@ set(AICPU_INCLUDE_DIRS
     ${PROJECT_HYBM_SRC_BASE}/include
     ${PROJECT_HYBM_SRC_BASE}/csrc/common
     ${PROJECT_HYBM_SRC_BASE}/csrc/under_api
+    ${PROJECT_HYBM_SRC_BASE}/../smem/include/device # 共享布局头 smem_shm_sdma_layout.h(单一事实源)
     ${_ASCEND_INC_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -84,6 +85,69 @@ message("==================hybm ai cpu ops compile done=========================
 
 # ---- Default target: build all artifacts ----
 add_custom_target(cann_hybm_kernel ALL DEPENDS ${AICPU_SO_OUTPUT} ${AICPU_JSON_OUTPUT} ${AICPU_TAR_OUTPUT})
+
+# ============================================================================
+# 310P 设备发起 SDMA 编排 kernel
+# 独立 so: 与 libcann_hybm_kernel.so 互不影响; 设备侧版本名由 MF_SDMA_ORCH_KVER 控制
+# (CP1 按文件名 dlopen 缓存 —— 改 kernel 必 bump, 部署链详见 docs/310p/部署档案.md)
+# ============================================================================
+set(SDMA_ORCH_SO_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.so") # 编排 kernel so 产物(构建目录)
+set(SDMA_ORCH_JSON_CUST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/libmf_sdma_orch.json") # CUST 迁移用 json 源(仓库静态文件)
+set(SDMA_ORCH_JSON_CUST_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.json") # CUST json 构建目录副本
+
+# 设备侧 launch 版本号(缓存变量): launch json 的 kernelSo 与部署链的复制目标名都用它
+set(MF_SDMA_ORCH_KVER "6" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
+# launch json 输出路径(文件名带版本号)
+set(SDMA_ORCH_JSON_LAUNCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch_v${MF_SDMA_ORCH_KVER}.json")
+
+add_custom_command( # 编排 kernel so 编译(hcc 交叉编译)
+    OUTPUT ${SDMA_ORCH_SO_OUTPUT} # 产物: 设备侧 so
+    COMMAND ${AICPU_COMPILER} # aarch64 交叉编译器
+        -shared -O2 -std=c++17 -fPIC # 共享库/O2/C++17/位置无关
+        ${AICPU_INC_FLAGS} # include 路径(含 smem 布局头共享目录)
+        -o ${SDMA_ORCH_SO_OUTPUT} # 输出目标
+        ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # kernel 源文件
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # 依赖: kernel 源
+            ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_contract.h # 依赖: wire 契约头
+    COMMENT "Compiling 310P sdma orchestrator kernel (libmf_sdma_orch.so)"
+)
+
+add_custom_command( # 复制 CUST json 到构建目录(deployer 迁移链用)
+    OUTPUT ${SDMA_ORCH_JSON_CUST_OUT} # 产物: CUST json 副本
+    COMMAND ${CMAKE_COMMAND} -E copy ${SDMA_ORCH_JSON_CUST_SRC} ${SDMA_ORCH_JSON_CUST_OUT} # 原样复制
+    DEPENDS ${SDMA_ORCH_JSON_CUST_SRC} # 依赖: 仓库内源 json
+    COMMENT "Copying sdma orchestrator CUST json (deployer mode=1 migration)"
+)
+
+# launch json 按 MF_SDMA_ORCH_KVER 配置期生成 (kernelSo 指向设备侧版本名)
+file(WRITE "${SDMA_ORCH_JSON_LAUNCH_OUT}" # 配置期生成 launch json(内容见下, 勿在串内加注释)
+"{
+    \"HybmSdmaOrchEpoch\": {
+        \"opInfo\": {
+            \"opKernelLib\": \"AICPUKernel\",
+            \"kernelSo\": \"libmf_sdma_orch_v${MF_SDMA_ORCH_KVER}.so\",
+            \"functionName\": \"HybmSdmaOrchEpoch\"
+        }
+    }
+}
+")
+add_custom_command( # launch json 时间戳目标(让 file(WRITE) 产物纳入构建图)
+    OUTPUT ${SDMA_ORCH_JSON_LAUNCH_OUT} # 产物: launch json
+    COMMAND ${CMAKE_COMMAND} -E touch ${SDMA_ORCH_JSON_LAUNCH_OUT} # touch 刷新时间戳
+    DEPENDS ${SDMA_ORCH_SO_OUTPUT} # 依赖: 先产出 so
+    COMMENT "Sdma orchestrator launch json (AICPUKernel cpuMode=0, v${MF_SDMA_ORCH_KVER})"
+)
+
+add_custom_target(mf_sdma_orch_kernel ALL # 顶层目标: 编排 kernel 三产物聚合(so+双 json)
+    DEPENDS ${SDMA_ORCH_SO_OUTPUT} ${SDMA_ORCH_JSON_CUST_OUT} ${SDMA_ORCH_JSON_LAUNCH_OUT})
+
+install(FILES ${SDMA_ORCH_SO_OUTPUT} # 安装编排 kernel so(可执行权限)
+        DESTINATION ${TARGET_INSTALL_DIR}/hybm/aicpu_kernel
+        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+
+install(FILES ${SDMA_ORCH_JSON_CUST_OUT} ${SDMA_ORCH_JSON_LAUNCH_OUT} # 安装编排 kernel 双 json
+        DESTINATION ${TARGET_INSTALL_DIR}/hybm/aicpu_kernel
+        PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
 
 # ---- Install ----
 install(FILES ${AICPU_SO_OUTPUT}

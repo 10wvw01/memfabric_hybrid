@@ -38,13 +38,13 @@ SMEM_SHM_INLINE_AICORE uint64_t smem_shm_get_symmetric_size(uint32_t shmemId = 0
  * @brief Get qp info address which is set by function smem_shm_create from host side
  * @param shmemId           [in] shm object id, default 0
  */
-SMEM_SHM_INLINE_AICORE __gm__ void *smem_shm_get_qp_info_address(uint32_t shmemId = 0);
+SMEM_SHM_INLINE_AICORE uint64_t smem_shm_get_qp_info_address(uint32_t shmemId = 0);
 
 /**
  * @brief Get user extra context addr (context is set by function smem_shm_set_extra_context from host side)
  * @param shmemId           [in] shm object id, default 0
  */
-SMEM_SHM_INLINE_AICORE __gm__ void *smem_shm_get_extra_context_addr(uint32_t shmemId = 0);
+SMEM_SHM_INLINE_AICORE uint64_t smem_shm_get_extra_context_addr(uint32_t shmemId = 0);
 
 /**
  * @brief Get user extra context size (context is set by function smem_shm_set_extra_context from host side)

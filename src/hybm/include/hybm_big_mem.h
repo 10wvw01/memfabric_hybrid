@@ -186,6 +186,21 @@ int32_t hybm_set_extra_context(hybm_entity_t e, const void *context, uint32_t si
  */
 int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va);
 
+/**
+ * @brief 310P AICore×AICPU 协同模式信息(进程级, 机制见 docs/310p/机制档案.md)
+ */
+typedef struct {           /* 进程级协同模式就绪信息(SdmaOrchestrator 单例的查询快照) */
+    uint64_t workspace;     /* 协同工作区设备地址(非空 = 协同就绪) */
+} hybm_sdma_info_t; /* 仅就绪判定(数据面设备侧自驱, SQE 装配已内聚 epoch kernel) */
+
+/**
+ * @brief 查询协同模式就绪信息(未就绪返回非 0)
+ * @param info            [out] 就绪信息
+ * @return 0 if successful
+ */
+int32_t hybm_sdma_get_info(hybm_sdma_info_t *info); // 未就绪(开关关/初始化失败)返回非 0
+
+
 #ifdef __cplusplus
 }
 #endif

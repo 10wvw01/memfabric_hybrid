@@ -21,6 +21,7 @@
 #include "hybm_ex_info_transfer.h"
 #include "hybm_gva.h"
 #include "hybm_logger.h"
+#include "hybm_sdma_orchestrator.h" // 310P 协同模式传输准备单例(挂载点/meta 填充/释放均引用)
 #include "mf_fault_injection_point.h"
 #include "hybm_stream_manager.h"
 #include "hybm_va_manager.h"
@@ -234,7 +235,30 @@ int32_t MemEntityDefault::AllocLocalMemory(uint64_t size, hybm_mem_type mType, u
         }
     }
 
-    return UpdateHybmDeviceInfo(0);
+    ret = UpdateHybmDeviceInfo(0); // meta 刷新(含 physSize 槽; ret 复用外层声明)
+    if (ret != BM_OK) {             // meta 刷新失败
+        return ret;
+    }
+    return ConfigureOrchOnce(); // 段就绪后装配邮箱保留区与监督线程(幂等)
+}
+
+/* 段尾保留区初始化 + epoch 监督线程启动(首个 SDMA 池一次绑定;
+ * 幂等: 后续切片分配直接返回) */
+Result MemEntityDefault::ConfigureOrchOnce()
+{
+    if (!orchAcquired_ || orchConfigured_) { // 非协同 entity 或已配置
+        return BM_OK;                        // 幂等返回
+    }
+    const uint64_t ownSeg = reinterpret_cast<uint64_t>(hbmGva_) + options_.maxHBMSize * options_.rankId; // 本端段基址
+    auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace,
+                                                              options_.maxHBMSize); // 保留区+监督线程
+    if (ret != BM_OK) { // 配置失败(单池约束/非 2 幂 symm/清零失败)
+        BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: "
+                     << options_.rankId << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段
+        return ret;
+    }
+    orchConfigured_ = true; // 绑定完成
+    return BM_OK;           // 配置成功
 }
 
 int32_t MemEntityDefault::RegisterLocalMemory(const void *ptr, uint64_t size, uint32_t flags,
@@ -717,7 +741,8 @@ int32_t MemEntityDefault::Mmap() noexcept
         return BM_NOT_INITIALIZED;
     }
 
-    // in trans scene, two segement work togather, but hbm do not need to mmap, and wrongly mmap will make dram mmap fail
+    // in trans scene, two segments work together, but hbm does not need to mmap,
+    // and wrongly mmap will make dram mmap fail
     if (hbmSegment_ != nullptr && options_.scene != HYBM_SCENE_TRANS) {
         auto ret = hbmSegment_->Mmap();
         if (ret != BM_OK) {
@@ -1051,6 +1076,15 @@ void MemEntityDefault::SetHybmDeviceInfo(HybmDeviceMeta &info)
         info.qpInfoAddress = 0UL;
         info.sdmaWorkSpace = 0UL;
     }
+    info.physSize = options_.deviceVASpace; /* 段物理大小(设备侧邮箱保留区定位) */
+    /* 310P 协同模式: 工作区复用 sdmaWorkSpace 槽(A3 血统同概念, 平台互斥不同时写);
+     * 未就绪保持零值(host 侧以 smem_shm_sdma_get_workspace(handle) 非空判定可用) */
+    if (orchAcquired_) { // 本 entity 持有协同(InitTransManager 已 Acquire)
+        auto &prep = SdmaOrchestrator::GetInstance(); // 进程级单例(多 entity 共享同一份协同资源)
+        if (prep.Ready()) { // 协同就绪: 填充真实工作区
+            info.sdmaWorkSpace = prep.GetWorkspace(); // 工作区设备地址(result/overflow)
+        }
+    }
 }
 
 int32_t MemEntityDefault::ImportForTransportPrecheck(const ExchangeInfoReader desc[], uint32_t &count,
@@ -1237,7 +1271,25 @@ Result MemEntityDefault::InitTransManager()
         BM_LOG_DEBUG("NO RDMA/URMA Data Operator transport skip init.");
         return BM_OK;
     }
-    if (options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA) {
+    if (options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA) { // SDMA 传输位(设备侧搬运引擎)
+        // 平台门控+显式禁用: 310P 自动启用协同(A3 SdmaTransportManager 配方在 310P
+        // 必败——AclnnShmemSdmaStarsQuery 实测 65534, 协同为该平台唯一可用 SDMA 链路;
+        // MF_SDMA_ORCH_DISABLE=1 仅供诊断场景显式关断, 走 A3 路径即报其原生错误)
+        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P && !SdmaOrchestrator::Disabled()) {
+            /* 310P 协同模式: 改做编排准备(CP 流+工作区+kernel, 失败即报错不静默);
+             * meta 由 SetHybmDeviceInfo 填充 */
+            BM_LOG_INFO("310P sdma orchestrator: device-initiated SDMA instead of SdmaTransportManager, "
+                        "entityId: " << id_ << " devId: " << options_.devId);
+            auto ret = SdmaOrchestrator::GetInstance().Acquire(options_.devId); // 首次进入做全量初始化(引用计数+1)
+            if (ret != BM_OK) { // 准备失败(CP 流/工作区/kernel 任一不过)
+                BM_LOG_ERROR("sdma orchestrator acquire failed, ret: " << ret << " devId: " << options_.devId
+                                                                  << " entityId: " << id_);
+                return ret;
+            }
+            orchAcquired_ = true; // 标记本 entity 持有, ReleaseResources 对称 Release
+            return BM_OK;            // 协同模式不创建 SdmaTransportManager
+        }
+        // 非 310P 或开关关闭: 走 A3 等平台的 SDMA TransportManager 原路径
         transportManager_ = transport::TransportManager::Create(transport::TT_SDMA, tagManager_);
     } else {
         transportManager_ = transport::TransportManager::Create(transport::TT_COMPOSE, tagManager_);
@@ -1362,6 +1414,11 @@ void MemEntityDefault::ReleaseResources()
         return;
     }
     dataOperator_.reset();
+    if (orchAcquired_) { // 本 entity 曾 Acquire 协同资源
+        /* 与 InitTransManager 的 Acquire 对称(进程级单例引用计数, 归零才真正释放) */
+        SdmaOrchestrator::GetInstance().Release(); // 引用计数-1, 归零逆序清理 CP 流/工作区
+        orchAcquired_ = false; // 清标记防重复 Release
+    }
     if (transportManager_ != nullptr) {
         transportManager_->CloseDevice();
     }

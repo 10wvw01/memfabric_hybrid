@@ -5,6 +5,7 @@ file(GLOB_RECURSE UT_SOURCE_FILES *.cpp
 
 include_directories(
         ${PROJECT_HYBM_SRC_BASE}/include
+        ${PROJECT_HYBM_SRC_BASE}/../smem/include/device # 共享布局头 smem_shm_sdma_layout.h
         ${PROJECT_HYBM_SRC_BASE}/csrc/common
         ${PROJECT_HYBM_SRC_BASE}/csrc/data_operation
         ${PROJECT_HYBM_SRC_BASE}/csrc/data_operation/host
@@ -21,6 +22,7 @@ include_directories(
         ${PROJECT_HYBM_SRC_BASE}/csrc/transport/utils
         ${PROJECT_HYBM_SRC_BASE}/csrc/ts_engine
         ${PROJECT_HYBM_SRC_BASE}/csrc/under_api
+        ${PROJECT_HYBM_SRC_BASE}/ops/hybm_kernel # 协同模式契约头(hybm_sdma_contract.h)搜索路径
 
         ${PROJECT_UTIL_SRC_BASE}/ptracer/include
         ${PROJECT_UTIL_SRC_BASE}/ptracer/tracers

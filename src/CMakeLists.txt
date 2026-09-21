@@ -19,3 +19,19 @@ add_subdirectory(smem/csrc/config_store)
 add_subdirectory(smem/csrc)
 add_subdirectory(hybm/csrc)
 add_subdirectory(acc_offload/csrc)
+
+# ---- AICPU 编排 kernel(随主构建一并产出, 免独立构建步骤) ----
+# 产物: <build>/src/hybm/ops/hybm_kernel/{libmf_sdma_orch.so, libmf_sdma_orch.json,
+#       libmf_sdma_orch_v4.json} + A3 血统 libcann_hybm_kernel.*(安装至
+#       ${TARGET_INSTALL_DIR}/hybm/aicpu_kernel/, 与运行时安装前缀发现路径一致)
+# 门控: 仅 NPU 构建; CANN 交叉工具链(hcc)缺失时优雅跳过(如无 CANN 的 CI 环境),
+#       不阻断主库构建
+if(NOT DEFINED ASCEND_HOME_PATH)
+    set(ASCEND_HOME_PATH "$ENV{ASCEND_HOME_PATH}")
+endif()
+if(XPU_TYPE STREQUAL "NPU"
+        AND EXISTS "${ASCEND_HOME_PATH}/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++")
+    add_subdirectory(hybm/ops)
+elseif(XPU_TYPE STREQUAL "NPU")
+    message(STATUS "[src] skip hybm/ops: hcc toolchain not found (export ASCEND_HOME_PATH to enable)")
+endif()
