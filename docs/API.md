@@ -811,6 +811,9 @@ void *smem_shm_sdma_get_workspace(smem_shm_t handle);
 |handle|SHM对象handle|
 |返回值|协同工作区设备地址；协同未就绪（非310P/初始化失败/已禁用）或handle无效时返回NULL|
 
+> 引擎层另有同语义镜像 `hybm_sdma_get_info`（`hybm_big_mem.h`，hybm C API 族，随头文件
+> Doxygen 注释文档化，不在此展开）。
+
 设备侧编程模型（AICore kernel 内使用，`#include "smem_shm_aicore_base_sdma.h"`，bisheng 编译，与
 910B `roce_write/poll_cq/quiet` 同构）。三件套均以池 gva（`smem_shm_create` 出参，经 kernel 参数
 传入）为首参——框架以 gva 为锚定位段尾保留区内的双环邮箱，用户无须关心任何队列/槽位/地址细节。
@@ -818,7 +821,8 @@ void *smem_shm_sdma_get_workspace(smem_shm_t handle);
 ##### smem_shm_sdma_signal
 
 投递一封搬运请求邮件。异步：函数返回仅表示请求已入环，实际搬运由 AICPU 编排 kernel 代投的
-SDMA 完成（同一队列 FIFO 保序）。请求环深度 64，满环时自旋等待对端消费（背压）。
+SDMA 完成（同一队列 FIFO 保序）。请求环深度 64，满环时渐进退避自旋等待对端消费（背压：
+前 4096 轮纯自旋保低延迟，之后插入空转退避并渐进加倍）。
 
 ```c
 bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
@@ -838,8 +842,8 @@ bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
 
 ##### smem_shm_sdma_wait
 
-按序消费下一封到达邮件（FIFO：到达顺序=对端投递顺序）。阻塞自旋直至命中或预算耗尽。邮件自
-描述数据落点，接收方无须与发送方预约定布局。
+按序消费下一封到达邮件（FIFO：到达顺序=对端投递顺序）。渐进退避自旋直至命中或预算耗尽。
+邮件自描述数据落点，接收方无须与发送方预约定布局。
 
 ```c
 smem_shm_sdma_mail_t smem_shm_sdma_wait(__gm__ void *gva);
@@ -876,6 +880,37 @@ bool smem_shm_sdma_quiet(__gm__ void *gva);
 |-|-|
 |gva|池基址（同上）|
 |返回值|true=全部已落地（无投递时平凡为 true）；false=轮询预算耗尽（传输异常）|
+
+##### 高频路径：smem_shm_sdma_reserved 与 _at 变体
+
+三件套的 gva 版每次调用内部要从 meta 区读 3 个 GM 值（对称段大小/rank/段物理大小）定位段尾
+保留区——这些值在 kernel 生命周期内不变。单 kernel 内多封收发（流水/循环）时，可在入口一次
+预计算保留区基址，后续走 `_at` 变体免重复 meta 读：
+
+```c
+__gm__ uint8_t *smem_shm_sdma_reserved(__gm__ void *gva);  /* 预计算段尾保留区基址 */
+
+bool smem_shm_sdma_signal_at(__gm__ uint8_t *res, __gm__ void *src, __gm__ void *dst,
+                             uint64_t len, uint64_t imm);
+smem_shm_sdma_mail_t smem_shm_sdma_wait_at(__gm__ uint8_t *res);
+bool smem_shm_sdma_quiet_at(__gm__ uint8_t *res);
+```
+
+|参数/返回值|含义|
+|-|-|
+|res|`smem_shm_sdma_reserved(gva)` 的缓存值（kernel 入口计算一次）|
+|其余参数/返回值|与 gva 版同名接口完全一致|
+
+```c
+/* 高频路径示例: 入口一次预计算, 循环内全程 _at */
+__gm__ uint8_t *res = smem_shm_sdma_reserved(gva);
+for (uint32_t c = 0; c < chunks; c++) {
+    (void)smem_shm_sdma_signal_at(res, chunk[c], peerChunk[c], bytes, c);
+}
+(void)smem_shm_sdma_quiet_at(res);
+```
+
+> 单封/低频场景直接使用 gva 版（薄转发，行为一致）；08 示例即按高频路径编写。
 
 ##### 使用约束
 
