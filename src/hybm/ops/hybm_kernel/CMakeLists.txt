@@ -95,8 +95,15 @@ set(SDMA_ORCH_SO_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.so") # 编�
 set(SDMA_ORCH_JSON_CUST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/libmf_sdma_orch.json") # CUST 迁移用 json 源(仓库静态文件)
 set(SDMA_ORCH_JSON_CUST_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.json") # CUST json 构建目录副本
 
-# 设备侧 launch 版本号(缓存变量): launch json 的 kernelSo 与部署链的复制目标名都用它
-set(MF_SDMA_ORCH_KVER "6" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
+# 设备侧 launch 版本号: 从 wire 契约头解析(单一事实源; 勿用缓存变量——旧缓存值会把新
+# kernel 配到旧版本名下, 设备侧 test -f 命中旧文件跳过部署, 修复静默失效)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_contract.h" MF_SDMA_ORCH_KVER_LINE
+     REGEX "^[ \t]*constexpr uint32_t HYBM_SDMA_ORCH_KVER = [0-9]+")
+string(REGEX REPLACE ".*HYBM_SDMA_ORCH_KVER = ([0-9]+).*" "\\1" MF_SDMA_ORCH_KVER "${MF_SDMA_ORCH_KVER_LINE}")
+if(NOT MF_SDMA_ORCH_KVER MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "parse HYBM_SDMA_ORCH_KVER from hybm_sdma_contract.h failed")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_contract.h")
 # launch json 输出路径(文件名带版本号)
 set(SDMA_ORCH_JSON_LAUNCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch_v${MF_SDMA_ORCH_KVER}.json")
 

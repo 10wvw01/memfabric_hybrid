@@ -11,7 +11,8 @@
  */
 
 /* hybm_sdma_orchestrator.cpp — 310P 设备发起 SDMA 的 AICPU 编排资源管理(实现)
- * 机制档案见 docs/310p/机制档案.md(SQE 配方/CP 流/工作区/通知链)。
+ * 机制档案见 docs/310p/机制档案.md(SQE 配方/CP 流/工作区/通知链);
+ * epoch 自限与监督续命设计见 docs/310p/常驻消费设计.md(墙钟主限/三层防线/诊断日志速查)。
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE // dladdr(GNU 扩展, 构建系统可能已定义)
@@ -44,9 +45,10 @@ namespace {
 /* ACL_STREAM_DEVICE_USE_ONLY 的值(acl_rt.h:0x20): SQ 注册进 CP1 trs 表(AICPU 可查可投的前提) */
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;       /* 单 block(kernel 状态机单线程语义) */
-constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25; /* launch attr 超时, 须 < AICPU watchdog 30s */
+constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25; /* KFC 命令超时 attr(设备 shell 挂死防线; 命令毫秒级, 不触级联) */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_ATTR_TIMEOUT_S = 60; /* epoch launch attr 占位值: 须 > 击杀边界(板间 28~36s), 永不先触发 */
 constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费 kernel 入口符号 */
-constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v6.json"; /* CWD 缺省 json(与 KVER 同步) */
+constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v9.json"; /* CWD 缺省 json(与 KVER 同步) */
 constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
 constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
 /* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 须在本卡设备上部署) */
@@ -589,9 +591,13 @@ Result SdmaOrchestrator::LaunchEpoch()
         BM_LOG_ERROR("KernelArgs Append/Finalize failed, ret: " << ret << " sqId: " << sqId_);
         return ret;
     }
+    /* attr 超时仅作 API 占位: runtime 拒绝空属性 cfg(numAttrs=0 实测 107000 invalid
+     * value); 取值须大于击杀边界(板间漂移 28~36s, 本机实测 35.9s)使其永不先触发
+     * (超时击杀终局为 hdc 断链/DEV_RUNNING_DOWN, 进程级不可恢复); epoch 真正的
+     * 自限由 kernel 侧墙钟(18s, cntvct_el0 标定)保证 */
     aclrtLaunchKernelAttr attr{};
     attr.id = aclrtLaunchKernelAttrId::ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT;
-    attr.value.timeout = HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S; // 25s, 须 < watchdog 30s
+    attr.value.timeout = HYBM_SDMA_ORCH_EPOCH_ATTR_TIMEOUT_S;
     aclrtLaunchKernelCfg cfg{};
     cfg.attrs = &attr;
     cfg.numAttrs = 1;
@@ -632,9 +638,19 @@ void SdmaOrchestrator::SupervisorLoop()
                 BM_LOG_INFO("epoch faulted during shutdown (expected, self-healed), ret: " << ret);
                 continue; // 下一纪读到停止标志即净退
             }
+            if (r.magic == HYBM_SDMA_ORCH_RESULT_MAGIC && r.mainRet == 0 &&
+                r.exitReason != HYBM_SDMA_ORCH_EXIT_ERROR) {
+                /* 无错误记录的死亡 = watchdog 击杀健康纪(忙时预算为循环次数非墙钟, 满载必超):
+                 * 环+游标语义无损, 不计放弃计数直接续命——否则满载池 ~17 纪后必死 */
+                BM_LOG_WARN("epoch watchdog-killed (healthy, relaunch), ret: " << ret << " sqId: " << sqId_
+                            << " consumed: " << r.consumed);
+                continue;
+            }
             BM_LOG_ERROR("epoch sync failed, ret: " << ret << " mainRet: " << r.mainRet
-                         << " exitReason: " << r.exitReason << " consumed: " << r.consumed);
-            if (++errors > 16) {
+                         << " exitReason: " << r.exitReason << " consumed: " << r.consumed
+                         << " sqId: " << sqId_);
+            if (++errors > 16) { // 连续 16 次失败即放弃(数据面将停在背压/超时)
+                BM_LOG_ERROR("epoch failed 16 times, supervisor exit, sqId: " << sqId_ << " devId: " << devId_);
                 return;
             }
             continue; // 瞬态错误可恢复
@@ -650,7 +666,7 @@ void SdmaOrchestrator::StopSupervisor()
     }
     stopFlag_ = true;
     if (configured_ && epochParam_.stopAddr != 0) {
-        // 写非零值: kernel ≤100µs 轮询间隔内退出(memset 字节语义, 非零即停)
+        // 写非零值: kernel 一轮轮询(~130µs 实测节拍)内退出(memset 字节语义, 非零即停)
         (void)DlAclApi::AclrtMemset(reinterpret_cast<void *>(epochParam_.stopAddr), 8, 1, 8);
     }
     supervisor_.join(); // ≤ 一个轮询间隔 + sync 返回

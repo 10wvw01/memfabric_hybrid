@@ -31,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 6; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 9; /* 设备侧产物版本号: kernel 变更需重部署时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -81,7 +81,17 @@ constexpr uint32_t HYBM_SDMA_ORCH_EXIT_ERROR = 2;             /* 错误退出 */
 
 /* SQE 配方与 HAL 弱符号(STARS V2 64B, hcomm 源码比对定论), 见 kernel 实现 */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;        /* 空闲退避 100µs */
-constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000;   /* epoch 循环上限(≈22s 空闲) */
+/* epoch 自限双层设计(实机复盘 2026-09-21):
+ *   主限 = 墙钟 WALL_S(cntvct_el0 纪内差值, 频率 usleep 下界标定): 忙/闲节拍漂移
+ *         (实测空闲即有 116→140µs/循环漂移)下墙钟恒定, 循环数预算本质不可靠。
+ *   兜底 = MAX_LOOPS: 标定失败(计数器不走)时退化为纯循环上限, 150000×~140µs≈21s。
+ * 约束链: WALL_S=18s < 击杀边界(板间漂移 28~36s, 本机实测 35.9s)。
+ * 教训(勿再犯): ①epoch 超时击杀终局为 hdc 断链/DEV_RUNNING_DOWN, 进程级永久不可
+ * 恢复(90s launch 探针零恢复)——续命只能靠"从未被杀"; ②launch cfg 空属性(numAttrs=0)
+ * 被 runtime 拒绝(107000), attr 仅作占位且取值须大于击杀边界; ③cntfrq_el0 可读性
+ * 无实机依据, 频率以 usleep 下界标定反推(只依赖已验证的 cntvct_el0)。 */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_WALL_S = 18;           /* epoch 墙钟自限(主限, 节拍漂移免疫) */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 150000;   /* epoch 循环上限(兜底, 时钟失效时 ~21s) */
 
 } // namespace mf
 } // namespace ock

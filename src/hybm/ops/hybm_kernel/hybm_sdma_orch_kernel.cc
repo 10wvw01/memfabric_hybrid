@@ -37,8 +37,11 @@
 
 /* hybm_sdma_orch_kernel.cc — epoch 消费 kernel(310P 设备发起 SDMA)
  *
- * 执行模型(watchdog ~30s 实证约束): 每 epoch 自限 ~22s, host 监督线程到期续命;
- * 环+游标语义使续命间隙无损(邮件只延迟不丢失)。
+ * epoch 自限与监督续命设计见 docs/310p/常驻消费设计.md(设计公理/三层防线/防回归清单)。
+ * 执行模型(击杀边界板间漂移 28~36s, 本机实测 35.9s; 超时击杀终局为 hdc 断链/
+ * DEV_RUNNING_DOWN, 进程级不可恢复——续命只能靠"从未被杀"): 每 epoch 墙钟自限 18s
+ * (主限, cntvct_el0 纪内差值, 忙/闲节拍漂移免疫)+循环上限兜底, host 监督线程到期
+ * 立即续命; 环+游标语义使续命间隙无损(邮件只延迟不丢失)。
  *
  * 职责: 按序消费本端段尾保留区请求环的邮件 {src,dst,len,imm}, 逐封构造 SQE 三连:
  *   ① 数据 SQE(src→dst)
@@ -99,6 +102,27 @@ inline void cacheInvalidateLine(uintptr_t addr) // civac: 读侧失效取最新�
 inline void memBarrier() // 全系统内存屏障(写序保证)
 {
     __asm__ __volatile__("dsb ish" ::: "memory");
+}
+
+// 虚拟计数器读取(AICPU EL0 可读, 旧探针 kernel timeline 打点同款原语;
+// 各核独立计数, 仅限本执行体内相对时长——跨核时间戳不可比, 墙钟只用纪内差值)
+inline uint64_t readCntvct()
+{
+    uint64_t v;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
+/* 墙钟频率标定: cntvct_el0 为实机已验证原语(旧探针 kernel 同款, 各核独立计数仅限
+ * 纪内差值); cntfrq_el0 可读性无实机依据, 以 usleep 下界反推: usleep(20ms) 保证
+ * ≥20ms → 标定值 ≤ 真值 → 墙钟只会提前触发(安全方向); 代价 20ms/纪(≈0.1%);
+ * 返回 0 = 计数器不走, 退化为纯循环上限 */
+inline uint64_t calibCntFreq()
+{
+    const uint64_t t0 = readCntvct();
+    usleep(20000);
+    const uint64_t dt = readCntvct() - t0;
+    return dt * 50ULL; // ticks/20ms × 50 = ticks/s
 }
 
 // ssid 实时查询(SQE src/dst_substreamid 必填, 失败显式记 0xFFFF 不回退 0)
@@ -347,7 +371,7 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
 }
 } // namespace
 
-// kernel 入口: epoch 消费(自限 ~22s, host 监督续命)。
+// kernel 入口: epoch 消费(墙钟自限 18s, host 监督续命)。
 // 返回 0 正常退出(时限/停止); 1 错误退出(诊断见 result)。
 extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(void *args)
 {
@@ -359,6 +383,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     result->mainRet = 0;
     result->consumed = 0;
     result->exitReason = HYBM_SDMA_ORCH_EXIT_DEADLINE; // 默认时限退出
+    finishResult(result); // 入口即刷出: watchdog 击杀后 host D2H 可辨"健康启动未及退出"(vs 错误退出)
     SqContext ctx = {};
     ctx.result = result;
     ctx.streamId = static_cast<uint32_t>(p->streamId);
@@ -373,8 +398,15 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     }
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     uint64_t head = loadCell(p->reqBase - SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_RS_REQ_HEAD); // 消费起点
+    /* 墙钟自限(主限): 节拍漂移免疫, 忙/闲 epoch 墙钟恒定; 标定失败(0)时退化纯循环上限(兜底) */
+    const uint64_t cntFreq = calibCntFreq();
+    const uint64_t wallDeadline =
+        (cntFreq != 0) ? readCntvct() + cntFreq * HYBM_SDMA_ORCH_EPOCH_WALL_S : 0;
     constexpr uint32_t kDoorbellBatch = 8; // 攒批上限(环内积压时 N 封一铃降 HAL 开销; 单封场景批=1)
     for (uint32_t loops = 0; loops < HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS; loops++) {
+        if ((loops & 63U) == 0 && wallDeadline != 0 && readCntvct() >= wallDeadline) {
+            break; // 墙钟到期(exitReason 默认 DEADLINE, host 续命)
+        }
         if (loadCell(p->stopAddr) != 0) { // 停止标志(host 析构)
             result->exitReason = HYBM_SDMA_ORCH_EXIT_STOP;
             break;
