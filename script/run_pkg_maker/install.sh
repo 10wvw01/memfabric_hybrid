@@ -332,9 +332,13 @@ function try_install_extend()
     fi
 
     if [ "${ascend_version}" == "none" ]; then
-        print "ERROR" "cannot detect ascend chip version (got 'none'), abort install extend lib. \
-Ensure npu-smi is in PATH (source CANN set_env.sh) before running .run."
-        exit 1
+        # 310P3 reports "310P3" in npu-smi and matches no Ascend9xx pattern;
+        # the copy_extend kernel is only built for A2/A5 (dav-c220/c310), so
+        # an undetectable chip must skip the optional extend lib instead of
+        # aborting the whole install (which previously cut off set_env.sh
+        # generation on 310P hosts).
+        print "WARNING" "cannot detect ascend chip version (got 'none'), skip install extend lib."
+        return
     fi
 
     cce_param="--cce-aicore-arch=dav-c220"

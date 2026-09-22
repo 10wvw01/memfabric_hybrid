@@ -302,7 +302,7 @@ Result SdmaOrchestrator::LoadOrchestratorKernel()
         }
         return ret;
     } else { // 507018: 设备侧文件缺失 → 自动部署(迁移+复制+校验)后加载
-        BM_LOG_INFO("kernel not on device, auto deploy, devId: " << devId_ << " dst: " << dst);
+        BM_LOG_WARN("kernel not on device, auto deploy, devId: " << devId_ << " dst: " << dst);
         return DeployOrchestratorKernel(resolved, dst);
     }
     auto ret = TryLoadKernel(resolved); // 通道异常分支的兜底加载(预部署假定)
@@ -333,7 +333,7 @@ Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &launchJsonP
     if (KfcExec("test -f " + dst, true) == BM_OK) { // 锁内复查: 对端进程可能刚部署完
         auto ret = TryLoadKernel(launchJsonPath);
         if (ret == BM_OK) {
-            BM_LOG_INFO("kernel deployed by peer process, devId: " << devId_);
+            BM_LOG_WARN("kernel deployed by peer process, devId: " << devId_);
             return BM_OK;
         }
         BM_LOG_ERROR("kernel load failed though peer deployed, ret: " << ret << " json: " << launchJsonPath);
@@ -469,6 +469,12 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
     if (ret != BM_OK) {
         return ret;
     }
+    /* 注意: 本函数在 torch_npu 等注册了 ACL 错误回调的进程内存在已知限制——
+     * 探测 miss(test -f 退出码 1)以 ACL_ERROR_RT_AICPU_EXCEPTION(507018) 从
+     * sync 返回后, 进程内 ACL 运行时进入错误闩锁态(实测新建流/后续 launch 均
+     * 立即 507018), 自动部署链无法在进程内继续; 独立进程(无错误回调)无此现象。
+     * 该环境下须由外部 deployer+mini_kfc 预部署 CP1 kernel(见
+     * tools/aicpu_kernel_deploy/README.md), 使探测命中(sync=0)从而绕开错误路径。 */
     char buf[HYBM_SDMA_ORCH_CMD_BUF_SIZE] = {0};
     strncpy(buf, cmd.c_str(), sizeof(buf) - 1);
     aclrtLaunchKernelAttr attr{}; // 超时属性: 防设备 shell 挂死卡初始化
@@ -486,7 +492,7 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
     ret = DlAclApi::AclrtSynchronizeStream(launchStream_);
     if (ret != BM_OK) { // sync 非 0 = 命令退出码非 0(或流错误)
         if (probe && ret == HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR) {
-            BM_LOG_INFO("kfc probe miss (expected on first run), sync: " << ret << " cmd: " << cmd);
+            BM_LOG_WARN("kfc probe miss (expected on first run), sync: " << ret << " cmd: " << cmd);
         } else {
             BM_LOG_ERROR("kfc cmd failed, sync: " << ret << " cmd: " << cmd);
         }

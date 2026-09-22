@@ -75,6 +75,13 @@ cp "${OUTPUT_DIR}"/smem/lib64/* ${PKG_DIR}/"${ARCH_OS}"/lib64
 # hybm
 cp -r "${OUTPUT_DIR}"/hybm/include/* ${PKG_DIR}/include/hybm/
 cp "${OUTPUT_DIR}"/hybm/lib64/libmf_hybm_core.so ${PKG_DIR}/"${ARCH_OS}"/lib64/
+# 310P SDMA orchestrator AICPU kernel trio (launch json + CUST json + so).
+# Runtime auto-discovery resolves <prefix>/<ARCH_OS>/lib64/../hybm/aicpu_kernel,
+# so the trio must ride inside the ARCH_OS directory to be found after install.
+if [ -d "${OUTPUT_DIR}"/hybm/aicpu_kernel ]; then
+    mkdir -p ${PKG_DIR}/"${ARCH_OS}"/hybm
+    cp -r "${OUTPUT_DIR}"/hybm/aicpu_kernel ${PKG_DIR}/"${ARCH_OS}"/hybm/
+fi
 cp -r "${PROJECT_DIR}"/src/hybm/csrc/copy_extend ${PKG_DIR}
 # accoffload extend source (AscendC kernel + torch_npu adapter), compiled at install time
 mkdir -p ${PKG_DIR}/accoffload_operators
