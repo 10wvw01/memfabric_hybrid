@@ -109,10 +109,10 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
  * 读零(smem_shm_get_global_rank 等失效)。 */
 static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
 {
-    aclrtMemAccessDesc acc{};                                            // 访问权限描述符
-    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;  // 读写权限
-    acc.location.id = static_cast<uint32_t>(deviceId);                   // 授权设备号
-    acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE; // 授权类型: 设备侧
+    aclrtMemAccessDesc acc{};
+    acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    acc.location.id = static_cast<uint32_t>(deviceId);
+    acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     auto ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, &acc, 1);
     if (ret != BM_OK) { // 授权失败
         BM_LOG_ERROR("set meta device access failed, ret: " << ret << " addr: 0x" << std::hex
@@ -141,12 +141,12 @@ int32_t Hybm310PInitMetaGva(uint16_t deviceId, void **globalMemoryBase, size_t a
         return BM_ERROR;
     }
     aclrtPhysicalMemProp prop{};
-    prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;      /* F10: 310P 仅 NONE 可用 */
-    prop.allocationType = aclrtMemAllocationType::ACL_MEM_ALLOCATION_TYPE_PINNED; /* 物理页钉住不换出 */
-    prop.memAttr = aclrtMemAttr::ACL_MEM_P2P_HUGE;                       /* F10: P2P_HUGE 实测可用 */
-    prop.location.id = static_cast<uint32_t>(deviceId);                  /* 内存归属设备号 */
-    prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE; /* 归属类型: 设备内存 */
-    aclrtDrvMemHandle handle = nullptr; // 经 allocHandle 出参带出
+    prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
+    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
+    prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
+    prop.location.id = static_cast<uint32_t>(deviceId);
+    prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+    aclrtDrvMemHandle handle = nullptr;
     // 第二步: 分配 meta 区物理页
     ret = DlAclApi::AclrtMallocPhysical(&handle, allocSize, &prop, 0);
     if (ret != BM_OK) { // 分配失败
