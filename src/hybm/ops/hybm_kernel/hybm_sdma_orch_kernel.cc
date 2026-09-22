@@ -37,8 +37,10 @@
 
 /* hybm_sdma_orch_kernel.cc — epoch 消费 kernel(310P 设备发起 SDMA)
  *
- * 执行模型(watchdog ~30s 实证约束): 每 epoch 自限 ~22s, host 监督线程到期续命;
- * 环+游标语义使续命间隙无损(邮件只延迟不丢失)。
+ * 执行模型(aicpu monitor taskTimeout=28s 实证约束): 每 epoch 壁钟自限 15s
+ * (cntvct_el0), host 监督线程到期续命; 环+游标语义使续命间隙无损(邮件只延迟不丢失)。
+ * 禁止循环次数×假设耗时估算自退——usleep(100) 实测 ≈130µs, 计数法必超 28s 被
+ * monitor 击杀(杀整个 aicpu-sd 进程并连带 HDC, 见平台事实)。
  *
  * 职责: 按序消费本端段尾保留区请求环的邮件 {src,dst,len,imm}, 逐封构造 SQE 三连:
  *   ① 数据 SQE(src→dst)
@@ -257,6 +259,20 @@ int32_t cp1LiveQuery(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
     return 0;
 }
 
+// 壁钟(AICPU 通用计数器; dav-2002 无 GetSystemCycle, cntvct_el0 为正解)
+inline uint64_t ReadWallClock()
+{
+    uint64_t v;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+inline uint64_t ReadClockFreq() // 计数器频率(Hz)
+{
+    uint64_t f;
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(f));
+    return f;
+}
+
 // 结果写回并刷出(host 经 D2H 可读)
 void finishResult(volatile ock::mf::HybmSdmaOrchResult *result)
 {
@@ -347,7 +363,7 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
 }
 } // namespace
 
-// kernel 入口: epoch 消费(自限 ~22s, host 监督续命)。
+// kernel 入口: epoch 消费(壁钟自限 15s, host 监督续命)。
 // 返回 0 正常退出(时限/停止); 1 错误退出(诊断见 result)。
 extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(void *args)
 {
@@ -373,8 +389,17 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     }
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     uint64_t head = loadCell(p->reqBase - SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_RS_REQ_HEAD); // 消费起点
+    /* 壁钟预算: 到点 DEADLINE 自退(exitReason 默认值即 DEADLINE, host 监督续命);
+     * freq 异常(0)时退回循环计数兜底 */
+    const uint64_t epochStart = ReadWallClock();
+    const uint64_t epochFreq = ReadClockFreq();
+    const uint64_t epochBudget =
+        (epochFreq > 0) ? static_cast<uint64_t>(HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S) * epochFreq : UINT64_MAX;
     constexpr uint32_t kDoorbellBatch = 8; // 攒批上限(环内积压时 N 封一铃降 HAL 开销; 单封场景批=1)
     for (uint32_t loops = 0; loops < HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS; loops++) {
+        if (epochBudget != UINT64_MAX && ReadWallClock() - epochStart >= epochBudget) {
+            break; // 壁钟到点(比任何超时机制早, 续命由 host 监督承担)
+        }
         if (loadCell(p->stopAddr) != 0) { // 停止标志(host 析构)
             result->exitReason = HYBM_SDMA_ORCH_EXIT_STOP;
             break;

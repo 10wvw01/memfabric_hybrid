@@ -31,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 6; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 7; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -80,8 +80,12 @@ constexpr uint32_t HYBM_SDMA_ORCH_EXIT_STOP = 1;              /* 停止退出(�
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_ERROR = 2;             /* 错误退出 */
 
 /* SQE 配方与 HAL 弱符号(STARS V2 64B, hcomm 源码比对定论), 见 kernel 实现 */
-constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;        /* 空闲退避 100µs */
-constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000;   /* epoch 循环上限(≈22s 空闲) */
+/* epoch 壁钟预算(秒): cntvct_el0 到点即 DEADLINE 自退, host 监督续命。
+ * 须留足余量低于 aicpu monitor taskTimeout 28s(实测击杀于 ~29s, 杀整个 aicpu-sd
+ * 进程并连带 HDC); 禁止用循环次数×假设每轮耗时估算自退——usleep(100) 实测 ≈130µs */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;      /* 空闲退避 100µs(实测 ≈130µs) */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000; /* 循环上限兜底(非时钟, 壁钟优先) */
 
 } // namespace mf
 } // namespace ock

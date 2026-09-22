@@ -16,8 +16,8 @@
  * smem_shm_sdma_signal/wait/quiet 设备侧自驱), 本类职责收敛为:
  *   1. 传输准备(CP 流/工作区/epoch kernel 加载, 含设备侧自动部署);
  *   2. ConfigureOrch: 段尾保留区初始化(双环清零) + epoch 参数装配;
- *   3. 监督线程: epoch kernel(~22s 自限)到期立即续命 —— "常驻消费"在 watchdog 30s
- *      实证约束下的实现形态, 环+游标语义使续命间隙无损。
+ *   3. 监督线程: epoch kernel(壁钟 15s 自限)到期立即续命 —— "常驻消费"在 aicpu
+ *      monitor taskTimeout 28s 实证约束下的实现形态, 环+游标语义使续命间隙无损。
  *
  * 生命周期: 多池共享进程级资源, Acquire/Release 引用计数; ConfigureOrch 一次绑定
  * (约束: 每进程单 SDMA 池, 双环位于首个配置池的段尾保留区)。

@@ -46,7 +46,7 @@ gva 首参；高频路径 `smem_shm_sdma_reserved(gva)` 预计算 + `_at` 变体
   发行版 4.1.2：`/usr/bin/mpirun` + 头/库 `/usr/lib/aarch64-linux-gnu/openmpi/{include,lib}`
   （编译需 `-DOMPI_SKIP_MPICXX`）；自装 4.1.5：`/usr/local/openmpi` 全套）
 - 协同编排 kernel 三件套（`libmf_sdma_orch.so` + `libmf_sdma_orch.json` +
-  `libmf_sdma_orch_v6.json`）位于 launch json 同目录（构建目录或安装前缀）——
+  `libmf_sdma_orch_v7.json`）位于 launch json 同目录（构建目录或安装前缀）——
   **初始化自动部署**：设备侧缺失时库内自动完成 CUST 迁移落盘 + CP1 搜索路径就位 +
   完整性校验（符号+尺寸），无需手工部署；手动/诊断部署链见
   `tools/aicpu_kernel_deploy/`（预部署与通道排查用）
@@ -94,11 +94,14 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -w -x asc 08_310p_aicore_aicpu_sdma.a
 # 2. mpirun 双 rank 运行(rank 由 MPI 分配, 不再传参; **设备侧零部署**——初始化自动
 #    探测→CUST 迁移→CP1 搜索路径就位→完整性校验, 全新设备/环境无任何手工部署步骤;
 #    CP1 目录树为 CANN 基线自带, 洁净卡实测可直接写入)
-export MF_SDMA_ORCH_JSON=<build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v6.json>
+export MF_SDMA_ORCH_JSON=<build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v7.json>
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
 export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root
 # 期望输出: 双方 "=== EX08 rN PASS ===" + r0 掩盖量化加速比(首轮含自动部署秒级开销)
+
+# 长驻 soak(可选, 验收监督续命): 跨 epoch 壁钟自退边界的持续收发零丢失
+EX08_SOAK_ROUNDS=30000 bash run.sh --run-only   # ~60s, 期望 ③soak PASS + 跨 ≥3 次续命
 ```
 
 ## 与相关示例/实验的关系

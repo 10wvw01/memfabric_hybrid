@@ -44,9 +44,9 @@ namespace {
 /* ACL_STREAM_DEVICE_USE_ONLY 的值(acl_rt.h:0x20): SQ 注册进 CP1 trs 表(AICPU 可查可投的前提) */
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;       /* 单 block(kernel 状态机单线程语义) */
-constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25; /* launch attr 超时, 须 < AICPU watchdog 30s */
+constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S = 25; /* attr 超时(host 同步语义), < monitor 28s */
 constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费 kernel 入口符号 */
-constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v6.json"; /* CWD 缺省 json(与 KVER 同步) */
+constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v7.json"; /* CWD 缺省 json(与 KVER 同步) */
 constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
 constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
 /* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 须在本卡设备上部署) */
@@ -591,7 +591,7 @@ Result SdmaOrchestrator::LaunchEpoch()
     }
     aclrtLaunchKernelAttr attr{};
     attr.id = aclrtLaunchKernelAttrId::ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT;
-    attr.value.timeout = HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S; // 25s, 须 < watchdog 30s
+    attr.value.timeout = HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_S; // 25s(host 同步语义), < monitor 28s
     aclrtLaunchKernelCfg cfg{};
     cfg.attrs = &attr;
     cfg.numAttrs = 1;
