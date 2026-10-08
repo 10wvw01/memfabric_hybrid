@@ -37,10 +37,13 @@
 
 /* hybm_sdma_orch_kernel.cc — epoch 消费 kernel(310P 设备发起 SDMA)
  *
- * 执行模型(aicpu monitor taskTimeout=28s 实证约束): 每 epoch 壁钟自限 15s
- * (cntvct_el0), host 监督线程到期续命; 环+游标语义使续命间隙无损(邮件只延迟不丢失)。
- * 禁止循环次数×假设耗时估算自退——usleep(100) 实测 ≈130µs, 计数法必超 28s 被
- * monitor 击杀(杀整个 aicpu-sd 进程并连带 HDC, 见平台事实)。
+ * 执行模型(v9 起 launch json 为 KFCKernel/type 5, 常驻单发): aicpu-sd monitor 对
+ * type 5 任务不计时(aicpusd_event_manager.cpp ExecuteHWTSKFCEventTask 路径无
+ * SetTaskStartTime, 与 CANN 自带 HcclKernelEntrance 同路径), 28s 击杀约束解除。
+ * host 一次下发(param.epochBudgetS=常驻哨兵), kernel 跑到停止标志(host 析构写入)
+ * 或错误退出为止——无到期重拉, host 监督线程已删除。
+ * 有限预算模式保留(诊断用): param.epochBudgetS=秒数, cntvct_el0 到点自退。
+ * 禁止循环次数×假设耗时估算自退——usleep(100) 实测 ≈130µs。
  *
  * 职责: 按序消费本端段尾保留区请求环的邮件 {src,dst,len,imm}, 逐封构造 SQE 三连:
  *   ① 数据 SQE(src→dst)
@@ -363,8 +366,8 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
 }
 } // namespace
 
-// kernel 入口: epoch 消费(壁钟自限 15s, host 监督续命)。
-// 返回 0 正常退出(时限/停止); 1 错误退出(诊断见 result)。
+// kernel 入口: epoch 消费(常驻模式跑到停止/错误; 有限预算模式到期自退)。
+// 返回 0 正常退出(停止); 1 错误退出(诊断见 result)。
 extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(void *args)
 {
     using namespace ock::mf;
@@ -389,14 +392,22 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     }
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     uint64_t head = loadCell(p->reqBase - SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_RS_REQ_HEAD); // 消费起点
-    /* 壁钟预算: 到点 DEADLINE 自退(exitReason 默认值即 DEADLINE, host 监督续命);
-     * freq 异常(0)时退回循环计数兜底 */
+    /* 壁钟预算: 常驻哨兵(0xFFFFFFFF)下无墙钟/循环上限——跑到停止标志或错误退出
+     * (v9: type 5 免 monitor 计时, 一次下发常驻, 无到期重拉); 有限预算到期 DEADLINE
+     * 自退(诊断模式); 0 用默认 15s(兼容旧 host); freq 异常(0)时有限预算退回循环
+     * 计数兜底。禁止循环次数×假设耗时估算——usleep(100) 实测 ≈130µs */
+    const bool resident = (p->epochBudgetS == HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+    const uint32_t budgetS =
+        (p->epochBudgetS == 0) ? HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S : p->epochBudgetS;
     const uint64_t epochStart = ReadWallClock();
     const uint64_t epochFreq = ReadClockFreq();
     const uint64_t epochBudget =
-        (epochFreq > 0) ? static_cast<uint64_t>(HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S) * epochFreq : UINT64_MAX;
+        (resident || epochFreq == 0) ? UINT64_MAX : static_cast<uint64_t>(budgetS) * epochFreq;
+    const uint64_t maxLoops = resident ? UINT64_MAX
+        : (static_cast<uint64_t>(HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS) * budgetS +
+           HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S - 1) / HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S;
     constexpr uint32_t kDoorbellBatch = 8; // 攒批上限(环内积压时 N 封一铃降 HAL 开销; 单封场景批=1)
-    for (uint32_t loops = 0; loops < HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS; loops++) {
+    for (uint64_t loops = 0; loops < maxLoops; loops++) {
         if (epochBudget != UINT64_MAX && ReadWallClock() - epochStart >= epochBudget) {
             break; // 壁钟到点(比任何超时机制早, 续命由 host 监督承担)
         }
