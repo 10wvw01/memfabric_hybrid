@@ -244,7 +244,38 @@ flowchart TB
 部署档案墙①对第三方封死、对华为自家包畅通的同一条通道——pypto 能把"第一次"
 外包给驱动/CANN，本质上因为 pypto 是华为自家组件。
 
-### 7.2 版本要求（pypto FAQ 明确写了）
+### 7.2 本机 310P3 设备侧实测（2026-10-10，KFC 布尔探针）
+
+用 memfabric 自有的 mini_kfc 工具（`310p-capability_matrix/17_aicore_aicpu_overlap/`）
+在本机 dev1（310P3，CANN 9.1.0 + 驱动 26.1.0）的 CP1 内做了文件级布尔探针
+（`test -f` / `grep -cq`，退出码经 `sync=` 回传；含负对照验证探针可靠性）：
+
+| 探测目标 | 结果 | 结论 |
+|---|---|---|
+| `libtilefwk_backend_server.so`（json 三算子路径的预置库） | **不存在**（sync=507018） | json 路径所需的独立预置库**不在 310P 设备上** |
+| `libaicpu_extend_kernels.so`（KFC 直发路径的默认库名） | **存在**（sync=0） | 310P 设备上有这份库 |
+| 该库内 grep `DynTileFwkKernelServer` / `DynTileFwkKernelServerInit` | **命中**（sync=0） | pypto 设备侧**真身符号就在这份库内** |
+| 该库内 grep `DynPyptoKernelServerNull`（转发桩） | 不命中 | 转发桩不在其中——310P 上没有 json 路径那套部署机制 |
+| `libpypto_server{0,1}.so`（运行时落盘的激活副本） | 不存在 | pypto 服务端从未在本机设备上激活过（全机亦无 pypto 运行痕迹） |
+| 负对照：不存在的文件名 | sync=507018 | 探针技术可靠 |
+
+**分平台结论（据上修正 §5/§7.1 的单线叙述）**——pypto 的设备侧承载有两种形态：
+
+- **310P（本机实测）**：真身符号 `DynTileFwkKernelServer(Init)` 由
+  `libaicpu_extend_kernels.so` 承载，对应 CANN 包的
+  `Ascend310P-aicpu_extend_syskernels.tar.gz` 签名捆绑包——pypto 在 310P 上走
+  **KFC 直发路径**（`AiCpuArgs` 默认 `soName="libaicpu_extend_kernels.so"`，见
+  §8），不依赖 `libtilefwk_backend_server.so`，也就**没有 PyptoNull 落盘
+  部署那一环**（找不到 json 路径的预置库，json 三算子在此形态下无法走通）；
+- **A2/A3/A5（推断）**：json 三算子路径 + `libtilefwk_backend_server.so` 预置库
+  + PyptoNull 落盘激活（§4/§5 全流程）。CANN 9.1.0 内置的 pypto 0.2.1 wheel
+  面向 A2/A3/A5；本机 pypto 开发分支 `trunk_for_a1`（A1=310P/dav-2002）正是在
+  做 310P 适配。此形态本机无法验证（非目标平台）。
+
+注：探针用的是字符串匹配（grep），未区分导出符号表与普通字符串；但 KFC 机制
+本就按符号名解析，FAQ 报错也证明这些名字正是解析目标，证据足够。
+
+### 7.3 版本要求（pypto FAQ 明确写了）
 
 pypto FAQ（`docs/zh/tutorials/appendix/faq.md`"CANN包不兼容"条目）：
 
@@ -261,15 +292,16 @@ api success, but func is nullptr`——设备侧解析不到 pypto 符号，老�
 pypto 与 CANN 的版本配对（`docs/zh/install/build_and_install.md`）：CANN 8.5.0 ↔
 PyPTO 0.1.2；CANN 9.0.0 ↔ PyPTO 0.2.0（本机 CANN 9.1.0 内置 0.2.1）。
 
-### 7.3 绕开鸡生蛋的证据链汇总
+### 7.4 绕开鸡生蛋的证据链汇总
 
 - json 登记的三个算子全部指向库文件名 `libtilefwk_backend_server.so`，且走
   "只登记 json"的模式 0 通道（该通道不上传库内容）→ 设备侧只能按文件名在本地找；
 - pypto 仓库内**没有任何**向设备预部署这个库的代码；
-- FAQ 的版本要求 + 老版本 `func is nullptr` 故障日志（见 7.2）；
-- CANN 内置 pypto wheel、签名捆绑包、驱动 aicpu 字段（见 7.1 实测）。
+- FAQ 的版本要求 + 老版本 `func is nullptr` 故障日志（见 7.3）；
+- CANN 内置 pypto wheel、签名捆绑包、驱动 aicpu 字段（见 7.1 实测）；
+- 本机 310P3 设备侧探针：extend 库在设备上且含真身符号（见 7.2 实测）。
 
-### 7.4 另外两个设计选择
+### 7.5 另外两个设计选择
 
 **为什么要经设备内存中转落盘，而不是直接用预置那份？** 版本解耦：预置库随驱动/
 CANN 发布、更新慢；Python 包里的库与主机侧运行时同源同版本编译，行为严格匹配。转发桩
@@ -293,17 +325,19 @@ CANN 发布、更新慢；Python 包里的库与主机侧运行时同源同版�
 | 目标平台 | 310P3（dav-2002） | A2/A3/A5（dav-2201/3510）为主、兼容 dav-2002 |
 | 部署体量 | 单功能 kernel（SDMA 编排器） | 整个设备侧运行时（调度器+控制流执行器） |
 
-### KFC 直发变体（旁支）
+### KFC 直发路径（310P 上的主路径，见 §7.2）
 
-pypto 三流模式还有一条不经 json 的直发路径：
+pypto 三流模式有一条不经 json 的直发路径：
 `RuntimeAicpuKernelLaunchExWithArgs(AICPU_KFC=5, "AST_DYN_AICPU", ...)`，真实的
 函数名/库文件名通过参数内的偏移量指明（`RtAicpuArgsEx.kernelNameAddrOffset/
 soNameAddrOffset`，`device_runner.cpp:372-373`），默认值为
 `AiCpuArgs{kernelName="DynTileFwkKernelServer", soName="libaicpu_extend_kernels.so"}`
 （`machine_ws_intf.h:105-110`；调用点 `device_launcher.cpp:494-528`、
-`device_runner.cpp:501-550`）。该变体直接指名真身函数，FAQ 报错即出自设备侧
-`ae_kernel_lib_aicpu_kfc.cpp` 对这些函数的解析。**【推断】**其符号解析依赖同一批
-预置库（`libaicpu_extend_kernels.so` 是驱动侧 aicpu SDK 组件），本文不展开。
+`device_runner.cpp:501-550`）。该路径直接指名真身函数，设备侧由
+`ae_kernel_lib_aicpu_kfc.cpp` 解析——FAQ 报错即出自此处。**本机 310P3 实测
+（§7.2）**：目标库 `libaicpu_extend_kernels.so` 在设备上、内含真身符号，
+由 CANN 的 `*-aicpu_extend_syskernels.tar.gz` 捆绑包承载——310P 形态下
+pypto 就是靠这条路径跑，json 三算子 + PyptoNull 落盘那套是 A2/A3/A5 形态。
 
 ## 9. 对 memfabric 的可借鉴点与前提差异
 
@@ -354,6 +388,7 @@ soNameAddrOffset`，`device_runner.cpp:372-373`），默认值为
 | F5 | 预置库由华为签名固件通道部署到设备（承载方：驱动固件或 CANN 捆绑包，未定论）；版本要求驱动 ≥25.2.0、CANN ≥8.5.0 | **推断为主，证据链强**（F4 + FAQ 版本要求与 `func is nullptr` 报错 + 仓内无预部署代码 + F9/F10 实测佐证） |
 | F6 | AICPU 常驻进程比主机进程活得久，函数表/幂等标志随之常驻 | **推断**（函数表机制成立的必要前提，代码结构强支持） |
 | F7 | 冷启动时初始化期的 `PyptoInit` 转发失败不阻断流程 | **推断**（算子返回码与流同步的关系未实测） |
-| F8 | KFC 直发变体的符号解析依赖预置/驱动侧库 | **推断**（旁支，未展开验证） |
+| F8 | KFC 直发路径在 310P 上是主路径：目标库 `libaicpu_extend_kernels.so` 设备在位且含真身符号（本机探针）；由 CANN extend_syskernels 捆绑包承载（命名对应 + 包在 CANN 内实测，未解包直证） | **半实测**（库与符号存在为实测；承载归因靠命名对应） |
 | F9 | CANN 9.1.0 内置 pypto 0.2.1 wheel（`aarch64-linux/lib64/pypto-0.2.1-cp37-abi3-*.whl`，pip 安装记录指向该路径） | 实测 |
 | F10 | CANN 9.1.0 `opp/Ascend310P/aicpu/` 下存在三种签名捆绑包（syskernels/extend_syskernels/legacy，`aa55aa` 文件头）；驱动 26.1.0 version.info 带 aicpu/tsfw/dvppkernels 版本字段 | 实测（包存在与格式；包内容未验） |
+| F11 | 本机 310P3 设备侧（dev1 探针）：无 `libtilefwk_backend_server.so`、无 `libpypto_server*.so`；有 `libaicpu_extend_kernels.so` 且含 `DynTileFwkKernelServer(Init)` 符号、不含转发桩符号；全机无 pypto 运行痕迹 | 实测（mini_kfc 布尔探针 + 负对照，2026-10-10） |
