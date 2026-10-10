@@ -217,20 +217,62 @@ flowchart TB
     OLD -.->|"提供三个转发桩符号"| TR1 & TR2 & TR3
 ```
 
-## 7. 设计动机分析
+## 7. 预置库从哪来：承载通道与版本要求
 
-**为什么能绕开鸡生蛋？** 前提是**驱动包预置了一份含转发桩的库**。证据链：
+### 7.1 承载通道：华为签名固件通道
+
+设备 OS 上 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/` 目录的内容，不是用户
+或 pypto 放的，而是**驱动/CANN 包在安装升级时经华为签名固件通道部署**的。本机
+实测证据（CANN 9.1.0 + 驱动 26.1.0）：
+
+- CANN 包 `opp/<芯片型号>/aicpu/` 下有三种设备侧 aicpu kernel 捆绑包：
+  `Ascend310P-aicpu_syskernels.tar.gz`、`Ascend310P-aicpu_extend_syskernels.tar.gz`、
+  `Ascend310P-aicpu_legacy.tar.gz`——文件头是 `aa55aa` 的**签名固件格式**，
+  不是标准 tar.gz，本地无法解包验看内容（memfabric 部署档案墙① CMS 验签管的
+  就是这类包）；
+- 驱动 `version.info`（本机 26.1.0）携带 `aicpu_version=1.0 / tsfw_version=1.0 /
+  dvppkernels_version=1.1` 等字段——设备侧 aicpu 组件由驱动固件包承载和跟踪；
+- **CANN 9.1.0 直接内置 pypto**：`aarch64-linux/lib64/pypto-0.2.1-cp37-abi3-*.whl`
+  随 CANN 发布，安装记录显示它被装进 CANN 自带的 python/site-packages——较新
+  CANN 版本里 pypto 与 CANN 同源打包，预置库自然与 CANN 版本联动；
+- 命名对应线索：pypto 直发路径的默认库名 `libaicpu_extend_kernels.so` ↔
+  CANN 捆绑包名 `*-aicpu_extend_syskernels.tar.gz`。
+
+**承载方到底是驱动固件还是 CANN 的捆绑包，本地无法最终定论**（签名包不可解包、
+设备文件系统不可达）。合理推断是分工：驱动侧承载 aicpu 框架与符号解析器
+（aicpu_scheduler / KFC），CANN 侧承载具体 kernel 库捆绑包。这正是 memfabric
+部署档案墙①对第三方封死、对华为自家包畅通的同一条通道——pypto 能把"第一次"
+外包给驱动/CANN，本质上因为 pypto 是华为自家组件。
+
+### 7.2 版本要求（pypto FAQ 明确写了）
+
+pypto FAQ（`docs/zh/tutorials/appendix/faq.md`"CANN包不兼容"条目）：
+
+| 依赖 | 最低版本 | 查看方法 |
+|---|---|---|
+| 驱动包 | **25.2.0** | `/usr/local/Ascend/driver/version.info`（FAQ 示例 25.3.rc1，含 aicpu_version 等字段） |
+| CANN 包 | **8.5.0** | `/usr/local/Ascend/ascend-toolkit/latest/opp/version.info`（FAQ 示例 8.5.0.2.220） |
+
+版本不满足的故障特征（FAQ 原文）：算子上板报 507018，设备日志出现
+`ae_kernel_lib_aicpu_kfc.cpp:105 CallKernelApi ... Get KFC DynTileFwkKernelServerInit
+api success, but func is nullptr`——设备侧解析不到 pypto 符号，老版本缺的正是
+预置库/解析框架。
+
+pypto 与 CANN 的版本配对（`docs/zh/install/build_and_install.md`）：CANN 8.5.0 ↔
+PyPTO 0.1.2；CANN 9.0.0 ↔ PyPTO 0.2.0（本机 CANN 9.1.0 内置 0.2.1）。
+
+### 7.3 绕开鸡生蛋的证据链汇总
 
 - json 登记的三个算子全部指向库文件名 `libtilefwk_backend_server.so`，且走
   "只登记 json"的模式 0 通道（该通道不上传库内容）→ 设备侧只能按文件名在本地找；
 - pypto 仓库内**没有任何**向设备预部署这个库的代码；
-- pypto 的 FAQ（`docs/zh/tutorials/appendix/faq.md`）明示 **"PyPTO 驱动包支持
-  25.2.0 以上版本"**，且老驱动上报
-  `ae_kernel_lib_aicpu_kfc.cpp ... Get KFC DynTileFwkKernelServerInit api success, but func is nullptr`
-  —— 老驱动缺的正是这份预置库。
+- FAQ 的版本要求 + 老版本 `func is nullptr` 故障日志（见 7.2）；
+- CANN 内置 pypto wheel、签名捆绑包、驱动 aicpu 字段（见 7.1 实测）。
 
-**为什么要经设备内存中转落盘，而不是直接用预置那份？** 版本解耦：预置库随驱动
-发布、更新慢；Python 包里的库与主机侧运行时同源同版本编译，行为严格匹配。转发桩
+### 7.4 另外两个设计选择
+
+**为什么要经设备内存中转落盘，而不是直接用预置那份？** 版本解耦：预置库随驱动/
+CANN 发布、更新慢；Python 包里的库与主机侧运行时同源同版本编译，行为严格匹配。转发桩
 是刻意保持不变的稳定接口，真身随 pypto 版本任意演进。
 
 **为什么不用 shell？** 落盘动作由一个 AICPU 算子（`DynPyptoKernelServerNull` 里
@@ -242,7 +284,7 @@ flowchart TB
 
 | 维度 | memfabric（deployer + KFC，见部署档案） | pypto（三件套） |
 |---|---|---|
-| "第一次"上设备 | deployer：`CUSTAICPUKernel` 模式 1 迁移 + KFC `cat` 复制到搜索路径 | 驱动包（≥25.2.0）预置含转发桩的库 |
+| "第一次"上设备 | deployer：`CUSTAICPUKernel` 模式 1 迁移 + KFC `cat` 复制到搜索路径 | 华为签名固件通道预置（驱动 ≥25.2.0 / CANN ≥8.5.0，见 §7） |
 | 日常部署/更新 | 一次性安装期动作，运行期不再传 | 每个主机进程第一次下发前：拷到设备内存 + Null 算子落盘 |
 | 传输方式 | 文件迁移 + 设备内 shell 复制 | 设备内存中转（一次内存拷贝），算子内写文件 |
 | 版本管理 | 改名 + KVER 递增（CP1 按文件名缓存） | 转发桩接口不变 + 新文件名 `libpypto_server{设备号}.so` + DEEPBIND 隔离 |
@@ -270,7 +312,8 @@ soNameAddrOffset`，`device_runner.cpp:372-373`），默认值为
    so 字节拷到设备内存，经既有的 KFC json 通道下发一个已经在设备上的"落盘算子"
    去写文件。和 KFC shell 方案相比：不受"单条短命令"约束、无 `sync=` 判定歧义、
    无需为 shell 执行面做安全评审。**前提**：落盘算子自己得先上设备——memfabric
-   的"第一次"仍要靠 deployer / OPP 通道承担（pypto 是把"第一次"外包给了驱动包）。
+   的"第一次"仍要靠 deployer / OPP 通道承担（pypto 是把"第一次"外包给了
+   驱动/CANN 签名固件通道，前提是它是华为自家组件，见 §7.1）。
 2. **版本解耦需求的差异**。pypto 是框架，主机侧运行时与设备侧服务必须逐版本匹配，
    所以需要稳定转发桩 + 每进程重部署；memfabric 是单功能 kernel，KVER 递增纪律
    （部署档案规则 3）已经够用，不需要引入转发桩的复杂度。
@@ -308,7 +351,9 @@ soNameAddrOffset`，`device_runner.cpp:372-373`），默认值为
 | F2 | 库字节拷到设备内存、指针存 `DeviceArgs`（代码直读） | 实测（代码） |
 | F3 | 落盘路径 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libpypto_server{设备号}.so`（代码直读） | 实测（代码） |
 | F4 | json 走模式 0 只登记不上传库内容；三个算子都指向预置库文件名 | 实测（代码） |
-| F5 | 驱动包 ≥25.2.0 预置该库 | **推断**（F4 + FAQ 版本要求 + `func is nullptr` 报错 + 仓内无预部署代码，证据链强） |
+| F5 | 预置库由华为签名固件通道部署到设备（承载方：驱动固件或 CANN 捆绑包，未定论）；版本要求驱动 ≥25.2.0、CANN ≥8.5.0 | **推断为主，证据链强**（F4 + FAQ 版本要求与 `func is nullptr` 报错 + 仓内无预部署代码 + F9/F10 实测佐证） |
 | F6 | AICPU 常驻进程比主机进程活得久，函数表/幂等标志随之常驻 | **推断**（函数表机制成立的必要前提，代码结构强支持） |
 | F7 | 冷启动时初始化期的 `PyptoInit` 转发失败不阻断流程 | **推断**（算子返回码与流同步的关系未实测） |
 | F8 | KFC 直发变体的符号解析依赖预置/驱动侧库 | **推断**（旁支，未展开验证） |
+| F9 | CANN 9.1.0 内置 pypto 0.2.1 wheel（`aarch64-linux/lib64/pypto-0.2.1-cp37-abi3-*.whl`，pip 安装记录指向该路径） | 实测 |
+| F10 | CANN 9.1.0 `opp/Ascend310P/aicpu/` 下存在三种签名捆绑包（syskernels/extend_syskernels/legacy，`aa55aa` 文件头）；驱动 26.1.0 version.info 带 aicpu/tsfw/dvppkernels 版本字段 | 实测（包存在与格式；包内容未验） |
