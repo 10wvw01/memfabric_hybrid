@@ -24,10 +24,10 @@
 
 | 寄存器类 | addr_type | 用途（一句话） | 普通驱动机器上的后果 |
 |---|---|---|---|
-| **AIC 同步寄存器** | 2 (`ADDR_MAP_TYPE_REG_AIC_CTRL`) | AICPU 调度器 ↔ AICore 的任务分发/完成同步 | 自动降级 GM fallback，**功能不受影响，只是慢** |
-| **AIC PMU 寄存器** | 3 (`ADDR_MAP_TYPE_REG_AIC_PMU_CTRL`) | 采集 AICore 微架构性能计数（流水线利用率、Cache 命中等） | **PMU 采集完全不可用**（无 fallback，寄存器地址填 0） |
+| **AIC 同步寄存器** | 2 (`ADDR_MAP_TYPE_REG_AIC_CTRL`) | AICPU 调度器 ↔ AICore 的任务分发/完成同步 | 不可用 |
+| **AIC PMU 寄存器** | 3 (`ADDR_MAP_TYPE_REG_AIC_PMU_CTRL`) | 采集 AICore 微架构性能计数（流水线利用率、Cache 命中等） | 不可用（无替代路径） |
 
-所以：装普通驱动的机器跑测试一切正常（走 GM 路）；只有装特制驱动的机器才走寄存器快路径，且**只有它能做 PMU 性能采集**。
+所以：**两类寄存器的使用都以特制驱动为前提**——只有装特制驱动的机器才能走寄存器路、才能做 PMU 采集；本文只关注寄存器方案。
 
 ## 2. 全景：谁在哪儿、怎么碰寄存器
 
@@ -50,7 +50,7 @@ flowchart TB
         subgraph AIC["AICore 0..7"]
             CORE["③ 专用指令访问自己的 SPR<br/>MOV DATA_MAIN_BASE / set_cond"]
         end
-        GMEM["GM / HBM<br/>shakeBuffer、协同工作区"]
+        GMEM["GM / HBM<br/>（DeviceArgs 等设备内存）"]
     end
     HC --> HAL --> KMOD
     KMOD -.->|"返回 out.ptr 区域基址"| HC
@@ -58,11 +58,9 @@ flowchart TB
     GMEM --> SCHE
     SCHE <-->|"MMIO 直达，零缓存一致性问题"| REG
     CORE <-->|"核内指令，不走内存总线"| REG
-    SCHE <-->|"GM fallback（普通驱动）：flush/dcci 手工维护"| GMEM
-    CORE <-->|"GM fallback（普通驱动）：dcci + volatile 读"| GMEM
 ```
 
-三个角色的分工：**Host 只负责"铺路"**（调一次映射拿到基址）；**AICPU 用内存方式**访问（volatile 解引用）；**AICore 用指令方式**访问自己的 SPR。实线=特制驱动的寄存器路，虚线=普通驱动的 GM fallback。
+三个角色的分工：**Host 只负责"铺路"**（调一次映射拿到基址）；**AICPU 用内存方式**访问（volatile 解引用）；**AICore 用指令方式**访问自己的 SPR。GM 只承担地址表等普通设备内存的传递。
 
 ### 2.2 三层访问机制一览
 
@@ -82,9 +80,8 @@ flowchart TD
     PRE --> CALL["halMemCtl(type=0 CTRL_TYPE_ADDR_MAP<br/>in={addr_type 2/3, devid})"]
     CALL --> OK{"映射成功？"}
     OK -->|"特制驱动 25.3.rc1.b099"| REGBASE["out.ptr = 区域基址<br/>每核基址 = ptr + i×2MB<br/>地址表传入设备侧"]
-    OK -->|"普通驱动 NOT_SUPPORT"| GMFB["GM fallback<br/>commByReg = false<br/>shakeBuffer + DCCI 手工维护一致性"]
+    OK -->|"普通驱动 NOT_SUPPORT"| NA["寄存器方案不可用<br/>需换装特制驱动"]
     REGBASE --> FAST["寄存器快路径"]
-    GMFB --> SLOW["GM 慢路径（功能等价）"]
 ```
 
 两个前置坑（pypto 实测教训，附录 C）：调 `halMemCtl` 前必须先初始化 CANN runtime（否则 ret=13）；此前不要做 map→unmap 探测（会破坏驱动内部状态导致真映射失败）。
@@ -102,19 +99,6 @@ flowchart TD
 |---|---|---|
 | 编译器层【实证】 | `volatile` | 禁止把轮询读优化成"读一次反复用"、禁止合并/删除/重排写 |
 | 硬件层【推断】 | 页表 uncached 属性 | 不进 CPU cache，每次访问直达硬件——寄存器值随时被 AICore 改，缓存即旧值 |
-
-### 2.5 两条通路完整对照（同一语义，两种实现）
-
-框架初始化时自动二选一（映射成功→寄存器路，失败→GM 路），两侧通过 `KernelArgs.commByReg` 标志协商。
-
-| | 寄存器路（commByReg=true，特制驱动） | GM fallback（commByReg=false，普通驱动） |
-|---|---|---|
-| 派任务 | AICPU volatile 写 SPR 0xA0 | AICPU 写 `shakeBufferCpuToCore[1]` + 屏障 + flush |
-| AICore 取任务 | `MOV x0, DATA_MAIN_BASE`（指令） | 先 DCCI 作废本地缓存行再读 |
-| 报完成 | `set_cond(value)`（指令） | 写 `shakeBuffer[4]` + DCCI 刷出 |
-| AICPU 知完成 | volatile 读 SPR 0x4C8 | invalidate 后读 `shakeBuffer[4]` |
-| 延迟 | 寄存器访问，无缓存一致性问题 | 每次往返 DDR + 手工 cache 维护指令 |
-| 附加 | fast-path 0x18 开关可用 | fast-path 无意义，跳过 |
 
 ## 3. 用途实证一：任务分发与完成同步
 
@@ -152,7 +136,7 @@ sequenceDiagram
 
 | 侧 | API | 位置（pypto） | 功能 |
 |---|---|---|---|
-| AICPU | `MapRegistersForAllCores` | aicore_hal.h:419 | 建 ready/finish 队列指针，传播 commByReg |
+| AICPU | `MapRegistersForAllCores` | aicore_hal.h:419 | 初始化 ready/finish 队列指针 |
 | AICPU | `SetReadyQueue`（单核/区间） | :233/:248 | 派发 leaf-task |
 | AICPU | `GetFinishQueue` / `GetFinishedTask` | :301/:352 | 轮询完成 |
 | AICPU | `WriteReg32` / `ReadReg32` | :161/:135 | 通用 MMIO 读写 |
@@ -160,7 +144,7 @@ sequenceDiagram
 | AICore | `GetTaskReg` / `GetNextLeafTask` | aicore_entry.h:178/:207 | 取任务（轮询） |
 | AICore | `SendCond` | :190 | 报完成 |
 
-**影响面**：测试代码不直接调这些 API；凡 `run_mode=npu` 上板执行 kernel，调度循环自动走这条通道——所有上板用例隐式依赖（普通驱动机器自动走 GM fallback，功能等价）。
+**影响面**：测试代码不直接调这些 API；凡 `run_mode=npu` 上板执行 kernel（特制驱动机器），调度循环自动走这条通道——所有上板用例隐式依赖。
 
 ## 4. 用途实证二：PMU 性能计数采集
 
@@ -208,9 +192,8 @@ python tools/profiling/tilefwk_pmu_to_csv.py -p PROF_xxx/device_x/data -pe=2 --a
 
 | 日志 | 含义 |
 |---|---|
-| `Map AICore reg addr (type 2) 0x... for DAV_2002` | 寄存器映射成功，走 MMIO 快路径（特制驱动） |
-| `DAV_2002 halMemCtl failed, falling back to GM-based communication (commByReg=false)` | 普通驱动，走 GM fallback |
-| `DAV_2002 halMemCtl PMU failed, PMU regs filled with zeros` | PMU 不可用（普通驱动） |
+| `Map AICore reg addr (type 2) 0x... for DAV_2002` | 寄存器映射成功，MMIO 生效（特制驱动） |
+| `DAV_2002 halMemCtl PMU failed, PMU regs filled with zeros` | PMU 映射未放行 |
 
 查本机驱动版本：`cat /usr/local/Ascend/driver/version.info`。上板硬门禁：驱动 ≥ 24.1（低于则 kernel launch 直接 abort；解析只看前两段数字，`25.3.rc1.b099` 按 25.3 比较）。
 
@@ -373,7 +356,7 @@ sequenceDiagram
 
 ## 10. 公共前置条件与风险
 
-1. **特制驱动**：P1/P2 全部依赖 25.3.rc1.b099 模式（`halMemCtl` 的 type=0（ADDR_MAP）操作放行 addr_type=2/3）；普通驱动机器上必须保留现有 GM+dcci 路径为 fallback——**双路径并存**（pypto `commByReg` 标志模式可抄）
+1. **特制驱动**：P1/P2 全部依赖 25.3.rc1.b099 模式（`halMemCtl` 的 type=0（ADDR_MAP）操作放行 addr_type=2/3），本方案以特制驱动为前提
 2. **地址传递**：host 拿映射地址（`base+i*2MB`）后须经 wire 契约传入 AICPU kernel（param 扩展）；pypto 已实证 host 拿的 VA 在 AICPU 进程有效
 3. **CCE kernel 改动**：`MOV x0, DATA_MAIN_BASE` / `set_cond` / `set_ctrl` 指令加进 AICore 设备头（pypto `aicore_entry.h:160-201` 现成代码，注意 host 仿真需 stub）
 4. **SPR 单槽协议**：所有寄存器化通道需单调递增序号防覆盖（现有 `tail+1`/`seq+1` 游标语义天然兼容）
@@ -487,8 +470,6 @@ for (int i = 0; i < nrCore; i++) {
 }
 ```
 
-框架自动降级（`device_runner.cpp:253-277`）：AIC_CTRL 映射失败 → `commByReg=false` 走 GM（日志 "falling back to GM-based communication"）；PMU 映射失败 → 寄存器填 0（日志 "PMU regs filled with zeros"）。
-
 ### D.3 AICPU 侧 volatile 读写（aicore_hal.h）
 
 ```cpp
@@ -550,7 +531,7 @@ kernel 头注释（:17）写"doorbell 走 halSqCqConfig (ioctl)"——310P 实�
 |---|---|
 | `framework/src/machine/runtime/runner/runtime_agent.cpp:164-194` | Host 侧 halMemCtl 映射 |
 | `framework/src/machine/runtime/runner/runtime_agent.h:24-27` | ADDR_MAP_TYPE 常量（4/5 为非官方 AIV 类型） |
-| `framework/src/machine/runtime/runner/device_runner.cpp:243-285` | GetAicoreRegs + GM fallback |
+| `framework/src/machine/runtime/runner/device_runner.cpp:243-285` | GetAicoreRegs 寄存器地址获取 |
 | `framework/src/machine/runtime/runner/device_launcher_driver_gate.{h,cpp}` | 驱动版本门禁 |
 | `framework/src/machine/device/dynamic/aicore_hal.h` | AICPU 侧寄存器读写/队列/握手/fast-path |
 | `framework/src/machine/device/dynamic/aicore_constants.h:48-50` | REG_SPR_FAST_PATH (0x18) |
@@ -559,7 +540,7 @@ kernel 头注释（:17）写"doorbell 走 halSqCqConfig (ioctl)"——310P 实�
 | `framework/src/machine/runtime/runner/pmu_common.cpp` | PROF_PMU_EVENT_TYPE → 事件码 |
 | `framework/src/machine/utils/device_switch.h:24-30` | PMU_COLLECT / PERF_PMU_TEST_SWITCH 编译宏 |
 | `framework/src/interface/machine/device/tilefwk/aicore_entry.h:178-205,445-465` | AICore 侧取任务/上报/PMU ctrl |
-| `framework/src/interface/machine/device/tilefwk/aicpu_common.h:44-51,151-179` | shakeBuffer 索引、DeviceArgs 寄存器字段、commByReg |
+| `framework/src/interface/machine/device/tilefwk/aicpu_common.h:44-51,151-179` | DeviceArgs 寄存器字段、shakeBuffer 索引 |
 | `framework/src/machine/device/dynamic/aicore_manager.h:737,1554,3131` | ProfStart / SetReadyQueue / ProfGetPmu 调用点 |
 | `framework/src/machine/simulation/host_aicore_entry_adapter.h:66-77` | host 仿真 intrinsic stub |
 | `tools/profiling/tilefwk_pmu_to_csv.py` | PMU 二进制 → CSV |
