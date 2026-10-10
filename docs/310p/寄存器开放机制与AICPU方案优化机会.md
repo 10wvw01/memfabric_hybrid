@@ -327,6 +327,7 @@ sequenceDiagram
 
 - **现状**：每投递一封请求邮件 = ① 写 32B 槽（4×volatile 64 位）+ ② clean 邮件行 + ③ 写游标 `REQ_TAIL` + ④ clean 游标行
 - **方案**：①②留 GM 不动；③④改 `set_cond(tail+1)`，AICPU 轮询映射的 SPR 0x4C8（第一部分 §3 finish 队列配方）
+- **具体设计（pypto 同构，见 §3.1"单号 vs 账本"）**：握手阶段抄 `TryHandShakeByGm`（AICore `set_cond(HELLO)` + GM 槽写 phyId，AICPU 建 blockIdx→SPR 地址映射）；生产时 AICore 先写 GM 邮件槽（账本）再 `set_cond(tail+1)`（单号）——**单调序号 + AICPU 本地消费位置**天然适配 SPR 单槽（连写覆盖无碍，AICPU 见 tail=N 即去 GM 账本批量取到第 N 封）。当前生产形态 AICore 单 block（`<<<1,0,aiCoreStream>>>`）单生产者↔单消费者正好适配；未来多 block 需 per-core 信箱轮询或代表核 doorbell（zbal core0 模式）
 - **收益**：每封邮件省 1 次 clean + 1 次游标 GM 写；AICPU 轮询从 GM 读变寄存器读（边际收益小）
 - **风险**：`set_cond` 对 AICPU 的可见时序需实测（pypto 握手场景实证过该通路，memfabric 高频连续通知场景需确认单槽协议）；`tail+1` 递增天然满足防覆盖序号
 - **零成本子优化（先做，可能白赚另一半）**：② 的邮件数据 clean 可能本就多余——邮件读者只有 AICPU（不经 SDMA），按定论 #1 天然一致，实测去掉后 mode13 八步闭环 mismatch=0 是否保持
@@ -335,7 +336,7 @@ sequenceDiagram
 ### 8.2 场景二：背压与 ready 通知（C2，AICPU→AICore）✅ 配方现成
 
 - **现状**：生产路径满环时 AICore dcci 轮询 `REQ_HEAD`；demo 形态 role1 AICPU 写 ready flag（cvac + `dsb ish`），AICore dcci + volatile 轮询
-- **方案**：**pypto ready 队列配方原样照抄**——AICPU 直写目标 AICore SPR 0xA0（MMIO），AICore 用 `MOV x0, DATA_MAIN_BASE` 读自己的信箱
+- **方案**：**pypto ready 队列配方原样照抄**——AICPU 直写目标 AICore SPR 0xA0（`*(volatile uint64_t*)(regAddrs_[core]+0xA0) = head+1`），AICore 用 `MOV x0, DATA_MAIN_BASE` 读自己的信箱；握手阶段与场景一共用（AICPU 已建 phyId→SPR 地址映射，见 §3.1）
 - **收益**：写侧 2 条 cache 指令+屏障 → 1 次 MMIO 写；读侧 AICore 轮询从"dcci + GM 读"（占 DDR 带宽、污染 cache）→ 纯寄存器读
 - **风险**：host 需拿到每核 SPR 地址表并经 wire 契约传入 AICPU kernel；多 AICore 需 blockId→phyId 映射（注意奇数卡 phyId 8/9 边界）
 - **定位**：demo 形态收益明显；生产路径仅背压时触发，优先级中等
