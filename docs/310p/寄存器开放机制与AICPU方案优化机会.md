@@ -279,7 +279,7 @@ sequenceDiagram
     Note right of K: 场景一：游标可 set_cond 化省 1 次 clean；<br/>邮件数据 clean 或许可直接省（P0 实测）
     R-->>A: 裸读轮询发现新邮件
     A->>T: SQE 对（数据+标志）+ cvac + doorbell
-    Note right of A: 场景三：doorbell 疑走 ioctl（μs 级内核陷入），<br/>若属实改驱动开放寄存器映射（P0 验证）
+    Note right of A: 场景三（已验证）：CP 流 SQ 查不到 sqRegBase<br/>（IsSqDbMap=0），实走 halSqCqConfig；<br/>MMIO 化需驱动/固件补门铃两步注册
     T->>P: SDMA 搬运数据 + 写 8B 到达戳
     P-->>W: dcci 轮询到达戳，读到达邮件
     Note left of W: 场景四：SDMA 只写 GM，寄存器物理不可达，<br/>保留 dcci（已是最小正确实现）
@@ -315,12 +315,16 @@ sequenceDiagram
 - **风险**：host 需拿到每核 SPR 地址表并经 wire 契约传入 AICPU kernel；多 AICore 需 blockId→phyId 映射（注意奇数卡 phyId 8/9 边界）
 - **定位**：demo 形态收益明显；生产路径仅背压时触发，优先级中等
 
-### 8.3 场景三：SQE doorbell 提交路径（C3，AICPU→TSFW）⚠️ 待验证，潜在收益最大
+### 8.3 场景三：SQE doorbell 提交路径（C3，AICPU→TSFW）❌ 已验证：查不到 sqRegBase，实走 ioctl
 
-- **现状**：doorbell 双路径——`cp1QueryProp(prop=5)` 查到 `sqRegBase` 则 MMIO 直写（shmem 同款），否则 `halSqCqConfig` ioctl；**kernel 头注释说 310P 走 ioctl**（附录 D.6 有代码）
-- **疑点**：若实跑是 ioctl，攒批模式下每批一次内核陷入（μs 级），流水模式批次多时累积可观
-- **行动（先验证再动手）**：跑 mode13/14 打印 `sqRegBase` 是否非 0；或用 `reserved[1]&8` 强制 HAL 做 A/B 对照，timeline `[2]SQE 提交完` 打点直接量出差值
-- **若确认 ioctl**：按第一部分模式改驱动，把 SQ doorbell 寄存器映射进 CP1 进程——**改驱动第一优先级**，且 kernel 里 MMIO 路径已写好，只等 `sqRegBase` 有效
+- **验证结论（2026-10-10，本机 310P3 / 驱动 26.1.0）**：CP 流 SQ 的 `sqRegBase` **查不到有效值**——doorbell 实走 `halSqCqConfig(SQ_TAIL)` HAL 路径（xcclpp v43 全链 PASS、memfabric mode13/14 验收全靠它）
+- **证据链**（xcclpp aicpu-310p3 实机实验 + tsch 固件源码，无需重跑）：
+  1. 设备日志 `[TsDrvNormalSqInfoInit] sqid=18 ... IsSqDbMap=0 IsHwSqMap=1`——CP 流 remote SQ 的 doorbell 寄存器页映射未建立（队列映射有，doorbell 映射无）
+  2. zbal 式"直写 sqRegBase+0x8"提交路径实测失败（xcclpp 提交路径矩阵）
+  3. tsch 源码：host 普通流门铃需**两步注册**——① 内核 `trs_sq_remap` 把 SQ 寄存器 4 页 remap 进进程 ② CREATE_TASK_CMD_SQCQ 邮箱让固件注册 SQ + 解除门铃中断屏蔽；**CP 流 remote SQ 的闭源注册 handler 两步都跳过了**（用户态无解，hcomm 官方 API `halResourceIdRestore` 本机无符号）
+  4. 对照：host 普通流 `IsSqDbMap=1`（doorbell 映射存在，host 编排生产可用）——缺失是 CP 流 remote SQ 特有
+- **优化路径修正**：不是"映射一个寄存器"就够——需驱动/固件侧补齐 remote SQ 的门铃两步注册（remap + 固件邮箱），比 pypto 式放行 halMemCtl 重
+- **未知项**：特制驱动 25.3.rc1.b099 机器上 CP 流 `IsSqDbMap` 是否=1 未测——若=1 则该机器 zbal 式直写可用，值得优先验证
 
 ### 8.4 场景四：到达/完成检测（C4，SDMA→AICore）❌ 不可寄存器化
 
@@ -345,9 +349,10 @@ sequenceDiagram
 
 | 优先级 | 行动 | 类型 | 前置 |
 |---|---|---|---|
-| **P0** | doorbell 现状确认（log `sqRegBase` / `reserved[1]&8` A/B 对照） | 零成本实验 | 无 |
+| ~~P0~~ **已完成** | doorbell 现状确认 → **结论：CP 流 SQ 查不到 sqRegBase（IsSqDbMap=0），实走 halSqCqConfig**（§8.3 证据链：设备日志 + zbal 式实测失败 + tsch 源码两步注册分析） | 已验证 | — |
 | **P0** | 请求邮件数据 clean 必要性实测（定论 #1 反推） | 零成本实验 | 无 |
-| **P1** | 若 doorbell 确认 ioctl → 改驱动开放 SQ doorbell 寄存器映射 | **改驱动** | 驱动仓 |
+| **P1** | 在特制驱动 25.3.rc1.b099 机器上验证 CP 流 `IsSqDbMap` 是否=1（若=1 则 zbal 式直写直接可用） | 实机验证 | 特制驱动机器 |
+| **P1** | 若需本机 MMIO doorbell → 改驱动/固件补齐 remote SQ 门铃两步注册（trs_sq_remap + CREATE 邮箱，闭源 handler 现跳过） | **改驱动/固件** | 驱动仓 |
 | **P1** | ready/背压通知 SPR 化（场景二配方） | kernel + wire 契约扩展 | 特制驱动 + host 传 regBase |
 | **P2** | PMU 周期计数器接入 timeline（场景五配方） | kernel 侧 | 特制驱动（无 fallback） |
 | **P2** | `REQ_TAIL` 游标 `set_cond` 化（场景一） | kernel 侧 | 同上 |
@@ -521,7 +526,7 @@ if (c->ch->sqRegBase != 0) {                    // 来自 cp1QueryProp(prop=5, D
 }
 ```
 
-kernel 头注释（:17）写"doorbell 走 halSqCqConfig (ioctl)"——310P 实跑路径待 P0 实验确认。
+kernel 头注释（:17）写"doorbell 走 halSqCqConfig (ioctl)"——**已验证属实**（§8.3：CP 流 SQ `IsSqDbMap=0`，sqRegBase 查不到有效值）。
 
 ## 附录 E 相关文件索引
 
