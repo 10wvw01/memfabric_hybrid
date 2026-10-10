@@ -41,13 +41,35 @@ HalMemCtl(type=0, &in, sizeof(in), &out, nullptr)          ← PyPTO adapter 封
           → 驱动 halMemCtl(CTRL_TYPE_ADDR_MAP, ...)          ← 特制驱动在此放行
 ```
 
-**参数与返回**（`runtime_agent.cpp:164-194`）：
+**真实签名与结构体**（本机驱动头文件 `driver/kernel/inc/driver/ascend_hal.h:2822` / `ascend_hal_define.h:927-933`）：
+
+```c
+// halMemCtl 是 5 参通用控制入口（type 分发 9 种操作：ADDR_MAP/UNMAP/FEATURE 查询/内存修复/
+// CP_MMAP 等），寄存器映射只是其中 type=0 的一条
+drvError_t halMemCtl(int type, void *param_value, size_t param_value_size,
+                     void *out_value, size_t *out_size_ret);
+
+struct AddrMapInPara  { unsigned int addr_type; unsigned int devid; };        // in：哪类资源+哪个设备
+struct AddrMapOutPara { unsigned long long ptr; unsigned long long len; };   // out：映射基址+长度
+struct AddrUnmapInPara { unsigned int addr_type; unsigned int devid;         // 解除映射（type=1）用
+                         unsigned long long ptr; unsigned long long len; };
+```
+
+**pypto 的真实调用**（`runtime_agent.cpp:170-179`，经 adapter 封装落在 `HalMemCtl`）：
 
 ```cpp
-AddrMapInPara  in  = { .addr_type = 2 /*AIC_CTRL*/ 或 3 /*PMU_CTRL*/, .devid = deviceId };
-AddrMapOutPara out;                              // out.ptr = 映射基址, out.len = 长度
-HalMemCtl(0, &in, sizeof(in), &out, nullptr);    // 成功后 out.ptr 即寄存器区域虚拟地址
+struct AddrMapInPara inMapPara;
+struct AddrMapOutPara outMapPara;
+inMapPara.devid = deviceId;
+inMapPara.addr_type = addrType;              // 2=AIC_CTRL / 3=AIC_PMU_CTRL
+auto ret = HalMemCtl(0,                      // type=0 (CTRL_TYPE_ADDR_MAP)
+    reinterpret_cast<void*>(&inMapPara),     // param_value
+    sizeof(struct AddrMapInPara),            // param_value_size
+    reinterpret_cast<void*>(&outMapPara),    // out_value
+    nullptr);                                // out_size_ret 不用，传 null
 ```
+
+> **为什么官方文档几乎为零**：`halMemCtl` 是驱动**内部接口**（非公开 SDK API，`ASCEND_HAL_WEAK` 弱导出、无兼容承诺），头文件全部文档只有一句泛泛的 "This command is used to control memory"；`addrMapType` 枚举每项一行注释（如 "Used to map aicore synchronous register"）是仅有的语义说明。32MB 区域、每核 2MB stride、0xA0/0x4C8 偏移等**布局知识不在任何头文件里**，来自三条腿：① 兄弟仓源码（hcomm/pypto 基线）② 头文件反推 ③ 实机探针实验（pypto mydocs 诊断、xcclpp `comm/` probe 工具）。特制驱动能"开放寄存器"也正因它是内部接口——驱动团队改自己的门禁。
 
 **地址计算**（`runtime_agent.cpp:167-168` 注释）：驱动共映射 **32MB**，每核 **2MB stride**；A1 有 10 个 AICore、开放 8 个。
 
