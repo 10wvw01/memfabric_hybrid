@@ -15,7 +15,9 @@
 
 | | 普通驱动 | 特制驱动 25.3.rc1.b099 |
 |---|---|---|
-| `halMemCtl(CTRL_TYPE_ADDR_MAP)` 寄存器映射 | 全部 4 种 addr_type 返回 `DRV_ERROR_NOT_SUPPORT` | **可以映射**（基线代码一次 map 成功，实测见附录 A） |
+| `halMemCtl` 的 **type=0（`CTRL_TYPE_ADDR_MAP`）寄存器映射操作** | 310P3 上实测全部 addr_type（0-3）返回 `DRV_ERROR_NOT_SUPPORT (65534)` | **放行**（基线代码一次 map 成功，实测见附录 A） |
+
+> 精确表述：`halMemCtl` 是驱动内部 9 种操作的通用控制入口（5 参签名与全部结构体见 §2.1），"寄存器映射"只是其中 type=0 这一条操作；特制驱动开放的就是**这条操作在 310P3 上的放行**——使下表两类寄存器区域可被映射进用户态。addr_type（入参 `AddrMapInPara.addr_type`）选择映射哪类资源。
 
 它开放的是两类设备寄存器的**用户态映射权限**：
 
@@ -38,7 +40,7 @@
 HalMemCtl(type=0, &in, sizeof(in), &out, nullptr)          ← PyPTO adapter 封装
   → AdapterManager → PluginHandler
       → dlopen("libascend_hal.so") + dlsym("halMemCtl")     ← 动态加载 CANN 驱动用户态库（hal_adapter_types.h:29-31）
-          → 驱动 halMemCtl(CTRL_TYPE_ADDR_MAP, ...)          ← 特制驱动在此放行
+          → 驱动 halMemCtl(type=0 /*CTRL_TYPE_ADDR_MAP*/, ...)   ← 特制驱动在此放行
 ```
 
 **真实签名与结构体**（本机驱动头文件 `driver/kernel/inc/driver/ascend_hal.h:2822` / `ascend_hal_define.h:927-933`）：
@@ -408,7 +410,7 @@ if (c->ch->sqRegBase != 0) {                    // 来自 cp1QueryProp(prop=5, D
 
 ## 9. 公共前置条件与风险
 
-1. **特制驱动**：P1/P2 全部依赖 25.3.rc1.b099 模式（halMemCtl ADDR_MAP 放行 AIC_CTRL/PMU_CTRL）；普通驱动机器上必须保留现有 GM+dcci 路径为 fallback——**双路径并存**（pypto `commByReg` 标志模式可抄）
+1. **特制驱动**：P1/P2 全部依赖 25.3.rc1.b099 模式（`halMemCtl` 的 type=0（ADDR_MAP）操作放行 addr_type=2/3）；普通驱动机器上必须保留现有 GM+dcci 路径为 fallback——**双路径并存**（pypto `commByReg` 标志模式可抄）
 2. **地址传递**：host 拿映射地址（`base+i*2MB`）后须经 wire 契约传入 AICPU kernel（param 扩展）；pypto 已实证 host 拿的 VA 在 AICPU 进程有效
 3. **CCE kernel 改动**：`MOV x0, DATA_MAIN_BASE` / `set_cond` / `set_ctrl` 指令加进 AICore 设备头（pypto `aicore_entry.h:160-201` 现成代码，注意 host 仿真需 stub）
 4. **SPR 单槽协议**：所有寄存器化通道需单调递增序号防覆盖（现有 `tail+1`/`seq+1` 游标语义天然兼容）
@@ -421,7 +423,7 @@ if (c->ch->sqRegBase != 0) {                    // 来自 cp1QueryProp(prop=5, D
 
 ### A.1 行为差异实测
 
-| 环境 | 驱动 | `halMemCtl(CTRL_TYPE_ADDR_MAP)` 行为 |
+| 环境 | 驱动 | `halMemCtl` type=0（`CTRL_TYPE_ADDR_MAP`）行为 |
 |---|---|---|
 | 远端 bz_310p3 (123.60.231.33, Docker env_wwl_docker_310p_20260521) | 普通（版本未记录） | 全部 4 种 addr_type（L2_BUFF/C2C_CTRL/AIC_CTRL/AIC_PMU_CTRL）返回 `DRV_ERROR_NOT_SUPPORT (65534)`；`CTRL_TYPE_SUPPORT_FEATURE` bit2=0；`halGetDeviceInfoByBuff` 全部 NOT_SUPPORT |
 | 本地 A1 机器（host deviceId=3） | **25.3.rc1.b099**（CANN 9.0.0） | 基线分支 `pypto_base_resnet18_0522` "HAL 一次 map 成功" |
