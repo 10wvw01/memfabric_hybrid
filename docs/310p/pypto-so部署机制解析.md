@@ -259,6 +259,22 @@ flowchart TB
 | `libpypto_server{0,1}.so`（运行时落盘的激活副本） | 不存在 | pypto 服务端从未在本机设备上激活过（全机亦无 pypto 运行痕迹） |
 | 负对照：不存在的文件名 | sync=507018 | 探针技术可靠 |
 
+**复刻下发实测（同日）**：用 mini_kfc 同骨架的小工具，逐字段复刻 pypto
+`GenBuiltInOpInfo` 的 PyptoNull json 条目（`AICPUKernel` +
+`libtilefwk_backend_server.so` + `DynPyptoKernelServerNull`，mode 0 加载后
+blockDim=1 下发），在本机 dev1 上实测：
+
+| 用例 | 结果 | 判读 |
+|---|---|---|
+| A：PyptoNull 精确复刻（so 缺失） | launch=0，**sync=507018** | **json 三算子路径在本机 310P 上实测不可行**——与 FAQ"CANN包不兼容"故障特征（507018）完全一致 |
+| B：so 改为设备上存在的 extend 库（符号不在其中） | launch=0，sync=507018 | 对照：区分"库缺失"与"符号缺失"，失败面相同 |
+| C：阳性对照（KFCKernel + system，mini_kfc 等价） | launch=0，**sync=0** | 通道本身正常，排除测试方法问题 |
+
+由此把 §7.2 下方原【推断】细化为实测结论：**launch API 是异步下发、返回 0 不代表
+执行成功；失败在 stream 同步时才现形（507018）**。pypto 的
+`DynamicLaunchSynchronize` 会记 warning 并把非零返回累加上报——"静默失败"仅指
+不阻断后续任务下发，错误最终会在同步点暴露。
+
 **分平台结论（据上修正 §5/§7.1 的单线叙述）**——pypto 的设备侧承载有两种形态：
 
 - **310P（本机实测）**：真身符号 `DynTileFwkKernelServer(Init)` 由
@@ -275,14 +291,13 @@ CANN 内置 wheel 是官方发布产物，版本随 CANN 打包固定。本机 `
 检出的 `trunk_for_a1` 是 310P 适配**开发分支**（A1=310P/dav-2002，今日仍在提交），
 其 `pyproject.toml` 版本号 **0.2.1 与 CANN 9.1.0 内置 wheel 完全一致**——说明
 310P 适配成果已合入并随 CANN 9.1.0 正式发布（CANN 9.1.0 本身就是 310P 包，
-`opp/Ascend310P`），trunk_for_a1 是该发布基线之上的继续开发线。因此两形态是
-**同一版本 pypto 在不同平台上依赖不同的设备侧预置库**（310P：extend 库，实测；
+`opp/Ascend310P`），trunk_for_a1 是该发布基线之上的继续开发线。**同一版本 pypto 在不同平台上依赖不同的设备侧预置库**（310P：extend 库，实测；
 A2/A3/A5：tilefwk 库，推断），而非"不同平台用不同 pypto 版本"。代码层面两条
 路径的选择由构建开关与执行模式决定：双流模式 + 新 CANN 构建走 json 转发
 （`PyptoRun`，device_runner.cpp:358-361），三流模式恒走 KFC 直发
-（`AST_DYN_AICPU`，device_runner.cpp:501-563 无条件）——310P 上 PyptoNull 一环
-因设备无 tilefwk 库而执行失败，但 mode-0 json launch 是异步下发、失败仅记设备
-日志，不阻断后续 KFC 直发【推断】。
+（`AST_DYN_AICPU`，device_runner.cpp:501-563 无条件）。310P 上 PyptoNull 一环
+实测失败（§7.2 复刻下发：launch=0 / sync=507018）——launch 异步不阻断后续
+KFC 直发任务的下发，但错误在流同步点暴露。
 
 注：探针用的是字符串匹配（grep），未区分导出符号表与普通字符串；但 KFC 机制
 本就按符号名解析，FAQ 报错也证明这些名字正是解析目标，证据足够。
@@ -404,3 +419,5 @@ pypto 就是靠这条路径跑，json 三算子 + PyptoNull 落盘那套是 A2/A
 | F9 | CANN 9.1.0 内置 pypto 0.2.1 wheel（`aarch64-linux/lib64/pypto-0.2.1-cp37-abi3-*.whl`，pip 安装记录指向该路径） | 实测 |
 | F10 | CANN 9.1.0 `opp/Ascend310P/aicpu/` 下存在三种签名捆绑包（syskernels/extend_syskernels/legacy，`aa55aa` 文件头）；驱动 26.1.0 version.info 带 aicpu/tsfw/dvppkernels 版本字段 | 实测（包存在与格式；包内容未验） |
 | F11 | 本机 310P3 设备侧（dev1 探针）：无 `libtilefwk_backend_server.so`、无 `libpypto_server*.so`；有 `libaicpu_extend_kernels.so` 且含 `DynTileFwkKernelServer(Init)` 符号、不含转发桩符号；全机无 pypto 运行痕迹 | 实测（mini_kfc 布尔探针 + 负对照，2026-10-10） |
+| F12 | **json 三算子部署方案在本机 310P 上不可行**：复刻 PyptoNull json（逐字段同 `GenBuiltInOpInfo`）mode 0 加载后下发 → launch=0、sync=507018；阳性对照（KFCKernel+system）sync=0 排除方法问题。故 §4/§5 全流程（PyptoNull 落盘激活）在本机无法走通，310P 靠 KFC 直发路径 | 实测（dev1，2026-10-10） |
+| F13 | 理论变通：用 memfabric 部署链（CUST 迁移 + KFC 复制）把 wheel 内 `libtilefwk_backend_server.so` 补到设备搜索路径，可让 json 路径的库解析通过——即第三方通道可代行"第一次"预置。未实测（真跑通还需按 §5.2 构造合法 `DeviceArgs` 链，且须防零参直调真身函数导致设备进程空指针崩溃） | **推断**（部署机制层面成立，未验证） |
