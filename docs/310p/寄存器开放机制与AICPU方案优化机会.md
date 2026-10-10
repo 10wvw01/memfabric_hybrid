@@ -324,6 +324,14 @@ sequenceDiagram
   3. tsch 源码：host 普通流门铃需**两步注册**——① 内核 `trs_sq_remap` 把 SQ 寄存器 4 页 remap 进进程 ② CREATE_TASK_CMD_SQCQ 邮箱让固件注册 SQ + 解除门铃中断屏蔽；**CP 流 remote SQ 的闭源注册 handler 两步都跳过了**（用户态无解，hcomm 官方 API `halResourceIdRestore` 本机无符号）
   4. 对照：host 普通流 `IsSqDbMap=1`（doorbell 映射存在，host 编排生产可用）——缺失是 CP 流 remote SQ 特有
 - **优化路径修正**：不是"映射一个寄存器"就够——需驱动/固件侧补齐 remote SQ 的门铃两步注册（remap + 固件邮箱），比 pypto 式放行 halMemCtl 重
+- **能否用 halMemCtl 开放（2026-10-10 补充分析）**：**现有接口不行，改驱动后可以**——`addrMapType` 是封闭枚举（L2_BUFF/C2C/AIC_CTRL/AIC_PMU_CTRL/CNT_NOTIFY 共 5 类，`ADDR_MAP_TYPE_MAX`），无 SQ doorbell 类型也不支持任意地址映射；pypto 那次是"驱动已有实现只差放行"（改门禁常量），SQ 门铃是"驱动没有该 addr_type 实现"（要加代码）。三条开放路径：
+  | 路径 | 改动 | 重量 |
+  |---|---|---|
+  | a. halMemCtl 新增 `ADDR_MAP_TYPE_REG_SQ_DB`（按 sqId 查门铃物理页 remap；内核 `trs_sq_remap` 本有此能力，host 普通流 `IsSqDbMap=1` 为证） | 驱动加代码，调用方式与 pypto 同款 | 中 |
+  | b. 补 CP 流 remote SQ 门铃两步注册（`trs_sq_remap` + CREATE 邮箱解除中断屏蔽；hcomm `halResourceIdRestore` 同款，本机无符号） | 闭源 remote handler/固件 | 重 |
+  | c. 先在特制驱动机器测 CP 流 `IsSqDbMap` 是否=1 | 零改动，若=1 则直写直接可用 | 零（最优先） |
+- **有利条件**：kernel 侧 MMIO 直写分支与 prop=5 查询代码已就位（`submitSqe`/`cp1QueryProp`）；v43 勘正确认门铃硬件链路一直通（假成功根因=SQE type 字段），拿到有效 VA 后直写应能响；门铃物理位置明确（tail 寄存器 4K 槽+0x8 即硬件 `SQ_DB`，tsch 源码证实）
+- **遗留待验证**：zbal 式直写在 type 修正后未重测（矩阵数据是 type 错误时期测的）；特制驱动机器 `IsSqDbMap`
 - **未知项**：特制驱动 25.3.rc1.b099 机器上 CP 流 `IsSqDbMap` 是否=1 未测——若=1 则该机器 zbal 式直写可用，值得优先验证
 
 ### 8.4 场景四：到达/完成检测（C4，SDMA→AICore）❌ 不可寄存器化
