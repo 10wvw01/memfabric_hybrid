@@ -324,7 +324,25 @@ sequenceDiagram
   3. tsch 源码：host 普通流门铃需**两步注册**——① 内核 `trs_sq_remap` 把 SQ 寄存器 4 页 remap 进进程 ② CREATE_TASK_CMD_SQCQ 邮箱让固件注册 SQ + 解除门铃中断屏蔽；**CP 流 remote SQ 的闭源注册 handler 两步都跳过了**（用户态无解，hcomm 官方 API `halResourceIdRestore` 本机无符号）
   4. 对照：host 普通流 `IsSqDbMap=1`（doorbell 映射存在，host 编排生产可用）——缺失是 CP 流 remote SQ 特有
 - **优化路径修正**：不是"映射一个寄存器"就够——需驱动/固件侧补齐 remote SQ 的门铃两步注册（remap + 固件邮箱），比 pypto 式放行 halMemCtl 重
-- **能否用 halMemCtl 开放（2026-10-10 补充分析）**：**现有接口不行，改驱动后可以**——`addrMapType` 是封闭枚举（L2_BUFF/C2C/AIC_CTRL/AIC_PMU_CTRL/CNT_NOTIFY 共 5 类，`ADDR_MAP_TYPE_MAX`；hcomm 老 stub 仅 4 类，逐代按需累加），无 SQ doorbell 类型也不支持任意地址映射；pypto 那次是"驱动已有实现只差放行"（改门禁常量），SQ 门铃是"驱动没有该 addr_type 实现"（要加代码）。**SQ 门铃不在枚举里的根因**：halMemCtl 映射的是全局静态区域（进程生命周期）；SQ 门铃是每 SQ 独有槽位（随 SQ 创建/销毁），其映射被设计捆绑在 SQ 分配流程（内核 `trs_sq_remap` remap 4 页给分配者，host 普通流 `IsSqDbMap=1` 即此路），跨进程另有专用通道（`halResourceIdRestore`/`AclnnShmemSdmaStarsQuery`）——驱动假设"敲门铃的人=分配 SQ 的人"；310P3 AICPU 敲 host 建的 CP 流 SQ 门铃打破该假设，且 remote 注册跳过 remap、专用通道皆断（三面围墙）。三条开放路径：
+- **查询链路代码级定位（为什么查不到——三道墙，2026-10-10）**：`halSqCqQuery(prop=5)` 本身不用换，是数据来源断了——
+  ```
+  CP1: halSqCqQuery({SQ_REG_BASE})
+   → 用户态 HAL trs_sq_cq_query (ascend_hal/trs/core/trs_sqcq.c:1466)：prop=5 不在
+     UIO 白名单（仅 HEAD/TAIL/CQE/BASE/DEPTH/SQE_SIZE/MEM_ATTR）→ ioctl 进设备内核
+   → 内核 trs_sqcq_query (sdk_driver/.../trs_hw_sqcq.c:1642)：
+     墙① trs_proc_has_res：CP1 进程不拥有该 SQ（host 分配；设备内核 trs 资源池
+         TRS_HW_SQ total=0，SQ 只在 CP1 用户态表）→ -EINVAL
+     墙② trs_get_sq_reg_vaddr (trs_hw_sqcq.c:1591)：reg_mem.uva=0（remote 未 remap）
+         → -EOPNOTSUPP
+     墙③ 语义墙：reg_mem.uva 是分配进程地址空间的 VA，对 CP1 进程页表无意义
+  ```
+- **改哪里（三个位置）**：
+  | 位置 | 代码 | 改法 | 仓库 |
+  |---|---|---|---|
+  | 1. 根因 | CP1 remote SQ 注册 handler（`TsDrvNormalSqInfoInit`/`trsRemoteAllocResId`，xcclpp 定位 `trs_slave_event.c`/`tsdrv_id.c`，**不在开放仓**） | 注册时把 db 页 mmap 进 CP1（队列页已映 IsHwSqMap=1，同机制多映一页）填 `sq_ctrl.db`，`IsSqDbMap=1`——三道墙一次全解 | 闭源 |
+  | 2. 查询侧 | `trs_sqcq.c:1482` UIO 白名单 | 加 `SQ_REG_BASE`（前提：位置 1 修好表里才有值） | 开放 |
+  | 3. halMemCtl 路线 | `svm/v3/api/master/svm_mem_ctl.c:151` handler 表分发 | 新增 `ADDR_MAP_SQ_DB` handler；硬依赖：按 sqId 找 reg 物理页须内核 trs 管理该 SQ（墙①），仍绕回位置 1 | 开放但依赖闭源 |
+- **附带发现**：开放仓 `halMemCtl`（svm_mem_ctl.c:155）对未注册 type 返回 NOT_SUPPORT——普通驱动 ADDR_MAP 的 NOT_SUPPORT 很可能就是"handler 未注册"，特制驱动 25.3.rc1.b099 = 注册了 ADDR_MAP handler 的构建（解释 pypto"放行"机制）
   | 路径 | 改动 | 重量 |
   |---|---|---|
   | a. halMemCtl 新增 `ADDR_MAP_TYPE_REG_SQ_DB`（按 sqId 查门铃物理页 remap；内核 `trs_sq_remap` 本有此能力，host 普通流 `IsSqDbMap=1` 为证） | 驱动加代码，调用方式与 pypto 同款 | 中 |
