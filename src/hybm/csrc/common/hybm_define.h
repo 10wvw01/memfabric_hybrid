@@ -79,7 +79,7 @@ constexpr uint16_t SEGMENT_TYPE_USER_DEV = 0x2U;
 constexpr uint16_t SEGMENT_TYPE_DEFAULT = 0x10U;
 constexpr uint16_t SEGMENT_TYPE_OFFSET = 8U;
 constexpr uint16_t UNIFIED_EXCHANGE_SEG_INFO_SIZE =
-    200U; /* all exchange info padding to same size, 192+8 for physicalChipId */
+    200U; /* all exchange info padding to same size, 192+8 for physicalChipId and deviceUserId */
 
 inline bool IsDramSlice(uint64_t magic)
 {
