@@ -31,7 +31,7 @@ make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0   # 产物: deployer mini_kfc
 ## 手动部署链（kernel 三件套由 `src/hybm/ops` 的 `mf_sdma_orch_kernel` 目标产出）
 
 前置：`libmf_sdma_orch.so`（kernel 本体）+ `libmf_sdma_orch.json`（CUST 迁移 json）+
-`libmf_sdma_orch_v4.json`（launch json），三者同目录（主构建产物
+`libmf_sdma_orch_v9.json`（launch json），三者同目录（主构建产物
 `<build>/src/hybm/ops/hybm_kernel/`、独立构建产物 `<build-kernel>/hybm_kernel/`，
 或安装前缀 `<prefix>/hybm/aicpu_kernel/`）。
 
@@ -42,17 +42,17 @@ KERNEL_DIR=<上述三件套所在目录>
 (./deployer 0 $KERNEL_DIR/libmf_sdma_orch.json 300 > /tmp/deploy.log 2>&1 &)            # 迁移+保活
 sleep 22                                                                                  # 迁移完成裕量
 ./mini_kfc 0 "cat /home/CustAiCpuUser/lib/libmf_sdma_orch.so.* > \
-/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v4.so && chmod 644 \
-/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v4.so"                  # 复制+授权
+/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so && chmod 644 \
+/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so"                  # 复制+授权
 ./mini_kfc 0 "grep -q HybmSdmaOrchBatch \
-/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v4.so"                  # 验证门(sync=0 即过)
+/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so"                  # 验证门(sync=0 即过)
 ```
 
 ## 运维纪律
 
 - **保活语义**：`deployer` 退出后清理链会（延迟）删除设备侧文件——300 秒保活期内须完成
   验证门与正式运行；到期后重跑本链即可。
-- **版本切换**：设备侧文件名带版本（`libmf_sdma_orch_v4.so`），换版本=新文件名，
+- **版本切换**：设备侧文件名带版本（`libmf_sdma_orch_v9.so`），换版本=新文件名，
   CP1 dlopen 缓存自然失效（KVER 递增即缓存破坏）。
 - **同卡双 die 共享设备 OS 文件系统**：dev0 上部署对 dev1 同样生效。
 

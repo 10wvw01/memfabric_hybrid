@@ -178,6 +178,8 @@ MemFabric跨机访问数据流和控制流如下图所示(昇腾A3超节点):
 
 - [编译安装](./docs/installation.md)：介绍组件编译和安装教程。
 
+- [310P 使用指南](./docs/310p/使用指南.md)：Atlas 300I Duo（Ascend310P3）上从环境准备到跑通双池与设备发起搬运示例的完整流程。
+
 - [DevContainer 快速入门](./docs/devcontainer_quickstart.md)：VS Code Remote + DevContainer 一键环境搭建 + 全量用例运行指南。
 
 - [样例执行](./examples/memory_pool/README.md)：介绍如何端到端执行样例代码，包括C++和Python样例。
@@ -199,8 +201,9 @@ MemFabric跨机访问数据流和控制流如下图所示(昇腾A3超节点):
   - Atlas 800I A2/A3 系列产品
   - Atlas 800T A2/A3 系列产品
   - Atlas 900 A3 SuperPoD
+  - Atlas 300I Duo（Ascend310P3，单卡双 die）
 - 平台：aarch64/x86
-- 配套软件：CANN 8.1.RC1及之后版本
+- 配套软件：CANN 8.1.RC1及之后版本（310P 需 CANN ≥ 9.1）
 - cmake >= 3.19
 - GLIBC >= 2.28
 - Ascend HDK配套驱动（npu-driver）、固件（npu-firmware）依赖(使用不同介质所需最低版本不同)：

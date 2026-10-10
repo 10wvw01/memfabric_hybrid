@@ -24,6 +24,7 @@
  *   5. smem 层 sdma 协同 API 的无效 handle 拒绝
  */
 #include <gtest/gtest.h> // googletest 框架
+#include <cstddef>       // offsetof
 
 #include "hybm_sdma_orchestrator.h" // 被测单例(public 接口: Acquire/Ready/GetRefCountForTest/Release)
 
@@ -89,6 +90,22 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
     EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);                       // ovf 在 result 后
     EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U);                   // stop 不压 ovf
     EXPECT_LE(HYBM_SDMA_ORCH_WS_STOP_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);                       // 落在 4KB 内
+}
+
+/* 用例 3b: v9 契约不变式(KFCKernel/type 5 免 28s monitor 计时, 常驻单发语义) */
+TEST(SdmaOrchestratorTest, V9ResidentInvariants)
+{
+    /* 参数布局锁: rsv0→epochBudgetS 原位替换, 72B 总尺寸不变(旧 host 传 0 走默认 15s) */
+    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 72U);
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U); // 第 4 个 u32 槽位
+    /* 常驻哨兵: 全 F(无墙钟/循环上限, 跑到停止/错误); 与默认预算 0 语义区分 */
+    EXPECT_EQ(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, 0xFFFFFFFFu);
+    EXPECT_NE(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S);
+    /* launch attr 超时: 必须 0(永不超时)——有限值到达即把常驻任务标记 507017 超时,
+     * StopEpoch 的 sync 提前返回不等 kernel 退出; attr 缺省为默认超时 ≈6.4s 同样误杀 */
+    EXPECT_EQ(HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S, 0U);
+    /* 契约版本与 KVER 一致(部署链缓存刷新依赖) */
+    EXPECT_EQ(HYBM_SDMA_ORCH_KVER, 9U);
 }
 
 /* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; 仅存 host API) */

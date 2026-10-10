@@ -15,15 +15,18 @@
 3. 01_basic/03_single_device_hbm_pool
 4. 01_basic/04_no_xpu_host_rdma_dram_pool
 5. 01_basic/05_no_xpu_host_urma_dram_pool
-6. 02_scale_out/01_single_node_multi_device_dram
-7. 02_scale_out/02_multi_node_multi_device_dram
-8. 03_optimization/01_copy_data_batch
-9. 03_optimization/02_register
-10. 03_optimization/03_device_sdma
-11. 04_features/01_enable_unified_address_space
-12. 05_observability/01_prometheus_grafana
-13. 05_observability/02_opentelemetry
-14. 05_observability/03_dashboards
+6. 01_basic/06_single_card_external_stream
+7. 01_basic/07_310p_die_pair_pool（310P 专属：单卡双 die 双池，需 Atlas 300I Duo）
+8. 01_basic/08_310p_aicore_aicpu_sdma（310P 专属：设备发起 SDMA 协同，需 Atlas 300I Duo，上手见[310P 使用指南](../../docs/310p/使用指南.md)）
+9. 02_scale_out/01_single_node_multi_device_dram
+10. 02_scale_out/02_multi_node_multi_device_dram
+11. 03_optimization/01_copy_data_batch
+12. 03_optimization/02_register
+13. 03_optimization/03_device_sdma
+14. 04_features/01_enable_unified_address_space
+15. 05_observability/01_prometheus_grafana
+16. 05_observability/02_opentelemetry
+17. 05_observability/03_dashboards
 
 ## 统一约束
 - 所有样例仅使用内存池接口。

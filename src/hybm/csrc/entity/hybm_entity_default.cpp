@@ -179,6 +179,12 @@ int32_t MemEntityDefault::UnReserveMemorySpace() noexcept
         return BM_OK;
     }
 
+    if (orchAcquired_) {
+        /* 先停常驻 epoch kernel 再解除段 VA 映射: kernel 轮询段尾保留区的请求环,
+         * VA 先拆会设备侧访问异常(kernel 异常退出且丢失退出诊断); 池销毁路径
+         * (smem_shm_destroy→hybm_unreserve_mem_space)早于编排器 Release, 故在此拦停 */
+        SdmaOrchestrator::GetInstance().StopEpoch();
+    }
     if (hbmSegment_ != nullptr) {
         hbmSegment_->UnReserveMemorySpace();
     }
@@ -239,25 +245,26 @@ int32_t MemEntityDefault::AllocLocalMemory(uint64_t size, hybm_mem_type mType, u
     if (ret != BM_OK) {             // meta 刷新失败
         return ret;
     }
-    return ConfigureOrchOnce(); // 段就绪后装配邮箱保留区与监督线程(幂等)
+    return ConfigureOrchOnce(slice); // 段就绪后装配邮箱保留区+常驻 kernel(幂等)
 }
 
-/* 段尾保留区初始化 + epoch 监督线程启动(首个 SDMA 池一次绑定;
+/* 段尾保留区初始化 + 常驻 epoch kernel 一次下发(首个 SDMA 池一次绑定;
  * 幂等: 后续切片分配直接返回) */
-Result MemEntityDefault::ConfigureOrchOnce()
+Result MemEntityDefault::ConfigureOrchOnce(hybm_mem_slice_t slice)
 {
     if (!orchAcquired_ || orchConfigured_) { // 非协同 entity 或已配置
         return BM_OK;                        // 幂等返回
     }
     const uint64_t ownSeg = reinterpret_cast<uint64_t>(hbmGva_) + options_.maxHBMSize * options_.rankId; // 本端段基址
     auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace,
-                                                              options_.maxHBMSize); // 保留区+监督线程
+                                                              options_.maxHBMSize); // 保留区+常驻 kernel
     if (ret != BM_OK) { // 配置失败(单池约束/非 2 幂 symm/清零失败)
         BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: "
                      << options_.rankId << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段
         return ret;
     }
     orchConfigured_ = true; // 绑定完成
+    orchSlice_ = slice;     // 记录协同池 slice(其释放路径须先停常驻 kernel)
     return BM_OK;           // 配置成功
 }
 
@@ -333,6 +340,14 @@ int32_t MemEntityDefault::FreeLocalMemory(hybm_mem_slice_t slice, uint32_t flags
         BM_LOG_ERROR("FreeLocalMemory: cannot resolve slice id="
                      << slice << ", neither hbmSegment_ nor dramSegment_ owns it; VaManager entry may leak");
         return BM_OK;
+    }
+
+    if (orchAcquired_ && orchConfigured_ && orchSlice_ == slice) {
+        /* 协同池 slice 释放前先停常驻 epoch kernel: kernel 轮询该 slice 段尾保留区
+         * 的请求环, 释放含 VA 解除映射, 先释放会设备侧访问异常(kernel 异常退出
+         * 丢诊断, 并连锁 507899); 池销毁(smem_shm_destroy)早于编排器 Release, 故
+         * 须在此拦停(StopEpoch 幂等, 后续 Release/UnReserve 再调为空操作) */
+        SdmaOrchestrator::GetInstance().StopEpoch();
     }
 
     if (transportManager_ != nullptr && !(options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA)) {

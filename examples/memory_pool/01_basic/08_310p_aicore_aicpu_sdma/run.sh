@@ -87,7 +87,7 @@ ensure_main_build()
     for lib in "${MAIN_LIBS[@]}"; do
         if [ ! -f "$lib" ]; then
             echo "[run.sh] 主库静态库缺失($lib), 自动触发主构建(XPU_TYPE=NPU, BUILD_PYTHON=OFF)..."
-            cmake -B "$ROOT/build" -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF
+            cmake -S "$ROOT" -B "$ROOT/build" -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF
             cmake --build "$ROOT/build" -j
             return 0
         fi
