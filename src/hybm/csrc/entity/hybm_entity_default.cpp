@@ -31,7 +31,7 @@
 namespace ock {
 namespace mf {
 
-thread_local bool MemEntityDefault::isSetDevice_ = false;
+thread_local int32_t MemEntityDefault::isSetDevice_ = -1;
 
 MemEntityDefault::MemEntityDefault(int id) noexcept : id_(id), initialized_(false) {}
 
@@ -830,6 +830,13 @@ int32_t MemEntityDefault::CopyData(hybm_copy_params &params, hybm_data_copy_dire
     auto ret = SetThreadAclDevice();
     BM_ASSERT_LOG_AND_RETURN(ret == BM_OK, "ret = " << ret, BM_ERROR);
 
+    int32_t curDevice = -1;
+    DlAclApi::AclrtGetDevice(&curDevice);
+    BM_LOG_INFO("CopyData enter: direction=" << direction << " curDevice=" << curDevice
+                                             << " entityDevId=" << options_.devId
+                                             << " src=" << VaToStr(params.src) << " dest=" << VaToStr(params.dest)
+                                             << " size=" << params.dataSize);
+
     ret = BM_OK;
     std::pair<uint32_t, uint32_t> p2pInfo;
     ret = LocateAddrAndRank(params.src, params.dest, p2pInfo);
@@ -1415,16 +1422,18 @@ int32_t MemEntityDefault::SetThreadAclDevice()
 #if !defined(ASCEND_NPU)
     return BM_OK;
 #endif
-    if (isSetDevice_) {
+    auto devId = static_cast<int32_t>(options_.devId);
+    if (isSetDevice_ == devId) {
         return BM_OK;
     }
-    auto ret = DlAclApi::AclrtSetDevice(HybmGetInitDeviceId());
+    auto ret = DlAclApi::AclrtSetDevice(devId);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("Set device id to be " << HybmGetInitDeviceId() << " failed: " << ret);
+        BM_LOG_ERROR("SetThreadAclDevice: AclrtSetDevice(" << devId << ") failed, ret: " << ret);
         return ret;
     }
-    isSetDevice_ = true;
-    BM_LOG_DEBUG("Set device id to be " << HybmGetInitDeviceId() << " success.");
+    isSetDevice_ = devId;
+    BM_LOG_INFO("SetThreadAclDevice: deviceId=" << devId << " success (was "
+             << (isSetDevice_ == -1 ? "unset" : std::to_string(isSetDevice_)) << ")");
     return BM_OK;
 }
 

@@ -122,11 +122,15 @@ bool HostDataOpAclMemcpy::IsD2HDirection(hybm_data_copy_direction direction) noe
 
 Result HostDataOpAclMemcpy::SubmitD2D(void *dest, const void *src, uint64_t length) noexcept
 {
-    // 同步 D2D 跨 die 返回 507899 不可用, 必须 async 提交(P0 实测 F15)
     auto ret = DlAclApi::AclrtMemcpyAsync(dest, length, src, length, ACL_MEMCPY_DEVICE_TO_DEVICE, stream_);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtMemcpyAsync(D2D) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
-                                                          << " dst:" << dest << " size:" << length);
+        BM_LOG_WARN("AclrtMemcpyAsync(D2D) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
+                                                         << " dst:" << dest << " size:" << length << ", retry sync");
+        ret = DlAclApi::AclrtMemcpy(dest, length, src, length, ACL_MEMCPY_DEVICE_TO_DEVICE);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("AclrtMemcpy(D2D fallback) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
+                                                                  << " dst:" << dest << " size:" << length);
+        }
     }
     return ret;
 }
@@ -172,8 +176,13 @@ Result HostDataOpAclMemcpy::CopyH2D(void *dest, const void *src, uint64_t length
 {
     auto ret = DlAclApi::AclrtMemcpyAsync(dest, length, src, length, ACL_MEMCPY_HOST_TO_DEVICE, stream_);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtMemcpyAsync(H2D) failed, ret:" << ret << " rankId:" << rankId_ << " dst:" << dest
-                                                          << " size:" << length);
+        BM_LOG_WARN("AclrtMemcpyAsync(H2D) failed, ret:" << ret << " rankId:" << rankId_ << " dst:" << dest
+                                                         << " size:" << length << ", retry sync");
+        ret = DlAclApi::AclrtMemcpy(dest, length, src, length, ACL_MEMCPY_HOST_TO_DEVICE);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("AclrtMemcpy(H2D fallback) failed, ret:" << ret << " rankId:" << rankId_ << " dst:" << dest
+                                                                  << " size:" << length);
+        }
         return ret;
     }
     ret = SyncStream();
@@ -190,10 +199,18 @@ Result HostDataOpAclMemcpy::CopyH2D(void *dest, const void *src, uint64_t length
 
 Result HostDataOpAclMemcpy::CopyD2H(void *dest, const void *src, uint64_t length) noexcept
 {
+    int32_t curDevice = -1;
+    DlAclApi::AclrtGetDevice(&curDevice);
     auto ret = DlAclApi::AclrtMemcpyAsync(dest, length, src, length, ACL_MEMCPY_DEVICE_TO_HOST, stream_);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtMemcpyAsync(D2H) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
-                                                          << " size:" << length);
+        BM_LOG_WARN("AclrtMemcpyAsync(D2H) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
+                                                         << " size:" << length << " curDevice:" << curDevice
+                                                         << " stream:" << stream_ << ", retry sync");
+        ret = DlAclApi::AclrtMemcpy(dest, length, src, length, ACL_MEMCPY_DEVICE_TO_HOST);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("AclrtMemcpy(D2H fallback) failed, ret:" << ret << " rankId:" << rankId_ << " src:" << src
+                                                                  << " size:" << length << " curDevice:" << curDevice);
+        }
         return ret;
     }
     ret = SyncStream();
