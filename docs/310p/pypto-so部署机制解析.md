@@ -268,9 +268,21 @@ flowchart TB
   §8），不依赖 `libtilefwk_backend_server.so`，也就**没有 PyptoNull 落盘
   部署那一环**（找不到 json 路径的预置库，json 三算子在此形态下无法走通）；
 - **A2/A3/A5（推断）**：json 三算子路径 + `libtilefwk_backend_server.so` 预置库
-  + PyptoNull 落盘激活（§4/§5 全流程）。CANN 9.1.0 内置的 pypto 0.2.1 wheel
-  面向 A2/A3/A5；本机 pypto 开发分支 `trunk_for_a1`（A1=310P/dav-2002）正是在
-  做 310P 适配。此形态本机无法验证（非目标平台）。
+  + PyptoNull 落盘激活（§4/§5 全流程）。此形态本机无法验证（非目标平台）。
+
+**版本关系澄清（防误读）**：不存在"CANN 内置的必须是某个 pypto 开发分支"的问题——
+CANN 内置 wheel 是官方发布产物，版本随 CANN 打包固定。本机 `/home/w00930648/pypto`
+检出的 `trunk_for_a1` 是 310P 适配**开发分支**（A1=310P/dav-2002，今日仍在提交），
+其 `pyproject.toml` 版本号 **0.2.1 与 CANN 9.1.0 内置 wheel 完全一致**——说明
+310P 适配成果已合入并随 CANN 9.1.0 正式发布（CANN 9.1.0 本身就是 310P 包，
+`opp/Ascend310P`），trunk_for_a1 是该发布基线之上的继续开发线。因此两形态是
+**同一版本 pypto 在不同平台上依赖不同的设备侧预置库**（310P：extend 库，实测；
+A2/A3/A5：tilefwk 库，推断），而非"不同平台用不同 pypto 版本"。代码层面两条
+路径的选择由构建开关与执行模式决定：双流模式 + 新 CANN 构建走 json 转发
+（`PyptoRun`，device_runner.cpp:358-361），三流模式恒走 KFC 直发
+（`AST_DYN_AICPU`，device_runner.cpp:501-563 无条件）——310P 上 PyptoNull 一环
+因设备无 tilefwk 库而执行失败，但 mode-0 json launch 是异步下发、失败仅记设备
+日志，不阻断后续 KFC 直发【推断】。
 
 注：探针用的是字符串匹配（grep），未区分导出符号表与普通字符串；但 KFC 机制
 本就按符号名解析，FAQ 报错也证明这些名字正是解析目标，证据足够。
