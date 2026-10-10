@@ -300,11 +300,13 @@ sequenceDiagram
 
 ### 8.1 场景一：请求邮件的生产通知（C1，AICore→AICPU）⚠️ 部分可行
 
-- **现状**：每投递一封请求邮件 = 32B 槽写 + 1 次 clean（邮件行）+ 游标 `REQ_TAIL` 写 + 1 次 clean
-- **方案**：32B 邮件**数据保留 GM**（定论 #1：AICore→AICPU 天然一致，AICPU 裸读即见）；`REQ_TAIL` 游标通知改 `set_cond(tail+1)`，AICPU 轮询映射的 SPR 0x4C8（第一部分 §3 finish 队列配方）
-- **收益**：每封邮件省 1 次 clean；AICPU 轮询从 GM 读变寄存器读（边际收益小）
-- **风险**：SPR 单槽 64 位——只搬"游标"不搬数据；`set_cond` 对 AICPU 的可见时序需实测；`tail+1` 递增天然满足序号防覆盖协议
-- **零成本子优化（先做）**：邮件数据的 clean 可能本就多余（读者只有 AICPU）——实测去掉后 mode13 八步闭环 mismatch=0 是否保持
+**"部分可行"的含义**：这条通知由两部分组成——32B 邮件数据 `{src,dst,len,imm}` + 8B 游标 `REQ_TAIL`（"有新邮件"信号）。SPR 单槽只有 64 位：32B 数据物理上进不去（`src/dst` 各占满 64 位；连续 set_cond 单槽互相覆盖不是队列），**数据只能留 GM**（好在定论 #1 AICore→AICPU 天然一致，AICPU 裸读本就便宜，留在 GM 损失不大）；**只有 8B 游标能寄存器化**。收益也随之为部分：每次 signal 的 2 次 clean 只能省 1 次（游标那次）。
+
+- **现状**：每投递一封请求邮件 = ① 写 32B 槽（4×volatile 64 位）+ ② clean 邮件行 + ③ 写游标 `REQ_TAIL` + ④ clean 游标行
+- **方案**：①②留 GM 不动；③④改 `set_cond(tail+1)`，AICPU 轮询映射的 SPR 0x4C8（第一部分 §3 finish 队列配方）
+- **收益**：每封邮件省 1 次 clean + 1 次游标 GM 写；AICPU 轮询从 GM 读变寄存器读（边际收益小）
+- **风险**：`set_cond` 对 AICPU 的可见时序需实测（pypto 握手场景实证过该通路，memfabric 高频连续通知场景需确认单槽协议）；`tail+1` 递增天然满足防覆盖序号
+- **零成本子优化（先做，可能白赚另一半）**：② 的邮件数据 clean 可能本就多余——邮件读者只有 AICPU（不经 SDMA），按定论 #1 天然一致，实测去掉后 mode13 八步闭环 mismatch=0 是否保持
 - **验证**：mode13 回归 + mode14 timeline 打点对比
 
 ### 8.2 场景二：背压与 ready 通知（C2，AICPU→AICore）✅ 配方现成
