@@ -110,7 +110,30 @@ PyPTO 上板执行是 **MPMD 模式**（Multiple Program Multiple Data，区别�
 | `0x4C8` | `REG_SPR_COND` | AICore 写 / AICPU 读 | **完成上报**：AICore 写完成状态，AICPU 轮询判断任务结束 |
 | `0x18` | `REG_SPR_FAST_PATH_ENABLE`（OPEN=0xE/CLOSE=0xF） | AICPU 写 | **快速通路开关**：握手后打开、core 退出前必须关闭 |
 
-### 3.1 一次完整任务往返（时序图）
+### 3.1 寄存器传什么、GM 传什么（单号 vs 账本）
+
+SPR 0xA0 只装得下一个 64 位值，而"任务"包含函数、参数、数据地址——**寄存器传的不是任务内容，是取任务的凭据**。pypto 的拆分（`aicore_manager.h:1479` 位域 + `aicore_entry.h` 消费链）：
+
+```
+64 位 encodeTaskId+1（位域压缩的定位字）：
+|--16bit--|--16bit--|-1bit-|-1bit----|-1bit--|--3bit--|--10bit--|--16bit--|
+| 上下文修改标志 | devtaskid | rsp | pingpong | dcci  | 并行索引 | func id | opindex |
+└- 高32位：任务上下文定位 -┘      └--- 低32位：leaf task 序号（执行哪个函数）---┘
+
+AICPU（先记账后按铃）：
+  ① SetParallelDevTask：ptrElements[i]=任务描述符地址 → 写 GM 账本（KernelArgs.parallelDevTask）
+  ② SetParallelDevTaskSize：发布 front/rear+版本
+  ③ SetReadyQueue：SPR 0xA0 = encodeTaskId+1 → 敲门铃
+AICore（收单号查账本）：
+  ① GetNextLeafTask：MOV DATA_MAIN_BASE → 低 32 位 = leaf task 序号
+  ② GetRegHighValue：高 32 位 = devtaskid+修改标志（决定是否 dcci 刷新账本）
+  ③ GetCoreFunctionData：读 GM 账本 ptrElements[idx] → 完整任务描述符（函数+参数）
+  ④ CallSubFuncTask：执行
+```
+
+顺序保证：先写 GM 账本、后敲寄存器门铃——门铃到 = 账本必就绪（与 memfabric SQE 对"标志到即数据到"同构）。派发槽单槽 + 双缓冲派发（running+pending）用 pingpong 位/并行索引区分，一次 64 位读同时捕获任务 ID 与上下文元数据（aicore_entry.h:214 注释：分开读会读到覆写后的值）。**"GM 账本 + 寄存器单号"模式已在 pypto 生产验证——memfabric 场景一的方案与此同构。**
+
+### 3.2 一次完整任务往返（时序图）
 
 ```mermaid
 sequenceDiagram
@@ -132,7 +155,7 @@ sequenceDiagram
     S->>S: 派发下一个任务
 ```
 
-### 3.2 关键 API 索引
+### 3.3 关键 API 索引
 
 | 侧 | API | 位置（pypto） | 功能 |
 |---|---|---|---|
