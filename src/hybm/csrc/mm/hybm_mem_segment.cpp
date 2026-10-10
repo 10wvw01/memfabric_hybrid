@@ -320,7 +320,7 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
      * for same-card, but cross-card 507899 indicates a real P2P failure. */
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
         Result ret = DlAclApi::AclrtDeviceEnablePeerAccess(remotePhyId, 0);
-        bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), remotePhyId);
+        bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(devicePhyId_), remotePhyId);
         if (ret != 0) {
             if (ret == ACL_ERROR_RT_DRV_INTERNAL_ERROR && sameCard) {
                 BM_LOG_INFO("same-card cross-die P2P rejected (507899), safe to ignore."
@@ -360,8 +360,8 @@ bool MemSegment::IsSameCard(uint32_t peerId) noexcept
      * Callers MUST pass the correct field based on Is310PAclPath(). */
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
         auto peerDevId = static_cast<int32_t>(peerId);
-        bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), peerDevId);
-        BM_LOG_DEBUG("310P3 IsSameCard: deviceId_=" << deviceId_ << " peerDevId=" << peerDevId
+        bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(devicePhyId_), peerDevId);
+        BM_LOG_DEBUG("310P3 IsSameCard: devicePhyId_=" << devicePhyId_ << " peerDevId=" << peerDevId
                                                     << " sameCard=" << sameCard);
         return sameCard;
     }

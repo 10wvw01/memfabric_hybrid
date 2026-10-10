@@ -255,6 +255,7 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
     HostSdmaExportInfo info;
     std::string exInfo;
     info.devicePhyId = devicePhyId_;
+    info.deviceUserId = static_cast<uint32_t>(deviceId_);
     info.magic = (options_.segType == HYBM_MST_DRAM) ? VMM_BASE_DRAM_SLICE_EXPORT_INFO_MAGIC
                                                      : VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
     info.version = EXPORT_INFO_VERSION;
@@ -536,6 +537,7 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
     }
 
     info.devicePhyId = devicePhyId_;
+    info.deviceUserId = static_cast<uint32_t>(deviceId_);
     info.magic = (options_.segType == HYBM_MST_DRAM) ? VMM_BASE_DRAM_SLICE_EXPORT_INFO_MAGIC
                                                      : VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
     info.version = EXPORT_INFO_VERSION;
@@ -718,9 +720,10 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
                          << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
                          << " peerDevicePhyId:" << im.devicePhyId);
     if (sameCard) {
-        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ctx trick: SetDevice(exporter:" << im.devicePhyId
-                             << ") for rank:" << im.rankId);
-        DlAclApi::AclrtSetDevice(static_cast<int32_t>(im.devicePhyId), true);
+        int32_t ctxDevId = static_cast<int32_t>(im.deviceUserId);
+        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ctx trick: SetDevice(exporter userId:" << ctxDevId
+                             << " phyId:" << im.devicePhyId << ") for rank:" << im.rankId);
+        DlAclApi::AclrtSetDevice(ctxDevId, true);
     }
     /* Check P2P accessibility before import */
     {

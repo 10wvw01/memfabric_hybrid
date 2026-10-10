@@ -34,7 +34,7 @@ struct HostSdmaExportInfo {
     uint32_t devicePhyId{0};
     uint64_t size{0};
     uint32_t physicalChipId{0};
-    uint32_t reserved_{0};
+    uint32_t deviceUserId{0};
     MemShareHandle shareHandle;
 }; // 200B
 
