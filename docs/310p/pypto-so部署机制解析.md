@@ -283,21 +283,45 @@ blockDim=1 下发），在本机 dev1 上实测：
   **KFC 直发路径**（`AiCpuArgs` 默认 `soName="libaicpu_extend_kernels.so"`，见
   §8），不依赖 `libtilefwk_backend_server.so`，也就**没有 PyptoNull 落盘
   部署那一环**（找不到 json 路径的预置库，json 三算子在此形态下无法走通）；
-- **A2/A3/A5（推断）**：json 三算子路径 + `libtilefwk_backend_server.so` 预置库
-  + PyptoNull 落盘激活（§4/§5 全流程）。此形态本机无法验证（非目标平台）。
+- **A2/A3/A5（弱推断，2026-10-12 降级）**：json 三算子路径 +
+  `libtilefwk_backend_server.so` 预置库 + PyptoNull 落盘激活（§4/§5 全流程）。
+  **降级原因见下方"关键修正"**：该路径在当前可查证的所有构建中均未启用，
+  "鸡"存在于哪个环境没有任何直接证据。
+
+**关键修正（2026-10-12 实测）：json 路径在当前构建中是被编译开关整体关闭的**
+
+`framework/src/machine/runtime/CMakeLists.txt:23` 中 `BUILD_WITH_NEW_CANN` 的
+定义**被注释掉**：
+
+```cmake
+#$<BUILD_INTERFACE:$<$<BOOL:${BUILD_WITH_CANN}>:BUILD_WITH_NEW_CANN>>
+```
+
+证据链（strings 实测，NEW_CANN 独有的日志串如 "Get BuiltIn FuncName" /
+"Get OpType" / "Load aicpu json failed" 只在 `#ifdef BUILD_WITH_NEW_CANN`
+函数体内出现）：
+
+| 构建产物 | NEW_CANN 独有串数量 | 判定 |
+|---|---|---|
+| CANN 9.1.0 内置 wheel（pypto 0.2.1）`libtile_fwk_runtime.so` | 0 | json 路径 inert |
+| 本地 trunk_for_a1 构建 `libtile_fwk_runtime.so` | 0 | 同上 |
+
+即：**当前 310P 形态（源码与发布物）里，json 三算子路径是"设计完备但未启用"
+的代码**——`GetBuiltInOpBinHandle` 函数体为空（json 文件仍会生成但从不加载）、
+`LaunchBuiltInOp` 空操作（PyptoNull 想发也发不出）、`LaunchDynamicAiCpu` 走
+`#else` 分支 KFC 直发。设备上没有"鸡"不是固件没部署到位，而是**此构建根本
+不需要鸡**。§4/§5 的鸡生蛋全流程描述适用于"解开该注释的未来/其他构建"。
 
 **版本关系澄清（防误读）**：不存在"CANN 内置的必须是某个 pypto 开发分支"的问题——
 CANN 内置 wheel 是官方发布产物，版本随 CANN 打包固定。本机 `/home/w00930648/pypto`
-检出的 `trunk_for_a1` 是 310P 适配**开发分支**（A1=310P/dav-2002，今日仍在提交），
-其 `pyproject.toml` 版本号 **0.2.1 与 CANN 9.1.0 内置 wheel 完全一致**——说明
-310P 适配成果已合入并随 CANN 9.1.0 正式发布（CANN 9.1.0 本身就是 310P 包，
-`opp/Ascend310P`），trunk_for_a1 是该发布基线之上的继续开发线。**同一版本 pypto 在不同平台上依赖不同的设备侧预置库**（310P：extend 库，实测；
-A2/A3/A5：tilefwk 库，推断），而非"不同平台用不同 pypto 版本"。代码层面两条
-路径的选择由构建开关与执行模式决定：双流模式 + 新 CANN 构建走 json 转发
-（`PyptoRun`，device_runner.cpp:358-361），三流模式恒走 KFC 直发
-（`AST_DYN_AICPU`，device_runner.cpp:501-563 无条件）。310P 上 PyptoNull 一环
-实测失败（§7.2 复刻下发：launch=0 / sync=507018）——launch 异步不阻断后续
-KFC 直发任务的下发，但错误在流同步点暴露。
+检出的 `trunk_for_a1` 是 310P 适配**开发分支**（A1=310P/dav-2002，仍在活跃提交），
+其 `pyproject.toml` 版本号 **0.2.1 与 CANN 9.1.0 内置 wheel 完全一致**，且两者
+NEW_CANN 开关状态一致（都关）——310P 形态已随 CANN 9.1.0 发布，trunk_for_a1
+是其继续开发线。代码层面两条路径的选择：`BUILD_WITH_NEW_CANN` 开启时双流模式
+走 json 转发（`PyptoRun`，device_runner.cpp:358-361）、三流模式恒走 KFC 直发
+（`AST_DYN_AICPU`，device_runner.cpp:501-563 无条件）；开关关闭时全部 KFC 直发
+（当前状态）。§7.2 复刻下发实测（launch=0 / sync=507018）验证的是"若 json 路径
+启用、设备又无预置库"时的失败形态。
 
 注：探针用的是字符串匹配（grep），未区分导出符号表与普通字符串；但 KFC 机制
 本就按符号名解析，FAQ 报错也证明这些名字正是解析目标，证据足够。
@@ -318,6 +342,12 @@ api success, but func is nullptr`——设备侧解析不到 pypto 符号，老�
 
 pypto 与 CANN 的版本配对（`docs/zh/install/build_and_install.md`）：CANN 8.5.0 ↔
 PyPTO 0.1.2；CANN 9.0.0 ↔ PyPTO 0.2.0（本机 CANN 9.1.0 内置 0.2.1）。
+
+**精确版本（`tools/prepare_env.sh` 硬编码，实测读取）**——官方环境准备脚本：
+设备类型仅支持 **a2 / a3**（参数校验"must be a2 or a3"，310P 不在官方清单）；
+驱动 = **Ascend HDK 25.3.RC1**（`Ascend-hdk-910b-npu-driver_25.3.rc1`（A2）/
+`Atlas-A3-hdk-npu-driver_25.3.rc1`（A3））；固件 = **7.8.0.2.212**（910b 与
+Atlas-A3 同版本）；CANN ops 包 = 9.0.0。
 
 ### 7.4 绕开鸡生蛋的证据链汇总
 
@@ -412,7 +442,7 @@ pypto 就是靠这条路径跑，json 三算子 + PyptoNull 落盘那套是 A2/A
 | F2 | 库字节拷到设备内存、指针存 `DeviceArgs`（代码直读） | 实测（代码） |
 | F3 | 落盘路径 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libpypto_server{设备号}.so`（代码直读） | 实测（代码） |
 | F4 | json 走模式 0 只登记不上传库内容；三个算子都指向预置库文件名 | 实测（代码） |
-| F5 | 预置库由华为签名固件通道部署到设备（承载方：驱动固件或 CANN 捆绑包，未定论）；版本要求驱动 ≥25.2.0、CANN ≥8.5.0 | **推断为主，证据链强**（F4 + FAQ 版本要求与 `func is nullptr` 报错 + 仓内无预部署代码 + F9/F10 实测佐证） |
+| F5 | ~~预置库由华为签名固件通道部署到设备~~ **2026-10-12 降级为未解**：json 路径在当前所有可查证构建中被编译关闭（F14），"鸡"存在于哪个环境无任何直接证据；签名通道能部署设备侧 so 本身仍是事实（extend 库实测在位），但"哪个包会带 tilefwk 预置库"仅剩 FAQ 版本要求一条间接线索 | **未解**（原"推断为主证据链强"的表述过强，修正） |
 | F6 | AICPU 常驻进程比主机进程活得久，函数表/幂等标志随之常驻 | **推断**（函数表机制成立的必要前提，代码结构强支持） |
 | F7 | 冷启动时初始化期的 `PyptoInit` 转发失败不阻断流程 | **推断**（算子返回码与流同步的关系未实测） |
 | F8 | KFC 直发路径在 310P 上是主路径：目标库 `libaicpu_extend_kernels.so` 设备在位且含真身符号（本机探针）；由 CANN extend_syskernels 捆绑包承载（命名对应 + 包在 CANN 内实测，未解包直证） | **半实测**（库与符号存在为实测；承载归因靠命名对应） |
@@ -421,3 +451,5 @@ pypto 就是靠这条路径跑，json 三算子 + PyptoNull 落盘那套是 A2/A
 | F11 | 本机 310P3 设备侧（dev1 探针）：无 `libtilefwk_backend_server.so`、无 `libpypto_server*.so`；有 `libaicpu_extend_kernels.so` 且含 `DynTileFwkKernelServer(Init)` 符号、不含转发桩符号；全机无 pypto 运行痕迹 | 实测（mini_kfc 布尔探针 + 负对照，2026-10-10） |
 | F12 | **json 三算子部署方案在本机 310P 上不可行**：复刻 PyptoNull json（逐字段同 `GenBuiltInOpInfo`）mode 0 加载后下发 → launch=0、sync=507018；阳性对照（KFCKernel+system）sync=0 排除方法问题。故 §4/§5 全流程（PyptoNull 落盘激活）在本机无法走通，310P 靠 KFC 直发路径 | 实测（dev1，2026-10-10） |
 | F13 | 理论变通：用 memfabric 部署链（CUST 迁移 + KFC 复制）把 wheel 内 `libtilefwk_backend_server.so` 补到设备搜索路径，可让 json 路径的库解析通过——即第三方通道可代行"第一次"预置。未实测（真跑通还需按 §5.2 构造合法 `DeviceArgs` 链，且须防零参直调真身函数导致设备进程空指针崩溃） | **推断**（部署机制层面成立，未验证） |
+| F14 | **json 三算子路径在当前构建中整体关闭**：`BUILD_WITH_NEW_CANN` 定义在 `framework/src/machine/runtime/CMakeLists.txt:23` 被注释；CANN 9.1.0 内置 wheel 与本地 trunk_for_a1 构建的 `libtile_fwk_runtime.so` 中 NEW_CANN 独有日志串（"Get BuiltIn FuncName"/"Get OpType"/"Load aicpu json failed"）均为 0。json 文件仍会生成但从不加载，PyptoNull 无从下发，全部走 KFC 直发 | 实测（CMake 源 + strings 双构建产物，2026-10-12） |
+| F15 | pypto 官方环境版本（`tools/prepare_env.sh` 硬编码）：设备仅 a2/a3；驱动 Ascend HDK 25.3.RC1（910b/Atlas-A3 driver 25.3.rc1）；固件 7.8.0.2.212；CANN ops 9.0.0 | 实测（脚本内容） |
