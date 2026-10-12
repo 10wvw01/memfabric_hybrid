@@ -31,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 9; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 11; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -75,22 +75,25 @@ struct HybmSdmaOrchResult {
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
 constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0005u; /* 结果区存活魔数 */
+constexpr uint32_t HYBM_SDMA_ORCH_EXIT_RUNNING = 0xFFFFFFFFu; /* 运行中(kernel 入口写, host 轮询判据) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_DEADLINE = 0;          /* 时限退出(正常续命) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_STOP = 1;              /* 停止退出(析构) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_ERROR = 2;             /* 错误退出 */
 
 /* SQE 配方与 HAL 弱符号(STARS V2 64B, hcomm 源码比对定论), 见 kernel 实现 */
-/* epoch 壁钟预算(秒): cntvct_el0 到点即 DEADLINE 自退。
- * v9 起 launch json 为 KFCKernel(type 5): aicpu-sd monitor 对该类型不计时
- * (ExecuteHWTSKFCEventTask 无 SetTaskStartTime, 与 CANN 自带 HcclKernelEntrance 同路径),
- * 28s 击杀约束解除——host 下发常驻哨兵, kernel 一次下发跑到停止标志/错误退出,
- * 不再有到期重拉(监督线程已删除)。预算字段保留兼容: 0=本默认值(旧 host),
- * 有限值=到期自退(诊断用)。禁止用循环次数×假设每轮耗时估算自退——usleep(100)
- * 实测 ≈130µs */
+/* epoch 时限(2026-10-12 定案, v11): KFCKernel(type 5) 执行环境下 cntvct_el0/cntfrq_el0
+ * 均不可用(v7 时代 type 2 实测正常, 换 type 5 后两 die 全失效——回退循环计数 22 万圈
+ * 实测 34s/15s 预算, 负载下漂移至 42~102s)。正解 = host 心跳时钟: host 监督线程每
+ * 100ms 以同步 AclrtMemcpy 往工作区 HEARTBEAT_OFF 写递增计数(同步调用返回即完成,
+ * 不给任何全设备同步留 pending 任务), kernel 主循环读心跳, 到 budgetS×10 即自退。
+ * 精度 100ms, 不受设备负载影响, 不依赖设备寄存器。 */
+constexpr uint32_t HYBM_SDMA_ORCH_HEARTBEAT_HZ = 10;  /* host 心跳频率(每 100ms 一跳) */
+/* 工作区心跳槽偏移(工作区布局: resultAddr 即基址, RESULT 0 / OVF 64 / STOP 128): */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF = 136; /* host 心跳计数 8B(每 100ms +1, kernel 读) */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
-constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 常驻哨兵(无墙钟/循环上限) */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 常驻哨兵(不判心跳, 诊断用) */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;       /* 空闲退避 100µs(实测 ≈130µs) */
-constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000;  /* 每 15s 预算的循环上限兜底(有限预算模式按比例放大) */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000;  /* 循环上限兜底(心跳停喂时防永跑; 每 15s 名额) */
 
 } // namespace mf
 } // namespace ock

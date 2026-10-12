@@ -90,9 +90,13 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
     EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);                       // ovf 在 result 后
     EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U);                   // stop 不压 ovf
     EXPECT_LE(HYBM_SDMA_ORCH_WS_STOP_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);                       // 落在 4KB 内
+    /* 心跳槽(v11 时限时钟): 不压 stop(可紧邻), 落在 4KB 内 */
+    EXPECT_GE(HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF, HYBM_SDMA_ORCH_WS_STOP_OFF + 8U);
+    EXPECT_LE(HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);
+    EXPECT_EQ(HYBM_SDMA_ORCH_EXIT_RUNNING, 0xFFFFFFFFu); // 运行中标记(host 轮询判据)
 }
 
-/* 用例 3b: v9 契约不变式(KFCKernel/type 5 免 28s monitor 计时, 常驻单发语义) */
+/* 用例 3b: 契约不变式(KFCKernel/type 5 免 28s monitor 计时; v10: 有限纪默认+freq 兜底) */
 TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 {
     /* 参数布局锁: rsv0→epochBudgetS 原位替换, 72B 总尺寸不变(旧 host 传 0 走默认 15s) */
@@ -105,7 +109,7 @@ TEST(SdmaOrchestratorTest, V9ResidentInvariants)
      * StopEpoch 的 sync 提前返回不等 kernel 退出; attr 缺省为默认超时 ≈6.4s 同样误杀 */
     EXPECT_EQ(HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S, 0U);
     /* 契约版本与 KVER 一致(部署链缓存刷新依赖) */
-    EXPECT_EQ(HYBM_SDMA_ORCH_KVER, 9U);
+    EXPECT_EQ(HYBM_SDMA_ORCH_KVER, 11U);
 }
 
 /* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; 仅存 host API) */

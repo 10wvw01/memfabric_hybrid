@@ -37,13 +37,14 @@
 
 /* hybm_sdma_orch_kernel.cc — epoch 消费 kernel(310P 设备发起 SDMA)
  *
- * 执行模型(v9 起 launch json 为 KFCKernel/type 5, 常驻单发): aicpu-sd monitor 对
- * type 5 任务不计时(aicpusd_event_manager.cpp ExecuteHWTSKFCEventTask 路径无
- * SetTaskStartTime, 与 CANN 自带 HcclKernelEntrance 同路径), 28s 击杀约束解除。
- * host 一次下发(param.epochBudgetS=常驻哨兵), kernel 跑到停止标志(host 析构写入)
- * 或错误退出为止——无到期重拉, host 监督线程已删除。
- * 有限预算模式保留(诊断用): param.epochBudgetS=秒数, cntvct_el0 到点自退。
- * 禁止循环次数×假设耗时估算自退——usleep(100) 实测 ≈130µs。
+ * 执行模型(v11 起 launch json 为 KFCKernel/type 5, 有限纪 + host 心跳时钟):
+ * aicpu-sd monitor 对 type 5 任务不计时(28s 击杀约束解除); 但该执行环境下
+ * cntvct_el0/cntfrq_el0 均不可用(v7 时代 type 2 正常, type 5 两 die 全失效,
+ * 2026-10-12 实测), epoch 时限改由 host 心跳驱动: 监督线程每 100ms 往工作区
+ * HEARTBEAT_OFF 写递增计数, kernel 主循环读之, 到 budgetS×10 跳即自退;
+ * 循环上限保留兜底(心跳停喂时防永跑)。host 收到退出后无缝重拉(环+游标零丢失)。
+ * 为什么不常驻: host 侧全设备同步(AclrtSynchronizeDevice, torch_npu 分配器内部
+ * 触发)等所有流的全部任务且无豁免——常驻 kernel 必阻塞它(serve 实测死因 507017)。
  *
  * 职责: 按序消费本端段尾保留区请求环的邮件 {src,dst,len,imm}, 逐封构造 SQE 三连:
  *   ① 数据 SQE(src→dst)
@@ -262,18 +263,14 @@ int32_t cp1LiveQuery(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
     return 0;
 }
 
-// 壁钟(AICPU 通用计数器; dav-2002 无 GetSystemCycle, cntvct_el0 为正解)
-inline uint64_t ReadWallClock()
+// host 心跳时钟槽: 工作区 HEARTBEAT_OFF(resultAddr 即工作区基址, RESULT_OFF=0)。
+// type 5 下 cntvct_el0/cntfrq_el0 均不可用(见文件头), 时限由 host 每 100ms 一跳驱动。
+inline uint64_t LoadHeartbeat(const volatile ock::mf::HybmSdmaOrchResult *result)
 {
-    uint64_t v;
-    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
-    return v;
-}
-inline uint64_t ReadClockFreq() // 计数器频率(Hz)
-{
-    uint64_t f;
-    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(f));
-    return f;
+    const uint64_t hbAddr =
+        reinterpret_cast<uint64_t>(result) + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF;
+    __asm__ __volatile__("dc civac, %0" ::"r"(hbAddr & ~static_cast<uint64_t>(63)) : "memory");
+    return *reinterpret_cast<volatile uint64_t *>(hbAddr);
 }
 
 // 结果写回并刷出(host 经 D2H 可读)
@@ -377,7 +374,8 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     result->magic = HYBM_SDMA_ORCH_RESULT_MAGIC;
     result->mainRet = 0;
     result->consumed = 0;
-    result->exitReason = HYBM_SDMA_ORCH_EXIT_DEADLINE; // 默认时限退出
+    result->exitReason = HYBM_SDMA_ORCH_EXIT_RUNNING; // 运行中(host 轮询判据: 变为终值即退出)
+    finishResult(result);                             // 入口状态刷出(host 立即可见 RUNNING)
     SqContext ctx = {};
     ctx.result = result;
     ctx.streamId = static_cast<uint32_t>(p->streamId);
@@ -392,24 +390,21 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     }
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     uint64_t head = loadCell(p->reqBase - SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_RS_REQ_HEAD); // 消费起点
-    /* 壁钟预算: 常驻哨兵(0xFFFFFFFF)下无墙钟/循环上限——跑到停止标志或错误退出
-     * (v9: type 5 免 monitor 计时, 一次下发常驻, 无到期重拉); 有限预算到期 DEADLINE
-     * 自退(诊断模式); 0 用默认 15s(兼容旧 host); freq 异常(0)时有限预算退回循环
-     * 计数兜底。禁止循环次数×假设耗时估算——usleep(100) 实测 ≈130µs */
+    /* 心跳预算(v11): 常驻哨兵不判心跳(诊断模式); 0 用默认 15s(兼容旧 host);
+     * 到 budgetS×10 跳自退——host 每 100ms 一跳, 精度 100ms, 不受设备负载影响。
+     * 循环上限保留兜底(心跳停喂时防永跑, 名额按 15s 预算折算)。 */
     const bool resident = (p->epochBudgetS == HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
     const uint32_t budgetS =
         (p->epochBudgetS == 0) ? HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S : p->epochBudgetS;
-    const uint64_t epochStart = ReadWallClock();
-    const uint64_t epochFreq = ReadClockFreq();
-    const uint64_t epochBudget =
-        (resident || epochFreq == 0) ? UINT64_MAX : static_cast<uint64_t>(budgetS) * epochFreq;
+    const uint64_t budgetTicks = static_cast<uint64_t>(budgetS) * HYBM_SDMA_ORCH_HEARTBEAT_HZ;
     const uint64_t maxLoops = resident ? UINT64_MAX
         : (static_cast<uint64_t>(HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS) * budgetS +
            HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S - 1) / HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S;
     constexpr uint32_t kDoorbellBatch = 8; // 攒批上限(环内积压时 N 封一铃降 HAL 开销; 单封场景批=1)
     for (uint64_t loops = 0; loops < maxLoops; loops++) {
-        if (epochBudget != UINT64_MAX && ReadWallClock() - epochStart >= epochBudget) {
-            break; // 壁钟到点(比任何超时机制早, 续命由 host 监督承担)
+        if (!resident && LoadHeartbeat(result) >= budgetTicks) {
+            result->exitReason = HYBM_SDMA_ORCH_EXIT_DEADLINE; // 时限到点(正常续命点)
+            break;
         }
         if (loadCell(p->stopAddr) != 0) { // 停止标志(host 析构)
             result->exitReason = HYBM_SDMA_ORCH_EXIT_STOP;

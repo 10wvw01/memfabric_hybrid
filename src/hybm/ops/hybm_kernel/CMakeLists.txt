@@ -96,7 +96,7 @@ set(SDMA_ORCH_JSON_CUST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/libmf_sdma_orch.json") 
 set(SDMA_ORCH_JSON_CUST_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.json") # CUST json 构建目录副本
 
 # 设备侧 launch 版本号(缓存变量): launch json 的 kernelSo 与部署链的复制目标名都用它
-set(MF_SDMA_ORCH_KVER "9" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
+set(MF_SDMA_ORCH_KVER "11" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
 # launch json 输出路径(文件名带版本号)
 set(SDMA_ORCH_JSON_LAUNCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch_v${MF_SDMA_ORCH_KVER}.json")
 
@@ -120,7 +120,7 @@ add_custom_command( # 复制 CUST json 到构建目录(deployer 迁移链用)
 )
 
 # launch json 按 MF_SDMA_ORCH_KVER 配置期生成 (kernelSo 指向设备侧版本名)。
-# v9: opKernelLib 切 KFCKernel(type 5)——aicpu-sd monitor 对该类型不计时
+# v9: opKernelLib 切 KFCKernel(type 5)——aicpu-sd monitor 对该类型不计时(v10: 壁钟 freq 兜底)
 # (ExecuteHWTSKFCEventTask 无 SetTaskStartTime), 28s 击杀约束解除;
 # CANN 自带 HcclKernelEntrance 同为 KFCKernel(opp/built-in/.../config/ccl_kernel.json)
 file(WRITE "${SDMA_ORCH_JSON_LAUNCH_OUT}" # 配置期生成 launch json(内容见下, 勿在串内加注释)
