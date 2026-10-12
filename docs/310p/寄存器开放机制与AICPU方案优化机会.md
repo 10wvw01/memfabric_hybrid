@@ -383,6 +383,7 @@ sequenceDiagram
   - 稳健性：设备 0/6 × CANN 9.0.0/9.1.0 四组一致；算子正确解析输入后才走到查询步（sqid=340），排除测试侧传参问题
   - **与 xcclpp 归档记录完全一致**（他们记录的 65534 即此内部返回码；"aicpu exception"是 AICPU 算子报错的标准外部表现）
   - **prop 级细节（解释 xcclpp 直查成功与算子失败并存）**：算子要查 `SQ_REG_BASE`(prop=5)——不在用户态 UIO 白名单（`trs_sqcq.c:1482`），走 ioctl 进内核 trs 撞三道墙 → 65534；而 xcclpp 直查的 `SQ_BASE`(prop=6) 在白名单内、直接读 CP1 用户态 trs 表（remote 注册建了表项）故成功——**断的恰好是门铃地址查询（场景三本尊）**
+  - **SQ_BASE vs SQ_REG_BASE（信箱 vs 门铃）**：前者是 SQE 环内存地址（数据面，"往哪写 SQE"），后者是寄存器页基地址（控制面，head/tail/**门铃 +0x8**）；内核 `trs_sq_remap` 本该映射 4 页（队列+head+tail+门铃），310P3 remote 注册只做了队列页（`IsHwSqMap=1` / `IsSqDbMap=0`）——**只有 SQ_BASE 时提交者必须能调 ioctl（→AICPU 编排，memfabric 现行）；有 SQ_REG_BASE 才能 kernel 内 MMIO 直敲门铃（→AICore 直驱，shmem 前提）——即"AICPU 中转 vs AICore 直驱"的分界线**
   - 另测 **host 侧 `aclrtCmoAsync` 返回 207000**（API 存在于 9.1.0 但 310P3 不可用）
   - **结论：310P3 上 StarsQuery 链路不通，断点 = HAL 查询 NOT_SUPPORT（与场景三"三道墙"中的①②吻合）**。310P3 驱动修复 remote 注册后，shmem 这套三步流程可直接作为 memfabric 的实现参照
 
