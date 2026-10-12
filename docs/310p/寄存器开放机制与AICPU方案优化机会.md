@@ -376,7 +376,8 @@ sequenceDiagram
   | c. 先在特制驱动机器测 CP 流 `IsSqDbMap` 是否=1 | 零改动，若=1 则直写直接可用 | 零（最优先） |
 - **有利条件**：kernel 侧 MMIO 直写分支与 prop=5 查询代码已就位（`submitSqe`/`cp1QueryProp`）；v43 勘正确认门铃硬件链路一直通（假成功根因=SQE type 字段），拿到有效 VA 后直写应能响；门铃物理位置明确（tail 寄存器 4K 槽+0x8 即硬件 `SQ_DB`，tsch 源码证实）
 - **遗留待验证**：zbal 式直写在 type 修正后未重测（矩阵数据是 type 错误时期测的）；特制驱动机器 `IsSqDbMap`
-- **未知项**：特制驱动 25.3.rc1.b099 机器上 CP 流 `IsSqDbMap` 是否=1 未测——若=1 则该机器 zbal 式直写可用，值得优先验证
+- **生产参照（2026-10-10 核查 shmem 仓 master@`0ab6ccc`，VERSION 1.7.0）**：CANN SHMEM **v1.3.0（2026-04-08 tag）已落地"AIV 直驱 STARS 驱动 SDMA"**——SDMA 特性 commit 2026-02-05、CMO 特性 2026-03-03，均早于 v1.3.0。三步流程代码属实：① Host 建 **CP 流**（`aclrtCreateStreamWithConfig(ACL_STREAM_DEVICE_USE_ONLY)` + `RtStreamGetSqid`，通道数上限 `ACLSHMEM_MAX_AIV_PER_NPU=72`，每 AIV 独立通道，`device_sdma_transport_manager.cpp:92-130`）② `AclnnShmemSdmaStarsQuery` 内置算子把 `stars_channel_info_t{sq_base, sq_reg_base, sq_depth, sq_id...}` 写入 GM workspace（`:251-259`，dlopen opapi 二段式调用）③ AIV 组装 64B SQE + dcci 刷 + **直写 doorbell `sq_reg_base+0x8`**（`shmem_device_sdma.hpp:331`；950/dav-3510 用 STARS v2 布局 offset 0x0）。CMO 预取同链路：`aclshmemx_cmo_nbi` + `stars_sdma_cmo_sqe_t`（当前仅支持 PREFETCH 类型），样例 `examples/cmo/` 三场景测试（不预取/Host 预取/Device 预取）与文章一致
+- **交叉印证（关键）**：shmem 这条链路与本文场景三**完全同构**——A2/A3 上 CP 流 remote 注册建立了 doorbell 映射（分离架构注册路径完整），所以"仅依赖现有接口、无需驱动改动"在 A2/A3 成立；310P3 断在同一处（xcclpp 实测 StarsQuery 查询点 NOT_SUPPORT / IsSqDbMap=0）。**310P3 驱动修复 remote 注册后，shmem 这套三步流程可直接作为 memfabric 的实现参照**。性能数字（小消息提升 80%+、CMO 接口 3.3us、预取 2~4 倍）仓库只有测试载体无结果数据，无法从代码核实
 
 ### 8.4 场景四：到达/完成检测（C4，SDMA→AICore）❌ 不可寄存器化
 
