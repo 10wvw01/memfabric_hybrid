@@ -377,7 +377,7 @@ sequenceDiagram
 - **有利条件**：kernel 侧 MMIO 直写分支与 prop=5 查询代码已就位（`submitSqe`/`cp1QueryProp`）；v43 勘正确认门铃硬件链路一直通（假成功根因=SQE type 字段），拿到有效 VA 后直写应能响；门铃物理位置明确（tail 寄存器 4K 槽+0x8 即硬件 `SQ_DB`，tsch 源码证实）
 - **遗留待验证**：zbal 式直写在 type 修正后未重测（矩阵数据是 type 错误时期测的）；特制驱动机器 `IsSqDbMap`
 - **生产参照（2026-10-10 核查 shmem 仓 master@`0ab6ccc`，VERSION 1.7.0）**：CANN SHMEM **v1.3.0（2026-04-08 tag）已落地"AIV 直驱 STARS 驱动 SDMA"**——SDMA 特性 commit 2026-02-05、CMO 特性 2026-03-03，均早于 v1.3.0。三步流程代码属实：① Host 建 **CP 流**（`aclrtCreateStreamWithConfig(ACL_STREAM_DEVICE_USE_ONLY)` + `RtStreamGetSqid`，通道数上限 `ACLSHMEM_MAX_AIV_PER_NPU=72`，每 AIV 独立通道，`device_sdma_transport_manager.cpp:92-130`）② `AclnnShmemSdmaStarsQuery` 内置算子把 `stars_channel_info_t{sq_base, sq_reg_base, sq_depth, sq_id...}` 写入 GM workspace（`:251-259`，dlopen opapi 二段式调用）③ AIV 组装 64B SQE + dcci 刷 + **直写 doorbell `sq_reg_base+0x8`**（`shmem_device_sdma.hpp:331`；950/dav-3510 用 STARS v2 布局 offset 0x0）。CMO 预取同链路：`aclshmemx_cmo_nbi` + `stars_sdma_cmo_sqe_t`（当前仅支持 PREFETCH 类型），样例 `examples/cmo/` 三场景测试（不预取/Host 预取/Device 预取）与文章一致
-- **交叉印证（关键）**：shmem 这条链路与本文场景三**完全同构**——A2/A3 上 CP 流 remote 注册建立了 doorbell 映射（分离架构注册路径完整），所以"仅依赖现有接口、无需驱动改动"在 A2/A3 成立；310P3 断在同一处（xcclpp 实测 StarsQuery 查询点 NOT_SUPPORT / IsSqDbMap=0）。**310P3 驱动修复 remote 注册后，shmem 这套三步流程可直接作为 memfabric 的实现参照**。性能数字（小消息提升 80%+、CMO 接口 3.3us、预取 2~4 倍）仓库只有测试载体无结果数据，无法从代码核实
+- **交叉印证（2026-10-12 一手实测修正）**：shmem 这条链路与本文场景三**完全同构**。A2/A3 上 CP 流 remote 注册完整故"仅依赖现有接口"成立；**310P3 断点一手实测**（测试载体 `/tmp/opencode/stars_test/`，基于 CANN 自带 `pto.bak/comm/async/sdma/sdma_workspace_manager.hpp` 完整复刻 shmem 三步流程，仅通道数 48→4）：CP 流创建成功、`aclnnShmemSdmaStarsQuery` 调用成功，但 AICPU 算子（libcpu_kernels.so `ShmemSdmaStarsQuery`）**执行时 aicpu exception（retCode=0x2a/507018）**——跨设备（0/6）、跨 CANN（9.0.0/9.1.0）结果一致。**修正**：此前引用 xcclpp"查询点同步返回 65534 NOT_SUPPORT"的表述不准确，真实形态是异步算子崩溃（闭源二进制，内部断点不可见）；底结论不变：**310P3 上 StarsQuery 链路不通**。另测 **host 侧 `aclrtCmoAsync` 返回 207000**（API 存在于 9.1.0 但 310P3 不可用）。**310P3 驱动修复 remote 注册后，shmem 这套三步流程可直接作为 memfabric 的实现参照**
 
 ### 8.4 场景四：到达/完成检测（C4，SDMA→AICore）❌ 不可寄存器化
 
@@ -424,6 +424,23 @@ sequenceDiagram
 ---
 
 # 附录
+
+## 11. 与 CANN SHMEM 直驱直通方案的对照与启发（2026-10-12）
+
+### 11.1 文章核查与一手实测
+
+CANN SHMEM 直驱直通文章（AIV 直驱 STARS 驱动 SDMA + CMO 缓存预取）代码级核查**属实**：v1.3.0（2026-04-08 tag）落地、当前 1.7.0；三步流程/CMO 接口/样例齐全（§8.3 生产参照）；性能数字（小消息 80%+、CMO 3.3us、预取 2~4 倍）为内部实测，仓库无数据不可核实。310P3 侧一手实测（测试载体 `/tmp/opencode/stars_test/`）：StarsQuery 算子 aicpu exception、host `aclrtCmoAsync` 返回 207000——**文章能力在 310P3 当前不可用，堵点与场景三重合**。
+
+### 11.2 对 memfabric 310P 通信优化的启发
+
+1. **AICPU 中转的性能天花板有了官方数据背书**：文章三方案对比明确 AICPU 中转"小消息带宽低、P99 大、调度不稳定（最大 6 核）"——memfabric 现行 AICPU 编排方案的小消息上限即此形态；本文场景一/二（通知链寄存器化，砍 AICPU 调度环节的缓存维护开销）正对该瓶颈
+2. **AICore 直驱有完整蓝图，310P3 堵点收敛为一个**：shmem 三步流程（CP 流→StarsQuery→AIV 直写 doorbell）是现成参照；310P3 的 StarsQuery/doorbell/CMO 堵点全部指向场景三的 SQ 通道信息获取 + doorbell 映射。**修好场景三解锁的不只是 AICPU 的 ioctl→MMIO 优化，而是整套 AICore 直驱（小消息 80%+ 的量级收益）**
+3. **混合架构选项（不修驱动可试）**：xcclpp v43 已证 AICPU kernel 内直查 `halSqCqQuery(SQ_BASE)` 成功——AICPU 编排 kernel 初始化时把 `sq_base` 查好写进协同工作区 GM，AICore kernel 从 GM 读后**自己组装 SQE**（不经 AICPU 逐笔中转）；唯一剩余堵点是 doorbell 直写（AICore 无法调 ioctl）
+4. **CMO 预取的下一步实验（可能立即可做）**：host 侧 `aclrtCmoAsync` 不可用（207000），但 **AICPU 可用现有 ioctl doorbell 提交 CMO SQE**（CMO 与数据 SQE 走同一 SQ 环）——值得实验：AICPU 编排 kernel 构造 CMO SQE（type=6 PREFETCH）提交，验证 310P3 固件是否执行。若通，"AICore 发预取请求邮件 → AICPU 构造 CMO SQE → SDMA 预取到 L2"立即可落地
+5. **池化场景放大预取收益**：文章 2~4 倍是本地 GM→L2（L2 命中 ~7TB/s vs GM ~1.6TB/s）；memfabric 的远端池数据访问延迟更高，预取掩盖收益理论上更大——修好直驱后值得做"远端池数据 L2 预取"专题
+6. **通道模型**：每核独立 CP 流（48/72 通道上限）避免多核共享 SQ 锁竞争——直驱修好后可借鉴
+
+---
 
 ## 附录 A 特制驱动 25.3.rc1.b099 证据链
 
