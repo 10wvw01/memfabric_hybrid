@@ -368,7 +368,11 @@ sequenceDiagram
   | 1. 根因 | CP1 remote SQ 注册 handler（`TsDrvNormalSqInfoInit`/`trsRemoteAllocResId`，xcclpp 定位 `trs_slave_event.c`/`tsdrv_id.c`，**不在开放仓**） | 注册时把 db 页 mmap 进 CP1（队列页已映 IsHwSqMap=1，同机制多映一页）填 `sq_ctrl.db`，`IsSqDbMap=1`——三道墙一次全解 | 闭源 |
   | 2. 查询侧 | `trs_sqcq.c:1482` UIO 白名单 | 加 `SQ_REG_BASE`（前提：位置 1 修好表里才有值） | 开放 |
   | 3. halMemCtl 路线 | `svm/v3/api/master/svm_mem_ctl.c:151` handler 表分发 | 新增 `ADDR_MAP_SQ_DB` handler；硬依赖：按 sqId 找 reg 物理页须内核 trs 管理该 SQ（墙①），仍绕回位置 1 | 开放但依赖闭源 |
-- **用户态"漏步骤"假设重新打开（2026-10-12 追查，P0 实验）**：hcomm（AICPU 生产参照）在查询前有一个我们没做的前置步骤——`StreamRestore(streamId)`（`aicpu_communicator.cc:185` → `halResourceIdRestore({ruDevId, tsId=0, resType=DRV_STREAM_ID, resId=streamId})`，头文件注释"**将流资源映射到custom进程**"），调用序 = restore → 查询 → 直写 SQE；xcclpp v43 复现时跳过了这步（当时判"本机无符号"）。**实测修正：cann-9.0.0 与 9.1.0 的 devlib（host+device 两版）`libascend_hal.so` 均有该符号**——这条官方跨进程恢复路线从未被真正试过。但 restore 是否建立门铃页映射（IsSqDbMap→1）**未知**（hcomm restore 后走 halSqCqConfig 门铃，不直写 reg_base；可能只补墙①不补墙②/固件注册）。**P0 实验**：xcclpp 部署链加载 kernel 进 CP1：①restore ②逐 prop 查（SQ_BASE/REG_BASE/HEAD/TAIL/STATUS）③结果写 GM——一次实验定论三道墙翻转几道
+- **用户态"漏步骤"假设定论（2026-10-12 CP1 实机实验，已关闭）**：hcomm 查询前确有 `StreamRestore` 前置步骤（`halResourceIdRestore`），xcclpp v43 复现时跳过。**CP1 实机验证**（xcclpp 部署链加载 `XcclppRestoreProbeRun` kernel，dev6）：
+  1. **基线 prop 级差异同机确认**：`BASE`(0xdfffd0190000)/`DEPTH`(1024)/`HEAD`/`TAIL` 可查，**`REG_BASE`=65534 NOT_SUPPORT**（门铃断点，一手证实）
+  2. **`halResourceIdRestore` 弱符号在 CP1 进程内未解析**（SYM_NULL）——hcomm StreamRestore 路线不可复现
+  3. **设备侧运行时库普查**（KFC 退出码探测）：设备上唯一的 `libascend_hal.so` 在 `/usr/lib64/`，**无 restore 符号**；host 侧 CANN devlib 副本有符号但属开发备份，不被设备进程加载（修正此前"9.0.0/9.1.0 有该符号"的判断——仅对 devlib 成立）
+  - **最终结论：不是漏步骤，也非 host 侧操作可补——设备侧运行时库不导出该 API，修复必须走固件/驱动更新（场景三位置 1）**。测试载体：xcclpp `aicpu-310p3/restore_probe.cc` + kernel `XcclppRestoreProbeRun`
 - **附带发现**：开放仓 `halMemCtl`（svm_mem_ctl.c:155）对未注册 type 返回 NOT_SUPPORT——普通驱动 ADDR_MAP 的 NOT_SUPPORT 很可能就是"handler 未注册"，特制驱动 25.3.rc1.b099 = 注册了 ADDR_MAP handler 的构建（解释 pypto"放行"机制）
   | 路径 | 改动 | 重量 |
   |---|---|---|
@@ -412,6 +416,7 @@ sequenceDiagram
 | 优先级 | 行动 | 类型 | 前置 |
 |---|---|---|---|
 | ~~P0~~ **已完成** | doorbell 现状确认 → **结论：CP 流 SQ 查不到 sqRegBase（IsSqDbMap=0），实走 halSqCqConfig**（§8.3 证据链：设备日志 + zbal 式实测失败 + tsch 源码两步注册分析） | 已验证 | — |
+| ~~P0~~ **已完成** | restore"漏步骤"假设 → **结论：设备侧运行时库（/usr/lib64/libascend_hal.so）不导出 halResourceIdRestore，CP1 内 SYM_NULL，不可复现；修复必须走固件/驱动**（§8.3 CP1 实机实验：REG_BASE=65534 / restore 符号未解析 / 设备侧库普查） | 已验证（CP1 实机） | — |
 | **P0** | 请求邮件数据 clean 必要性实测（定论 #1 反推） | 零成本实验 | 无 |
 | **P1** | 在特制驱动 25.3.rc1.b099 机器上验证 CP 流 `IsSqDbMap` 是否=1（若=1 则 zbal 式直写直接可用） | 实机验证 | 特制驱动机器 |
 | **P1** | 若需本机 MMIO doorbell → 改驱动/固件补齐 remote SQ 门铃两步注册（trs_sq_remap + CREATE 邮箱，闭源 handler 现跳过） | **改驱动/固件** | 驱动仓 |
