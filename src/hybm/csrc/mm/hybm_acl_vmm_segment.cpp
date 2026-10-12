@@ -46,13 +46,11 @@ Result HybmAclVmmSegment::ValidateOptions() noexcept
         return BM_INVALID_PARAM;
     }
     if (options_.rankCnt == 0 || options_.rankId >= options_.rankCnt) {
-        BM_LOG_ERROR("acl vmm segment invalid rank, rankId:" << options_.rankId
-                                                             << " rankCnt:" << options_.rankCnt);
+        BM_LOG_ERROR("acl vmm segment invalid rank, rankId:" << options_.rankId << " rankCnt:" << options_.rankCnt);
         return BM_INVALID_PARAM;
     }
     if (options_.maxSize > UINT64_MAX / options_.rankCnt) {
-        BM_LOG_ERROR("acl vmm segment size overflow, maxSize:" << options_.maxSize
-                                                               << " rankCnt:" << options_.rankCnt);
+        BM_LOG_ERROR("acl vmm segment size overflow, maxSize:" << options_.maxSize << " rankCnt:" << options_.rankCnt);
         return BM_INVALID_PARAM;
     }
     return BM_OK;
@@ -95,7 +93,7 @@ Result HybmAclVmmSegment::UnReserveMemorySpace() noexcept
         auto sliceRet = ReleaseSliceMemory(slices_.begin()->second.slice);
         if (sliceRet != BM_OK) {
             BM_LOG_ERROR("UnReserveMemorySpace ReleaseSliceMemory failed, ret:" << sliceRet
-                       << " rankId:" << options_.rankId);
+                                                                                << " rankId:" << options_.rankId);
             return sliceRet;
         }
     }
@@ -126,8 +124,8 @@ Result HybmAclVmmSegment::UnReserveMemorySpace() noexcept
 void HybmAclVmmSegment::FillMemProp(aclrtPhysicalMemProp &prop, aclrtMemAttr memAttr) const noexcept
 {
     prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-    prop.allocationType = aclrtMemAllocationType::ACL_MEM_ALLOCATION_TYPE_PINNED;
-    prop.memAttr = memAttr;
+    prop.allocationType = static_cast<uint32_t>(ACL_MEM_ALLOCATION_TYPE_PINNED);
+    prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
     prop.location.id = static_cast<uint32_t>(options_.devId);
     prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
 }
@@ -144,8 +142,7 @@ Result HybmAclVmmSegment::MallocPhysicalWithFallback(uint64_t size, aclrtDrvMemH
         ret = DlAclApi::AclrtMallocPhysical(&handle, size, &prop, 0);
     }
     if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtMallocPhysical failed, ret:" << ret << " rankId:" << options_.rankId
-                                                        << " size:" << size);
+        BM_LOG_ERROR("AclrtMallocPhysical failed, ret:" << ret << " rankId:" << options_.rankId << " size:" << size);
     }
     return ret;
 }
@@ -160,7 +157,7 @@ Result HybmAclVmmSegment::MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_
     }
 
     aclrtMemAccessDesc acc{};
-    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     acc.location.id = static_cast<uint32_t>(options_.devId);
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &acc, 1);
@@ -173,11 +170,10 @@ Result HybmAclVmmSegment::MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_
     return BM_OK;
 }
 
-Result HybmAclVmmSegment::RegisterAndExportSlice(const MemSlicePtr &slice, aclrtDrvMemHandle handle,
-                                                 uint64_t allocAddr, uint64_t size) noexcept
+Result HybmAclVmmSegment::RegisterAndExportSlice(const MemSlicePtr &slice, aclrtDrvMemHandle handle, uint64_t allocAddr,
+                                                 uint64_t size) noexcept
 {
-    auto vaRet = HybmVaManager::GetInstance().AddVaInfo({{allocAddr, allocAddr, allocAddr}, size,
-                                                         HYBM_MEM_TYPE_DEVICE},
+    auto vaRet = HybmVaManager::GetInstance().AddVaInfo({{allocAddr, allocAddr, allocAddr}, size, HYBM_MEM_TYPE_DEVICE},
                                                         options_.rankId);
     if (vaRet != BM_OK) {
         BM_LOG_ERROR("AddVaInfo failed, ret:" << vaRet << " rankId:" << options_.rankId
@@ -214,7 +210,8 @@ Result HybmAclVmmSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) no
     }
     if (allocatedSize_ + size > options_.maxSize) {
         BM_LOG_ERROR("AllocLocalMemory exceed maxSize, rankId:" << options_.rankId << " allocatedSize:"
-                   << allocatedSize_ << " reqSize:" << size << " maxSize:" << options_.maxSize);
+                                                                << allocatedSize_ << " reqSize:" << size
+                                                                << " maxSize:" << options_.maxSize);
         return BM_INVALID_PARAM;
     }
 
@@ -232,8 +229,8 @@ Result HybmAclVmmSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) no
     }
 
     try {
-        slice = std::make_shared<MemSlice>(sliceCount_, HYBM_MEM_TYPE_DEVICE, MEM_PT_TYPE_GVM, allocAddr, allocAddr,
-                                           size);
+        slice =
+            std::make_shared<MemSlice>(sliceCount_, HYBM_MEM_TYPE_DEVICE, MEM_PT_TYPE_GVM, allocAddr, allocAddr, size);
     } catch (...) {
         BM_LOG_ERROR("make MemSlice failed, rankId:" << options_.rankId << " sliceIndex:" << sliceCount_);
         (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
@@ -265,15 +262,14 @@ Result HybmAclVmmSegment::ExportInner(const MemSlicePtr &slice) noexcept
 {
     auto it = slices_.find(static_cast<uint32_t>(slice->index_));
     if (it == slices_.end()) {
-        BM_LOG_ERROR("ExportInner slice not found, sliceIndex:" << slice->index_
-                                                                << " rankId:" << options_.rankId);
+        BM_LOG_ERROR("ExportInner slice not found, sliceIndex:" << slice->index_ << " rankId:" << options_.rankId);
         return BM_INVALID_PARAM;
     }
 
     uint64_t sh = 0;
-    auto ret = DlAclApi::AclrtMemExportToShareableHandle(it->second.handle,
-                                                         aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
-                                                         ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &sh);
+    auto ret =
+        DlAclApi::AclrtMemExportToShareableHandle(it->second.handle, aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
+                                                  ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &sh);
     if (ret != BM_OK) {
         BM_LOG_ERROR("AclrtMemExportToShareableHandle failed, ret:" << ret << " rankId:" << options_.rankId
                                                                     << " sliceIndex:" << slice->index_);
@@ -299,8 +295,7 @@ Result HybmAclVmmSegment::ExportInner(const MemSlicePtr &slice) noexcept
     LiteralExInfoTranslater<AclVmmExportInfo> translator;
     std::string exInfo;
     if (translator.Serialize(info, exInfo) != 0) {
-        BM_LOG_ERROR("serialize export info failed, rankId:" << options_.rankId
-                                                             << " sliceIndex:" << slice->index_);
+        BM_LOG_ERROR("serialize export info failed, rankId:" << options_.rankId << " sliceIndex:" << slice->index_);
         return BM_ERROR;
     }
     try {
@@ -339,7 +334,7 @@ Result HybmAclVmmSegment::GetExportSliceSize(size_t &size) noexcept
 bool HybmAclVmmSegment::IsDiePair(uint32_t peerDevId) const noexcept
 {
     // 310P Duo: 同卡双 die 共享 PCIe 设备, user devId/2 相同即同卡 die 对
-    return peerDevId / 2U == static_cast<uint32_t>(options_.devId) / 2U;
+    return IsSamePhysicalCard(peerDevId, static_cast<uint32_t>(options_.devId));
 }
 
 uint64_t HybmAclVmmSegment::OwnSlotBase() const noexcept
@@ -358,15 +353,15 @@ bool HybmAclVmmSegment::IsImportInfoValid(const AclVmmExportInfo &info) const no
     // sliceIndex 与 size 必须落在对端 rank 的 slot 窗口内且 2M 对齐
     if (info.rankId >= options_.rankCnt) {
         BM_LOG_WARN("import info rankId out of range, localRank:" << options_.rankId << " remoteRank:" << info.rankId
-                    << " rankCnt:" << options_.rankCnt << ", skip");
+                                                                  << " rankCnt:" << options_.rankCnt << ", skip");
         return false;
     }
     if (info.size == 0 || info.size % HYBM_LARGE_PAGE_SIZE != 0 ||
         info.sliceIndex > (options_.maxSize / HYBM_LARGE_PAGE_SIZE) - 1U ||
         info.sliceIndex * HYBM_LARGE_PAGE_SIZE + info.size > options_.maxSize) {
-        BM_LOG_WARN("import info size/sliceIndex invalid, localRank:" << options_.rankId << " remoteRank:"
-                    << info.rankId << " sliceIndex:" << info.sliceIndex << " size:" << info.size
-                    << " maxSize:" << options_.maxSize << ", skip");
+        BM_LOG_WARN("import info size/sliceIndex invalid, localRank:"
+                    << options_.rankId << " remoteRank:" << info.rankId << " sliceIndex:" << info.sliceIndex
+                    << " size:" << info.size << " maxSize:" << options_.maxSize << ", skip");
         return false;
     }
     return true;
@@ -397,7 +392,7 @@ Result HybmAclVmmSegment::Import(const std::vector<std::string> &allExInfo, void
         auto key = (static_cast<uint64_t>(info.rankId) << 32U) | info.sliceIndex;
         if (importKeys_.count(key) != 0U) {
             BM_LOG_INFO("import info duplicated, localRank:" << options_.rankId << " remoteRank:" << info.rankId
-                        << " sliceIndex:" << info.sliceIndex << ", skip");
+                                                             << " sliceIndex:" << info.sliceIndex << ", skip");
             continue;
         }
         try {
@@ -408,7 +403,8 @@ Result HybmAclVmmSegment::Import(const std::vector<std::string> &allExInfo, void
             return BM_MALLOC_FAILED;
         }
         BM_LOG_INFO("acl vmm import info ok, localRank:" << options_.rankId << " remoteRank:" << info.rankId
-                   << " devId:" << info.devId << " sliceIndex:" << info.sliceIndex << " size:" << info.size);
+                                                         << " devId:" << info.devId << " sliceIndex:" << info.sliceIndex
+                                                         << " size:" << info.size);
     }
     return BM_OK;
 }
@@ -435,14 +431,15 @@ Result HybmAclVmmSegment::ImportHandleForDiePair(const AclVmmExportInfo &im, acl
     if (ret != BM_OK) {
         // shareableHandle 为内存导入凭据, 不落日志(防泄露), 以 remoteRank/sliceIndex 定位
         BM_LOG_ERROR("die pair import failed, ret:" << ret << " localRank:" << options_.rankId
-                   << " remoteRank:" << im.rankId << " sliceIndex:" << im.sliceIndex);
+                                                    << " remoteRank:" << im.rankId << " sliceIndex:" << im.sliceIndex);
     }
     // 恢复现场: 回本端 device 成功后线程才离开 expCtx, 此时销毁临时 ctx 才安全
     auto restoreRet = DlAclApi::AclrtSetDevice(options_.devId);
     if (restoreRet != BM_OK) {
         // SetDevice 失败时线程 current ctx 大概率仍是 expCtx, 销毁它会使线程上下文悬空,
         // 后续任意 ACL 调用随时崩溃; 宁可泄漏一个 ctx(进程退出由驱动回收), 不可摧毁线程现场
-        BM_LOG_WARN("SetDevice(own) restore failed, ret:" << restoreRet << " rankId:" << options_.rankId
+        BM_LOG_WARN("SetDevice(own) restore failed, ret:"
+                    << restoreRet << " rankId:" << options_.rankId
                     << ", skip DestroyContext to avoid dangling current ctx, peerDevId:" << im.devId);
     } else {
         (void)DlAclApi::AclrtDestroyContext(expCtx);
@@ -461,7 +458,7 @@ Result HybmAclVmmSegment::ImportOne(const AclVmmExportInfo &im) noexcept
         ret = DlAclApi::AclrtMemImportFromShareableHandle(im.shareableHandle, options_.devId, &handle);
         if (ret != BM_OK) {
             BM_LOG_ERROR("cross card import failed, ret:" << ret << " localRank:" << options_.rankId
-                       << " remoteRank:" << im.rankId << " peerDevId:" << im.devId);
+                                                          << " remoteRank:" << im.rankId << " peerDevId:" << im.devId);
         }
     }
     if (ret != BM_OK) {
@@ -478,28 +475,29 @@ Result HybmAclVmmSegment::MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrv
     auto ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(slotAddr), im.size, 0, handle, 0);
     if (ret != BM_OK) {
         BM_LOG_ERROR("AclrtMapMem(imported) failed, ret:" << ret << " rankId:" << options_.rankId
-                   << " remoteRank:" << im.rankId << " slotAddr:" << VaToStr(slotAddr) << " size:" << im.size);
+                                                          << " remoteRank:" << im.rankId
+                                                          << " slotAddr:" << VaToStr(slotAddr) << " size:" << im.size);
         (void)DlAclApi::AclrtFreePhysical(handle);
         return ret;
     }
 
     aclrtMemAccessDesc acc{};
-    acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     acc.location.id = static_cast<uint32_t>(options_.devId);
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(slotAddr), im.size, &acc, 1);
     if (ret != BM_OK) {
         BM_LOG_ERROR("AclrtMemSetAccess(imported) failed, ret:" << ret << " rankId:" << options_.rankId
-                   << " remoteRank:" << im.rankId << " slotAddr:" << VaToStr(slotAddr));
+                                                                << " remoteRank:" << im.rankId
+                                                                << " slotAddr:" << VaToStr(slotAddr));
         (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(slotAddr));
         (void)DlAclApi::AclrtFreePhysical(handle);
         return ret;
     }
 
     // 对称窗口: gva(导出方) 与本地 slot 同值; dva=hva=slotAddr 保证 TransformVa 直通
-    auto vaRet = HybmVaManager::GetInstance().AddVaInfoFromExternal({im.gva, slotAddr, slotAddr, im.size,
-                                                                     HYBM_MEM_TYPE_DEVICE},
-                                                                    options_.rankId, im.rankId);
+    auto vaRet = HybmVaManager::GetInstance().AddVaInfoFromExternal(
+        {im.gva, slotAddr, slotAddr, im.size, HYBM_MEM_TYPE_DEVICE}, options_.rankId, im.rankId);
     if (vaRet != BM_OK) {
         BM_LOG_ERROR("AddVaInfoFromExternal failed, ret:" << vaRet << " rankId:" << options_.rankId
                                                           << " remoteRank:" << im.rankId);
@@ -523,14 +521,14 @@ Result HybmAclVmmSegment::Mmap() noexcept
         }
         auto slotAddr = SlotBase(im.rankId) + im.sliceIndex * HYBM_LARGE_PAGE_SIZE;
         if (mappedGvaMem_.find(slotAddr) != mappedGvaMem_.end()) {
-            BM_LOG_INFO("remote slice already mapped, localRank:" << options_.rankId
-                        << " remoteRank:" << im.rankId << " slotAddr:" << VaToStr(slotAddr));
+            BM_LOG_INFO("remote slice already mapped, localRank:" << options_.rankId << " remoteRank:" << im.rankId
+                                                                  << " slotAddr:" << VaToStr(slotAddr));
             continue;
         }
         auto ret = ImportOne(im);
         if (ret != BM_OK) {
             BM_LOG_ERROR("ImportOne failed, ret:" << ret << " localRank:" << options_.rankId
-                        << " remoteRank:" << im.rankId << " sliceIndex:" << im.sliceIndex);
+                                                  << " remoteRank:" << im.rankId << " sliceIndex:" << im.sliceIndex);
             return ret;
         }
     }
@@ -598,7 +596,7 @@ Result HybmAclVmmSegment::RemoveImported(const std::vector<uint32_t> &ranks) noe
             auto ret = UnmapOne(it->first, it->second);
             if (ret != BM_OK) {
                 BM_LOG_ERROR("RemoveImported UnmapOne failed, ret:" << ret << " rankId:" << options_.rankId
-                           << " removeRank:" << rank);
+                                                                    << " removeRank:" << rank);
             }
             it = mappedGvaMem_.erase(it);
         }
@@ -614,20 +612,20 @@ Result HybmAclVmmSegment::ReleaseSliceMemory(const MemSlicePtr &slice) noexcept
     auto it = slices_.find(static_cast<uint32_t>(holder->index_));
     if (it == slices_.end()) {
         BM_LOG_ERROR("ReleaseSliceMemory slice not found, sliceIndex:" << holder->index_
-                    << " rankId:" << options_.rankId);
+                                                                       << " rankId:" << options_.rankId);
         return BM_INVALID_PARAM;
     }
 
     auto ret = DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(holder->vAddress_));
     if (ret != BM_OK) {
-        BM_LOG_ERROR("AclrtUnmapMem(own) failed, ret:" << ret << " rankId:" << options_.rankId
-                   << " sliceIndex:" << holder->index_ << " addr:" << VaToStr(holder->vAddress_));
+        BM_LOG_ERROR("AclrtUnmapMem(own) failed, ret:" << ret << " rankId:" << options_.rankId << " sliceIndex:"
+                                                       << holder->index_ << " addr:" << VaToStr(holder->vAddress_));
         return ret;
     }
     ret = DlAclApi::AclrtFreePhysical(it->second.handle);
     if (ret != BM_OK) {
         BM_LOG_ERROR("AclrtFreePhysical(own) failed, ret:" << ret << " rankId:" << options_.rankId
-                   << " sliceIndex:" << holder->index_);
+                                                           << " sliceIndex:" << holder->index_);
         return ret;
     }
     HybmVaManager::GetInstance().RemoveOneVaInfo(holder->vAddress_);
@@ -650,8 +648,7 @@ MemSlicePtr HybmAclVmmSegment::GetMemSlice(hybm_mem_slice_t slice, bool quiet) c
 bool HybmAclVmmSegment::MemoryInRange(const void *begin, uint64_t size) const noexcept
 {
     auto addr = reinterpret_cast<const uint8_t *>(begin);
-    return addr >= globalVirtualAddress_ && addr + size <= globalVirtualAddress_ + totalVirtualSize_ &&
-           size != 0;
+    return addr >= globalVirtualAddress_ && addr + size <= globalVirtualAddress_ + totalVirtualSize_ && size != 0;
 }
 
 bool HybmAclVmmSegment::IsLocalRange(const void *begin, uint64_t size) const noexcept

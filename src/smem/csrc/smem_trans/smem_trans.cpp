@@ -169,7 +169,14 @@ SMEM_API int32_t smem_trans_deregister_mem(smem_trans_t handle, void *address)
     SM_VALIDATE_RETURN(handle != nullptr, "invalid handle, which is null", SM_INVALID_PARAM);
     SM_VALIDATE_RETURN(address != nullptr, "invalid address, which is null", SM_INVALID_PARAM);
 
-    return SM_OK;
+    SmemTransEntryPtr entry;
+    auto result = SmemTransEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    if (result != SM_OK || entry == nullptr) {
+        SM_LOG_AND_SET_LAST_ERROR("get entry by handle failed, handle: " << handle << " result: " << result);
+        return result;
+    }
+
+    return entry->DeregisterLocalMemory(address);
 }
 
 SMEM_API int32_t smem_trans_write(smem_trans_t handle, const void *local_addr, const char *remote_unique_id,

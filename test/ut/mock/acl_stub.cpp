@@ -26,7 +26,7 @@ int32_t g_stubDestroyStreamCalls = 0;
 int32_t g_stubSetCurrentContextFail = 0; // 非 0 时 SetCurrentContext 返回错误(die 对导入防护用例)
 int32_t g_stubSetDeviceFail = 0;         // 非 0 时 SetDevice 返回错误(die 对导入恢复失败用例)
 int32_t g_stubDestroyContextCalls = 0;   // 计数: context 销毁次数(验证失败时跳过销毁)
-int32_t g_stubMallocP2pOom = 0;          // 非 0 时 memAttr=P2P(4/5) 的 MallocPhysical 返回 207001(分区 OOM 注入)
+int32_t g_stubMallocP2pOom = 0; // 非 0 时 memAttr=P2P(4/5) 的 MallocPhysical 返回 207001(分区 OOM 注入)
 }
 
 extern "C" {

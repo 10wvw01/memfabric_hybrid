@@ -13,10 +13,12 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include "devmm_svm_gva.h"
 #include "hybm.h"
 #include "hybm_ptracer.h"
 #include "hybm_common_include.h"
+#include "hybm_vmm_handle_registry.h"
 #include "mf_env_define.h"
 #include "hybm_gva.h"
 #include "hybm_version.h"
@@ -151,15 +153,28 @@ HYBM_API void hybm_uninit()
         }
     } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         if (g_baseAddr != 0) {
-            auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
-            BM_LOG_INFO("unmap meta info res: " << ret);
-            if (g_allocHandle != nullptr) {
-                ret = DlHalApi::HalMemRelease((drv_mem_handle_t *)g_allocHandle);
-                g_allocHandle = nullptr;
-                BM_LOG_INFO("release meta memory handle res: " << ret);
+            if (socType == AscendSocType::ASCEND_310P) {
+                auto unmapRet = DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("310P unmap meta res: " << unmapRet);
+                if (g_allocHandle != nullptr) {
+                    auto freeRet = DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
+                    g_allocHandle = nullptr;
+                    BM_LOG_INFO("310P free physical res: " << freeRet);
+                }
+                auto releaseRet = DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("310P release mem addr res: " << releaseRet);
+            } else {
+                auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("unmap meta info res: " << ret);
+                if (g_allocHandle != nullptr) {
+                    ret = DlHalApi::HalMemRelease((drv_mem_handle_t *)g_allocHandle);
+                    g_allocHandle = nullptr;
+                    BM_LOG_INFO("release meta memory handle res: " << ret);
+                }
+                ret = DlHalApi::HalMemAddressFree(reinterpret_cast<void *>(g_baseAddr));
+                BM_LOG_INFO("free meta memory res: " << ret);
             }
-            ret = DlHalApi::HalMemAddressFree(reinterpret_cast<void *>(g_baseAddr));
-            BM_LOG_INFO("free meta memory res: " << ret);
+            g_baseAddr = 0ULL;
         }
     } else {
         if (g_baseAddr != 0) {
@@ -213,6 +228,44 @@ HYBM_API const char *hybm_get_error_string(int32_t errCode)
     return info.c_str();
 }
 
+HYBM_API int32_t hybm_get_soc_type(void)
+{
+    return static_cast<int32_t>(DlAclApi::GetAscendSocType());
+}
+
+HYBM_API int32_t hybm_get_phy_chip_id(uint32_t deviceId)
+{
+    int64_t val = 0;
+    auto ret = DlAclApi::RtGetDeviceInfo(deviceId, 0, INFO_TYPE_PHY_CHIP_ID, &val);
+    if (ret != BM_OK) {
+        return -1;
+    }
+    return static_cast<int32_t>(val);
+}
+
+HYBM_API int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDeviceId)
+{
+    if (localDeviceId == peerDeviceId) {
+        return 0;
+    }
+    /* 310P3 Duo: deviceId/2 identifies the physical card.
+     * dev0/dev1 → card0, dev2/dev3 → card1, etc.
+     * Same card = no P2P needed. */
+    if (IsSamePhysicalCard(localDeviceId, peerDeviceId)) {
+        BM_LOG_INFO("hybm_enable_peer_access: same card by deviceId/2, local:" << localDeviceId
+                                                                               << " peer:" << peerDeviceId);
+        return 0;
+    }
+    auto ret = DlAclApi::AclrtDeviceEnablePeerAccess(static_cast<int32_t>(peerDeviceId), 0);
+    if (ret != 0) {
+        BM_LOG_ERROR("hybm_enable_peer_access failed:" << ret << " local:" << localDeviceId
+                                                       << " peer:" << peerDeviceId);
+        return ret;
+    }
+    BM_LOG_INFO("hybm_enable_peer_access: local:" << localDeviceId << " peer:" << peerDeviceId << " ret:" << ret);
+    return 0;
+}
+
 HYBM_API int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va)
 {
     if (va == nullptr) {
@@ -240,4 +293,111 @@ HYBM_API int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t 
 
     *va = convertedVa;
     return BM_OK;
+}
+
+HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size_t size)
+{
+    auto setRet = DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId), true);
+    if (setRet != 0) {
+        BM_LOG_ERROR("AclrtSetDevice failed, ret:" << setRet << " deviceId:" << deviceId);
+        return nullptr;
+    }
+
+    aclrtPhysicalMemProp prop{};
+    prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
+    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
+    prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
+    prop.location.id = deviceId;
+    prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+    prop.reserve = 0ULL;
+
+    size_t granularity = 0;
+    auto ret = DlAclApi::AclrtMemGetAllocationGranularity(&prop, 1U, &granularity);
+    if (ret != 0 || granularity == 0) {
+        BM_LOG_ERROR("AclrtMemGetAllocationGranularity failed, ret:" << ret << " deviceId:" << deviceId);
+        return nullptr;
+    }
+    size_t alignedSize = (size + granularity - 1) & ~(granularity - 1);
+
+    aclrtDrvMemHandle handle = nullptr;
+    ret = DlAclApi::AclrtMallocPhysical(&handle, alignedSize, &prop, 0);
+    if (ret != 0 || handle == nullptr) {
+        BM_LOG_ERROR("AclrtMallocPhysical failed, ret:" << ret << " deviceId:" << deviceId << " size:" << alignedSize);
+        return nullptr;
+    }
+
+    void *va = nullptr;
+    ret = DlAclApi::AclrtReserveMemAddress(&va, alignedSize, 0, nullptr, 0);
+    if (ret != 0 || va == nullptr) {
+        BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " deviceId:" << deviceId
+                                                           << " size:" << alignedSize);
+        DlAclApi::AclrtFreePhysical(handle);
+        return nullptr;
+    }
+
+    ret = DlAclApi::AclrtMapMem(va, alignedSize, 0, handle, 0);
+    if (ret != 0) {
+        BM_LOG_ERROR("AclrtMapMem failed, ret:" << ret << " deviceId:" << deviceId << " va:" << va);
+        DlAclApi::AclrtReleaseMemAddress(va);
+        DlAclApi::AclrtFreePhysical(handle);
+        return nullptr;
+    }
+
+    aclrtMemAccessDesc localDesc{
+        ACL_RT_MEM_ACCESS_FLAGS_READWRITE, {deviceId, aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE}, {}};
+    auto localAccessRet = DlAclApi::AclrtMemSetAccess(va, alignedSize, &localDesc, 1);
+    if (localAccessRet != 0) {
+        BM_LOG_ERROR("AclrtMemSetAccess(local) failed, ret:" << localAccessRet << " deviceId:" << deviceId
+                                                              << " va:" << va << " size:" << alignedSize);
+        DlAclApi::AclrtUnmapMem(va);
+        DlAclApi::AclrtReleaseMemAddress(va);
+        DlAclApi::AclrtFreePhysical(handle);
+        return nullptr;
+    }
+
+    for (uint32_t d = 0; d < worldSize; d++) {
+        if (d == deviceId) {
+            continue;
+        }
+        if (IsSamePhysicalCard(d, deviceId)) {
+            continue;
+        }
+        aclrtMemAccessDesc desc{
+            ACL_RT_MEM_ACCESS_FLAGS_READWRITE, {d, aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE}, {}};
+        auto r = DlAclApi::AclrtMemSetAccess(va, alignedSize, &desc, 1);
+        if (r != 0) {
+            BM_LOG_WARN("AclrtMemSetAccess for dev:" << d << " failed:" << r << " (non-fatal, may be set later)");
+        }
+    }
+
+    VmmHandleRegistry::Register(va, handle, deviceId);
+
+    BM_LOG_INFO("hybm_alloc_vmm_buffer success, deviceId:" << deviceId << " va:" << va << " size:" << alignedSize
+                                                           << " handle:" << handle);
+    return va;
+}
+
+HYBM_API void hybm_free_vmm_buffer(void *addr, size_t size)
+{
+    (void)size;
+    if (addr == nullptr) {
+        return;
+    }
+
+    aclrtDrvMemHandle handle = nullptr;
+    uint32_t deviceId = 0;
+    if (!VmmHandleRegistry::Unregister(addr, handle, deviceId)) {
+        BM_LOG_WARN("hybm_free_vmm_buffer: addr not found in registry, addr:" << addr);
+        return;
+    }
+
+    auto setRet = DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId), true);
+    if (setRet != 0) {
+        BM_LOG_ERROR("hybm_free_vmm_buffer AclrtSetDevice failed, ret:" << setRet << " deviceId:" << deviceId);
+    }
+    auto unmapRet = DlAclApi::AclrtUnmapMem(addr);
+    auto releaseRet = DlAclApi::AclrtReleaseMemAddress(addr);
+    auto freeRet = DlAclApi::AclrtFreePhysical(handle);
+    BM_LOG_INFO("hybm_free_vmm_buffer done, addr:" << addr << " handle:" << handle << " unmapRet:" << unmapRet
+                                                   << " releaseRet:" << releaseRet << " freeRet:" << freeRet);
 }

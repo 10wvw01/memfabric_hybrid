@@ -32,6 +32,7 @@
 #include "smem_trans_entry_manager.h"
 #include "mf_fault_injection_point.h"
 #include "smem_trans_entry.h"
+#include "topology_preflight.h"
 
 namespace ock {
 namespace smem {
@@ -143,6 +144,9 @@ void SmemTransEntry::UnInitialize()
 
     globalGroup_ = nullptr;
     if (entity_ != nullptr) {
+        std::unique_lock<std::mutex> uniqueLock{memMutex_};
+        CleanupRegisteredSlices();
+        uniqueLock.unlock();
         hybm_destroy_entity(entity_, 0);
         entity_ = nullptr;
     }
@@ -202,7 +206,7 @@ void SmemTransEntry::AddRemoteInfo(uint32_t rk, smem_trans_role_t role, WorkerId
     rankToWorkerId_[rk] = id;
     ranksRole_[rk] = role;
 
-    if (role == config_.role) { // same role, skip record
+    if (config_.role != SMEM_TRANS_BOTH && role == config_.role) { // same role, skip record
         return;
     }
     for (auto i = 0U; i < global.size(); i++) {
@@ -266,7 +270,7 @@ Result SmemTransEntry::JoinImport(std::unordered_map<uint32_t, std::string> &all
                 info.u.session.reserved = 0U;
                 WorkerIdUnion workerId{info.u.session};
                 id = workerId.workerId;
-                if (isEntity && role != config_.role) {
+                if (isEntity && (config_.role == SMEM_TRANS_BOTH || role != config_.role)) {
                     int ret = hybm_import(entity_, &info.hybmInfo, 1U, nullptr, HYBM_FLAG_EXPORT_ENTITY);
                     if (ret != SM_OK) {
                         SM_LOG_ERROR("hybm import entity failed, result: " << ret << " remote_rank:" << it.first
@@ -283,7 +287,7 @@ Result SmemTransEntry::JoinImport(std::unordered_map<uint32_t, std::string> &all
             }
         }
 
-        if (!hybmInfos.empty() && role != config_.role) {
+        if (!hybmInfos.empty() && (config_.role == SMEM_TRANS_BOTH || role != config_.role)) {
             global = std::vector<void *>(hybmInfos.size(), nullptr);
             int ret = hybm_import(entity_, hybmInfos.data(), hybmInfos.size(), global.data(), 0);
             if (ret != SM_OK) {
@@ -367,7 +371,7 @@ Result SmemTransEntry::UpdateHandle(uint32_t rk)
     int32_t ret = globalGroup_->GroupBarrierPrefixKey(rk, xinfo);
     SM_VALIDATE_RETURN(ret == SM_OK, "barrier prefix info failed, ret:" << ret, ret);
     auto role = (rk == rankId_) ? config_.role : QueryRole(rk);
-    if (rk != rankId_ && (role != SMEM_TRANS_BUTT && role != config_.role)) {
+    if (rk != rankId_ && (role != SMEM_TRANS_BUTT && (config_.role == SMEM_TRANS_BOTH || role != config_.role))) {
         SmemTransExchangeInfo info;
         std::vector<LocalMapAddress> local;
         std::vector<hybm_exchange_info> hybmInfos;
@@ -522,6 +526,17 @@ Result SmemTransEntry::RegisterLocalMemory(const void *address, uint64_t size, u
     return RegisterLocalMemories(regMemories, flags);
 }
 
+void SmemTransEntry::CleanupRegisteredSlices() noexcept
+{
+    for (auto &it : registeredSlices_) {
+        auto ret = hybm_free_local_memory(entity_, it.second.slice, 1, 0);
+        if (ret != 0) {
+            SM_LOG_ERROR("hybm_free_local_memory failed, address:" << it.first << " ret:" << ret);
+        }
+    }
+    registeredSlices_.clear();
+}
+
 Result SmemTransEntry::RegisterLocalMemories(const std::vector<std::pair<const void *, size_t>> &regMemories,
                                              uint32_t flags)
 {
@@ -550,9 +565,19 @@ Result SmemTransEntry::RegisterLocalMemories(const std::vector<std::pair<const v
     for (auto &m : mm) {
         auto ret = RegisterOneMemory(m.first, m.second, flags);
         if (ret != 0) {
+            SM_LOG_ERROR("RegisterOneMemory failed, address:" << m.first << " size:" << m.second
+                                                              << " rank:" << rankId_ << " ret:" << ret);
             registedInfo_.clear();
+            CleanupRegisteredSlices();
             return ret;
         }
+    }
+    auto topoRet = TopologyPreflight();
+    if (topoRet != SM_OK) {
+        SM_LOG_ERROR("topology preflight failed, rank:" << rankId_ << " ret:" << topoRet);
+        registedInfo_.clear();
+        CleanupRegisteredSlices();
+        return topoRet;
     }
     auto ret = Update(0);
     registedInfo_.clear();
@@ -650,6 +675,11 @@ Result SmemTransEntry::BatchQuantTransfer(smem_trans_quant_copy_param_t *params,
     SM_VALIDATE_RETURN(params->remoteAddrs != nullptr, "invalid remoteAddrs, which is null", SM_INVALID_PARAM);
     SM_VALIDATE_RETURN(params->dataSizes != nullptr, "invalid dataSizes, which is null", SM_INVALID_PARAM);
     SM_VALIDATE_RETURN(params->batchSize != 0, "invalid batchSize, which is 0", SM_INVALID_PARAM);
+    auto quantSocType = hybm_get_soc_type();
+    if (quantSocType == HYBM_SOC_TYPE_310P) {
+        SM_LOG_ERROR("quant write is not supported on 310P, socType:" << quantSocType);
+        return SM_ERROR;
+    }
     for (auto i = 0U; i < params->batchSize; i++) {
         SM_VALIDATE_RETURN(params->localAddrs[i] != nullptr, "localAddrs, which is null", SM_INVALID_PARAM);
         SM_VALIDATE_RETURN(params->remoteAddrs[i] != nullptr, "remoteAddrs, which is null", SM_INVALID_PARAM);
@@ -828,7 +858,56 @@ Result SmemTransEntry::RegisterOneMemory(const void *address, uint64_t size, uin
 
     info.u.address = LocalMapAddress(const_cast<void *>(address), size);
     registedInfo_.emplace_back(info);
+    registeredSlices_[address] = RegisteredSliceInfo{slice, size};
     return SM_OK;
+}
+
+Result SmemTransEntry::DeregisterLocalMemory(const void *address)
+{
+    if (entity_ == nullptr) {
+        SM_LOG_ERROR("not create entity, address:" << address);
+        return SM_ERROR;
+    }
+    if (address == nullptr) {
+        SM_LOG_ERROR("invalid address, which is null");
+        return SM_INVALID_PARAM;
+    }
+
+    constexpr auto NPU_PAGE_SIZE = 2UL * 1024UL * 1024UL;
+    constexpr auto NPU_PAGE_MASK = ~(NPU_PAGE_SIZE - 1UL);
+    auto pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(address));
+    auto alignedAddr = reinterpret_cast<const void *>(pointer & NPU_PAGE_MASK);
+
+    std::unique_lock<std::mutex> uniqueLock{memMutex_};
+    auto it = registeredSlices_.find(alignedAddr);
+    if (it == registeredSlices_.end()) {
+        SM_LOG_ERROR("address not found in registered slices, address:" << address << " alignedAddr:" << alignedAddr);
+        return SM_INVALID_PARAM;
+    }
+
+    auto ret = hybm_free_local_memory(entity_, it->second.slice, 1, 0);
+    if (ret != 0) {
+        SM_LOG_ERROR("hybm_free_local_memory failed, address:" << alignedAddr << " size:" << it->second.size
+                                                               << " ret:" << ret);
+        return SM_ERROR;
+    }
+
+    SM_LOG_INFO("deregistered memory, address:" << alignedAddr << " size:" << it->second.size << " rank:" << rankId_);
+    registeredSlices_.erase(it);
+    return SM_OK;
+}
+
+Result SmemTransEntry::TopologyPreflight()
+{
+    if (hybm_get_soc_type() != HYBM_SOC_TYPE_310P) {
+        return SM_OK;
+    }
+    if ((config_.dataOpType & SMEMB_DATA_OP_SDMA) == 0U) {
+        return SM_OK;
+    }
+
+    const uint32_t rankSize = globalGroup_ != nullptr ? globalGroup_->GetRankSize() : 0U;
+    return CheckTopologyP2PSlots(store_, rankId_, config_.deviceId, rankSize, 5000, "TRANS");
 }
 
 hybm_options SmemTransEntry::GenerateHybmOptions()

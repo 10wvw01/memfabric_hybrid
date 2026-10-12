@@ -58,12 +58,20 @@ void HybmStreamManager::DestroyAllThreadHybmStream()
 
 class AclrtStream {
 public:
-    explicit AclrtStream(void *stream) : stream_(stream) {}
+    explicit AclrtStream() : stream_(nullptr) {}
     ~AclrtStream()
     {
         if (stream_ != nullptr) {
             DlAclApi::AclrtDestroyStream(stream_);
         }
+    }
+    void *Get() const
+    {
+        return stream_;
+    }
+    void Reset(void *s)
+    {
+        stream_ = s;
     }
 
 private:
@@ -80,23 +88,34 @@ int HybmStreamManager::SetDevice(uint32_t devId)
     return BM_OK;
 }
 
+static thread_local AclrtStream g_threadAclStream;
+
 void *HybmStreamManager::GetThreadAclStream()
 {
-    static thread_local void *stream_ = nullptr;
-    if (stream_ != nullptr) {
-        return stream_;
+    if (g_threadAclStream.Get() != nullptr) {
+        return g_threadAclStream.Get();
     }
 #if defined(ASCEND_NPU)
+    void *stream = nullptr;
     static uint32_t ACL_STREAM_FAST_LAUNCH = 1U;
     static uint32_t ACL_STREAM_FAST_SYNC = 2U;
-    auto ret = DlAclApi::AclrtCreateStreamWithConfig(&stream_, 0, ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC);
+    auto ret = DlAclApi::AclrtCreateStreamWithConfig(&stream, 0, ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC);
     if (ret != 0) {
         BM_LOG_ERROR("create stream failed: " << ret);
         return nullptr;
     }
+    g_threadAclStream.Reset(stream);
 #endif
-    static thread_local AclrtStream aclrtStream_(stream_);
-    return stream_;
+    return g_threadAclStream.Get();
+}
+
+void HybmStreamManager::ResetThreadAclStream()
+{
+    if (g_threadAclStream.Get() == nullptr) {
+        return;
+    }
+    DlAclApi::AclrtDestroyStream(g_threadAclStream.Get());
+    g_threadAclStream.Reset(nullptr);
 }
 } // namespace mf
 } // namespace ock

@@ -106,6 +106,7 @@ public:
 
     Result RegisterLocalMemory(const void *address, uint64_t size, uint32_t flags);
     Result RegisterLocalMemories(const std::vector<std::pair<const void *, size_t>> &regMemories, uint32_t flags);
+    Result DeregisterLocalMemory(const void *address);
     Result SyncTransfer(void *localAddr, const std::string &remoteUniqueId, void *remoteAddr, size_t dataSize,
                         smem_bm_copy_type opcode, void *stream, uint32_t flags);
     Result BatchSyncTransfer(void *localAddrs[], const std::string &remoteUniqueId, void *remoteAddrs[],
@@ -141,6 +142,8 @@ private:
     void RemoveRanks(std::vector<uint32_t> &rankSet);
     Result ParseNameToUniqueId(const std::string &name, WorkerId &uniqueId);
     Result RegisterOneMemory(const void *address, uint64_t size, uint32_t flags);
+    void CleanupRegisteredSlices() noexcept;
+    Result TopologyPreflight();
     hybm_options GenerateHybmOptions();
     Result TransformAddr(Local2GlobalMap &maps, std::vector<void *> &addr, void *remoteAddrs[],
                          const size_t dataSizes[], uint32_t size);
@@ -153,6 +156,11 @@ private:
 
     std::mutex memMutex_;
     std::vector<SmemTransExchangeInfo> registedInfo_;
+    struct RegisteredSliceInfo {
+        hybm_mem_slice_t slice{nullptr};
+        uint64_t size{0};
+    };
+    std::unordered_map<const void *, RegisteredSliceInfo> registeredSlices_;
 
     const std::string name_;
     UrlExtraction storeUrlExtraction_;

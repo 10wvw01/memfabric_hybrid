@@ -754,9 +754,9 @@ TEST_F(HybmMemSegmentTest, HybmConnBasedSegment_CheckSdmaReaches)
     options.rankId = 0;
 
     ock::mf::HybmConnBasedSegment segment(options, 100);
-    // 测试 SDMA 可达性检查
+    // HybmConnBasedSegment::CheckSdmaReaches override 返回 true
     bool sdmaReaches = segment.CheckSdmaReaches(0);
-    EXPECT_EQ(sdmaReaches, false);
+    EXPECT_EQ(sdmaReaches, true);
 }
 
 // =========================

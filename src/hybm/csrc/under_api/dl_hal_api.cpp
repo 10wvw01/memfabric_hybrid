@@ -17,6 +17,7 @@
 
 #include "hybm_define.h"
 #include "hybm_logger.h"
+#include "dl_acl_api.h"
 #include "dl_hal_api.h"
 
 namespace ock {
@@ -139,7 +140,7 @@ Result DlHalApi::DcmiGetAffinityCpuInfo(int32_t deviceId, std::string &cpuList)
 
 Result DlHalApi::LoadHybmVmmLibrary(uint32_t gvaVersion)
 {
-    if (gvaVersion != HYBM_GVA_V4) {
+    if (gvaVersion != HYBM_GVA_V4 && DlAclApi::GetAscendSocType() != AscendSocType::ASCEND_310P) {
         BM_LOG_INFO("driver version is too old, not support vmm.");
         return BM_OK;
     }
