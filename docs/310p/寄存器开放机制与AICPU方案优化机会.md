@@ -377,7 +377,13 @@ sequenceDiagram
 - **有利条件**：kernel 侧 MMIO 直写分支与 prop=5 查询代码已就位（`submitSqe`/`cp1QueryProp`）；v43 勘正确认门铃硬件链路一直通（假成功根因=SQE type 字段），拿到有效 VA 后直写应能响；门铃物理位置明确（tail 寄存器 4K 槽+0x8 即硬件 `SQ_DB`，tsch 源码证实）
 - **遗留待验证**：zbal 式直写在 type 修正后未重测（矩阵数据是 type 错误时期测的）；特制驱动机器 `IsSqDbMap`
 - **生产参照（2026-10-10 核查 shmem 仓 master@`0ab6ccc`，VERSION 1.7.0）**：CANN SHMEM **v1.3.0（2026-04-08 tag）已落地"AIV 直驱 STARS 驱动 SDMA"**——SDMA 特性 commit 2026-02-05、CMO 特性 2026-03-03，均早于 v1.3.0。三步流程代码属实：① Host 建 **CP 流**（`aclrtCreateStreamWithConfig(ACL_STREAM_DEVICE_USE_ONLY)` + `RtStreamGetSqid`，通道数上限 `ACLSHMEM_MAX_AIV_PER_NPU=72`，每 AIV 独立通道，`device_sdma_transport_manager.cpp:92-130`）② `AclnnShmemSdmaStarsQuery` 内置算子把 `stars_channel_info_t{sq_base, sq_reg_base, sq_depth, sq_id...}` 写入 GM workspace（`:251-259`，dlopen opapi 二段式调用）③ AIV 组装 64B SQE + dcci 刷 + **直写 doorbell `sq_reg_base+0x8`**（`shmem_device_sdma.hpp:331`；950/dav-3510 用 STARS v2 布局 offset 0x0）。CMO 预取同链路：`aclshmemx_cmo_nbi` + `stars_sdma_cmo_sqe_t`（当前仅支持 PREFETCH 类型），样例 `examples/cmo/` 三场景测试（不预取/Host 预取/Device 预取）与文章一致
-- **交叉印证（2026-10-12 一手实测修正）**：shmem 这条链路与本文场景三**完全同构**。A2/A3 上 CP 流 remote 注册完整故"仅依赖现有接口"成立；**310P3 断点一手实测**（测试载体 `/tmp/opencode/stars_test/`，基于 CANN 自带 `pto.bak/comm/async/sdma/sdma_workspace_manager.hpp` 完整复刻 shmem 三步流程，仅通道数 48→4）：CP 流创建成功、`aclnnShmemSdmaStarsQuery` 调用成功，但 AICPU 算子（libcpu_kernels.so `ShmemSdmaStarsQuery`）**执行时 aicpu exception（retCode=0x2a/507018）**——跨设备（0/6）、跨 CANN（9.0.0/9.1.0）结果一致。**修正**：此前引用 xcclpp"查询点同步返回 65534 NOT_SUPPORT"的表述不准确，真实形态是异步算子崩溃（闭源二进制，内部断点不可见）；底结论不变：**310P3 上 StarsQuery 链路不通**。另测 **host 侧 `aclrtCmoAsync` 返回 207000**（API 存在于 9.1.0 但 310P3 不可用）。**310P3 驱动修复 remote 注册后，shmem 这套三步流程可直接作为 memfabric 的实现参照**
+- **交叉印证（2026-10-12 一手实测，双层证据）**：shmem 这条链路与本文场景三**完全同构**。A2/A3 上 CP 流 remote 注册完整故"仅依赖现有接口"成立；**310P3 断点一手实测**（测试载体 `/tmp/opencode/stars_test/`，CANN 自带 `pto.bak/comm/async/sdma/sdma_workspace_manager.hpp` 原样复刻 shmem 三步流程，仅通道数 48→4）：
+  - **Host API 层**：CP 流创建成功、`aclnnShmemSdmaStarsQuery` 调用返回 0、流同步失败（507018 aicpu exception）
+  - **设备日志层（决定性）**：`[shmem_sdma_stars_query.cc:97] halSqCqQuery base addr failed. ret = 65534 sqid:340`——算子内部 HAL 查询返回 **NOT_SUPPORT**，经 AICPU 标准错误通道（kernel failed → 流异常）上报，**非崩溃**
+  - 稳健性：设备 0/6 × CANN 9.0.0/9.1.0 四组一致；算子正确解析输入后才走到查询步（sqid=340），排除测试侧传参问题
+  - **与 xcclpp 归档记录完全一致**（他们记录的 65534 即此内部返回码；"aicpu exception"是 AICPU 算子报错的标准外部表现）
+  - 另测 **host 侧 `aclrtCmoAsync` 返回 207000**（API 存在于 9.1.0 但 310P3 不可用）
+  - **结论：310P3 上 StarsQuery 链路不通，断点 = HAL 查询 NOT_SUPPORT（与场景三"三道墙"中的①②吻合）**。310P3 驱动修复 remote 注册后，shmem 这套三步流程可直接作为 memfabric 的实现参照
 
 ### 8.4 场景四：到达/完成检测（C4，SDMA→AICore）❌ 不可寄存器化
 
