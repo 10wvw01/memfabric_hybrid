@@ -6,7 +6,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 演示**设备发起的计算-通信协同**（与 07 的 host 编排互补）：
 
 - **AICore kernel 产数据**（写池 GVA + 逐行 clean）→ `smem_shm_sdma_signal` 投递搬运
-- **AICPU epoch 编排 kernel 常驻消费**（v9 起 KFCKernel/type 5 免 28s monitor 计时，一次下发常驻运行至停止/错误，无到期重拉与监督线程）：
+- **AICPU 搬运 kernel 按时长分轮循环消费**（KFCKernel/type 5 任务不受设备侧 28 秒强制结束约束；每轮默认 15 秒，由**主机报时**驱动——监督线程每 100ms 往工作区写递增计数，kernel 数到"每轮秒数×10"就自己退出。为什么用主机报时：type 5 执行环境下读硬件时钟的寄存器全部失效（两 die 实测），kernel 自己按时长退出不可行，见平台事实 2026-10-12 定案。监督线程轮询结果区发现退出后清零计数、重新拉起新一轮——环+游标语义零丢失，换轮间隙约 100ms（轮询粒度）。为什么不一次下发跑到停止：主机侧全设备同步（torch_npu 分配显存时内部触发）会等所有流的全部任务且无豁免，永不退出的 kernel 必然阻塞它）：
   消费段尾保留区请求环 → SQE 三连（数据 + 到达戳 + 完成戳，批末 doorbell，FIFO 保序）
 - **对端 AICore `smem_shm_sdma_wait` 按序收件**（邮件 {dst,len,imm} 自描述落点 → 读改写 INC →
   回程 signal）；源缓冲复用前 `smem_shm_sdma_quiet`
@@ -61,7 +61,8 @@ gva 首参；高频路径 `smem_shm_sdma_reserved(gva)` 预计算 + `_at` 变体
 2. **掩盖量化**：①流水总时延 < ②串行总时延（输出加速比；串行基线含逐轮 launch 与
    轮间会合开销，加速比度量的是"批量流水 vs 逐轮往返"的合并收益，非纯通算掩盖——
    纯掩盖收益受 (T计算+T通信)/max(T计算,T通信) ≤ 2x 结构上限约束）
-3. `destroy`/`uninit`/`MPI_Finalize` 干净退出
+3. **④设备同步共存**：`AclrtSynchronizeDeviceWithTimeout(90s)`（分配器量级预算）在分轮运行下完成——等待 = 当前轮剩余（≤15s）。判据是"完成即过"（超时才会击杀 kernel / 报废池，即 serve 死因；等待数轮属延迟问题无碍）
+4. `destroy`/`uninit`/`MPI_Finalize` 干净退出
 
 > 注 1：双 rank 会合已由早期 `/tmp` 文件轮询改为 `MPI_Barrier`（无残留文件，同步粒度
 > 从 1ms 降到微秒级）。
@@ -100,8 +101,8 @@ export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root
 # 期望输出: 双方 "=== EX08 rN PASS ===" + r0 掩盖量化加速比(首轮含自动部署秒级开销)
 
-# 长驻 soak(可选, 验收常驻稳定性): 持续收发零丢失(v9 常驻单发, 无 epoch 边界)
-EX08_SOAK_ROUNDS=30000 bash run.sh --run-only   # ~35s, 期望 ③soak PASS(常驻 kernel 全程单任务)
+# 长稳测试(可选, 验收换轮无缝性): 跨轮边界持续收发零丢失(分轮运行+自动换轮)
+EX08_SOAK_ROUNDS=30000 bash run.sh --run-only   # ~46s, 期望 ③soak PASS(跨 ≥3 次换班, max 单轮 ~100ms=换班间隙)
 ```
 
 ## 与相关示例/实验的关系

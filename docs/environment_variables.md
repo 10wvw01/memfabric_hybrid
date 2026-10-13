@@ -17,7 +17,8 @@
 | `MF_HYBM_RDMA_SWAP_SPACE_SIZE` | NPU: 1GB<br>其他: 4GB | RDMA交换空间大小（单位MB），用于host_rdma/device_rdma数据传输的中转内存。 |
 | `MF_HYBM_URMA_SWAP_SPACE_SIZE` | 0 | URMA交换空间大小（单位MB），用于device_urma数据传输未注册内存的中转内存。设为0时跳过交换空间分配，未注册内存路径将直接返回错误。 |
 | `MF_HYBM_RDMA_FORCE_UNREGISTERED` | 0 | 强制RDMA跳过内存注册检查路径。设为非0值时，`BatchDataCopy`直接走未注册路径发起RDMA读写。 |
-| `MF_SDMA_ORCH_JSON` | 空 | 310P设备发起SDMA协同编排kernel的launch json路径（仅310P生效）。未设置时依次自动发现：安装前缀（库同级的`../hybm/aicpu_kernel/`）→ 当前目录下版本化json（`libmf_sdma_orch_v9.json`，文件名版本号随kernel版本递增）。 |
+| `MF_SDMA_ORCH_JSON` | 空 | 310P设备发起SDMA协同编排kernel的launch json路径（仅310P生效）。未设置时依次自动发现：安装前缀（库同级的`../hybm/aicpu_kernel/`）→ 当前目录下版本化json（`libmf_sdma_orch_v11.json`，文件名版本号随kernel版本递增）。 |
+| `MF_SDMA_ORCH_EPOCH_BUDGET_S` | 15 | 协同搬运kernel的每轮时长上限（秒）。到点自退后由库内监督线程重新拉起（环+游标语义零丢失）。取值：1~600按秒设限；0或非法值用默认15；4294967295=永不退出诊断模式（会阻塞任何全设备同步如torch_npu分配器内部同步，仅诊断用）。 |
 | `MF_SDMA_ORCH_DISABLE` | 空（默认启用） | 310P上显式禁用设备发起SDMA协同模式（仅诊断用）。设为`1`或`on`时建池不走协同路径，`smem_shm_sdma_get_workspace`返回NULL。 |
 | `MF_LOG_LEVEL` | 无 | MemFabric日志级别，取值范围0-4（0:DEBUG, 1:INFO, 2:WARN, 3:ERROR, 4:OFF）。**仅Python接口下生效，bm/shm场景不生效。** |
 | `MF_CONFIG_STORE_URL` | 无（必填） | MemFabric Store URL，用于Transfer Engine初始化时连接配置存储。格式如`tcp://ip:port`。 |
