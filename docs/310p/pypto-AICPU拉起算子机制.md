@@ -147,7 +147,7 @@ wheel 版本 so 经 GM 落盘成 `libpypto_server{设备号}.so` → 转发桩�
 
 - KFC 直发三调用点：`device_runner.cpp:427-434`（Init）/ `:530-550`（三流，无条件）/ `:364-387`（双流 else）；参数默认值 `machine_ws_intf.h:105-110`
 - NEW_CANN 开关（注释状态）：`framework/src/machine/runtime/CMakeLists.txt:23`
-- 真身入口：`dynamic/device_sche.cpp:45`；CTRL/SCHED/调度实现：`device_sche.h` / `device_ctrl.h` / `aicore_manager.h`
+- 真身源码：pypto 仓库 `framework/src/machine/device/`（构建目标 `tile_fwk_server`）——入口 `dynamic/device_sche.cpp:45,53`；分派 `device_sche.h:563`；CTRL `device_ctrl.h/.cpp`；SCHED `aicore_manager.h`；数据结构 `utils/dynamic/`。这是 pypto 自有的**设备侧 runtime**（host 侧在 `framework/src/machine/runtime/`），非 CANN 代码。**同一源码两份构建**：pypto 自建 → wheel 内 `libtilefwk_backend_server.so`（当前不部署不用）；华为随 CANN 构建 → 编进 `libaicpu_extend_kernels.so` 预置到设备（设备上实际跑的这份；华为所用 pypto 基线不可考，签名包不可解包，仅符号/日志串与仓库源码一致）
 - json 三件套源码：`load_aicpu_op.cpp`（json 生成/加载）、`pypto_aicpu_interface.{h,cpp}`（落盘+转发）
 - extend 库承载归因：CANN `opp/Ascend310P/aicpu/Ascend310P-aicpu_extend_syskernels.tar.gz`（`aa55aa` 签名格式，实测存在，未解包直证）——命名与库名对应
 - 方法论备注（误判复盘）：判断代码行为先看构建配置，再看构建产物 strings（分支独有日志串），最后才读源码分支——"代码存在且精致"不等于"代码在运行"（本档案曾因此误判，详见 git 历史 2026-10-12 修正记录）
