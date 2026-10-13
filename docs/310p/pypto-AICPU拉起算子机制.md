@@ -81,6 +81,32 @@ host 每次 launch
 └──────────────────────────────────────────────────────────┘
 ```
 
+### 2.4 三个常见疑问
+
+**Q：直发的两个入口具体干什么？**
+`DynTileFwkKernelServerInit`（进程 Init 一次）：日志开关、DeviceTrace、性能统计注册、
+**注册异常信号处理** `SignalReg(SigAct)`——出错时复位 AICore 寄存器
+（device_sche.cpp:45-62）。`DynTileFwkKernelServer`（每次执行 1+N 次）：runtime
+本体，按 runMode 分角色走 CTRL/SCHED 流程（device_sche.cpp:53-60 → device_sche.h:563）。
+
+**Q：AICPU 的代码 so 什么时候部署到设备？GM 里的拷贝怎么到文件系统？**
+**当前构建不部署、也没有"后面"**——GM 里那份 so 拷贝（`InitAiCpuSoBin`）是死重，
+唯一能把它写成设备文件的 `SaveSoFile`（PyptoNull 算子内）被编译开关关闭。实测设备
+上无 `libpypto_server*.so`：pypto 在设备文件系统里一个字节都没放过。设备上的
+extend 库是 **CANN/驱动装机升级时**经签名固件通道放的，与 pypto 运行无关（本机
+从未跑过 pypto，extend 库在；host 无其非签名副本）。"GM → 落盘 → 文件系统"是
+未启用的 json 三件套流程，勿与现行机制混淆。
+
+**Q：用户真的从不向 AICPU 下发算子吗？**
+**当前构建：是**——AICPU 下发点只有预置 runtime 两个入口；自定义算子下发机制
+（`LaunchCustomOp`/`CustomAiCpuSoLoad`/`AicpuKernelLaunch`，load_aicpu_op.cpp:77/106/127）
+函数体全在 `#ifdef BUILD_WITH_NEW_CANN` 内，产物实测为空。但**存在一条未启用的
+opt-in 路径**：`TileFwkAiCpuCompile`（compile_control_bin.cpp，环境变量
+`ENABLE_CTRLFLOW_COMPILE` 控制）把单个用户函数的控制流编成独立 so
+（`lib{函数名}_control.so`），注册为 CANN 自定义 AICPU 算子（`{func}Init/{func}Run`），
+mode=1 连 so 内容上传后 launch——该路径运行时同样被 NEW_CANN 开关关闭。
+
+
 ## 3. 事实清单（实机探针，2026-10-10/12/13）
 
 | # | 事实 | 结果 |
