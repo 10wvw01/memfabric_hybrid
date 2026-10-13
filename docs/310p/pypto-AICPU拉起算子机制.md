@@ -23,42 +23,61 @@
 
 ### 2.1 编译期（host 侧 JIT）
 
-用户 Python 代码被编译成三样产物：
+用户 Python 代码被编译成两样产物（AICPU 视角）：
 
-1. **CCE kernel**——AICore 上跑的计算代码（bisheng/ccec 工具链编译）；
-2. **控制流二进制**——AArch64 代码段，AICPU 上跑的用户循环/调度逻辑；
-3. **程序镜像（DevAscendProgram）**——控制流二进制 + 异构子图描述 + 任务编码表，
+1. **控制流二进制**——AICPU 上跑的用户代码：JIT 生成 C++ 源码
+   （`backend.cpp:525` BuildControlFlow，入口函数 `ControlFlowEntry`）→ CANN 交叉
+   工具链 `aarch64-target-linux-gnu-g++` 编成 **AArch64 机器码**（AICPU 即 ARM 核；
+   `backend.cpp:1103` 同时编 host 版用于仿真）→ objcopy 抽出 `.pypto` 代码段；
+2. **程序镜像（DevAscendProgram）**——控制流二进制 + 异构子图描述 + 任务编码表，
    打包成一个自描述的内存结构。
 
-### 2.2 每次执行（host 侧三步）
+（AICore 的 CCE kernel 是另一条编译线（bisheng/ccec），与本问题无关，不展开。）
+
+### 2.2 每次执行（host 侧两步，AICPU 视角）
 
 | 步 | 动作 | 源码坐标 |
 |---|---|---|
-| ① | 程序镜像 + 参数 H2D 拷到设备内存（GM），算子参数 `cfgdata` 指向它 | `device_runner.cpp:76-89`（CopyDataToDevice） |
-| ② | KFC 直发 `DynTileFwkKernelServer(Init)` 给 AICPU：进程 Init 直发一次 Init；每次执行直发 1 个 CTRL + N 个 SCHED（同一函数，靠参数 runMode 分角色） | `device_runner.cpp:427-434`（Init）、`:530-550`（三流 ctrl/sched）、`:364-387`（双流） |
-| ③ | CCE kernel 按正常通道下发 AICore | `device_runner.cpp:344-356` |
+| ① | 程序镜像 + 参数 H2D 拷到设备内存（GM），算子参数 `cfgdata` 指向它——**用户代码以数据身份进 GM** | `device_runner.cpp:76-89`（CopyDataToDevice） |
+| ② | KFC 直发 `DynTileFwkKernelServer(Init)` 给 AICPU：进程 Init 直发一次 Init；每次执行直发 1 个 CTRL + N 个 SCHED（同一函数，靠参数 runMode 分角色）——**这是唯一被"拉起"的算子，且是预置 runtime，不是用户代码** | `device_runner.cpp:427-434`（Init）、`:530-550`（三流 ctrl/sched）、`:364-387`（双流） |
+
+（AICore 的 CCE kernel 走正常 launch 通道，与"AICPU 上拉起算子"无关，此处不展开。）
 
 KFC 直发的机制：`RuntimeAicpuKernelLaunchExWithArgs(AICPU_KFC, "AST_DYN_AICPU", ...)`，
 真实函数名/库名写在参数里（`machine_ws_intf.h:105-110` 默认
 `kernelName="DynTileFwkKernelServer"`、`soName="libaicpu_extend_kernels.so"`），
 设备侧 `ae_kernel_lib_aicpu_kfc.cpp` 按名解析——和 mini_kfc 同一套机制。
 
-### 2.3 设备侧（预置 runtime 干活）
+### 2.3 设备侧：用户代码如何被"拉起"——**call，不是 launch**
+
+预置 runtime 在 CTRL AICPU 上执行到 `ctx.GELaunch(...)`（`device_ctrl.h:348`）时，
+从 GM 的程序镜像里取出 `ControlFlowEntry` 的**地址，当函数指针直接调用**：
+
+```cpp
+ControlFlowEntry(ctx, symbolTable, runtimeCallList[], startArgs)
+```
+
+用户机器码从此在 AICPU 上原生速度执行；需要 runtime 服务（分配内存、生成任务）时
+经 `runtimeCallList` 回调表反调 runtime（ROOT_ALLOC / ROOT_STITCH…）。
+**CANN 意义上的"算子拉起"只发生一次（预置 runtime）；用户的自定义算子在 AICPU
+上是被 runtime 当子程序 call 的机器码。**
+
+AICPU 上另有一类受限用户任务：`aicpuLeafCode`（如分布式 wait_until），编成 int32
+opcode 数组（`codegen_npu.cpp:725`）由 AicpuTaskManager 解码执行——字节码，非任意代码。
 
 ```
 host 每次 launch
-   │  ①程序镜像→GM   ②KFC直发×(1+N)   ③CCE kernel→AICore
+   │  ①程序镜像(含用户机器码)→GM   ②KFC直发runtime×(1+N)
    ▼
 ┌─ 设备 ─────────────────────────────────────────────────┐
 │ 【extend 库】(CANN 预装, >3MB, 含 server 真身代码)      │
 │   DynTileFwkKernelServer                                │
-│     ├─ CTRL AICPU (1核): 执行【控制流二进制】            │
-│     │    （用户循环/调度逻辑原生速度跑）                 │
-│     │    → 每轮生成任务塞进 SCHED 队列                  │
+│     ├─ CTRL AICPU (1核): GELaunch 取出 ControlFlowEntry │
+│     │    地址【call 用户机器码】(原生速度跑用户循环/调度)│
+│     │    → 用户码经回调表要服务 → 每轮生成任务进 SCHED  │
 │     ├─ SCHED AICPU (N核): 取任务→依赖就绪→              │
 │     │    写寄存器/GM 通知 AICore                        │
-│     └─ AICPU 自己也干小活（如分布式 wait 轮询）          │
-│   AICore: 轮询信箱取活 → 执行 CCE kernel → 通知完工     │
+│     └─ AICPU 自己也干小活（aicpuLeafCode 字节码任务）    │
 └──────────────────────────────────────────────────────────┘
 ```
 
