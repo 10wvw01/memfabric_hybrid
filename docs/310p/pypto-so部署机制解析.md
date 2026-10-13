@@ -67,6 +67,15 @@ memfabric 对同一问题的解法是 deployer（`CUSTAICPUKernel` 模式 1 迁�
 
 ## 4. 部署时序全景
 
+> **警示（2026-10-12 复核）**：本节与 §5 描述的 json 三算子 + PyptoNull 落盘流程
+> 在当前构建中**未启用**（`BUILD_WITH_NEW_CANN` 被注释，见 §7.2 关键修正）。
+> 当前实际执行链是三处 launch 全走 `#else` 分支的 KFC 直发：
+> ① 进程 Init 末尾直发 `DynTileFwkKernelServerInit`（extend 库，正常执行）；
+> ② 双流执行期直发 `DynTileFwkKernelServer`；③ 三流模式直发 ctrl/sched 两发
+> （device_runner.cpp:427-434 / 364-387 / 530-550）。`InitAiCpuSoBin` 无条件执行，
+> wheel 的 so 字节仍每次拷到 GM 但无人消费（死重）；json 文件仍生成但从不加载。
+> 本节以下内容保留作为"该机制启用后"的解析。
+
 ```mermaid
 sequenceDiagram
     participant H as 主机进程<br/>(DeviceRunner，进程内只初始化一次)
@@ -444,12 +453,12 @@ pypto 就是靠这条路径跑，json 三算子 + PyptoNull 落盘那套是 A2/A
 | F4 | json 走模式 0 只登记不上传库内容；三个算子都指向预置库文件名 | 实测（代码） |
 | F5 | ~~预置库由华为签名固件通道部署到设备~~ **2026-10-12 降级为未解**：json 路径在当前所有可查证构建中被编译关闭（F14），"鸡"存在于哪个环境无任何直接证据；签名通道能部署设备侧 so 本身仍是事实（extend 库实测在位），但"哪个包会带 tilefwk 预置库"仅剩 FAQ 版本要求一条间接线索 | **未解**（原"推断为主证据链强"的表述过强，修正） |
 | F6 | AICPU 常驻进程比主机进程活得久，函数表/幂等标志随之常驻 | **推断**（函数表机制成立的必要前提，代码结构强支持） |
-| F7 | 冷启动时初始化期的 `PyptoInit` 转发失败不阻断流程 | **推断**（算子返回码与流同步的关系未实测） |
+| F7 | ~~冷启动时初始化期的 `PyptoInit` 转发失败不阻断流程~~ **修正（2026-10-12）**：该场景仅存在于 NEW_CANN 构建的假设中；当前构建 Init 走 `#else` 直发 `DynTileFwkKernelServerInit`（extend 库有符号），正常执行、无失败环节 | 原推断作废（分析了错误的分支） |
 | F8 | KFC 直发路径在 310P 上是主路径：目标库 `libaicpu_extend_kernels.so` 设备在位且含真身符号（本机探针）；由 CANN extend_syskernels 捆绑包承载（命名对应 + 包在 CANN 内实测，未解包直证） | **半实测**（库与符号存在为实测；承载归因靠命名对应） |
 | F9 | CANN 9.1.0 内置 pypto 0.2.1 wheel（`aarch64-linux/lib64/pypto-0.2.1-cp37-abi3-*.whl`，pip 安装记录指向该路径） | 实测 |
 | F10 | CANN 9.1.0 `opp/Ascend310P/aicpu/` 下存在三种签名捆绑包（syskernels/extend_syskernels/legacy，`aa55aa` 文件头）；驱动 26.1.0 version.info 带 aicpu/tsfw/dvppkernels 版本字段 | 实测（包存在与格式；包内容未验） |
 | F11 | 本机 310P3 设备侧（dev1 探针）：无 `libtilefwk_backend_server.so`、无 `libpypto_server*.so`；有 `libaicpu_extend_kernels.so` 且含 `DynTileFwkKernelServer(Init)` 符号、不含转发桩符号；全机无 pypto 运行痕迹 | 实测（mini_kfc 布尔探针 + 负对照，2026-10-10） |
 | F12 | **json 三算子部署方案在本机 310P 上不可行**：复刻 PyptoNull json（逐字段同 `GenBuiltInOpInfo`）mode 0 加载后下发 → launch=0、sync=507018；阳性对照（KFCKernel+system）sync=0 排除方法问题。故 §4/§5 全流程（PyptoNull 落盘激活）在本机无法走通，310P 靠 KFC 直发路径 | 实测（dev1，2026-10-10） |
 | F13 | 理论变通：用 memfabric 部署链（CUST 迁移 + KFC 复制）把 wheel 内 `libtilefwk_backend_server.so` 补到设备搜索路径，可让 json 路径的库解析通过——即第三方通道可代行"第一次"预置。未实测（真跑通还需按 §5.2 构造合法 `DeviceArgs` 链，且须防零参直调真身函数导致设备进程空指针崩溃） | **推断**（部署机制层面成立，未验证） |
-| F14 | **json 三算子路径在当前构建中整体关闭**：`BUILD_WITH_NEW_CANN` 定义在 `framework/src/machine/runtime/CMakeLists.txt:23` 被注释；CANN 9.1.0 内置 wheel 与本地 trunk_for_a1 构建的 `libtile_fwk_runtime.so` 中 NEW_CANN 独有日志串（"Get BuiltIn FuncName"/"Get OpType"/"Load aicpu json failed"）均为 0。json 文件仍会生成但从不加载，PyptoNull 无从下发，全部走 KFC 直发 | 实测（CMake 源 + strings 双构建产物，2026-10-12） |
+| F14 | **json 三算子路径在当前构建中整体关闭**：`BUILD_WITH_NEW_CANN` 定义在 `framework/src/machine/runtime/CMakeLists.txt:23` 被注释；CANN 9.1.0 内置 wheel 与本地 trunk_for_a1 构建的 `libtile_fwk_runtime.so` 中 NEW_CANN 独有日志串（"Get BuiltIn FuncName"/"Get OpType"/"Load aicpu json failed"）均为 0。json 文件仍会生成但从不加载，PyptoNull 无从下发，全部走 KFC 直发。**实际执行链（2026-10-12 复核）**：Init 末尾 `LaunchAicpuServerInit` 走 `#else` 直发 `DynTileFwkKernelServerInit`（extend 库）正常执行；双流 `LaunchDynamicAiCpu` 走 `#else` 直发 `DynTileFwkKernelServer`；三流模式无条件直发 ctrl/sched 两发；`InitAiCpuSoBin` 无条件执行但 GM 拷贝无人消费 | 实测（CMake 源 + strings 双构建产物 + 代码分支复核，2026-10-12） |
 | F15 | pypto 官方环境版本（`tools/prepare_env.sh` 硬编码）：设备仅 a2/a3；驱动 Ascend HDK 25.3.RC1（910b/Atlas-A3 driver 25.3.rc1）；固件 7.8.0.2.212；CANN ops 9.0.0 | 实测（脚本内容） |
