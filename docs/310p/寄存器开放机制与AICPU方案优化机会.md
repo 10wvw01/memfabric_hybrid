@@ -729,3 +729,27 @@ kernel 头注释（:17）写"doorbell 走 halSqCqConfig (ioctl)"——**已验�
 | `sdk_driver/trsdrv/trs/trs_core/trs_hw_sqcq.c:1642,1670` | 内核查询（墙① proc_has_res） |
 | `sdk_driver/trsdrv/trs/trs_core/trs_sqcq_map.c:295` | trs_sq_remap（host 普通流 db 注册能力，参照物） |
 | `pkg_inc/ascend_hal_define.h:933,977-983` | CTRL_TYPE_ADDR_MAP=0 / addrMapType 枚举 |
+
+## 16. 附：halSqCqConfig(SQ_TAIL) 的完整九跳链路（2026-10-15 行号核实，回答"最终怎么写上寄存器"）
+
+```
+用户态: doorbellViaHal(hybm:199) → halSqCqConfig(:211)
+  → trs_sq_cq_config(trs_sqcq.c:1301; UIO直写:1313 因 db/tail=NULL 失败 → ioctl:1327)
+  → trs_dev_ioctl(trs_dev_drv.c:623)  ══ 系统调用 ══
+内核: ioctl分发表(trs_fops.c:1172) → ioctl_trs_sqcq_config(:319, copy_from_user)
+  → type分发(:315, DRV_NORMAL_TYPE→trs_hw_sqcq_config)
+  → trs_proc_has_res(trs_hw_sqcq.c:1518 — CP1 能过! 见下) 
+  → case SQ_TAIL(:1537) → trs_chan_ctrl(chan_rxtx.c:1016) → trs_chan_set_sq_tail(:413)
+  → ts_inst->ops.sqcq_ctrl(:418 函数指针, stars_v2_ops.c:342/:157)
+  → trs_stars_v2_chan_sqcq.c:249/:238 → trs_stars_set_sq_tail(trs_stars.c:187)
+  → ★ ka_mm_writel(tail, stars->base + sqid*stride + reg_offset)  ← 内核 iomem 直写 doorbell
+```
+
+**精化"三道墙"结论（重要）**：config 链的 has_res（:1518）实测能过（v43 全链 PASS）——
+**CP1 内核资源池里其实有这条 remote SQ**。故 prop=5 查询 65534 的真正断点是**墙②**
+（`trs_get_sq_reg_vaddr` 读 `reg_mem.uva`——remote SQ 注册未做 db 页 remap，uva 恒 0 →
+-EOPNOTSUPP），非墙①。与 IsHwSqMap=1/IsSqDbMap=0 自洽：队列页映了（BASE 可查），db 页
+没映（REG_BASE 不可查、kernel 不能直写、halSqCqConfig 的 UIO 快路径也是 NULL）。
+**R3 修复（补 db 页 remap）一改三收的机理由此完全闭环**：uva 被填 → prop=5 返回有效
+VA → kernel 直写 + halSqCqConfig UIO 化 + AICore 直驱全解锁；终点寄存器从来没变
+（`stars->base` ≡ 查不到的 `sqRegBase`），变的只是"谁能直达它"。
