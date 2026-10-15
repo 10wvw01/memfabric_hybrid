@@ -122,3 +122,79 @@ static int trs_core_stars_v2_ops_sqcq_reg_unmap(struct trs_id_inst *inst,
   → 行为与现状完全一致（**不会更糟**）。
 - **失败时的替代路线**：退回 §13 R3 位置 1（闭源 remote 注册 handler 补 db 页 mmap，
   走 `trs_sq_remap` 的页映射路线而非消息路线）。
+
+---
+
+# 六、交付物与操作指引（2026-10-15 实施完成）
+
+## 交付物（三件套，全就绪）
+
+| # | 物 | 位置 |
+|---|---|---|
+| 1 | **driver 仓改动分支** | `/home/w00930648/driver` 分支 `wgm-310p` @ commit `7b4467a`（60 行：2 函数迁移 + 1 include + ops 表 2 槽位） |
+| 2 | **标准 patch 文件** | 本目录 `0001-feat-trs-stars_v2-sqcq_reg_map-unmap-remote-SQ-doorb.patch`（`git am` 可直接应用） |
+| 3 | 源码坐标档案 | 寄存器文档 §17 + 本文档一~五章 |
+
+改动内容 = 本文第二节 Patch 的机器执行版（逐字一致，含注释）。核对基线：开源仓 master
+（gitcode.com/cann/driver）。
+
+## 构建步骤（在有内核构建环境的机器上）
+
+```bash
+# 0. 前置: 目标机(wwl机器)内核版本的内源码/头 + aarch64 工具链
+#    (wwl 机器: uname -r 取内核版本, /lib/modules/$(uname -r)/build 须存在)
+cd <driver仓> && git checkout wgm-310p
+
+# 1. 构建 (⚠ 见下方"构建目标警告")
+bash build.sh --pkg --soc=ascend910b -j16 \
+     -k /lib/modules/$(uname -r)/build
+
+# 2. 产物: 输出目录中的驱动 run 包
+```
+
+### ⚠ 构建目标警告（重要）
+
+开源仓 `build.sh` 只支持 `ascend910b / ascend910_93 / ascend950` 三个 `--soc`——
+**没有 310P3 专属构建目标**（310P3 驱动包是华为内部构建线出的，如 24.1.rc3）。
+两条路：
+
+| 路 | 操作 | 风险 |
+|---|---|---|
+| A. 自编（试） | `--soc=ascend910b` 构建（trsdrv/stars_v2 源码在同一树，会被编入） | 安装包元数据（芯片校验/固件配套）可能不匹配 310P3 机器——安装脚本可能拒绝；强行装需绕过校验 |
+| B. 提驱动团队（正规） | 把 `0001-*.patch` 交给驱动团队，在**内部 310P3 构建线**出版本 | 沟通周期 |
+
+**建议先走 B**（patch 即提交单元，根因注释在 commit message 里写全了）；A 作为快验证手段。
+
+## 装机与验证（装好驱动后）
+
+```bash
+# 1. 备份现驱动 (wwl 机器 24.1.rc3)
+cp -r /usr/local/Ascend/driver /root/driver_bak_24.1.rc3
+
+# 2. 安装自编/团队出的驱动包 (按包内说明; 注意版本号须 ≥24.1 以过 pypto 驱动门禁)
+
+# 3. 重启设备驱动 (或整机重启), 确认 npu-smi info 正常
+
+# 4. 验证链 (按序):
+#   4.1 创建 CP 流: 任意 CUST/CP 流程序 (如 memfabric mode13 前置)
+#   4.2 CP1 内查 prop=5:
+#        期望: halSqCqQuery(SQ_REG_BASE) 返回 0 且 value 非 0   ← 补丁生效判据
+#        (现值: 65534 NOT_SUPPORT; 测试载体: xcclpp cp1QueryProp / restore_probe)
+#   4.3 MMIO 直写: *(volatile u32*)(sqRegBase + 0x8) = newTail → SDMA 消费 (v43 通道回归)
+#   4.4 设备日志佐证: plog 搜 "IsSqDbMap=1" (原 IsHwSqMap=1 IsSqDbMap=0)
+
+# 5. 失败判定与回退:
+#   - 4.2 仍 65534 且 plog 出现 "Msg send fail" → 设备侧不支持 v2 的 SQ_REG_MAP 消息
+#     → 补丁无害 (uva 保持 0 = 现状), 退回文档 §13 R3 位置 1 (闭源 handler 补 db 页 mmap)
+#   - 驱动异常 → 回滚: 恢复 /root/driver_bak_24.1.rc3 + 重启
+```
+
+## 成功后的连锁收益（一改三收）
+
+```
+sq_ctx[sqid].reg_mem.uva 被填上
+  → prop=5 查询通 (内核 case :1668 读 uva 返回)
+  → hybm kernel 直写 doorbell: *(volatile u32*)(sqRegBase+0x8)=tail (ns 级, 替代逐笔 μs ioctl)
+  → halSqCqConfig 的 UIO 直写路径激活 (sq_ctrl.db 非空, trs_sqcq.c:1156)
+  → AICore 直驱 (shmem 三步流程) 在 310P3 解锁 — 小消息 80%+ 量级收益的门
+```

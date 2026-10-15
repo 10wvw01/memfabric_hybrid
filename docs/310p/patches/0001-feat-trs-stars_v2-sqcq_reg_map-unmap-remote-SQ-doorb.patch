@@ -1,0 +1,113 @@
+From 7b4467a4488b43adcdceb10357e0482d0e806f48 Mon Sep 17 00:00:00 2001
+From: wgm <wgm@local>
+Date: Thu, 15 Oct 2026 09:28:14 +0000
+Subject: [PATCH] =?UTF-8?q?feat(trs):=20stars=5Fv2=20=E8=A1=A5=E9=BD=90=20?=
+ =?UTF-8?q?sqcq=5Freg=5Fmap/unmap=20=E2=80=94=20remote=20SQ=20doorbell=20?=
+ =?UTF-8?q?=E5=AF=84=E5=AD=98=E5=99=A8=E9=A1=B5=E6=98=A0=E5=B0=84=20(?=
+ =?UTF-8?q?=E8=87=AA=20v1=20=E8=BF=81=E7=A7=BB)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+根因: v2 适配层 .sqcq_reg_map/.sqcq_reg_unmap 置 NULL, remote(CP流) SQ 注册时
+reg_mem.uva 恒 0 → halSqCqQuery(SQ_REG_BASE) NOT_SUPPORT(65534) → 用户态/kernel
+无法 MMIO 直写 doorbell, 逐笔 ioctl.
+
+机制: TRS_MSG_SQ_REG_MAP 同步邮箱(带 remote_tgid) → 设备侧映射回填 sq_map.va
+→ trs_set_sq_reg_vaddr 填内核 uva. 参照 v1: trs_core_stars_v1_ops.c:72-115.
+
+安全性: 设备侧不支持该消息时发送返回错误, uva 保持 0, 行为与未打补丁一致.
+---
+ .../stars_v2/trs_core_stars_v2_ops.c          | 62 ++++++++++++++++++-
+ 1 file changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/src/sdk_driver/trsdrv/trs/lba/near/comm/adapt/trs_host_core/stars_v2/trs_core_stars_v2_ops.c b/src/sdk_driver/trsdrv/trs/lba/near/comm/adapt/trs_host_core/stars_v2/trs_core_stars_v2_ops.c
+index c47d1f9..fe1f3b0 100644
+--- a/src/sdk_driver/trsdrv/trs/lba/near/comm/adapt/trs_host_core/stars_v2/trs_core_stars_v2_ops.c
++++ b/src/sdk_driver/trsdrv/trs/lba/near/comm/adapt/trs_host_core/stars_v2/trs_core_stars_v2_ops.c
+@@ -27,6 +27,7 @@
+ #include "trs_pm_adapt.h"
+ #include "trs_core_near_ops_mbox.h"
+ #include "trs_core_near_ops.h"
++#include "trs_h2d_msg.h"
+ #include "trs_host_msg.h"
+ #include "trs_id_range.h"
+ #include "trs_core_stars_v2_ops.h"
+@@ -104,6 +105,63 @@ static int trs_core_stars_v2_ops_notice_proc_release(struct trs_id_inst *inst, i
+     return ret;
+ }
+ 
++/*
++ * wgm-310p: SQ doorbell 寄存器页映射同步 (自 stars_v1 trs_core_stars_v1_ops.c:72-115 迁移).
++ * 背景: v2 适配层曾将 .sqcq_reg_map/.sqcq_reg_unmap 置 NULL, 导致 remote(CP流) SQ 注册时
++ *       reg_mem.uva 恒 0 → halSqCqQuery(SQ_REG_BASE) 返回 NOT_SUPPORT → 用户态/kernel
++ *       无法 MMIO 直写 doorbell, 只能逐笔 ioctl (halSqCqConfig).
++ * 机制: 同步邮箱 TRS_MSG_SQ_REG_MAP (带 remote_tgid) → 设备侧完成映射并回填 sq_map.va
++ *       → trs_set_sq_reg_vaddr 填入内核 sq_ctx[sqid].reg_mem.uva.
++ * 安全: 设备侧若不支持该消息, 发送返回错误, uva 保持 0, 行为与未打补丁一致.
++ */
++static int trs_core_stars_v2_ops_sqcq_reg_map(struct trs_id_inst *inst,
++                                              struct trs_sqcq_reg_map_para *para)
++{
++    struct trs_msg_sqcq_sync *msg_sqcq_sync = NULL;
++    struct trs_msg_data msg;
++    int ret;
++
++    msg.header.cmdtype = TRS_MSG_SQ_REG_MAP;
++    msg.header.valid = TRS_MSG_SEND_MAGIC;
++    msg.header.tsid = inst->tsid;
++    msg_sqcq_sync = (struct trs_msg_sqcq_sync *)msg.payload;
++    msg_sqcq_sync->remote_tgid = para->host_pid;
++    msg_sqcq_sync->bind_sqcq.stream_id = para->stream_id;
++    msg_sqcq_sync->sq_id = para->sqid;
++    msg_sqcq_sync->cq_id = para->cqid;
++    ret = trs_host_msg_send(inst->devid, &msg, sizeof(struct trs_msg_data));
++    if ((ret != 0) && (ret != -ESRCH)) {
++        trs_err("Msg send fail. (devid=%u; ret=%d)\n", inst->devid, ret);
++        return ret;
++    }
++    (void)trs_set_sq_reg_vaddr(inst, para->sqid, msg_sqcq_sync->sq_map.va, msg_sqcq_sync->sq_map.size);
++    return ret;
++}
++
++static int trs_core_stars_v2_ops_sqcq_reg_unmap(struct trs_id_inst *inst,
++                                                struct trs_sqcq_reg_map_para *para)
++{
++    struct trs_msg_sqcq_sync *msg_sqcq_sync = NULL;
++    struct trs_msg_data msg;
++    int ret;
++
++    msg.header.cmdtype = TRS_MSG_SQ_REG_UNMAP;
++    msg.header.valid = TRS_MSG_SEND_MAGIC;
++    msg.header.tsid = inst->tsid;
++    msg_sqcq_sync = (struct trs_msg_sqcq_sync *)msg.payload;
++    msg_sqcq_sync->remote_tgid = para->host_pid;
++    msg_sqcq_sync->bind_sqcq.stream_id = para->stream_id;
++    msg_sqcq_sync->sq_id = para->sqid;
++    msg_sqcq_sync->cq_id = para->cqid;
++    ret = trs_host_msg_send(inst->devid, &msg, sizeof(struct trs_msg_data));
++    if (ret != 0) {
++        trs_err("Msg send fail. (devid=%u; ret=%d)\n", inst->devid, ret);
++        return ret;
++    }
++    (void)trs_set_sq_reg_vaddr(inst, para->sqid, 0, 0);
++    return ret;
++}
++
+ static struct trs_core_adapt_ops trs_core_stars_v2_ops = {
+     .owner = KA_THIS_MODULE,
+     .cq_mem_alloc = trs_core_ops_cq_mem_alloc,
+@@ -116,8 +174,8 @@ static struct trs_core_adapt_ops trs_core_stars_v2_ops = {
+     .hw_cqe_to_logic_cqe = trs_core_stars_v2_ops_cqe_to_logic_cqe,
+     .is_drop_cqe = trs_core_stars_v2_ops_is_drop_cqe,
+     .notice_ts = trs_core_stars_v2_ops_notice_ts,
+-    .sqcq_reg_map = NULL,
+-    .sqcq_reg_unmap = NULL,
++    .sqcq_reg_map = trs_core_stars_v2_ops_sqcq_reg_map,
++    .sqcq_reg_unmap = trs_core_stars_v2_ops_sqcq_reg_unmap,
+     .get_res_reg_offset = NULL,
+     .get_res_reg_total_size = NULL,
+     .get_sq_trigger_irq = NULL,
+-- 
+2.34.1
+
