@@ -753,3 +753,28 @@ kernel 头注释（:17）写"doorbell 走 halSqCqConfig (ioctl)"——**已验�
 **R3 修复（补 db 页 remap）一改三收的机理由此完全闭环**：uva 被填 → prop=5 返回有效
 VA → kernel 直写 + halSqCqConfig UIO 化 + AICore 直驱全解锁；终点寄存器从来没变
 （`stars->base` ≡ 查不到的 `sqRegBase`），变的只是"谁能直达它"。
+
+## 17. R3 根因精化与开放仓补丁（2026-10-15 第二轮核实，重大修正）
+
+**根因修正**：remote SQ 门铃查不到（prop=5 → 65534）的根因**不是**（只是）闭源注册
+handler 跳过——是 **stars_v2 适配层把整块寄存器相关 ops 全部置 NULL**
+（`trs_core_stars_v2_ops.c:119-124`：`sqcq_reg_map/reg_unmap/get_res_reg_offset/
+get_res_reg_total_size…` 全 NULL），v1 有完整实现（`trs_core_stars_v1_ops.c:72-115`）
+未被迁移到 v2。**→ R3 在开放仓即可尝试修复**（补丁见
+`patches/R3-stars-v2-sqcq-reg-map.patch.md`）。
+
+**关键机制链（行号核实）**：
+- 注册: `trs_hw_sqcq.c:606/:965` → `trs_res_mng.c:1077` ops 空检查（v2=NULL 跳过）
+- v1 实现: 发 `TRS_MSG_SQ_REG_MAP` 同步邮箱（`trs_host_msg.c:170
+  devdrv_sync_msg_send`，带 remote_tgid → 设备侧处理回填 sq_map.va）→
+  `trs_set_sq_reg_vaddr`（`trs_hw_sqcq.c:1566`，导出符号）填 `sq_ctx[sqid].reg_mem.uva`
+- 查询: 用户态白名单不含 REG_BASE → ioctl 进内核 → `case` 已存在（`:1668`）→
+  `trs_query_sq_reg_vaddr`（`:1626`）读 uva=0 → -EOPNOTSUPP
+
+**两处修正旧结论**：① §8.3 位置 2"白名单加 SQ_REG_BASE"**不要做**（真值在内核，
+必须走 ioctl；进白名单反而 UIO 读用户态表必失败）；② 墙①（has_res）实测能过
+（config 同检查通过），唯一断点是 uva=0。
+
+**补丁安全性**：失败=消息发送返回错误、uva 保持 0=现状不变；成功=prop=5 查询/
+halSqCqConfig UIO 化/kernel 直写三链全通。剩余前置风险：设备侧消息处理器（闭源）
+是否支持 v2 芯片——失败时退回位置 1（闭源 handler 补 db 页 mmap）。
