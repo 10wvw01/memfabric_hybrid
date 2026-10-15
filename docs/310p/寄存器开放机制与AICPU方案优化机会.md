@@ -646,3 +646,86 @@ kernel 头注释（:17）写"doorbell 走 halSqCqConfig (ioctl)"——**已验�
 | `docs/310p/机制档案.md` | SQE 配方、通知链三件套与 cache 纪律、八个定论 |
 | `openspec/specs/smem/310p-sdma-orch/spec.md` | 协同模式行为契约 |
 | `examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma/` | 生产示例（三件套用法） |
+
+---
+
+# 第三部分：驱动改动需求规格（2026-10-15 行号级核实）
+
+> 本章为"向驱动团队提需求"的落地清单：每项需求给出**改哪个仓哪个文件哪一行、开放哪段寄存器、
+> 怎么验证**。全部坐标已在本机 driver 源码仓逐行核实（`/home/w00930648/driver`）。
+
+## 12. 机制新发现：halMemCtl 有 v2/v3 双链，构建产品线决定成败
+
+**本轮核实修正了 §8.3 对"特制驱动"机制的推断**（原推断"注册了 ADDR_MAP handler 的构建"——方向对，但真相更具体）：
+
+| | v2 链（ascend910B 产品线） | v3 链（ascend950 产品线） |
+|---|---|---|
+| halMemCtl 实现 | `ascend_hal/svm/v2/devmm/devmm_svm.c:3195` | `ascend_hal/svm/v3/api/master/svm_mem_ctl.c:150` |
+| handler 表 | `devmm_svm.c:3182`：**`[CTRL_TYPE_ADDR_MAP]=devmm_ctrl_map_addr` 已注册**（:3184） | `svm_mem_ctl.c:144`：**ADDR_MAP 槽位为空** → 直接 NOT_SUPPORT |
+| addr_type 二级表 | `devmm_map_dev_reserve.c:182-188`：**五种 addr_type 全注册**（含 AIC_CTRL=2 / AIC_PMU_CTRL=3） | — |
+| 构建选择 | `ascend_hal/svm/CMakeLists.txt:18-22`：`PRODUCT == ascend910B → v2`；`ascend950 → v3` | 同左 |
+
+**结论**：310P3 构建驱动时 PRODUCT 走哪条产品线，决定 halMemCtl(type=0) 是通还是 NOT_SUPPORT。
+**特制驱动 25.3.rc1.b099 的最可能本质 = 310P3 走 v2 链（或 v3 补注册）的构建**。
+
+## 13. 需求清单（三项，按依赖关系排序）
+
+### R1+R2（一起提）：开放 AIC 同步/PMU 寄存器映射——场景一/二/五
+
+**开放哪些寄存器**（memfabric 实际使用的子集，均可先整区域开放再收紧）：
+
+| addr_type | 区域 | 大小/布局 | memfabric 用途与偏移 |
+|---|---|---|---|
+| 2 (`ADDR_MAP_TYPE_REG_AIC_CTRL`) | AIC 同步寄存器区 | 32MB = 每核 2MB × 10 核（开放 8） | 场景一 AICore 写 `0x4C8`(finish/游标)、场景二 AICPU 写 `0xA0`(ready/背压)、握手 `0x18`(fast-path 开关) |
+| 3 (`ADDR_MAP_TYPE_REG_AIC_PMU_CTRL`) | AIC PMU 寄存器区 | 每核一页 | 场景五周期计数 `0x250/0x254`(PMU_CNT_TOTAL0/1) + 编程偏移 `0x200-0x2AC` |
+
+**改动位置（三选一，由轻到重；先确认本机构建走哪条链再选）**：
+
+| 方案 | 改动 | 仓 | 重量 |
+|---|---|---|---|
+| A. **零代码**（仅当本机驱动已是 v2 链构建） | proc 运行时开关：`echo 1 > /proc/<设备节点>/feature/aic_reg_map`（写接口 `svm_master_feature_proc_fs.c:50-76`，节点由 `devmm_dev_feature_proc_fs_create` 每设备创建） | — | 零 |
+| B. **一行接线**（v3 链构建时） | `svm_mem_ctl.c:144` 的 handler 表加 `[CTRL_TYPE_ADDR_MAP] = <addr_map handler>`——移植 v2 的 `devmm_ctrl_map_addr`（`devmm_map_dev_reserve.c:194`）及其下游 | 开放 | 轻（表接线+链移植） |
+| C. **产品线归位** | 310P3 的 PRODUCT 构建从 v3 切回 v2 线（或在 CMakeLists `:18-22` 增加 310P3→v2 分支）——整个 v2 链（含 unmap）原样生效 | 开放 | 中（构建配置，需回归） |
+
+**内核侧两道闸（无论 A/B/C 都要过，均已核实）**：
+1. 能力位 `feature_aic_reg_map`：**硬编码 true**（`svm_master_dev_capability.c:186`，不依赖设备上报）✓ 无需改
+2. PF 禁用开关：`AIC_REG_MAP = {"aic_reg_map", ..., is_support_disable=true}`（`:38`）→ `devmm_dev_feature_capability_disable`（`:49`）**PF 设备默认禁用**——需 proc 写 1 打开（方案 A）或驱动团队把此项默认改为 enable
+3. 用户态 split mode 闸：`devmm_map_dev_reserve.c:209-213`（AIC_CTRL/PMU 在 `devmm_is_split_mode()`（`devmm_svm.c:168`，查 `halGetDeviceSplitMode`）为真时 NOT_SUPPORT）——物理卡非 split 部署应不受影响，构建时确认
+
+**验证方法**（照抄 pypto 模式）：`halMemCtl(0, {addr_type=2, devid}, &out)` 返回 `out.ptr` 非 0；pypto 侧日志 `Map AICore reg addr (type 2) 0x... for DAV_2002`（§5.1）。
+
+### R3：CP 流 remote SQ 门铃注册——场景三（AICore 直驱解锁项，最重）
+
+**这是三道墙的根因修复**（§8.3 已分析，此处给行号级落点）：
+
+| 位置 | 文件/函数 | 改动 | 仓 |
+|---|---|---|---|
+| 1. 根因（必改） | CP 流 remote SQ 注册 handler：`TsDrvNormalSqInfoInit` / `trsRemoteAllocResId`（**grep 实锤不在开放仓**） | 注册 remote SQ 时补 doorbell 寄存器页 remap（**队列页已映 `IsHwSqMap=1`，同机制多映一页 db**），填 `sq_ctrl.db`，使 `IsSqDbMap=1`——参照物：host 普通流注册在 `trs_hw_sqcq.c:608/:969` 调 `trs_sq_remap`（`trs_sqcq_map.c:295`，内核本有此能力） | **闭源** |
+| 2. 查询白名单 | `ascend_hal/trs/core/trs_sqcq.c:1481-1485` UIO 直读白名单：现含 HEAD/TAIL/CQE_STATUS/BASE/DEPTH/SQE_SIZE/MEM_ATTR——**缺 `DRV_SQCQ_PROP_SQ_REG_BASE`** | 加一项（前提：位置 1 修好，表里才有值） | 开放 |
+| 3. 内核查询 | `trsdrv/trs/trs_core/trs_hw_sqcq.c:1642 trs_sqcq_query`：墙① `trs_proc_has_res(TRS_HW_SQ)`（CP1 进程不拥有，:1670 附近 -EINVAL）；墙② `trs_get_sq_reg_vaddr` reg_mem.uva=0（remote 未 remap）→ -EOPNOTSUPP | 位置 1 修复后墙②自解；墙①是资源归属语义，remote SQ 注册进内核 trs 资源池即可（随位置 1） | 开放（随位置1） |
+
+**验证链**：设备日志 `IsSqDbMap=1` → CP1 `halSqCqQuery(prop=5)` 返回有效 VA → AICPU/AIV `*(volatile u32*)(sqRegBase+0x8)=tail` MMIO 直写 doorbell 生效（v43 通道回归）。
+
+**不改动时的替代路径**（§11.2-3 已列）：AICPU ioctl doorbell（现行）+ 混合架构（AICore 自组 SQE、AICPU 代敲铃）。
+
+## 14. 提需求时的三个关键问题（给驱动团队）
+
+1. **310P3 的驱动构建 PRODUCT 归哪条线**？（决定 halMemCtl 是 v2 通链还是 v3 断链——25.3.rc1.b099 是怎么编的）
+2. **PF 上 aic_reg_map 能否默认 enable**（或提供官方 proc 开关口径）？——`is_support_disable=true` 的设计初衷是什么（安全/多租户？）
+3. **remote SQ 注册 handler 为什么跳过 db 页映射**（IsHwSqMap=1 而 IsSqDbMap=0）——是遗漏还是刻意（安全边界）？
+
+## 15. 本轮新增核实坐标速查
+
+| 坐标 | 内容 |
+|---|---|
+| `ascend_hal/svm/CMakeLists.txt:18-22` | v2(910B)/v3(950) 产品线构建选择 |
+| `ascend_hal/svm/v3/api/master/svm_mem_ctl.c:144-149,150-165` | v3 handler 表（无 ADDR_MAP）+ halMemCtl |
+| `ascend_hal/svm/v2/devmm/devmm_svm.c:3182-3190,3195,168` | v2 handler 表（有 ADDR_MAP）+ halMemCtl + split_mode 查询 |
+| `ascend_hal/svm/v2/devmm/devmm_map_dev_reserve.c:182-193,194-215` | addr_type 二级表（全注册）+ 入口（split 闸 :209） |
+| `sdk_driver/svm/v2/master/comm/svm_master_addr_map.c:49-76,78` | 内核 map（能力闸 :60）+ ioctl 入口 |
+| `sdk_driver/svm/v2/master/comm/svm_master_dev_capability.c:38,49,186` | AIC_REG_MAP 项 / PF 禁用 / feature 硬编码 true |
+| `sdk_driver/svm/v2/master/comm/svm_master_feature_proc_fs.c:50-76` | /proc feature 运行时开关（1=enable） |
+| `ascend_hal/trs/core/trs_sqcq.c:1481-1485` | 用户态 UIO 查询白名单（缺 SQ_REG_BASE） |
+| `sdk_driver/trsdrv/trs/trs_core/trs_hw_sqcq.c:1642,1670` | 内核查询（墙① proc_has_res） |
+| `sdk_driver/trsdrv/trs/trs_core/trs_sqcq_map.c:295` | trs_sq_remap（host 普通流 db 注册能力，参照物） |
+| `pkg_inc/ascend_hal_define.h:933,977-983` | CTRL_TYPE_ADDR_MAP=0 / addrMapType 枚举 |
