@@ -16,7 +16,9 @@
    extend 集成层专有）和部署机器（落盘/dlopen/转发）；
 2. **定制 so**——pypto 自建设备侧 runtime（wheel 里的 `libtilefwk_backend_server.so`，
    真身 `DynTileFwkBackendKernelServer(Init)`），**运行时由引导层拉起**：host 把字节
-   经 GM 传入 → 引导层落盘到设备搜索路径并加载——保证与主机侧版本严格匹配；
+   经 GM 传入 → 引导层写入 **memfd（内存文件）并 dlopen(`/proc/self/fd/N`) 加载**——
+   **全程不落盘**（2026-10-15 反汇编勘正，此前"落盘到设备搜索路径"结论错误），
+   保证与主机侧版本严格匹配；
 3. **用户程序**——控制流二进制（机器码）嵌在程序镜像里，以数据身份进 GM，
    被定制 so 里的 runtime 以函数指针 call。
 
@@ -60,11 +62,12 @@ host:  ①a so字节→GM(Init)  ①b 程序镜像→GM(每次)  ② KFC直发�
    ▼
 ┌─ 设备 ──────────────────────────────────────────────────┐
 │ 【引导层】libaicpu_extend_kernels.so (CANN预装)          │
-│   DynTileFwkKernelServerInit: 读GM里so字节→落盘到        │
-│     /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/     │
-│     →dlopen→dlsym真身地址     ←【拉起定制的aicpu so】    │
-│   DynTileFwkKernelServer: 转发到定制so里的真身            │
-│ 【定制 so】(运行时落盘, 与wheel版本严格匹配)              │
+│   DynTileFwkKernelServerInit: 读GM里so字节→memfd_create │
+│     →write→snprintf("/proc/self/fd/N")→dlopen→dlsym     │
+│     真身×3 填函数表(key=1/2/3) ←【拉起定制的aicpu so】  │
+│     (全程内存, 不落盘 — 反汇编c3ebc/c4538/c51ac/c46bc)   │
+│   DynTileFwkKernelServer: 查表key=3转发到定制so真身      │
+│ 【定制 so】(memfd内存加载, 与wheel版本严格匹配)           │
 │   DynTileFwkBackendKernelServer = runtime本体            │
 │     ├─ CTRL AICPU (1核): GELaunch取出ControlFlowEntry    │
 │     │    地址【call 用户机器码】→经回调表要服务           │
@@ -91,12 +94,15 @@ host:  ①a so字节→GM(Init)  ①b 程序镜像→GM(每次)  ② KFC直发�
 转发到定制 so 真身，按 runMode 分角色走 CTRL/SCHED 流程。
 
 **Q：AICPU 的代码 so 什么时候部署到设备？GM 里的拷贝怎么到文件系统？**
-分两份说：**引导层**（extend 库）是 CANN/驱动装机升级时经签名固件通道预置的，与
-pypto 运行无关；**定制 so**（wheel 版 runtime）是 pypto 运行时部署的——`InitAiCpuSoBin`
-把字节 H2D 到 GM，进程 Init 时引导层 `DynTileFwkKernelServerInit` 消费它：落盘到
-`/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`（落盘全名未实测——本机从未跑过
-pypto，设备上无落盘文件属预期，不能反推"无部署环节"；extend 库内实测存在目录串
-`aicpu_kernels_device` 与 so 名串 `libtilefwk_backend`）。
+分两份说：**引导层**（extend 库）随 CANN 装机预置在设备 `/usr/lib64/aicpu_kernels/0/
+aicpu_kernels_device/`（注意：该目录在设备上是**易失的运行时环境**——2026-10-15 实测
+wwl 机器上整个目录曾被清除，见 §6）；**定制 so**（wheel 版 runtime）由 pypto 运行时部署：
+`InitAiCpuSoBin` 把字节 H2D 到 GM，进程 Init 时引导层 `DynTileFwkKernelServerInit` 消费它
+——**写进 memfd 内存文件后经 `/proc/self/fd/N` 伪路径 dlopen，不经过文件系统**（2026-10-15
+拉回 extend 库反汇编钉死：`memfd_create(G+256,MFD_CLOEXEC)`→`write(fd,aicpuSoBin,soLen)`
+→`snprintf_s(G+0x80,"/proc/self/fd/%ld")`→`dlopen(G+0x80)`，偏移 cfgdata@40/aicpuSoBin@96/
+aicpuSoLen@104 与主机侧参数镜像 static_assert 三重一致）。extend 库内的目录串与 so 名串
+只是日志/提示文案（ExecuteFunc 报错时引用 `pyptoServerSoName_`），不代表落盘路径。
 
 **Q：用户真的从不向 AICPU 下发算子吗？**
 **当前构建：是**——AICPU 下发点只有引导层入口两个；用户代码进 GM 走的是数据通道。
@@ -117,8 +123,28 @@ pypto，设备上无落盘文件属预期，不能反推"无部署环节"；exte
 | 7 | 仓库 json 三件套（PyptoNull 落盘 `libpypto_server{设备号}.so` + 转发桩）被 `BUILD_WITH_NEW_CANN`（runtime/CMakeLists.txt:23 被注释）整体关闭，wheel/本地构建产物该分支日志串均为 0；复刻下发 PyptoNull → 507018 | ✅ 死代码路径，与现行机制无关 |
 | 8 | 环境版本 | CANN 9.1.0（310P 包，内置 pypto 0.2.1 wheel）+ 驱动 26.1.0；FAQ 要求驱动 ≥25.2.0、CANN ≥8.5.0；官方环境脚本仅 a2/a3（HDK 25.3.RC1、固件 7.8.0.2.212） |
 
-**遗留未知**（引导层是华为内部代码，仓库无源码）：落盘文件全名；部署确切时机
-（Init 内或首次 Run）；GM 载荷缺失（`aicpuSoBin=0`）时是否回退 extend 内置 base 版。
+**遗留未知**：本机（9.1.0/26.1.0）Init 桩执行（sync=0）但函数表未填上——断点在
+dlopen(fdlink)/dlsym/填表环节，嫌疑 seccomp 拦 `openat("/proc/self/fd/N")` 或 9.1.0
+extend 行为变化（对照 §6：wwl 机器 2026-05-11 曾出现同款表空错误，5→9 月间自愈，
+解法未明——需向 wwl 求证）。
+
+## 6. wwl 机器交叉验证（2026-10-15，CANN 8.5.1/9.0.0 并存 + 驱动 24.1.rc3）
+
+在该机器（docker_claude_310p，6 NPU = 3 芯片×2die，dev0/1 Critical、其余 OK）上跑
+wgm-310p 分支探针套件（fork: gitcode.com/gcw_w5BPnxkC/pypto，工具 wgm_verify/）的结论：
+
+| # | 事实 | 证据 |
+|---|---|---|
+| 1 | **memfd 部署链在 wwl 机器批量成功过**：2026-09-16/17 dev2 上 `LoadTileFwkKernelFunc` 三函数（Static/DynInit/Dyn）"has been loaded" 共 **873 次**，extend 库 OpenSo 成功 344 次；完整时序 `KFC(kernelType=5)→OpenSo extend→14ms 内三函数 loaded→4 执行桩并行→AICore 开工`（plog device-2/device-116138_20260916095202551.log 等） | plog 铁证 |
+| 2 | **该机器 2026-05-11 出现过与本机现在同款的 Function[3] 表空错误**（device-0 plog，`ExecuteFunc: kernel func[3] is invalid`）——5→9 月间被解决（转折原因未明，最大嫌疑 CANN 9.0.0 环境部署了新版 extend） | plog |
+| 3 | **设备 aicpu_kernels 环境是易失的**：dev2 9 月还在用，2026-10-15 实测 dev2/3/4/5 的 `/usr/lib64/aicpu_kernels/` 整目录不存在（`/usr/lib64/libaicpu_processer.so` 仍在）→ 探针在所有可用卡上 undefined symbol。9-18~10-15 之间环境被整体清除（清除事件未明，dev0/1 同时 Critical） | check_all_dev 扫描 |
+| 4 | **两机 CP1 框架库不同版本**：wwl 机 processer 110,472B（md5 14f9bf…）vs 本机 79,848B（md5 0a8479…）——驱动 24.1.rc3 vs 26.1.0 差异的直接体现 | file_pull 拉取对比 |
+| 5 | wwl 机器 extend 库（9-16 实际使用的版本）**未能取回**：dev0 环境 Critical + 其他卡环境已清除；设备侧 extend 库随 aicpu_kernels 目录一同消失 | — |
+
+**对 memfabric 的补充启示**：pypto 的 memfd 部署证明**无文件系统权限也能让 CP1 执行
+任意 so**（GM 字节→内存文件→dlopen），比落盘方案更轻；但该链对 extend 库版本/环境
+敏感（两机都出现过"表空"阶段），且环境本身会消失——memfabric 的自管部署（deployer）
+在这两点上更可控。
 
 ## 4. 仓库侧未启用的同类机制：json 三件套（一段话）
 
@@ -132,22 +158,24 @@ extend 版由华为编译进 CANN——实际生效的是后者。完整解析�
 
 | 维度 | memfabric | pypto（实际） |
 |---|---|---|
-| 设备预置 | 无 | 引导层（extend 库，签名通道预置） |
-| "第一次"/每次 | deployer（CUST 模式 1 迁移）+ KFC `cat`，外部工具 | 引导层内置部署机器：GM 中转 → 落盘 → 加载，无需 shell |
-| 版本匹配 | 改名 + KVER 递增纪律 | 落盘定制 so 与 wheel 严格同版本 |
+| 设备预置 | 无 | 引导层（extend 库，随 CANN/驱动预置但**环境易失**，§6#3） |
+| "第一次"/每次 | deployer（CUST 模式 1 迁移）+ KFC `cat`，外部工具 | 引导层内置部署机器：GM 中转 → **memfd 内存文件** → dlopen，无需 shell、无需文件系统权限 |
+| 版本匹配 | 改名 + KVER 递增纪律 | memfd 加载的定制 so 与 wheel 严格同版本 |
 | 用户程序形态 | 固定功能 kernel（so 上设备） | 机器码载荷（程序镜像进 GM，不上文件系统） |
-| 生命周期风险 | deployer 清理链删设备文件 | 待验证（落盘文件生命周期未实测） |
+| 生命周期风险 | deployer 清理链删设备文件 | memfd 随进程生命周期，无文件残留；但依赖 extend 环境存活 |
 | 本质 | 第三方 kernel 挤进设备 | 华为自家组件：引导层随 CANN 预置 + 定制 so 运行时激活 |
 
-**对 memfabric 的可借鉴点**：pypto 的"GM 中转 + 预置引导层落盘"是**已生效**的无
-shell 自部署范式——比 memfabric 的 KFC `cat` 方案不受单命令约束、无 `sync=` 歧义；
-memfabric 若借鉴，需先解决"引导层怎么预置"（你们的等价物仍是 deployer/OPP 通道，
-或做成 CANN 自定义算子首次安装）。
+**对 memfabric 的可借鉴点**：pypto 的"GM 中转 + 预置引导层 + memfd 内存加载"是**已生效**
+的无 shell、无文件系统权限自部署范式——比 memfabric 的 KFC `cat` 方案不受单命令约束、
+无 `sync=` 歧义，也不需要 aicpu_kernels 目录写权限；memfabric 若借鉴，需先解决"引导层
+怎么预置"（你们的等价物仍是 deployer/OPP 通道，或做成 CANN 自定义算子首次安装）。
 
 ## 附录：关键坐标与证据
 
 - KFC 直发三调用点：`device_runner.cpp:427-434`（Init）/ `:530-550`（三流，无条件）/ `:364-387`（双流 else）；参数默认值 `machine_ws_intf.h:105-110`（注意 kernelName 指向引导层专有符号）
 - 定制 so 载荷：`device_runner.cpp:390-408`（InitAiCpuSoBin → `DeviceArgs.aicpuSoBin`）；真身源码：pypto 仓库 `framework/src/machine/device/`（构建目标 `tile_fwk_server`，入口 `device_sche.cpp:45,53` 带 Backend 的符号；CTRL `device_ctrl.h/.cpp`；SCHED `aicore_manager.h`）
-- 引导层：**仓库无源码**——符号 `DynTileFwkKernelServer(Init)` 仅存在于设备 extend 库（探针实测），部署机器证据见事实清单 #3；承载归因 CANN `opp/Ascend310P/aicpu/Ascend310P-aicpu_extend_syskernels.tar.gz`（`aa55aa` 签名格式，未解包直证）
+- 引导层：**仓库无源码，但 2026-10-15 已拉回本机设备上的实体并反汇编**（/tmp/opencode/pull/libaicpu_extend_kernels.so，8,063,424B，拉取工具 wgm_verify/file_pull*）——Init 桩关键坐标：`c3e3c`(cfgdata@40)/`c3e4c`(aicpuSoBin@96)/`c3e7c`(SoLen@104)/`c3ebc`(memfd_create)/`c4538`(write)/`c51ac`(snprintf "/proc/self/fd/%ld"，.rodata@0x576270 实测)/`c46bc`(dlopen)/`c51c0`(设已加载标志G[112])/`c40c8`(查表key=2)；孪生实现（机制镜像，源码在手）：pypto `pypto_aicpu_interface.h` BackendServerHandleManager（key: 2=Init/3=Exec，"has been loaded"=h:134、"Function[N] is null"=h:145）
+- 设备侧加载框架坐标（plog 实名）：KFC 解析 `ae_kernel_lib_aicpu_kfc.cpp:79 GetApiGlobal/:168 CallKernelApi`；so 管理 `ae_so_manager.cc:193/202 OpenSo`；宿主库 `/usr/lib64/libaicpu_processer.so`（两机版本不同，§6#4）
+- wwl 机器验证产物存档：pypto fork `wgm-310p` 分支 `wgm_verify/results/1015_150633/`（plog 铁证 + processer_wwl.so + 全部 results 日志）
 - 仓库 json 三件套（未启用）：`load_aicpu_op.cpp`、`pypto_aicpu_interface.{h,cpp}`；开关 `runtime/CMakeLists.txt:23`（注释状态）
-- 方法论备注（两次误判复盘）：①"代码存在且精致"≠"代码在运行"——先看构建配置，再看产物 strings，最后读源码分支；②**符号在哪个构建产物里定义，比源码里写了什么更接近真相**——KFC 目标名不在 wheel so 里、只在 extend 库里，这一步 nm 早就该做（本档案曾据此把引导层误判为"真身直接跑、GM 载荷误判为死重"，2026-10-13 经官方结论纠正）
+- 方法论备注（三次误判复盘）：①"代码存在且精致"≠"代码在运行"——先看构建配置，再看产物 strings，最后读源码分支；②**符号在哪个构建产物里定义，比源码里写了什么更接近真相**（2026-10-13 纠正"真身直接跑"误判）；③**验收标准必须与被测机制同构**——查文件系统验证一个不落盘的机制（memfd），"零部署"假阴性三周才纠正（2026-10-15 反汇编+wwl 机器 873 次成功加载日志双证）
