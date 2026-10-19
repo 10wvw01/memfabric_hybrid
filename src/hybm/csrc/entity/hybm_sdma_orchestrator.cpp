@@ -392,16 +392,17 @@ Result SdmaOrchestrator::RunDeployHelper(const std::string &launchJsonPath, cons
         BM_LOG_INFO("deploy helper not found; falling back to in-process KFC deploy");
         return BM_FILE_NOT_ACCESS;
     }
+    /* fork 前备好全部参数: 子进程内仅做 async-signal-safe 的 exec */
+    char devStr[16] = {0};
+    (void)snprintf(devStr, sizeof(devStr), "%u", devId_);
+    const char *helperArgv[] = {helper.c_str(), devStr, launchJsonPath.c_str(), nullptr};
     const pid_t pid = fork();
     if (pid < 0) {
         BM_LOG_ERROR("deploy helper fork failed, errno: " << errno);
         return BM_ERROR;
     }
     if (pid == 0) { // 子进程: 立即 exec(不触碰父进程任何 ACL/线程状态)
-        char devStr[16];
-        (void)snprintf(devStr, sizeof(devStr), "%u", devId_);
-        const char *argv[] = {helper.c_str(), devStr, launchJsonPath.c_str(), nullptr};
-        (void)execv(helper.c_str(), const_cast<char **>(argv));
+        (void)execv(helper.c_str(), const_cast<char **>(helperArgv));
         _exit(127); // exec 失败
     }
     int status = 0;
