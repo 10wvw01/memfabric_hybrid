@@ -34,6 +34,8 @@
 
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 #include "dl_rt_api.h"
 #include "mf_env_define.h"
@@ -312,6 +314,24 @@ Result SdmaOrchestrator::LoadOrchestratorKernel()
         return BM_INVALID_PARAM;
     }
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + devSoName;
+    /* 2026-10-18: torch_npu 进程内, 一条非零退出的 KFC 命令(如首轮 `test -f` 探测
+     * 的预期缺失, exit 1→507018)会永久打死本进程整个设备上下文——之后任何 launch
+     * (含普通 torch 算子)全部 507018 aicpu 异常; 实测时间/新流均不可恢复, 仅新进程
+     * 可行。因此探测+自动部署优先经 fork+exec 助手进程执行, 本进程零 KFC 命令。 */
+    bool helperRan = false;
+    const auto helper = RunDeployHelper(resolved, dst, helperRan);
+    if (helperRan) {
+        if (helper != BM_OK) {
+            BM_LOG_ERROR("deploy helper failed, ret: " << helper << " dst: " << dst);
+            return helper;
+        }
+        auto ret = TryLoadKernel(resolved);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("kernel load failed after helper deploy, ret: " << ret << " json: " << resolved);
+        }
+        return ret;
+    }
+    // 助手不可用(未安装): 回退旧进程内链路(纯 ACL 宿主可容忍探测缺失退出码)
     const auto gate = KfcExec("test -f " + dst, true); // 探测(文件缺失为首轮预期, 降级 INFO)
     if (gate != HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR && gate != BM_OK) {
         // KFC 不可用(锁定环境): 按预部署假定直接加载, 文件若真缺失由数据面 wait 显式报错
@@ -331,6 +351,82 @@ Result SdmaOrchestrator::LoadOrchestratorKernel()
         BM_LOG_ERROR("kernel load failed, ret: " << ret << " json: " << resolved);
     }
     return ret;
+}
+
+/* fork+exec 部署助手查找: 显式 env → 本 so 同目录(安装包 lib64) → 前缀 bin/。
+ * 找不到返回空串(调用方回退旧进程内链路)。 */
+static std::string FindDeployHelper()
+{
+    const char *env = getenv("MF_SDMA_ORCH_DEPLOY_HELPER");
+    if (env != nullptr && *env != '\0' && access(env, X_OK) == 0) {
+        return std::string(env);
+    }
+    Dl_info info = {};
+    if (dladdr(reinterpret_cast<void *>(&SdmaOrchestrator::GetInstance), &info) == 0 || info.dli_fname == nullptr) {
+        return "";
+    }
+    std::string soDir(info.dli_fname);
+    auto pos = soDir.find_last_of('/');
+    if (pos == std::string::npos) {
+        return "";
+    }
+    soDir.resize(pos);
+    for (const auto &cand : {soDir + "/orch_deploy_helper", soDir + "/../bin/orch_deploy_helper"}) {
+        if (access(cand.c_str(), X_OK) == 0) {
+            return cand;
+        }
+    }
+    return "";
+}
+
+/* fork+exec orch_deploy_helper: 探测+自动部署全部在子进程执行(新 ACL 上下文,
+ * 非零退出码无碍), 本进程不执行任何 KFC 命令——torch_npu 宿主一条非零退出
+ * KFC 命令即永久打死设备上下文(2026-10-18 实测)。退出码 0/3=已部署/本就在,
+ * 2=部署失败, 1/127=助手自身故障。 */
+Result SdmaOrchestrator::RunDeployHelper(const std::string &launchJsonPath, const std::string &dst,
+                                         bool &helperRan)
+{
+    helperRan = false;
+    const std::string helper = FindDeployHelper();
+    if (helper.empty()) {
+        BM_LOG_INFO("deploy helper not found; falling back to in-process KFC deploy");
+        return BM_FILE_NOT_ACCESS;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        BM_LOG_ERROR("deploy helper fork failed, errno: " << errno);
+        return BM_ERROR;
+    }
+    if (pid == 0) { // 子进程: 立即 exec(不触碰父进程任何 ACL/线程状态)
+        char devStr[16];
+        (void)snprintf(devStr, sizeof(devStr), "%u", devId_);
+        const char *argv[] = {helper.c_str(), devStr, launchJsonPath.c_str(), nullptr};
+        (void)execv(helper.c_str(), const_cast<char **>(argv));
+        _exit(127); // exec 失败
+    }
+    int status = 0;
+    for (int waited = 0; waited < 1800; ++waited) { // 上限 180s(迁移秒级, 重试含 sleep)
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            helperRan = true;
+            if (WIFEXITED(status)) {
+                const int rc = WEXITSTATUS(status);
+                BM_LOG_INFO("deploy helper rc: " << rc << " dst: " << dst);
+                return (rc == 0 || rc == 3) ? BM_OK : BM_ERROR;
+            }
+            BM_LOG_ERROR("deploy helper terminated abnormally, status: " << status);
+            return BM_ERROR;
+        }
+        if (r < 0) {
+            BM_LOG_ERROR("deploy helper waitpid failed, errno: " << errno);
+            return BM_ERROR;
+        }
+        usleep(100000); // 100ms 轮询
+    }
+    BM_LOG_ERROR("deploy helper timeout (180s), killing");
+    (void)kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    return BM_ERROR;
 }
 
 Result SdmaOrchestrator::TryLoadKernel(const std::string &jsonPath)

@@ -13,7 +13,7 @@ CXX ?= g++                                 # 主机编译器
 CXXFLAGS := -O2 -std=c++17 -Wall -Werror   # 编译选项
 LDFLAGS := -L$(CANN_LIB) -Wl,-rpath,$(CANN_LIB) -lascendcl -lruntime -ldl # 链接选项(rpath 免配 LD_LIBRARY_PATH)
 
-TOOLS := deployer mini_kfc                  # 工具目标列表
+TOOLS := deployer mini_kfc orch_deploy_helper                # 工具目标列表
 
 all: $(TOOLS)                               # 默认构建全部工具
 
@@ -21,6 +21,9 @@ deployer: deployer.cpp                      # CUST 迁移落盘工具
 	$(CXX) $(CXXFLAGS) -I$(CANN_INC) -o $@ $< $(LDFLAGS)
 
 mini_kfc: mini_kfc.cpp                      # KFC 通道设备内 shell 工具
+	$(CXX) $(CXXFLAGS) -I$(CANN_INC) -o $@ $< $(LDFLAGS)
+
+orch_deploy_helper: orch_deploy_helper.cpp  # 固定命令 CP1 部署助手(库 fork+exec 调用)
 	$(CXX) $(CXXFLAGS) -I$(CANN_INC) -o $@ $< $(LDFLAGS)
 
 clean:                                      # 清理产物
