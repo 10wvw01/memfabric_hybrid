@@ -38,8 +38,28 @@ struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
     uint64_t src;         /* 搬运源地址(本端段 GVA) */
     uint64_t dst;         /* 搬运目的地址(对端段 GVA) */
     uint64_t len;         /* 字节数(框架内部按粒度补齐) */
-    uint64_t imm;         /* 用户标签(原样回带到达到达邮件) */
+    uint64_t imm;         /* 用户标签(原样回带到达到达邮件); reduce 时为编码形态, 见下 */
 };
+
+/* ---- imm 操作编码(wire 契约; 与 smem_shm_aicore_base_sdma.h 的 SdmaEncodeOpImm 对齐) ----
+ * signal(op != COPY) 时 imm 编码: [63:48]=magic [47:40]=SQE opcode [39:0]=用户标签
+ * AICPU 消费侧解码: magic 匹配→按 opcode 构造 reduce SQE + 到达邮件透传还原后的标签;
+ * 不匹配→纯搬运(现状), 老调用(imm 为任意标签)无误判(magic 撞上概率 < 1/65536)。
+ * SQE opcode 编码 = 数据类型(高4位)|操作(低4位): FP32=0x70 FP16=0x60 ADD=0x01
+ * 310P3 实测支持域(2026-10-15): SUM×{FP32,FP16} 值级 PASS; 其余 kind/type 被拒。 */
+constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
+constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x71; /* FP32 累加: dst += src */
+constexpr uint8_t HYBM_SDMA_SQE_OP_FP16_ADD = 0x61; /* FP16 累加: dst += src */
+
+static inline uint8_t HybmSdmaDecodeOp(uint64_t imm, uint64_t *userTag)
+{
+    if ((imm >> 48) == HYBM_SDMA_IMM_MAGIC) {
+        *userTag = imm & 0xFFFFFFFFFFULL;
+        return static_cast<uint8_t>((imm >> 40) & 0xFFULL);
+    }
+    *userTag = imm;
+    return 0x00; /* 无编码 = 纯搬运 */
+}
 
 struct HybmSdmaArrMail {  /* 到达邮件(AICPU→对端 AICore, wait 消费) */
     uint64_t seq;         /* 序号(=请求序号; 首字段供到达戳 SQE 复用为拷贝源) */

@@ -135,8 +135,11 @@ int32_t doorbellViaHal(uint32_t devId, uint32_t sqId, uint32_t newTail)
 
 // SQE 构造(64B, STARS V2 SDMA 布局; 数据与戳 SQE 同构, 仅地址/长度不同)。
 // 逐字段依据 hcomm AddOneMemcpySqeV2 源码与真机成功样本比对; 构造前必须整体清零。
+// sqeOpcode: off16 操作码 — 0x00=CPY 纯搬运(默认); 0x71/0x61=FP32/FP16 ADD(dst+=src,
+//            SDMA inline reduce; 310P3 实测支持域 SUM×{FP32,FP16}, 见 contract 注)。
 void buildStarsSdmaSqe(uint8_t sqe[kSqeSize], uint16_t streamId, uint16_t taskId, uint64_t src, uint64_t dst,
-                       uint32_t len, uint32_t devId, uint64_t overflowAddr, uint16_t ssid)
+                       uint32_t len, uint32_t devId, uint64_t overflowAddr, uint16_t ssid,
+                       uint8_t sqeOpcode = 0x00)
 {
     memset(sqe, 0, kSqeSize);          // 全零打底(残留数据勿入环)
     sqe[0] = 0x09;                     // type: MEMCPY_ASYNC_SQE_V2(固件认的魔数)
@@ -144,7 +147,7 @@ void buildStarsSdmaSqe(uint8_t sqe[kSqeSize], uint16_t streamId, uint16_t taskId
     memcpy(&sqe[6], &taskId, 2);       // off6:  task_id
     sqe[8] = 0x00;                     // off8-11: 全 0(固件严格校验该域)
     sqe[14] = 0xff;                    // off12-15: kernel_credit=0xff, 其余保留
-    sqe[16] = 0x00;                    // off16-19: 位域模板(opcode=NOT_ATOMIC + ie_dma 等)
+    sqe[16] = sqeOpcode;               // off16: opcode(0x00=NOT_ATOMIC 搬运; reduce 由参数注入)
     sqe[17] = 0xde;
     sqe[18] = 0x0e;
     sqe[19] = 0x00;
@@ -294,15 +297,16 @@ inline void storeCell(uint64_t addr, uint64_t v)
     cacheFlushLine(addr & ~static_cast<uintptr_t>(63));
 }
 
-// SQE 三连入环(不敲铃): ① 数据(src→dst) ② 到达戳(邮件像 seq 字段→对端戳槽)
+// SQE 三连入环(不敲铃): ① 数据(src→dst, 可带 reduce opcode) ② 到达戳(邮件像 seq 字段→对端戳槽)
 // ③ 完成戳(同源→本端戳槽); 同队列 FIFO 保证 ②③ 晚于 ① 落地。返回 0 成功。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint64_t seq,
-                      const ock::mf::HybmSdmaReqMail &mail, uint64_t arrMailSlot, uint64_t peerArrStampSlot)
+                      const ock::mf::HybmSdmaReqMail &mail, uint64_t arrMailSlot, uint64_t peerArrStampSlot,
+                      uint8_t sqeOpcode)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
     buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(seq), mail.src, mail.dst,
-                      static_cast<uint32_t>(mail.len), p->devId, p->overflowAddr, ssid);
+                      static_cast<uint32_t>(mail.len), p->devId, p->overflowAddr, ssid, sqeOpcode);
     for (uint32_t retry = 0; submitSqe(ctx, sqe) == 240; retry++) { // SQ 满退避重试
         if (retry >= kSqFullRetry) {
             return 1360; // 错误码: SQ 持续满
@@ -342,6 +346,8 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     cacheInvalidateLine(reqSlot & ~static_cast<uintptr_t>(63));
     const volatile HybmSdmaReqMail *rm = reinterpret_cast<const volatile HybmSdmaReqMail *>(reqSlot);
     HybmSdmaReqMail mail = {rm->src, rm->dst, rm->len, rm->imm}; // 快照(后续槽可复用)
+    uint64_t immTag = mail.imm;                                  // 解码 reduce 编码 → 用户标签 + SQE opcode
+    const uint8_t sqeOpcode = HybmSdmaDecodeOp(mail.imm, &immTag);
     const uint64_t peerSeg = mail.dst & ~(p->symSize - 1);       // 对端段基址(掩码算术)
     const uint64_t peerRes = peerSeg + (p->physSize - SMEM_SHM_SDMA_RESERVED); // 对端保留区基址
     const uint64_t arrMailSlot = peerRes + SMEM_SHM_SDMA_RS_ARR_MAIL +
@@ -350,11 +356,11 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     am->seq = seq + 1; // 戳值(1 基, 供两支戳 SQE 复用为拷贝源; 0 保留为"空", 防幻影)
     am->dst = mail.dst;
     am->len = mail.len;
-    am->imm = mail.imm;
+    am->imm = immTag;  // 还原后的用户标签(reduce 编码不透传, wait 方兼容)
     cacheFlushLine(arrMailSlot & ~static_cast<uintptr_t>(63)); // 刷出邮件像(SQE 可读)
     const uint64_t peerArrStamp = peerRes + SMEM_SHM_SDMA_RS_ARR_STAMP +
                                   (seq % SMEM_SHM_SDMA_RS_ARR_SLOTS) * 8; // 对端到达戳槽
-    auto ret = issueMailSqes(p, ctx, ssid, seq, mail, arrMailSlot, peerArrStamp);
+    auto ret = issueMailSqes(p, ctx, ssid, seq, mail, arrMailSlot, peerArrStamp, sqeOpcode);
     if (ret != 0) {
         return ret;
     }
