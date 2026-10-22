@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <unistd.h>
 #include <mpi.h>
