@@ -99,12 +99,12 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
 }
 
 /* 310P meta 区创建: AclVmm 路径 —— halMem* 语义在 310P 不可用(F16), 改用
- * HybmAclVmmSegment 同款 API 配方(ReserveMemAddress + MallocPhysical + MapMem)。
+ * 共用段(HybmVmmBasedSegment) 310P 路径同款 API 配方(ReserveMemAddress + MallocPhysical + MapMem)。
  * meta 区地址 HYBM_DEVICE_META_ADDR 是设备侧头文件(smem_shm_aicore_base_meta.h)
  * 硬编码的约定地址, 必须 expectPtr 精确命中, 偏移即失败。 */
 /* meta 区设备访问授权: AclVmm 映射默认仅 host 上下文可访问(H2D 拷贝通道走进程
  * 自有权限, 故 UpdateHybmDeviceInfo 写入"成功"), AICore 的 SMMU 翻译需要显式
- * SetAccess 授权才可读 —— 池段(HybmAclVmmSegment::MapPhysicalToOwnSlot)一直有
+ * SetAccess 授权才可读 —— 池段(HybmVmmBasedSegment 310P 路径)一直有
  * 这一步(池 GVA AICore 可读的前提), meta 区 310P 移植时遗漏, 导致设备侧 getter
  * 读零(smem_shm_get_global_rank 等失效)。 */
 static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
