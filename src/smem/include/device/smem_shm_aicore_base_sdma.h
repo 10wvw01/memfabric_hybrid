@@ -59,8 +59,9 @@ typedef enum smem_shm_sdma_op {
  * 布局: [63:48]=magic [47:40]=SQE opcode [39:0]=用户标签
  * magic 使旧调用(imm 为任意标签值)被消费方无误判 — 概率 < 1/65536 且撞上仅误 reduce */
 constexpr uint64_t SMEM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
-constexpr uint8_t SMEM_SDMA_SQE_OP_FP32_ADD = 0x71;  /* 0x70(FP32) | 0x01(ADD) */
-constexpr uint8_t SMEM_SDMA_SQE_OP_FP16_ADD = 0x61;  /* 0x60(FP16) | 0x01(ADD) */
+/* opcode 枚举值对齐 hcomm 权威源码(aicpu_hccl_sqcqv2.cc SdmaReduceOpcode): FP32=2 FP16=3 */
+constexpr uint8_t SMEM_SDMA_SQE_OP_FP32_ADD = 0x02; /* 搬运+reduce dst += src (fp32 逐元素) */
+constexpr uint8_t SMEM_SDMA_SQE_OP_FP16_ADD = 0x03; /* 搬运+reduce dst += src (fp16 逐元素) */
 
 SMEM_SHM_INLINE_AICORE uint64_t SdmaEncodeOpImm(uint64_t imm, uint8_t sqeOpcode)
 {

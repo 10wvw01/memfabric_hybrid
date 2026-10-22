@@ -96,7 +96,7 @@ set(SDMA_ORCH_JSON_CUST_SRC "${CMAKE_CURRENT_SOURCE_DIR}/libmf_sdma_orch.json") 
 set(SDMA_ORCH_JSON_CUST_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.json") # CUST json 构建目录副本
 
 # 设备侧 launch 版本号(缓存变量): launch json 的 kernelSo 与部署链的复制目标名都用它
-set(MF_SDMA_ORCH_KVER "11" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
+set(MF_SDMA_ORCH_KVER "14" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
 # launch json 输出路径(文件名带版本号)
 set(SDMA_ORCH_JSON_LAUNCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch_v${MF_SDMA_ORCH_KVER}.json")
 
