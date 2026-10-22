@@ -31,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 11; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 14; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -45,11 +45,11 @@ struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
  * signal(op != COPY) 时 imm 编码: [63:48]=magic [47:40]=SQE opcode [39:0]=用户标签
  * AICPU 消费侧解码: magic 匹配→按 opcode 构造 reduce SQE + 到达邮件透传还原后的标签;
  * 不匹配→纯搬运(现状), 老调用(imm 为任意标签)无误判(magic 撞上概率 < 1/65536)。
- * SQE opcode 编码 = 数据类型(高4位)|操作(低4位): FP32=0x70 FP16=0x60 ADD=0x01
- * 310P3 实测支持域(2026-10-15): SUM×{FP32,FP16} 值级 PASS; 其余 kind/type 被拒。 */
+ * SQE opcode 枚举值对齐 hcomm 权威源码(aicpu_hccl_sqcqv2.cc SdmaReduceOpcode):
+ * NOT_ATOMIC=0(纯搬运) INT16=1 FP32=2 FP16=3 —— 高4位|低4位自造编码(如 0x71)固件不识别 */
 constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
-constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x71; /* FP32 累加: dst += src */
-constexpr uint8_t HYBM_SDMA_SQE_OP_FP16_ADD = 0x61; /* FP16 累加: dst += src */
+constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x02; /* FP32 累加: dst += src */
+constexpr uint8_t HYBM_SDMA_SQE_OP_FP16_ADD = 0x03; /* FP16 累加: dst += src */
 
 static inline uint8_t HybmSdmaDecodeOp(uint64_t imm, uint64_t *userTag)
 {
