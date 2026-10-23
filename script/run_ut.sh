@@ -11,8 +11,11 @@
 readonly SCRIPT_FULL_PATH=$(dirname $(readlink -f "$0"))
 readonly PROJECT_FULL_PATH=$(dirname "$SCRIPT_FULL_PATH")
 
-readonly BUILD_PATH="$PROJECT_FULL_PATH/build"
-readonly OUTPUT_PATH="$PROJECT_FULL_PATH/output"
+# UT 专属构建/安装目录: 与正常构建(build/, output/)彻底隔离, 防止 ASAN 配置
+# 污染正常产物(issue #18: 曾发生 UT 用还原源码重编 build/ 库、ASAN 库 install
+# 覆盖 output/ 两类事故)
+readonly BUILD_PATH="$PROJECT_FULL_PATH/build_ut"
+readonly OUTPUT_PATH="$PROJECT_FULL_PATH/output_ut"
 readonly HYBM_LIB_PATH="$OUTPUT_PATH/hybm/lib64"
 readonly SMEM_LIB_PATH="$OUTPUT_PATH/smem/lib64"
 readonly COVERAGE_PATH="$OUTPUT_PATH/coverage"
@@ -81,13 +84,16 @@ else
     export MAKE_CMD=make
 fi
 if ! $FAST_MODE || [ ! -f "${BUILD_PATH}/build.ninja" -a ! -f "${BUILD_PATH}/Makefile" ]; then
-    cmake -G "$GENERATOR" -DCMAKE_BUILD_TYPE=ASAN -DBUILD_UT=ON -DBUILD_OPEN_ABI=ON -S . -B ${BUILD_PATH}
+    cmake -G "$GENERATOR" -DCMAKE_BUILD_TYPE=ASAN -DBUILD_UT=ON -DBUILD_OPEN_ABI=ON \
+        -DCMAKE_INSTALL_PREFIX=${OUTPUT_PATH} -S . -B ${BUILD_PATH}
     $FAST_MODE && echo "${BUILD_FINGERPRINT}" > "${FINGERPRINT_FILE}"
 fi
 ${MAKE_CMD} install -j"${MF_BUILD_JOBS}" -C ${BUILD_PATH}
 export LD_LIBRARY_PATH=$SMEM_LIB_PATH:$HYBM_LIB_PATH:$MOCK_CANN_PATH/driver/lib64
 export ASCEND_HOME_PATH=$MOCK_CANN_PATH
-export ASAN_OPTIONS="detect_stack_use_after_return=1:allow_user_poisoning=1"
+# 注: 不开 detect_stack_use_after_return——mockcpp 的 ApiHook 跳转桩与该增强模式
+# 冲突产生框架级误报(issue #19), 其余 ASAN 检测能力保留
+export ASAN_OPTIONS="allow_user_poisoning=1"
 
 set +e
 cd "$OUTPUT_PATH/bin/ut" && ./test_memfabric --gtest_output=xml:"$TEST_REPORT_PATH/test_detail.xml" --gtest_filter=${TEST_FILTER}
@@ -99,6 +105,9 @@ if [ ${TEST_EXIT_CODE} -ne 0 ]; then
 fi
 
 if ! $FAST_MODE; then
+    if ! command -v lcov &>/dev/null || ! command -v genhtml &>/dev/null; then
+        echo "========= lcov/genhtml not found, skip coverage (apt install lcov) ========="
+    else
     mkdir -p "$COVERAGE_PATH"
     cd "$OUTPUT_PATH"
     EXCLUDE_DIRS=(
@@ -142,6 +151,7 @@ if ! $FAST_MODE; then
             echo "failed: branches coverage ${branches_rate}% < 40%"
             COVERAGE_FAILED=1
         fi
+    fi
     fi
 fi
 
