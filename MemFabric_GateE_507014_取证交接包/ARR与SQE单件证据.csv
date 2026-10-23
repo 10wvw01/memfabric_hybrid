@@ -1,0 +1,27 @@
+类别,项目,设备/环,槽位或序号,字段,实测值,期待值(对照),数据来源,证据分级,备注
+ARR,被等槽,dev0环(rank0接收),槽440,stamp,7609,8633,[MF_G1D]冻结帧(headSlot/headStamp),observed,旧圈值=8633-1024；新单从未被写入该槽(Host D2H与AICore双读路径同读旧值)
+ARR,被等槽,dev0环,槽440,mail.seq,7609,8633,[MF_G1D]冻结帧(headMailSeq),observed,mail与stamp同为上圈内容
+ARR,被等槽,dev0环,槽440,mail.dst,20735066112000,复现时应为chunk数据目的地址,[MF_G1D]冻结帧,observed,十进制设备地址；可与同环其他chunk邮件dst对照
+ARR,被等槽,dev0环,槽440,mail.len,4194304,4194304,[MF_G1D]冻结帧,observed,=0x400000=1024行x2048列x2字节
+ARR,被等槽,dev0环,槽440,mail.imm,5568193334238773249,本圈应为新imm(含gen/chunk tag),[MF_G1D]冻结帧,observed,上圈立即数；成功件imm形态见rank1返回记录0x4d46325600000001
+ARR,消费游标,dev0环,ArrHead,冻结值,8632(冻结>=13s),停滞期不变,[MF_G1D]帧序列,observed,消费游标；被等槽=ArrHead%1024=440；期待单号=ArrHead+1=8633
+ARR,被等槽,dev1环(rank1接收),槽442,stamp,7611,8635,[MF_G1D]冻结帧,observed,旧圈值=8635-1024；rank1为级联停滞(等rank0的chunk2邮件)
+ARR,被等槽,dev1环,槽442,mail.seq,7611,8635,[MF_G1D]冻结帧,observed,同上
+ARR,被等槽,dev1环,槽442,mail.dst,20731819720704,复现时应为chunk数据目的地址,[MF_G1D]冻结帧,observed,—
+ARR,被等槽,dev1环,槽442,mail.len,4194304,4194304,[MF_G1D]冻结帧,observed,—
+ARR,被等槽,dev1环,槽442,mail.imm,5568193334238773251,本圈应为新imm,[MF_G1D]冻结帧,observed,—
+ARR,消费游标,dev1环,ArrHead,冻结值,8634(08:34:50由8632跳入后冻结),停滞期不变,[MF_G1D]帧序列,observed,跳入的8633/8634为rank0侧AICPU排空请求环的补发(derived归因)
+ARR,成功邻件,dev1环,槽440,stamp,8633(停滞前帧),—,[MF_G1D]帧,observed,同环前一柜正常落环并被消费返回；与dev0环槽440形成同槽位对照：一侧更新一侧缺件
+ARR,V2等待返回记录,rank1,mailSeq=8633,返回字段,mailStatus=0 mailDst=0x12db00400000 mailLen=4194304 mailImm=0x4d46325600000001 waitChunk=1,—,[V2_G1D]行,observed,gen1730的chunk1等待正常返回；status=0
+ARR,V2等待返回记录,rank0,末次返回,返回字段,gen1728 c3 seq=8625；gen1730零返回,—,[V2_G1D]统计,observed,rank0在本代际没有任何一次wait返回
+ARR,边界邻槽对照,dev0环+dev1环,槽1020/1021/1022/1023,stamp,8189/8190/8191/8192,lap-8自洽,[MF_G1D]冻结帧,observed,环回绕健康；证明Host读路径正常
+ARR,边界邻槽对照,dev0环+dev1环,槽0/1/2,stamp,8193/8194/8195,lap-9自洽,[MF_G1D]冻结帧,observed,同帧读到本圈新单
+ARR,边界邻槽对照,dev0环,槽1023,mail,seq=8192 dst=20735095472128 len=8 imm=5568193335384821317,—,[MF_G1D]冻结帧,observed,8字节完成邮件形态
+ARR,边界邻槽对照,dev1环,槽1023,mail,seq=8192 dst=20731874246656 len=8 imm=5568193335384821317,—,[MF_G1D]冻结帧,observed,—
+ARR,quiet邻槽对照,dev0环+dev1环,槽60-63/槽0-1,quiet戳,8573/8574/8575/8576/8577/8578,连续自洽,[MF_G1D]冻结帧,observed,—
+SQE,原发性丢失邮件,rank1→rank0 chunk0(dev0环期待seq8633),SQE#1数据拷贝,src/dst/len/imm+入队序号+提交时刻hwHead/hwTail,MISSING,逐单记录应为该请求第1条SQE,需MemFabric侧AICPU逐单取证,unknown,当前最大证据缺口；不能伪造补全
+SQE,原发性丢失邮件,rank1→rank0 chunk0(dev0环期待seq8633),SQE#2写对端到达戳,目标地址/写入值,MISSING,目标应为ARR_STAMP+440*8；落地后stamp[440]应为8633,需MemFabric侧取证,unknown,与SQE#1/#3共同构成三连证据链
+SQE,原发性丢失邮件,rank1→rank0 chunk0(dev0环期待seq8633),SQE#3写本端完成戳,目标地址/写入值,MISSING,—,需MemFabric侧取证,unknown,—
+SQE,原发性丢失邮件,rank1→rank0 chunk0(dev0环期待seq8633),硬件完成/错误回执,每条SQE的完成与错误状态,MISSING,—,需MemFabric侧取证,unknown,区分SQE未组对/未送出/硬件未完成/写错目标
+SQE,事后SQ状态,dev0,采样终值,hwHead/hwTail/rc,hwHead=hwTail=302 rc=0(采样时),提交时刻状态未知,[MF_G1C]帧,observed,事后排空不等于每步瞬态正常
+SQE,事后SQ状态,dev1,采样终值,hwHead/hwTail/rc,hwHead=hwTail=308 rc=0(采样时),提交时刻状态未知,[MF_G1C]帧,observed,—

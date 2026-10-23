@@ -1,0 +1,85 @@
+{
+  "package": "MemFabric_GateE_507014_取证交接包",
+  "generated": "2026-10-23",
+  "source": "V1_V2_性能与稳定性专项排障总账_20261023.md §5.3（分支 docs/310p-v1-v2-perf-stability-ledger-20261023）",
+  "fault_session": {
+    "id": "D1R4",
+    "window_utc": "2026-10-21 08:23:12 - 08:38 (507014 于 08:34:49.395 / 08:34:58.078)",
+    "workload": "Qwen3.6-35B-A3B-w8a8 TP2 Eager Gate E 长稳；input=4096, output=256, 25 prompts/轮, 并发 10, 620s"
+  },
+  "repositories": {
+    "vllm-ascend": {
+      "repo": "vllm-ascend G1-D 取证分支（V2 侧私有 fork 镜像，地址与提交号不随包携带；联合取证时由 V2 侧提供）",
+      "branch": "diag/310p3-g1d-minimal-forensics-20261021",
+      "note": "D1R4 时点该分支 src/、cmake/、csrc/**/src/ 零改动（仅 test/docs/evidence 层）；运行时二进制身份以下方 SHA256 为准"
+    },
+    "memfabric_hybrid": {
+      "repo": "memfabric_hybrid G1-D 取证分支（原始开发仓 gitcode.com/GDD_ESCC/memfabric_hybrid）",
+      "branch": "diag/310p3-g1d-minimal-forensics-20261021",
+      "note": "部署的 Host SO 为该分支断言式构建产物；D1R4 之后该分支另追加过 Host 侧 tail 采样改动（未参与 D1R4 会话）"
+    }
+  },
+  "runtime_binaries": {
+    "host_libmf_hybm_core_so_D1R4_diagnostic": {
+      "sha256": "6e9dc2d699aa7b718a83f93397fbc2d0f18a799e384ffda9031d62f25195e55a",
+      "deployed_paths": [
+        "/usr/local/memfabric_hybrid/latest/aarch64-linux/lib64/libmf_hybm_core.so",
+        "<python3.12 site-packages>/memfabric_hybrid/lib/libmf_hybm_core.so"
+      ],
+      "embedded_commit": "（内嵌构建源提交标识，值不随包携带）",
+      "build_recipe": "Ninja RELEASE, -DMF_SDMA_ORCH_KVER=12 -DMF_SDMA_ORCH_G1C_DEVICE_TRACE=ON, BUILD_PYTHON=ON, 独立 build-g1d/",
+      "note": "D1R4 会话实际加载版本（两位置同哈希，provenance 断言）；会话后已恢复原装"
+    },
+    "host_libmf_hybm_core_so_production_restored": {
+      "sha256": "88d392850733d7f166ce28615a8fdbf164b604979df9d3fc8cd0c10c64fd7bc1",
+      "note": "原装/恢复态（= G1-C 恢复值 = fix-310p-kfc-deploy-helper 构建线，2026-10-19 热替换；wheel 元数据所记 git 版本低于实际部署的修复线，具体提交号不随包携带）"
+    },
+    "v2_plugin_vllm_ascend_C": {
+      "sha256": "bcbb4f67c5e32401bd5d575ee7559f769ecbeb1d541e23df4bf4e3fa09c97550",
+      "dt_needed": "libmf310p_v2_trial_device_g1d.so"
+    },
+    "v2_device_libmf310p_v2_trial_device_g1d_so": {
+      "sha256": "d9a6de660677b13dbd83688dd250fbcdd3ea62c3427179b5060a1e64c5fbfa73",
+      "build_defs": "VLLM_ASCEND_310P_V2_BUILD_DIAGNOSTICS=ON + G1C_TRACE=ON + G1D_TRACE=ON（独立文件名，不覆盖正式库）"
+    },
+    "memfabric_libmf_smem_so": {
+      "sha256": "daec23320da88f29388ec445cefb193122da1aded984eabd2b6d4389e2989d6d"
+    },
+    "orch_deploy_helper": {
+      "sha256": "849f93c0b4a96877d3e839ae7ceec4b6c479a8de331213f0d7a270c1198bd310"
+    },
+    "kver": {
+      "production_v11": {
+        "orch_json": "/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/hybm/aicpu_kernel/libmf_sdma_orch_v11.json",
+        "orch_json_sha256": "25e16b0af2f16989231ff0443698261257bd8142834783a0c1e4ad57cd9ebc78",
+        "installed_aicpu_lib_sha256": "db7134b8a2fa56f7250097c36d6a530d38901743d5eb8055bf9168bb52aee401",
+        "device_side_v11_so_sha256": "unknown（设备文件系统 Host 不可挂载，无法直读；间接证据：HybmSdmaOrchEpoch 每 Rank 恰一实例、行为与 v11 一致）"
+      },
+      "diagnostic_v12_used_by_D1R4": {
+        "so_sha256": "02290083…（保全前 8 位；G1-D 分支重构建与保全产物逐字节一致，全量值见服务器 g1d_backup 清单）",
+        "launch_json": "/tmp/opencode/g1d/kernel_v12_stage/libmf_sdma_orch_v12.json",
+        "launch_json_sha256": "90172726965f4944ed955237c296faf1622762897f742ffbecf69a9e2fb554d0",
+        "cust_json_sha256": "74ad4668…（同上，保全清单内）",
+        "deploy_state_during_D1R4": "dev0 rc=0 deployed and verified (size=14072)；dev1 rc=3 already present（双 die 共享设备文件系统）",
+        "note": "D1R4 是诊断 v12，不是生产 v11；会话后已 rm 清除并探针验证 507018（不存在）"
+      }
+    }
+  },
+  "software_stack": {
+    "device": "Atlas 300I Duo（Ascend310P3，dav-2002），单卡双 die dev0/dev1 组成 TP2",
+    "cann_toolkit": "9.1.0 (aarch64, /usr/local/Ascend/cann-9.1.0)",
+    "driver": "26.1.1 (ascendhal 7.35.23, aicpu 1.0)",
+    "python": "3.12.13",
+    "torch": "2.10.0+cpu (Host)",
+    "torch_npu": "2.10.0.post4",
+    "vllm": "0.27.1 (v0.27.1+empty, V1 engine)",
+    "vllm_ascend": "本仓库 G1-D 分支（见 repositories）",
+    "model": "Qwen3.6-35B-A3B-w8a8（服务器本地路径，此处脱敏；联系 V2 侧获取）",
+    "compiler": "BiSheng dav-2002（设备核）；Host CXX 与 G1-C 同构配方"
+  },
+  "identity_chain_notes": [
+    "D1R4 会话 provenance 由 gate_e_forensic_run.sh 自动记录（gate_e_D1R4/evidence/provenance.txt，本 JSON 数字与其逐项一致）",
+    "生产/诊断区分：KVER11 JSON 指向生产 v11；D1R4 显式 MF_SDMA_ORCH_JSON 指向诊断 v12 staging 文件",
+    "设备侧 v12 部署、Host 双位置替换均为断言式操作，会话后已全部恢复并留恢复证明（restore_proof / restore_final_proof）"
+  ]
+}
