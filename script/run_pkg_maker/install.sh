@@ -263,9 +263,9 @@ function check_path()
 
 function get_ascend_version() {
     local soc_name=""
-    # ÓÅÏÈÓÃ npu-smi È¡ SoC Ãû£¨ÈÝÆ÷/ËÞÖ÷ lspci ²»¿É¿¿Ê±ÈÔÓÐÐ§£©
+    # ä¼˜å…ˆç”¨ npu-smi å– SoC åž‹å·(310P çš„ Chip åˆ—ä¸º "310P3", ä¸å¸¦ Ascend å‰ç¼€, ä¸€å¹¶æå–)
     if command -v npu-smi &>/dev/null; then
-        soc_name=$(npu-smi info 2>/dev/null | grep -oE "Ascend9[0-9]+[A-Za-z]*" | head -n1)
+        soc_name=$(npu-smi info 2>/dev/null | grep -oE "Ascend9[0-9]+[A-Za-z]*|310P[0-9]*" | head -n1)
     fi
     if [ -n "${soc_name}" ]; then
         case "${soc_name}" in
@@ -275,12 +275,14 @@ function get_ascend_version() {
                  ascend_version="A2" ;;
              *Ascend910*)
                  ascend_version="A3" ;;
+             *310P*)
+                 ascend_version="310P" ;;
              *)
                 ascend_version="none" ;;
         esac
         return
     fi
-    # lspci ¶µµ×£¨PCI Éè±¸ ID£ºd802=A2, d803=A3, d806=A5£©
+    # lspci å…œåº•(PCI è®¾å¤‡ ID: d802=A2, d803=A3, d806=A5; 310P æ— å¯¹åº” ID, ä¸åœ¨æ­¤è¯†åˆ«)
     if [ $(lspci 2>/dev/null | grep -ci "Processing.*Huawei.*d806") -gt 0 ]; then
         ascend_version="A5"
     elif [ $(lspci 2>/dev/null | grep -ci "Processing.*Huawei.*d803") -gt 0 ]; then
@@ -325,6 +327,12 @@ function install_wheel_package() {
 
 function try_install_extend()
 {
+    if [ "${ascend_version}" == "310P" ]; then
+        # 310P çš„ HBM æ± èµ° AclVmm è·¯å¾„, ä¸ä½¿ç”¨ A3/A5 çš„ copy_extend kernel, è·³è¿‡å®‰è£…
+        print "INFO" "310P detected: extend kernel not required (AclVmm path), skip install extend lib."
+        return
+    fi
+
     bisheng_path=$(which bisheng 2>/dev/null)
     if [ -z "${bisheng_path}" ]; then
         print "WARNING" "bisheng Not Found, skip install extend lib."
