@@ -394,6 +394,23 @@ std::string HybmHostShmSegment::GetShmFilePath(uint32_t rankId, bool useHugetlbf
 Result HybmHostShmSegment::MapLocalShm() noexcept
 {
     useHugetlbfs_ = TryHugetlbfsAvailable();
+    if (!useHugetlbfs_) {
+        /* 回退 tmpfs 前校验容量: 稀疏 ftruncate 可超限"成功", 但 MAP_POPULATE/访问
+         * 未填充页将 SIGBUS(裸总线错误无法定位); 池大小超限直接快速失败 */
+        struct statfs shmFs {};
+        if (statfs(HOST_SHM_FALLBACK_DIR, &shmFs) != 0) {
+            BM_LOG_ERROR("Failed to statfs " << HOST_SHM_FALLBACK_DIR << " error:" << errno << " "
+                                             << SafeStrError(errno));
+            return BM_ERROR;
+        }
+        const uint64_t shmAvail = static_cast<uint64_t>(shmFs.f_bavail) * static_cast<uint64_t>(shmFs.f_bsize);
+        if (options_.size > shmAvail) {
+            BM_LOG_ERROR("DRAM pool size exceeds tmpfs capacity, size:"
+                         << options_.size << " available:" << shmAvail << " dir:" << HOST_SHM_FALLBACK_DIR
+                         << " (mount hugepages at " << HOST_SHM_HUGEPAGE_DIR << " or enlarge tmpfs)");
+            return BM_INVALID_PARAM;
+        }
+    }
     auto shmPath = GetShmFilePath(options_.rankId);
     BM_LOG_INFO("MapLocalShm start: rankId=" << options_.rankId << " size=" << options_.size
                                              << " useHugetlbfs=" << useHugetlbfs_ << " shmPath=" << shmPath);
