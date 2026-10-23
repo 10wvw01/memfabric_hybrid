@@ -46,7 +46,14 @@ constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;       /* 单 block(kernel 状态机单线程语义) */
 constexpr uint32_t HYBM_SDMA_ORCH_KFC_TIMEOUT_S = 25;  /* KFC 设备 shell 命令超时(部署链专用) */
 constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费 kernel 入口符号 */
-constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v11.json"; /* CWD 缺省 json(与 KVER 同步) */
+/* CWD 缺省 json 名随 KVER 生成(主构建经 CMake 注入 MF_SDMA_ORCH_KVER, 与设备侧文件名同步;
+ * 独立编译场景无注入时用兜底值, 须与 hybm_kernel/CMakeLists 的 KVER 手动同步) */
+#ifndef MF_SDMA_ORCH_KVER
+#define MF_SDMA_ORCH_KVER 14
+#endif
+#define HYBM_SDMA_KVER_STR_(x) #x
+#define HYBM_SDMA_KVER_STR(x) HYBM_SDMA_KVER_STR_(x)
+constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v" HYBM_SDMA_KVER_STR(MF_SDMA_ORCH_KVER) ".json";
 constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
 constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
 /* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 须在本卡设备上部署) */
