@@ -8,26 +8,28 @@ MoE layers whose RowParallelLinear matches the fused geometry contract:
 full-attention ``self_attn.o_proj`` and GDN (linear-attention)
 ``linear_attn.out_proj``. Both are *unquantized* in the real
 Qwen3.6-35B-A3B-w8a8 checkpoint (kept FLOAT) and share the identical shape
-K_global=4096 / K_local=2048 / N=2048 at TP=2, so one ABI v7 kernel serves
+K_global=4096 / K_local=2048 / N=2048 at TP=2, so one ABI v8 kernel serves
 both. All other layers keep the existing RowParallelLinear implementation.
 The checkpoint carries no torch_dtype, so vLLM runs it as FP16 on 310P
 (BF16 NZ linear is unsupported by this CANN anyway); the fused path
 therefore exchanges FP16 partial results.
 
-There is no M threshold: once the fused path is selected at startup every
-M is fused. Tail batches are zero-padded to the fixed communication batch
-``batch_m``; the producer scratch is zeroed once at allocation and tail
-batches only copy their valid rows (padded rows are computed and exchanged
-but never reduced into the output).
+Routing is three-band. ``M < min(batch_m, 256)`` runs the N-split serial
+wave (per-core 256-column weight slices). ``256 <= M <`` the single-wave
+ceiling (default 2048) runs one M-split serial wave: the padded
+``ceil(M/256)*256`` template computes the full MM and one variable-length
+SDMA signal carries the whole payload (structurally comparable to stock
+matmul + allreduce; ``M % 256 == 0`` reads x directly with zero staging).
+``M >=`` the ceiling keeps the batch pipeline: batches of ``batch_m``
+rows, lookahead=1, with SDMA of earlier batches overlapping later MM.
 
 The fused op treats wgm-dev-310p MemFabric as an opaque public transport.
-All 8 AI cores cooperatively execute each batch MM; core0 becomes the sole
-data ``signal()`` owner after every core publishes a generation-tagged
-ready cell. Per batch the dataflow is MM -> cache clean -> ready -> signal,
-allowing MM of later batches to overlap SDMA of earlier batches. Public
-``wait()`` joins each peer batch payload, a repo-owned FP16 add reduces the
-two TP partials, and a fixed FIFO credit protects arena reuse across waves
-and graph replays.
+All 8 AI cores cooperatively execute each MM; core0 becomes the sole data
+``signal()`` owner after every core publishes a generation-tagged ready
+cell. Per batch the dataflow is MM -> cache clean -> ready -> signal.
+Public ``wait()`` joins each peer payload, a repo-owned FP16 add reduces
+the two TP partials, and a fixed FIFO credit protects arena reuse across
+waves and graph replays.
 """
 
 from __future__ import annotations
@@ -158,7 +160,7 @@ def should_enable_memfabric_mm_ar(layer: torch.nn.Module) -> bool:
     quant_method = getattr(layer, "quant_method", None)
     if quant_method is not None:
         method_name = type(quant_method).__name__
-        if method_name not in ("AscendUnquantizedLinearMethod", "MemFabricMmArLinearMethod310"):
+        if method_name not in ("AscendUnquantizedLinearMethod", "MemFabricMmArLinearMethod310", "MemFabricMmArV2LinearMethod310"):
             return False
         nested = getattr(quant_method, "quant_method", None)
         if nested is not None and type(nested).__name__ != "AscendUnquantizedLinearMethod":

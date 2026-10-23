@@ -3,16 +3,16 @@
 
 """Runtime hooks that adapt MemFabric mm_ar to the 310P DFlash runner.
 
-Keep the DFlash runner itself owned by the main development branch.  The
+Keep the DFlash runner itself owned by the main development branch. The
 MemFabric customization only needs two lifecycle adjustments:
 
-1. optionally wrap runner dummy/profile/capture runs in the existing
-   MemFabric warmup fallback context; and
+1. optionally wrap *profile* dummy runs in the existing MemFabric warmup
+   fallback context, while leaving graph pre-capture eager warmups fused; and
 2. avoid device-wide synchronization once the long-lived MemFabric SDMA pool
    has started, because its supervised epoch kernel lives on a separate stream.
 
 The hooks are installed lazily when an eligible mm_ar layer is selected, which
-happens during model construction before profile/dummy runs.  Installation is
+happens during model construction before profile/dummy runs. Installation is
 idempotent and preserves the complete DFlash implementation of ``_dummy_run``
 (including FDO/FAP capture state and async metadata handling).
 """
@@ -20,6 +20,7 @@ idempotent and preserves the complete DFlash implementation of ``_dummy_run``
 from __future__ import annotations
 
 from functools import wraps
+from inspect import signature
 
 import torch
 
@@ -39,23 +40,37 @@ def install_memfabric_mm_ar_runner_hooks() -> None:
         memfabric_mm_ar_warmup_fallback,
     )
 
-    # Preserve the DFlash-owned _dummy_run implementation wholesale.  The
-    # wrapper only adds the MemFabric warmup context around it.
+    from vllm_ascend._310p.ops.memfabric_mm_ar_v2_serve import v2_pool_started
+
+    # Preserve the DFlash-owned implementations wholesale. The dummy-run
+    # wrapper only enables fallback for memory/profile runs. Graph pre-capture
+    # eager warmups must execute the fused path so lazy MemFabric state (most
+    # importantly small-M per-weight slices) exists before torch.npu.graph
+    # capture begins.
     original_dummy_run = NPUModelRunner310._dummy_run
+    original_sync_device = NPUModelRunner310._sync_device
+    dummy_run_signature = signature(original_dummy_run)
 
     @wraps(original_dummy_run)
     def _dummy_run_with_memfabric(self, *args, **kwargs):
-        with memfabric_mm_ar_warmup_fallback():
-            return original_dummy_run(self, *args, **kwargs)
+        bound = dummy_run_signature.bind_partial(self, *args, **kwargs)
+        is_profile = bool(bound.arguments.get("is_profile", False))
+        if is_profile:
+            with memfabric_mm_ar_warmup_fallback():
+                return original_dummy_run(self, *args, **kwargs)
+        return original_dummy_run(self, *args, **kwargs)
 
+    @wraps(original_sync_device)
     def _sync_device_with_memfabric(self) -> None:
         # The MemFabric orchestrator runs a supervised epoch kernel on its own
-        # launch stream for the lifetime of the pool.  A device-wide sync would
+        # launch stream for the lifetime of the pool. A device-wide sync would
         # wait on that stream; after pool creation only drain the model stream.
-        if memfabric_mm_ar_pool_started():
+        if memfabric_mm_ar_pool_started() or v2_pool_started():
             torch.npu.current_stream().synchronize()
             return
-        torch.npu.synchronize()
+        # Before pool creation retain the runner's original synchronization
+        # contract rather than duplicating its current implementation here.
+        return original_sync_device(self)
 
     NPUModelRunner310._dummy_run = _dummy_run_with_memfabric
     NPUModelRunner310._sync_device = _sync_device_with_memfabric
