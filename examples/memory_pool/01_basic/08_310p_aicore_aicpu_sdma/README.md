@@ -61,8 +61,10 @@ gva 首参；高频路径 `smem_shm_sdma_reserved(gva)` 预计算 + `_at` 变体
 2. **掩盖量化**：①流水总时延 < ②串行总时延（输出加速比；串行基线含逐轮 launch 与
    轮间会合开销，加速比度量的是"批量流水 vs 逐轮往返"的合并收益，非纯通算掩盖——
    纯掩盖收益受 (T计算+T通信)/max(T计算,T通信) ≤ 2x 结构上限约束）
-3. **④设备同步共存**：`AclrtSynchronizeDeviceWithTimeout(90s)`（分配器量级预算）在分轮运行下完成——等待 = 当前轮剩余（≤15s）。判据是"完成即过"（超时才会击杀 kernel / 报废池，即 serve 死因；等待数轮属延迟问题无碍）
-4. `destroy`/`uninit`/`MPI_Finalize` 干净退出
+3. `destroy`/`uninit`/`MPI_Finalize` 干净退出
+
+> 长稳压测与全设备同步探针（原 ③④）已迁 `test/integration/310p_sdma_stability/`，
+> 属测试内容不随示例分发。
 
 > 注 1：双 rank 会合已由早期 `/tmp` 文件轮询改为 `MPI_Barrier`（无残留文件，同步粒度
 > 从 1ms 降到微秒级）。
@@ -101,8 +103,8 @@ export LD_LIBRARY_PATH=$ASCEND_HOME_PATH/aarch64-linux/lib64:$MPI_LIB:...
 mpirun -np 2 /tmp/ex08   # root 用户加 --allow-run-as-root
 # 期望输出: 双方 "=== EX08 rN PASS ===" + r0 掩盖量化加速比(首轮含自动部署秒级开销)
 
-# 长稳测试(可选, 验收换轮无缝性): 跨轮边界持续收发零丢失(分轮运行+自动换轮)
-EX08_SOAK_ROUNDS=30000 bash run.sh --run-only   # ~46s, 期望 ③soak PASS(跨 ≥3 次换班, max 单轮 ~100ms=换班间隙)
+# 长稳压测(换轮无缝性验证)已迁测试目录:
+#   test/integration/310p_sdma_stability/  (STRESS_ROUNDS=30000 约 46s)
 ```
 
 ## 与相关示例/实验的关系
