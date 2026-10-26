@@ -49,7 +49,7 @@ constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费
 /* CWD 缺省 json 名随 KVER 生成(主构建经 CMake 注入 MF_SDMA_ORCH_KVER, 与设备侧文件名同步;
  * 独立编译场景无注入时用兜底值, 须与 hybm_kernel/CMakeLists 的 KVER 手动同步) */
 #ifndef MF_SDMA_ORCH_KVER
-#define MF_SDMA_ORCH_KVER 14
+#define MF_SDMA_ORCH_KVER 28
 #endif
 #define HYBM_SDMA_KVER_STR_(x) #x
 #define HYBM_SDMA_KVER_STR(x) HYBM_SDMA_KVER_STR_(x)
