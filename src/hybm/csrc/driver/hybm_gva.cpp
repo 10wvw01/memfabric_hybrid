@@ -17,6 +17,7 @@
 #include "dl_hal_api.h"
 #include "hybm_cmd.h"
 #include "hybm_gva.h"
+#include "hybm_physical_device_id.h"
 
 namespace ock {
 namespace mf {
@@ -75,7 +76,7 @@ static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
 {
     aclrtMemAccessDesc acc{};                                            // 访问权限描述符
     acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;  // 读写权限
-    acc.location.id = static_cast<uint32_t>(deviceId);                   // 授权设备号
+    acc.location.id = HybmPhysicalDeviceIdOf(static_cast<uint32_t>(deviceId));                   // 授权设备号
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE; // 授权类型: 设备侧
     auto ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, &acc, 1);
     if (ret != BM_OK) { // 授权失败
