@@ -11,6 +11,7 @@
  */
 
 #include "hybm_acl_vmm_segment.h"
+#include "hybm_physical_device_id.h"
 
 #include "hybm_ex_info_transfer.h"
 #include "hybm_va_manager.h"
@@ -136,7 +137,7 @@ Result HybmAclVmmSegment::MapPhysicalToOwnSlot(aclrtDrvMemHandle handle, uint64_
 
     aclrtMemAccessDesc acc{};
     acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    acc.location.id = static_cast<uint32_t>(options_.devId);
+    acc.location.id = HybmPhysicalDeviceIdOf(static_cast<uint32_t>(options_.devId));
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &acc, 1);
     if (ret != BM_OK) {
@@ -464,7 +465,7 @@ Result HybmAclVmmSegment::MapImportedToSlot(const AclVmmExportInfo &im, aclrtDrv
 
     aclrtMemAccessDesc acc{};
     acc.flags = aclrtMemAccessFlags::ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    acc.location.id = static_cast<uint32_t>(options_.devId);
+    acc.location.id = HybmPhysicalDeviceIdOf(static_cast<uint32_t>(options_.devId));
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(slotAddr), im.size, &acc, 1);
     if (ret != BM_OK) {
