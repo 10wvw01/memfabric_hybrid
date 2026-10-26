@@ -31,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 14; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 28; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -110,6 +110,34 @@ constexpr uint32_t HYBM_SDMA_ORCH_EXIT_ERROR = 2;             /* 错误退出 */
 constexpr uint32_t HYBM_SDMA_ORCH_HEARTBEAT_HZ = 10;  /* host 报时频率(每 100ms 一跳) */
 /* 工作区报时槽偏移(工作区布局: resultAddr 即基址, RESULT 0 / OVF 64 / STOP 128): */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF = 136; /* host 心跳计数 8B(每 100ms +1, kernel 读) */
+/* ---- v15 诊断面包屑(工作区尾段, host D2H 可读; 逐单记录消费原文/计算地址/SQ 游标) ----
+ * 用途: 邮件丢失类故障的逐单取证(如 Gate E 507014)——单条面包屑即可裁决
+ * "读回空请求(对端段基址算 0→写飞)/ SQE 未执行 / doorbell 异常"三类根因。
+ * 开销: 每封 ~1 次缓存行维护, 微秒级, 常开(量产后可按需关闭)。 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF = 144; /* u64: 最近一次 doorbell 尾值 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DBRET_OFF = 152;    /* u64: 低 32 位=该次 doorbell 返回码 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_EPOCH_OFF = 160;    /* u64: (sqHead<<32)|sqTail 入口活查询快照 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_LAUNCH_OFF = 168;   /* u64: 累计 kernel launch 次数 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF = 176; /* u64: 累计面包屑条数(环形游标) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_OFF = 184;     /* 48 × 64B 环形面包屑 */
+constexpr uint32_t HYBM_SDMA_ORCH_DBG_RING_SLOTS = 48;       /* 184+48×64=3256 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SQSNAP_OFF = 3256;  /* 13 × 64B: 入口快照环尾 SQE 原文 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF = 4088; /* 8B: 尾值防 0 占位 SQE 的自拷贝地址 */
+constexpr uint32_t HYBM_SDMA_ORCH_DBG_SQSNAP_SLOTS = 13;     /* 尾 13 槽(尸体检查) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SQBASE_OFF = 4024;  /* u64: SQ 环基址 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SNAPBASE_OFF = 4032; /* u64: 快照首槽号(=固件 head-2) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SQDEPTH_OFF = 4040;  /* u64: SQ 环深度 */
+struct HybmSdmaOrchDbgMail {                                  /* 单条面包屑(64B, 单缓存行) */
+    uint64_t seq;         /* 消费的请求序号 */
+    uint64_t reqF0;       /* 请求槽读回 4 字(原文; 全 0=读回空请求, 写飞根因特征) */
+    uint64_t reqF1;
+    uint64_t reqF2;
+    uint64_t reqF3;
+    uint64_t arrMailSlot; /* 计算出的对端邮件像地址(异常值检测) */
+    uint64_t sqTailBefore;/* 三连 SQE 入环前 shadow 尾 */
+    uint64_t sqTailAfter; /* 三连 SQE 入环后 shadow 尾 */
+};
+static_assert(sizeof(HybmSdmaOrchDbgMail) == 64, "DbgMail 尺寸漂移"); /* 布局锁 64B */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 永不退出的专用值(不判报时, 诊断用) */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;       /* 空闲退避 100µs(实测 ≈130µs) */
