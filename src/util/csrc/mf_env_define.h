@@ -70,6 +70,9 @@ inline const std::string MF_CONFIG_STORE_PORT_END =
 inline const std::string MF_SDMA_ORCH_DISABLE = GetEnvStr("MF_SDMA_ORCH_DISABLE"); // SdmaOrchestrator::Disabled 读取
 // 协同编排 kernel 的 launch json 路径(缺省依次: 安装前缀自动发现 → CWD 的 libmf_sdma_orch_v5.json)
 inline const std::string MF_SDMA_ORCH_JSON = GetEnvStr("MF_SDMA_ORCH_JSON"); // LoadOrchestratorKernel 读取
+// 搬运 kernel 每轮时长秒数(缺省 15): 到点自退后由监督线程重新拉起(环+游标零丢失)。
+// 4294967295=永不退出(诊断用; 会阻塞任何全设备同步, 见平台事实 2026-10-12 定案条目)
+inline const std::string MF_SDMA_ORCH_EPOCH_BUDGET_S = GetEnvStr("MF_SDMA_ORCH_EPOCH_BUDGET_S"); // ConfigureOrch 读取
 inline const std::string MF_GROUP_JOIN_MAX_TIMEOUT = GetEnvStr("MF_GROUP_JOIN_MAX_TIMEOUT");
 inline const std::string MF_GROUP_RETRY_TIME = GetEnvStr("MF_GROUP_RETRY_TIME", "MF_SMEM_GROUP_RETRY_TIME");
 inline const std::string MF_ACC_CHECK_PERIOD_HOURS =

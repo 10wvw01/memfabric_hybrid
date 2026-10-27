@@ -49,6 +49,8 @@ list(APPEND HYBMM_SRC_FILES ${PROJECT_UTIL_SRC_BASE}/mf_fault_injection_point_re
 add_library(hybmm_objects OBJECT ${HYBMM_SRC_FILES})
 target_compile_options(hybmm_objects PRIVATE -fPIC)
 target_include_directories(hybmm_objects INTERFACE ${HYBM_PUBLIC_INCLUDE_DIR})
+# 缺省 launch json 名与设备侧版本号同步(防滞后, 见 hybm_sdma_orchestrator.cpp 的 DEFAULT_JSON)
+target_compile_definitions(hybmm_objects PRIVATE MF_SDMA_ORCH_KVER=${MF_SDMA_ORCH_KVER})
 
 add_library(hybmm_static STATIC $<TARGET_OBJECTS:hybmm_objects> $<TARGET_OBJECTS:ptracer_object>)
 set_target_properties(hybmm_static PROPERTIES OUTPUT_NAME "mf_hybm_core")
