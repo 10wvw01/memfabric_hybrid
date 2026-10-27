@@ -31,7 +31,7 @@
  *   +0x0A80  到达戳 1024 × u64(SQE 写, 对端 AICore wait 轮询)
  *   +0x2A80  到达邮件 1024 × 32B(对端 AICPU 写, 本端 AICore 读)
  *   +0xAA80  arrHead u64(到达消费游标, 本端 AICore 写)[独占行]
- *   +0xAB00  单号暂存 512 × u64(本端 AICPU 写, 本端 SDMA 读)[v25: 戳 SQE 抄写源]
+ *   +0xAB00  单号暂存 512 × u64(本端 AICPU 写, 本端 SDMA 读)[v25: 戳 SQE 拷贝数据源]
  * 注意: 戳值 1 基(seq+1), 0 保留为"空"(防 seq0 与清零槽不可辨的幻影邮件)。
  */
 #ifndef __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__
@@ -56,7 +56,7 @@ constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_STAMP = 0x0A80;  /* 到达戳数组(SQE 
 constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_SLOTS = 1024;    /* 到达环深度 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_MAIL = 0x2A80;   /* 到达邮件数组(AICPU 写) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_ARR_HEAD = 0xAA80;   /* 到达消费游标(AICore 写, 独占行) */
-/* v25(GateE 507014 残余竞态修复): 戳 SQE 的单号抄写源。原设计复用对端"到达邮件"首字段
+/* v25(GateE 507014 残余竞态修复): 戳 SQE 的单号拷贝数据源。原设计复用对端"到达邮件"首字段
  * 为源——AICPU 跨芯片写面单后, 同 die 的 SDMA 立即跨芯片读回自己刚写的值, 写在途时
  * 读到上一圈旧值(实测: ② 抄旧值盖旧值无声失效, ③ 数微秒后读到新值正确落地; 双向
  * 同窗各丢一封, ~2 万封/次)。改为本端暂存后跨芯片只剩"写", 与从未失败的 SQE① 同构。
