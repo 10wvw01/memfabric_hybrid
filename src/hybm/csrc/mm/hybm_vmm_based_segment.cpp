@@ -23,6 +23,8 @@
 
 using namespace ock::mf;
 
+constexpr int32_t RT_ERROR_DRV_OUT_MEMORY = 207001;
+
 HybmVmmBasedSegment::~HybmVmmBasedSegment()
 {
     if (globalVirtualAddress_ == nullptr && localVirtualAddress_ == nullptr && slices_.empty()) {
@@ -229,6 +231,14 @@ Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_me
         prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
         aclrtDrvMemHandle aclHandle = nullptr;
         auto ret = DlAclApi::AclrtMallocPhysical(&aclHandle, size, &prop, 0);
+        if (ret == RT_ERROR_DRV_OUT_MEMORY) {
+            // 310P: ACL_MEM_P2P_HUGE 物理分区上限 ~4088MB(动态波动), 超限返 207001(P2P 分区 OOM);
+            // ACL_HBM_MEM_HUGE 从 AI 主池(~42GB)分配无此限制, 带宽无差异。回退仅对 die 间(同卡)共享生效。
+            BM_LOG_WARN("AclrtMallocPhysical(P2P_HUGE) P2P partition exhausted, fallback to ACL_HBM_MEM_HUGE, ret:"
+                        << ret << " devId:" << devId << " size:" << size);
+            prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_HBM_MEM_HUGE);
+            ret = DlAclApi::AclrtMallocPhysical(&aclHandle, size, &prop, 0);
+        }
         if (ret != BM_OK) {
             BM_LOG_ERROR("AclrtMallocPhysical failed, ret:" << ret << " devId:" << devId << " size:" << size);
             return ret;
