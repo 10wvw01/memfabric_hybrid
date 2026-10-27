@@ -82,8 +82,6 @@ constexpr uint32_t kInfoValueLen = 8;           // HAL 请求 value 数组长度
 constexpr size_t kSqeSize = 64;                 // SQE 尺寸(64B = 8×u64)
 constexpr uint32_t kSqFullRetry = 1000;              // SQ 满活查询自旋上限(×1ms)
 constexpr uint32_t kSqFullBackoffUs = 1000;     // SQ 满退避粒度
-constexpr uint32_t kQueryValidateRetry = 100;    // 查询垃圾值重查上限(×1ms)
-constexpr uint32_t kQueryValidateBackoffUs = 1000; // 查询重查退避粒度
 
 // HAL 请求结构(HAL 侧按定长 value 数组解释; 前五域为定位五元组)
 struct HalConfigInfo { // SQ/CQ 配置请求(doorbell 用)
@@ -254,45 +252,36 @@ int32_t cp1QueryProp(uint32_t devId, uint32_t sqId, uint32_t prop, uint32_t *v0,
     return r;
 }
 
-// 活查询 + 提交上下文装配(失败码写入返回值, 语义见各 1xxx 分支)。
-// v27: 查询结果合法性校验(实测 HAL 查询偶发返回垃圾值——depth 出现 ~92 万、
-// head/tail 越界——垃圾值直接毒化环算术: SQE 写到错误地址/铃值错乱被固件无视, 表象为
-// "队列冻结"与无声丢件)。异常重查, 持续异常显式报错退出(不再盲信)。
+// 活查询 + 提交上下文装配(失败码写入返回值, 语义见各 1xxx 分支)
 int32_t cp1LiveQuery(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 {
-    uint32_t lo = 0, hi = 0, status = 0, head = 0, tail = 0, depth = 0;
-    for (uint32_t retry = 0; retry < kQueryValidateRetry; retry++) {
-        int32_t rStatus = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_STATUS, &status, nullptr);
-        int32_t rBase = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_BASE, &lo, &hi);
-        int32_t rDepth = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_DEPTH, &depth, nullptr);
-        int32_t rHead = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &head, nullptr);
-        int32_t rTail = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_TAIL, &tail, nullptr);
-        (void)rStatus; // 状态仅诊断
-        if (rTail != 0) { // TAIL 失败: sqTail 是 SQE 写入位置, 失败即退出防覆写固件未消费 SQE
-            return 1400 + (rTail & 0xFF);
-        }
-        if (rBase != 0) {
-            return 1000 + (rBase & 0xFF); // 10xx: BASE 失败
-        }
-        if (rHead != 0) {
-            return 1300 + (rHead & 0xFF); // 13xx: HEAD 失败
-        }
-        if (rDepth != 0) {
-            return 1100 + (rDepth & 0xFF); // 11xx: DEPTH 失败
-        }
-        const bool depthOk = depth >= 64 && depth <= 8192 && (depth & (depth - 1)) == 0;
-        const bool cursorOk = head < depth && tail < depth;
-        const uint64_t base = (static_cast<uint64_t>(hi) << 32) | lo;
-        if (depthOk && cursorOk && base != 0) {
-            ctx->sqBase = base;
-            ctx->sqHead = head;
-            ctx->sqTail = tail;
-            ctx->sqDepth = depth;
-            return 0;
-        }
-        usleep(kQueryValidateBackoffUs); // 垃圾值: 退避重查
+    uint32_t lo = 0, hi = 0, status = 0, head = 0, tail = 0;
+    int32_t rStatus = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_STATUS, &status, nullptr);
+    int32_t rBase = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_BASE, &lo, &hi);
+    int32_t rDepth = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_DEPTH, &ctx->sqDepth, nullptr);
+    int32_t rHead = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &head, nullptr);
+    int32_t rTail = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_TAIL, &tail, nullptr);
+    (void)rStatus; // 状态仅诊断
+    if (rTail != 0) { // TAIL 失败: sqTail 是 SQE 写入位置, 失败即退出防覆写固件未消费 SQE
+        return 1400 + (rTail & 0xFF);
     }
-    return 1366; // 错误码: 查询结果持续非法(垃圾值毒化防御)
+    if (rBase != 0) {
+        return 1000 + (rBase & 0xFF); // 10xx: BASE 失败
+    }
+    if (rHead != 0) {
+        return 1300 + (rHead & 0xFF); // 13xx: HEAD 失败
+    }
+    if (rDepth != 0) {
+        return 1100 + (rDepth & 0xFF); // 11xx: DEPTH 失败
+    }
+    const uint64_t base = (static_cast<uint64_t>(hi) << 32) | lo;
+    if (base == 0 || ctx->sqDepth == 0) {
+        return 1200; // 12xx: 无效通道
+    }
+    ctx->sqBase = base;
+    ctx->sqHead = head;
+    ctx->sqTail = tail;
+    return 0;
 }
 
 // 主机报时槽: 工作区 HEARTBEAT_OFF(resultAddr 即工作区基址, RESULT_OFF=0)。
@@ -469,40 +458,6 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         return 1;
     }
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
-    { /* v15 诊断: launch 计数 + 入口活查询快照(换轮核对数据源) */
-        const uintptr_t ws = static_cast<uintptr_t>(p->resultAddr);
-        /* v24 换轮核对(并发丢件挂死（507014） 残余竞态修复): 上一轮最后一次 doorbell 可能仍在途,
-         * 入口 TAIL 活查询会拿到落后值——新班首批 SQE 从落后位写入将覆写未执行任务
-         * (实测: 极限攻击 ~19k 封/2 次换轮命中一次, 双方向同窗各丢一封, 戳值恰差一圈)。
-         * 以上班持久化铃值(诊断区 144)为准: 查询值不一致即补敲(幂等)并以之为锚。 */
-        const uint64_t lastRung = loadCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF);
-        if (lastRung != 0 && ctx.sqTail != static_cast<uint32_t>(lastRung)) {
-            (void)doorbellViaHal(p->devId, ctx.sqId, static_cast<uint32_t>(lastRung));
-            ctx.sqTail = static_cast<uint32_t>(lastRung);
-        }
-        storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_LAUNCH_OFF,
-                  loadCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_LAUNCH_OFF) + 1);
-        storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_EPOCH_OFF,
-                  (static_cast<uint64_t>(ctx.sqHead) << 32) | ctx.sqTail);
-        storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_SQBASE_OFF, ctx.sqBase);
-        storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_SQDEPTH_OFF, ctx.sqDepth);
-        /* 固件 head 附近 12 槽 SQE 原文快照(host 不可直读 SQ 环, 由本入口抄至工作区)。
-         * head=固件下一个待取位置——若固件在队列上冻结, 该快照即冻结点尸体。 */
-        if (ctx.sqDepth != 0) {
-            const uint64_t first = (ctx.sqHead + ctx.sqDepth - 2U) % ctx.sqDepth;
-            storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_SNAPBASE_OFF, first);
-            for (uint32_t i = 0; i < ock::mf::HYBM_SDMA_ORCH_DBG_SQSNAP_SLOTS; i++) {
-                const uint64_t slot = (first + i) % ctx.sqDepth;
-                const volatile uint64_t *src = reinterpret_cast<const volatile uint64_t *>(ctx.sqBase + slot * kSqeSize);
-                volatile uint64_t *dst = reinterpret_cast<volatile uint64_t *>(
-                    ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_SQSNAP_OFF + i * kSqeSize);
-                for (uint32_t w = 0; w < kSqeSize / 8; w++) {
-                    dst[w] = src[w];
-                }
-                cacheFlushLine(reinterpret_cast<uintptr_t>(dst));
-            }
-        }
-    }
     uint64_t head = loadCell(p->reqBase - SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_RS_REQ_HEAD); // 消费起点
     /* 报时预算(v11): 永不退出的专用值不判报时(诊断模式); 0 用默认 15s(兼容旧 host);
      * 到 budgetS×10 跳自退——host 每 100ms 写一次递增计数, 精度 100ms, 不受设备负载影响。
