@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# run.sh — Gate E 507014 换班竞态复现器一键编译与运行(封装 bisheng 长命令/环境自检/MPI 探测/双 rank 拉起)
+# run.sh — Gate E 507014 换轮竞态复现器一键编译与运行(封装 bisheng 长命令/环境自检/MPI 探测/双 rank 拉起)
 #
 # 用法:
-#   bash run.sh                # 编译复现器并 mpirun -np 2 运行(默认 dev4/dev5, 1s 换班)
+#   bash run.sh                # 编译复现器并 mpirun -np 2 运行(默认 dev4/dev5, 1s 换轮)
 #   bash run.sh --build-only   # 仅编译(产物 /tmp/mf_gatee_repro, 不运行)
 #   bash run.sh --run-only     # 仅运行(要求 /tmp/mf_gatee_repro 已编译)
 #
 # 关键旋钮(环境变量, 长跑建议 nohup/tmux):
 #   EX09_DEVICE_BASE=4        起始设备号(DEVICE_ID = base + rank; dev4/dev5 为空闲同卡 die 对)
-#   EX09_EPOCH_BUDGET_S=1     编排换班周期(秒)——1=攻击模式(边界频率×15), 15=生产对照
+#   EX09_EPOCH_BUDGET_S=1     编排换轮周期(秒)——1=加压模式(边界频率×15), 15=生产对照
 #   EX09_TOTAL_GENS=10000000  总代数
 #   EX09_BATCH_GENS=1         每次 launch 代数(1=V2 同构逐代)
 #   EX09_WAIT_BUDGET=10000000 单次 launch 轮询总量上限(防 28s 同步超时)
@@ -136,7 +136,7 @@ run_example()
     export MF_LOG_LEVEL="${MF_LOG_LEVEL:-INFO}"
     export LD_LIBRARY_PATH="$CANN_LIB:$MPI_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     local base="${EX09_DEVICE_BASE:-4}"
-    echo "[run.sh] 运行: dev$base/dev$((base + 1)) 换班=${MF_SDMA_ORCH_EPOCH_BUDGET_S}s json=$(basename "$json")"
+    echo "[run.sh] 运行: dev$base/dev$((base + 1)) 换轮=${MF_SDMA_ORCH_EPOCH_BUDGET_S}s json=$(basename "$json")"
     if [ "$(id -u)" -eq 0 ]; then
         exec "$MPI_RUN" --allow-run-as-root -np 2 bash -c \
             "DEVICE_ID=\$(( $base + \$OMPI_COMM_WORLD_RANK )) exec $EX_BIN"

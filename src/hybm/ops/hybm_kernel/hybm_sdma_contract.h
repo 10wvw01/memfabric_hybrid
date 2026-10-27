@@ -90,7 +90,7 @@ struct HybmSdmaOrchResult {
     uint32_t mainRet;     /* 主返回码(0=成功/1=失败) */
     uint32_t consumed;    /* 本 epoch 消费邮件数(低 16 位有效) */
     uint32_t exitReason;  /* 退出原因(0=时限/1=停止/2=错误) */
-    uint64_t headAfter;   /* 面包屑: 退出时 SQ head 采样 */
+    uint64_t headAfter;   /* 逐单日志: 退出时 SQ head 采样 */
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
@@ -110,26 +110,26 @@ constexpr uint32_t HYBM_SDMA_ORCH_EXIT_ERROR = 2;             /* 错误退出 */
 constexpr uint32_t HYBM_SDMA_ORCH_HEARTBEAT_HZ = 10;  /* host 报时频率(每 100ms 一跳) */
 /* 工作区报时槽偏移(工作区布局: resultAddr 即基址, RESULT 0 / OVF 64 / STOP 128): */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF = 136; /* host 心跳计数 8B(每 100ms +1, kernel 读) */
-/* ---- v15 诊断面包屑(工作区尾段, host D2H 可读; 逐单记录消费原文/计算地址/SQ 游标) ----
- * 用途: 邮件丢失类故障的逐单取证(如 Gate E 507014)——单条面包屑即可裁决
- * "读回空请求(对端段基址算 0→写飞)/ SQE 未执行 / doorbell 异常"三类根因。
+/* ---- v15 诊断逐单日志(工作区尾段, host D2H 可读; 逐单记录消费原文/计算地址/SQ 游标) ----
+ * 用途: 邮件丢失类故障的逐单取证(如 Gate E 507014)——单条逐单日志即可裁决
+ * "读回空请求(对端段基址算 0→写到错误地址)/ SQE 未执行 / doorbell 异常"三类根因。
  * 开销: 每封 ~1 次缓存行维护, 微秒级, 常开(量产后可按需关闭)。 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF = 144; /* u64: 最近一次 doorbell 尾值 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DBRET_OFF = 152;    /* u64: 低 32 位=该次 doorbell 返回码 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_EPOCH_OFF = 160;    /* u64: (sqHead<<32)|sqTail 入口活查询快照 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_LAUNCH_OFF = 168;   /* u64: 累计 kernel launch 次数 */
-constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF = 176; /* u64: 累计面包屑条数(环形游标) */
-constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_OFF = 184;     /* 48 × 64B 环形面包屑 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF = 176; /* u64: 累计逐单日志条数(环形游标) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_OFF = 184;     /* 48 × 64B 环形逐单日志 */
 constexpr uint32_t HYBM_SDMA_ORCH_DBG_RING_SLOTS = 48;       /* 184+48×64=3256 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SQSNAP_OFF = 3256;  /* 13 × 64B: 入口快照环尾 SQE 原文 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF = 4088; /* 8B: 尾值防 0 占位 SQE 的自拷贝地址 */
-constexpr uint32_t HYBM_SDMA_ORCH_DBG_SQSNAP_SLOTS = 13;     /* 尾 13 槽(尸体检查) */
+constexpr uint32_t HYBM_SDMA_ORCH_DBG_SQSNAP_SLOTS = 13;     /* 尾 13 槽(现场快照检查) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SQBASE_OFF = 4024;  /* u64: SQ 环基址 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SNAPBASE_OFF = 4032; /* u64: 快照首槽号(=固件 head-2) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_SQDEPTH_OFF = 4040;  /* u64: SQ 环深度 */
-struct HybmSdmaOrchDbgMail {                                  /* 单条面包屑(64B, 单缓存行) */
+struct HybmSdmaOrchDbgMail {                                  /* 单条逐单日志(64B, 单缓存行) */
     uint64_t seq;         /* 消费的请求序号 */
-    uint64_t reqF0;       /* 请求槽读回 4 字(原文; 全 0=读回空请求, 写飞根因特征) */
+    uint64_t reqF0;       /* 请求槽读回 4 字(原文; 全 0=读回空请求, 写到错误地址根因特征) */
     uint64_t reqF1;
     uint64_t reqF2;
     uint64_t reqF3;
