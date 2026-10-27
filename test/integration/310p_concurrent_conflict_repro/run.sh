@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# run.sh — Gate E 507014 换轮竞态复现器一键编译与运行(封装 bisheng 长命令/环境自检/MPI 探测/双 rank 拉起)
+# run.sh — 长稳并发丢件挂死（507014） 并发丢件复现器一键编译与运行(封装 bisheng 长命令/环境自检/MPI 探测/双 rank 拉起)
 #
 # 用法:
 #   bash run.sh                # 编译复现器并 mpirun -np 2 运行(默认 dev4/dev5, 1s 换轮)
-#   bash run.sh --build-only   # 仅编译(产物 /tmp/mf_gatee_repro, 不运行)
-#   bash run.sh --run-only     # 仅运行(要求 /tmp/mf_gatee_repro 已编译)
+#   bash run.sh --build-only   # 仅编译(产物 /tmp/mf_conflict_repro, 不运行)
+#   bash run.sh --run-only     # 仅运行(要求 /tmp/mf_conflict_repro 已编译)
 #
 # 关键旋钮(环境变量, 长跑建议 nohup/tmux):
 #   EX09_DEVICE_BASE=4        起始设备号(DEVICE_ID = base + rank; dev4/dev5 为空闲同卡 die 对)
@@ -22,8 +22,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"     # 仓库根(test/integration/<本目录> 上溯三级)
 KERNEL_DIR="$ROOT/build/src/hybm/ops/hybm_kernel"
-EX_SRC="$SCRIPT_DIR/gatee_repro.asc"
-EX_BIN="/tmp/mf_gatee_repro"
+EX_SRC="$SCRIPT_DIR/conflict_repro.asc"
+EX_BIN="/tmp/mf_conflict_repro"
 BUILD_ONLY=0
 RUN_ONLY=0
 

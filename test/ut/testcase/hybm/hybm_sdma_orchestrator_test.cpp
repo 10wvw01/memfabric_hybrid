@@ -85,7 +85,7 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
     EXPECT_GE(SMEM_SHM_SDMA_RS_ARR_STAMP, SMEM_SHM_SDMA_RS_QUIET + 8U * 64U);                  // 到达戳不压完成戳(同写者相邻合法)
     EXPECT_GE(SMEM_SHM_SDMA_RS_ARR_MAIL, SMEM_SHM_SDMA_RS_ARR_STAMP + 8U * 1024U);              // 邮件不压戳
     EXPECT_LE(SMEM_SHM_SDMA_RS_ARR_HEAD + 8U, SMEM_SHM_SDMA_RESERVED);                          // 全落在 48KB 内
-    /* v23 跨写者缓存行分隔纪律(共行回写竞态=GateE 507014 类丢件根因) */
+    /* v23 缓存行分隔纪律(共行回写竞态=并发丢件挂死类根因) */
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL & 0x3FU, 0U);  // reqTail 独占行首
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD & 0x3FU, 0U);  // reqHead 独占行首
     EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET & 0x3FU, 0U);     // 完成戳区行对齐
