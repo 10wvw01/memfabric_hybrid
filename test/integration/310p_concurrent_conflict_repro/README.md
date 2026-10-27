@@ -1,9 +1,9 @@
-# gatee_repro：Gate E 507014（双 Rank 偶发挂死）复现器与取证工具
+# conflict_repro：双 Rank 并发丢件挂死（错误码 507014）复现器与取证工具
 
 ## 背景
 
-vllm-ascend 侧 V2 融合算子在 310P3 单卡双 die TP=2 长稳验收（Gate E）中偶发双 Worker
-507014（AICore 超时）挂死，会话级复现率约 21%。取证交接包（`MemFabric_GateE_507014_取证交接包`，
+vllm-ascend 侧 V2 融合算子在 310P3 单卡双 die TP=2 长稳验收（验收）中偶发双 Worker
+507014（AICore 超时）挂死，会话级复现率约 21%。取证交接包（`故障取证材料（vllm-ascend 仓库分支 MemFabric_GateE_507014_取证交接包），
 分支 wzy-dev-vllm-ascend）将丢失区间夹逼到 MemFabric 执行域。本工具在**不依赖 vLLM** 的前提下
 复现并裁决该类丢件。
 
@@ -11,7 +11,7 @@ vllm-ascend 侧 V2 融合算子在 310P3 单卡双 die TP=2 长稳验收（Gate 
 
 | # | 根因 | 修复 | 复现特征 |
 |---|------|------|----------|
-| 1 | **ARR_HEAD 与 ARR_MAIL[1023] 共享 64B 缓存行**：AICPU（对端写邮件像）与 AICore（本端写消费游标）的软件缓存维护回写互踩，邮件像被确定性清零 | 布局 V3：跨写者字段独占缓存行 | 确定性丢第 1024 封（首圈边界槽），邮件像全零 |
+| 1 | **ARR_HEAD 与 ARR_MAIL[1023] 共享 64B 缓存行**：AICPU（对端写邮件像）与 AICore（本端写消费游标）的软件缓存维护回写互踩，邮件内容被确定性清零 | 布局 V3：跨写者字段独占缓存行 | 确定性丢第 1024 封（首圈边界槽），邮件像全零 |
 | 2 | **戳 SQE 拷贝数据源=对端邮件像**：AICPU 跨芯片写面单后，同 die SDMA 立即跨芯片读回自己刚写的值——写在途时读到上一圈旧值（② 抄旧盖旧无声失效，③ 数微秒后读新值正确） | 单号改本端暂存数组（512×8B，本地写本地读） | ③成功②失效、旧值恰差 1024 一圈、双方向同窗各丢一封 |
 | 3 | 防 0 占位 SQE 曾用 src==dst 自拷贝——偶发卡死通道杀死紧随其后的戳指令 | 占位改邻字节拷贝（src≠dst） | ~2 万封/次、双方向同窗（同步步调同位插占位） |
 
@@ -23,7 +23,7 @@ vllm-ascend 侧 V2 融合算子在 310P3 单卡双 die TP=2 长稳验收（Gate 
   并杜绝 teardown 挂死（失败走 MPI_Abort）
 - **三重证据 dump**：kernel 卡点快照（stuck 槽/期待戳/实读戳/邮件像/请求游标）+ host 保留区全窗
   （戳窗含被等槽邻柜、完成戳窗、请求槽原文）+ **编排诊断区**（逐单逐单日志：请求原文/计算地址/SQ 游标；
-  doorbell 尾值/返回码；固件 head 快照；冻结点 SQE 尸体）
+  doorbell 尾值/返回码；固件 head 快照；冻结点 SQE 现场）
 - **判别逻辑**：dump 时复查被等槽——旧值=真丢失；新值=慢件（预算不足防误报）
 
 ## 运行
@@ -49,5 +49,5 @@ EX09_WAIT_BUDGET=10000000  # 单次 launch 轮询预算(防 28s 同步超时)
 
 - 修复代码：`src/smem/include/device/smem_shm_sdma_layout.h`（布局 V3）、
   `src/hybm/ops/hybm_kernel/hybm_sdma_orch_kernel.cc`（暂存源/加固/诊断）
-- 事实档案：`docs/310p/平台事实.md`（GateE 507014 定案条目）
+- 事实档案：`docs/310p/平台事实.md`（并发丢件挂死（507014） 定案条目）
 - 姊妹测试：`test/integration/310p_sdma_stability/`（常规长稳+设备同步探针）
