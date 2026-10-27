@@ -23,6 +23,7 @@
 
 using namespace ock::mf;
 
+/* 310P 驱动错误码: P2P 物理分区耗尽(hcomm 同义, 见 PR12 实测) */
 constexpr int32_t RT_ERROR_DRV_OUT_MEMORY = 207001;
 
 HybmVmmBasedSegment::~HybmVmmBasedSegment()
@@ -53,9 +54,11 @@ Result HybmVmmBasedSegment::ValidateOptions() noexcept
                                                 << " must algin:" << align);
         return BM_INVALID_PARAM;
     }
-    if (!checkAlignment(options_.maxSize, GB)) {
+    /* 310P ACL 路径不走 A5 fabric GVA 的 GB 粒度路由, 物理分配粒度即 2MB 大页 */
+    const uint64_t maxAlign = Is310PAclPath() ? HYBM_LARGE_PAGE_SIZE : GB;
+    if (!checkAlignment(options_.maxSize, maxAlign)) {
         BM_LOG_ERROR("Invalid options segType:" << options_.segType << " max size:" << options_.maxSize
-                                                << " must align GB");
+                                                << " must align:" << maxAlign);
         return BM_INVALID_PARAM;
     }
 
@@ -84,26 +87,30 @@ Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
     totalVirtualSize_ = options_.rankCnt * options_.maxSize;
     auto totalLvaSize = options_.enable56BitsGva ? options_.maxSize : totalVirtualSize_;
     auto mem_type = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
-    auto gvaInfo = HybmVaManager::GetInstance().AllocReserveGva(options_.rankId, totalVirtualSize_, totalLvaSize,
-                                                                mem_type, options_.enable56BitsGva);
-    BM_ASSERT_LOG_AND_RETURN(gvaInfo.va[HVM_GVA] > 0, "gvaInfo.va[HVM_GVA] = " << gvaInfo.va[HVM_GVA], BM_ERROR);
-    globalVirtualAddress_ = (uint8_t *)reinterpret_cast<void *>(gvaInfo.va[HVM_GVA]);
-
     Result ret = BM_OK;
     if (Is310PAclPath()) {
-        /* 310P3: use AclrtReserveMemAddress for local VA only (maxSize, not totalLvaSize).
-         * Each rank's local segment gets its own reserved VA block.
-         * Imported segments will get their own AclrtReserveMemAddress in ReserveLva. */
-        ret = DlAclApi::AclrtReserveMemAddress(&base, options_.maxSize, 0, nullptr, 0);
+        /* 310P: 预留整个对称窗口(rankCnt×maxSize), 窗口即真实地址(双进程 reserve 起点
+         * 一致, 真机已证): slot_p = base + p×maxSize —— 本端物理映射进本端槽位,
+         * 对端经 shareable handle 导入对端槽位, "第 p 个 rank 显存 = 窗口起点 + p×每份
+         * 大小"的对称算术成立(host/kernel/协同编排器共用该公式)。
+         * 不走 VaManager 记账: gva==lva==槽位地址, TransformVa 恒等直通 */
+        ret = DlAclApi::AclrtReserveMemAddress(&base, totalVirtualSize_, 0, nullptr, 0);
         if (ret != BM_OK || base == nullptr) {
-            BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " size:" << options_.maxSize);
+            BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " size:" << totalVirtualSize_
+                                                               << " rankId:" << options_.rankId);
             return BM_MALLOC_FAILED;
         }
-        BM_LOG_INFO("AclrtReserveMemAddress(local) got addr:" << base << " size:" << options_.maxSize);
+        BM_LOG_INFO("AclrtReserveMemAddress(window) got addr:" << base << " size:" << totalVirtualSize_
+                                                               << " rankId:" << options_.rankId);
+        globalVirtualAddress_ = static_cast<uint8_t *>(base);
     } else {
+        auto gvaInfo = HybmVaManager::GetInstance().AllocReserveGva(options_.rankId, totalVirtualSize_, totalLvaSize,
+                                                                    mem_type, options_.enable56BitsGva);
+        BM_ASSERT_LOG_AND_RETURN(gvaInfo.va[HVM_GVA] > 0, "gvaInfo.va[HVM_GVA] = " << gvaInfo.va[HVM_GVA], BM_ERROR);
+        globalVirtualAddress_ = (uint8_t *)reinterpret_cast<void *>(gvaInfo.va[HVM_GVA]);
         uint64_t flag = MEM_RSV_TYPE_REMOTE_MAP;
-        ret =
-            DlHalApi::HalMemAddressReserve(&base, totalLvaSize, 0, reinterpret_cast<void *>(gvaInfo.va[HVM_DVA]), flag);
+        ret = DlHalApi::HalMemAddressReserve(&base, totalLvaSize, 0, reinterpret_cast<void *>(gvaInfo.va[HVM_DVA]),
+                                             flag);
         if (ret != 0 || base != reinterpret_cast<void *>(gvaInfo.va[HVM_DVA])) {
             BM_LOG_ERROR("prepare virtual memory size(" << totalVirtualSize_ << ") failed. ret: " << ret);
             return BM_MALLOC_FAILED;
@@ -136,7 +143,10 @@ Result HybmVmmBasedSegment::UnReserveMemorySpace() noexcept
     }
 
     for (auto lva : reservedLva_) {
-        HybmVaManager::GetInstance().FreeReserveLva((uintptr_t)lva, HVM_DVA);
+        if (!Is310PAclPath()) {
+            /* 310P: lva 为 ACL reserve 的窗口地址, 非 VaManager 记账, 不走 FreeReserveLva */
+            HybmVaManager::GetInstance().FreeReserveLva((uintptr_t)lva, HVM_DVA);
+        }
         Result freeRet = BM_OK;
         if (Is310PAclPath()) {
             freeRet = DlAclApi::AclrtReleaseMemAddress(lva);
@@ -149,7 +159,8 @@ Result HybmVmmBasedSegment::UnReserveMemorySpace() noexcept
                                                            << " va:" << lva);
         }
     }
-    if (globalVirtualAddress_ != nullptr) {
+    if (globalVirtualAddress_ != nullptr && !Is310PAclPath()) {
+        /* 310P: gva 即窗口地址本身(账实合一), 无 VaManager GVA 记账, 不走 FreeReserveGva */
         HybmVaManager::GetInstance().FreeReserveGva((uintptr_t)globalVirtualAddress_);
     }
     localVirtualAddress_ = nullptr;
@@ -232,10 +243,13 @@ Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_me
         aclrtDrvMemHandle aclHandle = nullptr;
         auto ret = DlAclApi::AclrtMallocPhysical(&aclHandle, size, &prop, 0);
         if (ret == RT_ERROR_DRV_OUT_MEMORY) {
-            // 310P: ACL_MEM_P2P_HUGE 物理分区上限 ~4088MB(动态波动), 超限返 207001(P2P 分区 OOM);
-            // ACL_HBM_MEM_HUGE 从 AI 主池(~42GB)分配无此限制, 带宽无差异。回退仅对 die 间(同卡)共享生效。
-            BM_LOG_WARN("AclrtMallocPhysical(P2P_HUGE) P2P partition exhausted, fallback to ACL_HBM_MEM_HUGE, ret:"
-                        << ret << " devId:" << devId << " size:" << size);
+            /* 310P: P2P_HUGE 物理分区上限 ~4088MB(动态波动), 超限返 207001;
+             * 回退 ACL_HBM_MEM_HUGE 从 AI 主池(~42GB)分配, 带宽无差异 */
+            BM_LOG_WARN("AclrtMallocPhysical(P2P_HUGE) partition exhausted, fallback to HBM_MEM_HUGE, ret:" << ret
+                                                                                                            << " devId:"
+                                                                                                            << devId
+                                                                                                            << " size:"
+                                                                                                            << size);
             prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_HBM_MEM_HUGE);
             ret = DlAclApi::AclrtMallocPhysical(&aclHandle, size, &prop, 0);
         }
@@ -254,7 +268,7 @@ Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_me
 Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
 {
     auto localVirtualBase =
-        localVirtualAddress_ + ((options_.enable56BitsGva || Is310PAclPath()) ? 0 : options_.maxSize * options_.rankId);
+        localVirtualAddress_ + (options_.enable56BitsGva ? 0 : options_.maxSize * options_.rankId);
     auto globalVirtualBase = globalVirtualAddress_ + options_.maxSize * options_.rankId;
     auto allocAddr = reinterpret_cast<uint64_t>(localVirtualBase + allocatedSize_);
     auto gva = reinterpret_cast<uint64_t>(globalVirtualBase + allocatedSize_);
@@ -303,7 +317,7 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         return MallocEmptySlice(slice);
     }
     auto localVirtualBase =
-        localVirtualAddress_ + ((options_.enable56BitsGva || Is310PAclPath()) ? 0 : options_.maxSize * options_.rankId);
+        localVirtualAddress_ + (options_.enable56BitsGva ? 0 : options_.maxSize * options_.rankId);
     auto globalVirtualBase = globalVirtualAddress_ + options_.maxSize * options_.rankId;
     auto allocAddr = reinterpret_cast<uint64_t>(localVirtualBase + allocatedSize_);
     auto gva = reinterpret_cast<uint64_t>(globalVirtualBase + allocatedSize_);
@@ -676,17 +690,31 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
 uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
 {
     if (Is310PAclPath()) {
-        /* For 310P3, each imported segment gets its own AclrtReserveMemAddress block.
-         * The imported handle will be mapped to this address via AclrtMapMem. */
+        /* 同卡(die 对): 两进程共享同一设备 OS 的 VA 分配器, 窗口起点一致(真机已证),
+         * 对端切片直接映射到其槽位地址(导出方 gva 即窗口内地址), 对称算术成立 */
+        if (IsSameCard(im.devicePhyId)) {
+            const uint64_t windowBase = reinterpret_cast<uint64_t>(localVirtualAddress_);
+            const uint64_t windowEnd = windowBase + totalVirtualSize_;
+            if (im.gva < windowBase || im.gva + im.size > windowEnd) {
+                BM_LOG_ERROR("310P import gva out of window, rank:" << im.rankId << " gva:" << VaToStr(im.gva)
+                                                                    << " size:" << im.size
+                                                                    << " windowBase:" << VaToStr(windowBase)
+                                                                    << " windowEnd:" << VaToStr(windowEnd));
+                return 0;
+            }
+            return im.gva;
+        }
+        /* 跨卡: 两卡 VA 分配器独立、窗口起点不保证一致, 对称算术不成立; 独立 reserve
+         * 映射, 跨卡拷贝经 AddVaInfo 的 gva→lva 翻译(不依赖对称窗口) */
         void *lva = nullptr;
         auto ret = DlAclApi::AclrtReserveMemAddress(&lva, im.size, 0, nullptr, 0);
         if (ret != BM_OK || lva == nullptr) {
-            BM_LOG_ERROR("AclrtReserveMemAddress for imported failed, ret:" << ret << " rank:" << im.rankId
-                                                                            << " size:" << im.size);
+            BM_LOG_ERROR("AclrtReserveMemAddress for cross-card import failed, ret:" << ret << " rank:" << im.rankId
+                                                                                     << " size:" << im.size);
             return 0;
         }
-        BM_LOG_DEBUG("ReserveLva(310P3): rank:" << im.rankId << " peerDeviceVa:" << VaToStr(im.deviceVa)
-                                                << " localLva:" << VaToStr(reinterpret_cast<uint64_t>(lva)));
+        BM_LOG_INFO("ReserveLva(310P cross-card): rank:" << im.rankId << " peerGva:" << VaToStr(im.gva)
+                                                         << " localLva:" << VaToStr(reinterpret_cast<uint64_t>(lva)));
         reservedLva_.push_back(lva);
         return reinterpret_cast<uint64_t>(lva);
     }

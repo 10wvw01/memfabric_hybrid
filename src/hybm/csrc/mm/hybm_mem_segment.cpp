@@ -22,7 +22,6 @@
 #include "hybm_types.h"
 #include "hybm_host_shm_segment.h"
 #include "hybm_conn_based_segment.h"
-#include "hybm_acl_vmm_segment.h"
 #include "hybm_vmm_based_segment.h"
 #include "hybm_va_manager.h"
 
@@ -85,13 +84,11 @@ MemSegmentPtr MemSegment::Create(const MemSegmentOptions &options, int entityId)
         case HYBM_MST_HBM:
             BM_LOG_INFO("HBM segment: gvaVer="
                         << HybmGetGvaVersion() << " socType=" << socType_
-                        << " → VMM=" << (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950));
-            if (socType_ == AscendSocType::ASCEND_310P) {
-                /* 310P: soc 判断优先于 GVA 版本判断(310P 驱动可能被映射为 V4, 但无 halMem* 语义)。
-                 * 专用段: 对称窗口即 aclrtReserveMemAddress 槽位窗口(slot_p=base+p*maxSize),
-                 * 对齐约束 2MB 大页; 通用段的 GB 对齐校验与全局窗口名义地址语义均不适用 310P */
-                tmpSeg = std::make_shared<HybmAclVmmSegment>(options, entityId);
-            } else if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950) {
+                        << " → VMM=" << (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950 ||
+                                         socType_ == AscendSocType::ASCEND_310P));
+            if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950 ||
+                socType_ == AscendSocType::ASCEND_310P) {
+                /* 310P 的差异(Aclrt* 接口/对称窗口/2MB 对齐)由类内 Is310PAclPath 分支处理 */
                 tmpSeg = std::make_shared<HybmVmmBasedSegment>(options, entityId);
             } else {
                 tmpSeg = std::make_shared<HybmDevLegacySegment>(options, entityId);
