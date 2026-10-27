@@ -190,7 +190,7 @@ int32_t cp1QueryProp(uint32_t devId, uint32_t sqId, uint32_t prop, uint32_t *v0,
 
 // SQE 入环: 只写环 + 推进 shadow tail, 不敲铃(调用方统一 doorbell)。
 // 满环检查活查询 head 重算(hcomm LaunchTask 同款): shadow 回绕后对 epoch 入口 head 快照
-// 的模减会失明(used 恒小), 覆写固件未消费 SQE 造成邮件无声丢失(GateE 507014 根因);
+// 的模减会失明(used 恒小), 覆写固件未消费 SQE 造成邮件无声丢失(并发丢件挂死（507014） 根因);
 // 活查询保证 used 始终以固件真实消费位置为基准。返回 0 成功; 1363=活查询超时环满。
 int32_t submitSqe(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, const uint8_t sqe[kSqeSize])
 {
@@ -352,14 +352,14 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
 
 // SQE 三连入环(不敲铃): ① 数据(src→dst, 可带 reduce opcode) ② 到达戳(本端暂存单号→对端戳槽)
 // ③ 完成戳(同源→本端戳槽); 同队列 FIFO 保证 ②③ 晚于 ① 落地。返回 0 成功。
-// v25: ②③ 拷贝数据源=本端暂存(原为对端邮件像首字段——跨芯片写在途时 SDMA 读回旧值, GateE 507014)。
+// v25: ②③ 拷贝数据源=本端暂存(原为对端邮件内容首字段——跨芯片写在途时 SDMA 读回旧值, 并发丢件挂死（507014）)。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint64_t seq,
                       const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t peerArrStampSlot,
                       uint8_t sqeOpcode)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
-    /* 尾值防 0(v21, GateE 507014 修复): 本封三连若恰好使 shadow 尾落到 0, 该批 doorbell
+    /* 尾值防 0(v21, 并发丢件挂死（507014） 修复): 本封三连若恰好使 shadow 尾落到 0, 该批 doorbell
      * 值为 0——固件将其当"空环"哨兵静默丢弃, SQE 完好在环但永不执行(实测确定性丢件)。
      * 先插入一条无害占位 SQE(工作区 8B 自拷贝), 尾值落到 1; 小正值回绕形态实测安全。 */
     if ((ctx->sqTail + 3) % ctx->sqDepth == 0) {
@@ -394,7 +394,7 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
 
 /* 批末敲铃: 统一屏障 + doorbell(环内积压时 N 封一铃, 降 HAL 调用开销)。
  * 尾值永不为 0 由 issueMailSqes 的占位 SQE 保证(0 会被固件当"空环"哨兵丢弃,
- * GateE 507014 根因)。尾值与返回码落诊断区(v15 逐单日志)。 */
+ * 并发丢件挂死（507014） 根因)。尾值与返回码落诊断区(v15 逐单日志)。 */
 int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 {
     memBarrier();                                                // SQE 写序后(批内唯一 dsb)
@@ -471,7 +471,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     { /* v15 诊断: launch 计数 + 入口活查询快照(换轮核对数据源) */
         const uintptr_t ws = static_cast<uintptr_t>(p->resultAddr);
-        /* v24 换轮核对(GateE 507014 残余竞态修复): 上一班最后一次 doorbell 可能仍在途,
+        /* v24 换轮核对(并发丢件挂死（507014） 残余竞态修复): 上一轮最后一次 doorbell 可能仍在途,
          * 入口 TAIL 活查询会拿到落后值——新班首批 SQE 从落后位写入将覆写未执行任务
          * (实测: 极限攻击 ~19k 封/2 次换轮命中一次, 双方向同窗各丢一封, 戳值恰差一圈)。
          * 以上班持久化铃值(诊断区 144)为准: 查询值不一致即补敲(幂等)并以之为锚。 */

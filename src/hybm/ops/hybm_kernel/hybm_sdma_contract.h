@@ -111,7 +111,7 @@ constexpr uint32_t HYBM_SDMA_ORCH_HEARTBEAT_HZ = 10;  /* host 报时频率(每 1
 /* 工作区报时槽偏移(工作区布局: resultAddr 即基址, RESULT 0 / OVF 64 / STOP 128): */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF = 136; /* host 心跳计数 8B(每 100ms +1, kernel 读) */
 /* ---- v15 诊断逐单日志(工作区尾段, host D2H 可读; 逐单记录消费原文/计算地址/SQ 游标) ----
- * 用途: 邮件丢失类故障的逐单取证(如 Gate E 507014)——单条逐单日志即可裁决
+ * 用途: 邮件丢失类故障的逐单取证(如 长稳并发丢件挂死（507014）)——单条逐单日志即可裁决
  * "读回空请求(对端段基址算 0→写到错误地址)/ SQE 未执行 / doorbell 异常"三类根因。
  * 开销: 每封 ~1 次缓存行维护, 微秒级, 常开(量产后可按需关闭)。 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF = 144; /* u64: 最近一次 doorbell 尾值 */
