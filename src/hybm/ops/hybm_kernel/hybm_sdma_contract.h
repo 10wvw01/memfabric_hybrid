@@ -31,15 +31,35 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 11; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 14; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
     uint64_t src;         /* 搬运源地址(本端段 GVA) */
     uint64_t dst;         /* 搬运目的地址(对端段 GVA) */
     uint64_t len;         /* 字节数(框架内部按粒度补齐) */
-    uint64_t imm;         /* 用户标签(原样回带到达到达邮件) */
+    uint64_t imm;         /* 用户标签(原样回带到达到达邮件); reduce 时为编码形态, 见下 */
 };
+
+/* ---- imm 操作编码(wire 契约; 与 smem_shm_aicore_base_sdma.h 的 SdmaEncodeOpImm 对齐) ----
+ * signal(op != COPY) 时 imm 编码: [63:48]=magic [47:40]=SQE opcode [39:0]=用户标签
+ * AICPU 消费侧解码: magic 匹配→按 opcode 构造 reduce SQE + 到达邮件透传还原后的标签;
+ * 不匹配→纯搬运(现状), 老调用(imm 为任意标签)无误判(magic 撞上概率 < 1/65536)。
+ * SQE opcode 枚举值对齐 hcomm 权威源码(aicpu_hccl_sqcqv2.cc SdmaReduceOpcode):
+ * NOT_ATOMIC=0(纯搬运) INT16=1 FP32=2 FP16=3 —— 高4位|低4位自造编码(如 0x71)固件不识别 */
+constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
+constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x02; /* FP32 累加: dst += src */
+constexpr uint8_t HYBM_SDMA_SQE_OP_FP16_ADD = 0x03; /* FP16 累加: dst += src */
+
+static inline uint8_t HybmSdmaDecodeOp(uint64_t imm, uint64_t *userTag)
+{
+    if ((imm >> 48) == HYBM_SDMA_IMM_MAGIC) {
+        *userTag = imm & 0xFFFFFFFFFFULL;
+        return static_cast<uint8_t>((imm >> 40) & 0xFFULL);
+    }
+    *userTag = imm;
+    return 0x00; /* 无编码 = 纯搬运 */
+}
 
 struct HybmSdmaArrMail {  /* 到达邮件(AICPU→对端 AICore, wait 消费) */
     uint64_t seq;         /* 序号(=请求序号; 首字段供到达戳 SQE 复用为拷贝源) */

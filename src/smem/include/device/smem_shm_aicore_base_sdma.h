@@ -40,10 +40,33 @@ extern "C" {
 struct smem_shm_sdma_mail_t {
     uint64_t dst;    /* 数据落点(接收方直接定位) */
     uint64_t len;    /* 数据长度(字节) */
-    uint64_t imm;    /* 用户标签(signal 的 imm 原样透传) */
+    uint64_t imm;    /* 用户标签(signal 的 imm 原样透传; reduce 时剥除操作编码后透传) */
     uint32_t seq;    /* 完成序号(诊断) */
     uint32_t status; /* 0=成功; 1=超时; 2=到达环溢出(生产方越界覆写) */
 };
+
+/* ---- 搬运操作模式(signal 可选参数; 不传 = 纯搬运, 原有用例零改动) ----
+ * SDMA inline reduce: dst = dst op src (element-wise)。310P3 实测支持域: ADD+FP32
+ * (实测 2026-10-15: SUM/fp32 PASS; i32/MAX/MIN/EQUAL 被能力位图拒绝 207000/107000)。
+ * SQE 层实现: opcode 编码 = 数据类型(高4位)|操作(低4位), FP32=0x70 ADD=0x01 → 0x71。 */
+typedef enum smem_shm_sdma_op {
+    SMEM_SHM_SDMA_OP_COPY = 0,     /* 纯搬运 dst = src (默认, 现状路径) */
+    SMEM_SHM_SDMA_OP_ADD_FP32 = 1, /* 搬运+reduce dst += src (fp32 逐元素) */
+    SMEM_SHM_SDMA_OP_ADD_FP16 = 2, /* 搬运+reduce dst += src (fp16 逐元素) */
+} smem_shm_sdma_op_t;
+
+/* imm 操作编码 (仅 op != COPY 时 signal_at 内部使用; 用户标签保留低 40 位)
+ * 布局: [63:48]=magic [47:40]=SQE opcode [39:0]=用户标签
+ * magic 使旧调用(imm 为任意标签值)被消费方无误判 — 概率 < 1/65536 且撞上仅误 reduce */
+constexpr uint64_t SMEM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
+/* opcode 枚举值对齐 hcomm 权威源码(aicpu_hccl_sqcqv2.cc SdmaReduceOpcode): FP32=2 FP16=3 */
+constexpr uint8_t SMEM_SDMA_SQE_OP_FP32_ADD = 0x02; /* 搬运+reduce dst += src (fp32 逐元素) */
+constexpr uint8_t SMEM_SDMA_SQE_OP_FP16_ADD = 0x03; /* 搬运+reduce dst += src (fp16 逐元素) */
+
+SMEM_SHM_INLINE_AICORE uint64_t SdmaEncodeOpImm(uint64_t imm, uint8_t sqeOpcode)
+{
+    return (SMEM_SDMA_IMM_MAGIC << 48) | (static_cast<uint64_t>(sqeOpcode) << 40) | (imm & 0xFFFFFFFFFFULL);
+}
 
 /* 轮询预算(探测次数上限; 超时为错误路径, 由调用方处置) */
 constexpr uint64_t SMEM_SHM_SDMA_POLL_MAX_ITER = 100000000ULL;
@@ -123,9 +146,11 @@ SMEM_SHM_INLINE_AICORE void SdmaReadMail(__gm__ uint8_t *slot, uint64_t *f0, uin
 
 /* ============================ 公开 API ============================ */
 
-/* signal 的预计算基址变体(res = smem_shm_sdma_reserved(gva) 缓存值) */
+/* signal 的预计算基址变体(res = smem_shm_sdma_reserved(gva) 缓存值)
+ * op: 可选搬运操作(不传 = SMEM_SHM_SDMA_OP_COPY 纯搬运); ADD_FP32 时 dst += src(fp32) */
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_at(__gm__ uint8_t *res, __gm__ void *src, __gm__ void *dst,
-                                                    uint64_t len, uint64_t imm)
+                                                    uint64_t len, uint64_t imm,
+                                                    smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
 {
     const uint64_t tail = SdmaReadCell(res, SMEM_SHM_SDMA_RS_REQ_TAIL);
     uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
@@ -141,10 +166,17 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_at(__gm__ uint8_t *res, __gm__ 
         return false; /* 满环预算耗尽, 邮件未投递(消费方 wait 超时暴露) */
     }
     __gm__ uint8_t *slot = res + SMEM_SHM_SDMA_RS_REQ_RING + (tail % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 32;
+    uint8_t sqeOp = 0;
+    if (op == SMEM_SHM_SDMA_OP_ADD_FP32) {
+        sqeOp = SMEM_SDMA_SQE_OP_FP32_ADD;
+    } else if (op == SMEM_SHM_SDMA_OP_ADD_FP16) {
+        sqeOp = SMEM_SDMA_SQE_OP_FP16_ADD;
+    }
+    const uint64_t immOut = (sqeOp != 0) ? SdmaEncodeOpImm(imm, sqeOp) : imm;
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 0) = reinterpret_cast<uint64_t>(src);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 8) = reinterpret_cast<uint64_t>(dst);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 16) = len;
-    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 24) = imm;
+    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 24) = immOut;
     AscendC::GlobalTensor<int32_t> t;
     t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t);
@@ -218,9 +250,10 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(__gm__ uint8_t *res)
  * len 须 4 字节对齐(SDMA 搬运粒度, 长度直传 SQE 不做补齐)。
  * 高频路径可 kernel 入口 smem_shm_sdma_reserved(gva) 预计算后走 _at 变体。 */
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
-                                                 uint64_t len, uint64_t imm)
+                                                 uint64_t len, uint64_t imm,
+                                                 smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
 {
-    return smem_shm_sdma_signal_at(smem_shm_sdma_reserved(gva), src, dst, len, imm);
+    return smem_shm_sdma_signal_at(smem_shm_sdma_reserved(gva), src, dst, len, imm, op);
 }
 
 /* 按序消费下一封到达邮件(阻塞自旋+渐进退避, 超时/溢出由 status 表达)。
