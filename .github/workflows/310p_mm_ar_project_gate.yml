@@ -1,0 +1,43 @@
+name: 310P MM-AR project control
+
+on:
+  pull_request:
+    branches: [dev/mainline]
+  push:
+    branches: [dev/mainline]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  project-control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lightweight test dependency
+        run: python -m pip install 'pytest>=7,<9'
+      - name: CPU-only governance unit tests
+        run: python -m unittest discover -s tools/310p_mm_ar -p 'test_*.py' -v
+      - name: Existing V2 CPU/source-contract regression
+        run: python -m pytest -q csrc/_310P/memfabric_mm_ar_v2/test/ut
+      - name: Validate project entry and state files
+        run: python3 tools/310p_mm_ar/project_gate.py --static
+      - name: Validate change ledger requirements
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ -z "${BASE_SHA}" || "${BASE_SHA}" =~ ^0+$ ]]; then
+            echo "First-commit/dispatch event: metadata-only check; no diff base."
+          else
+            python3 tools/310p_mm_ar/project_gate.py --base "${BASE_SHA}" --head "${HEAD_SHA}"
+          fi

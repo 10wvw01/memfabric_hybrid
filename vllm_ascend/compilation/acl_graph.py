@@ -1,0 +1,715 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import dataclasses
+import os
+import weakref
+from collections.abc import Callable
+from contextlib import ExitStack
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import torch
+import torch_npu
+import vllm.envs as envs
+from vllm.compilation.counter import compilation_counter
+from vllm.compilation.cuda_graph import CUDAGraphOptions
+from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.logger import logger
+from vllm.platforms import current_platform
+
+from vllm_ascend._310p.dflash_full_decode_manifest import (
+    record_full_decode_capture,
+)
+from vllm_ascend._310p.dflash_full_decode_only import (
+    is_310p_dflash_full_decode_only,
+)
+from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
+from vllm_ascend._310p.graph_input_contract import (
+    GraphInputContractError,
+    GraphInputSource,
+    GraphInputTensorContract,
+    capture_graph_input_contracts,
+    capture_graph_input_sources,
+    validate_graph_input_contracts,
+)
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+from ..utils import weak_ref_tensors
+
+_acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
+_STREAM_RESOURCE_ERROR_CODE = "207008"
+_STREAM_RESOURCE_ERROR_MARKERS = (
+    "insufficient_stream_resources",
+    "stream resources are insufficient",
+)
+_OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
+_GRAPH_DUMP_DIR_ENV = "VLLM_ASCEND_DFLASH_GRAPH_DUMP_DIR"
+
+
+def _prepare_aclgraph_debug_dump(
+    aclgraph: torch.npu.NPUGraph,
+    *,
+    component: str,
+    rank: int,
+    descriptor: BatchDescriptor,
+) -> Path | None:
+    """Enable the opt-in native NPUGraph dump for one graph descriptor."""
+    dump_dir = os.getenv(_GRAPH_DUMP_DIR_ENV)
+    if not dump_dir:
+        return None
+
+    path = Path(dump_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    dump_path = path / (f"{component}-rank{rank}-tokens{descriptor.num_tokens}-reqs{descriptor.num_reqs}.json")
+    aclgraph.enable_debug_mode()
+    return dump_path
+
+
+def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    lowered_message = message.lower()
+    has_error_code = _STREAM_RESOURCE_ERROR_CODE in message
+    has_stream_resource_marker = any(marker in lowered_message for marker in _STREAM_RESOURCE_ERROR_MARKERS)
+    return has_stream_resource_marker or (has_error_code and "stream resource" in lowered_message)
+
+
+def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
+
+
+@dataclasses.dataclass
+class ACLGraphEntry:
+    batch_descriptor: BatchDescriptor
+    aclgraph: torch.npu.NPUGraph | None = None
+    output: Any | None = None
+
+    # for aclgraph debugging, track the input addresses
+    # during capture, and check if they are the same during replay
+    input_addresses: list[int] | None = None
+    input_contracts: tuple[GraphInputTensorContract, ...] | None = None
+    component: str | None = None
+    rank: int | None = None
+    capture_count: int = 0
+    replay_count: int = 0
+    warmup_replay_count: int = 0
+    contract_validated: bool = False
+
+
+class ACLGraphWrapper:
+    """Wraps a runnable to add acl graph capturing and replaying ability. And
+    provide attribute access to the underlying `runnable` via `__getattr__`.
+
+    The workflow of this wrapper in the aclgraph dispatching is as follows:
+    1. At initialization, a runtime mode is assigned to the wrapper (FULL or
+    PIECEWISE).
+    2. At runtime, the wrapper receives a runtime_mode and a
+    batch_descriptor(key) from the forward context and blindly trust them
+    for aclgraph dispatching.
+    3. If runtime_mode is NONE or runtime_mode does not match the mode of the
+    wrapper, just call the runnable directly.
+    4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
+    the wrapper will perform aclgraph capture(if key does not exist, create
+    a new entry and cache it) or replay (if key exists in the cache).
+
+    Note: ACLGraphWrapper does not store persistent buffers or copy any
+    runtime inputs into that buffers for replay. We assume implementing them
+    is done outside of the wrapper. That is because we do not make any
+    assumption on the dynamic shape (batch size) of the runtime inputs, as a
+    trade-off for staying orthogonal to compilation logic. Nevertheless,
+    tracing and checking the input addresses to be consistent during replay is
+    guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
+    """
+
+    def __init__(
+        self,
+        runnable: Callable,
+        vllm_config: VllmConfig,
+        runtime_mode: CUDAGraphMode,
+        cudagraph_options: CUDAGraphOptions | None = None,
+        *,
+        use_eagle: bool = False,
+        enable_enpu: bool = False,
+        component: str | None = None,
+        retained_input_provider: Callable[[Any, BatchDescriptor], tuple[GraphInputSource, ...]] | None = None,
+    ):
+        self.runnable = runnable
+        self.vllm_config = vllm_config
+        self.runtime_mode = runtime_mode
+        self.compilation_config = vllm_config.compilation_config
+
+        self.first_run_finished = False
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.is_exact_310p_dflash_piecewise = self.is_debugging_mode and is_310p_dflash_piecewise(vllm_config)
+        self.is_exact_310p_dflash_full_decode_only = is_310p_dflash_full_decode_only(vllm_config)
+        self.validate_input_contracts = (
+            self.is_exact_310p_dflash_piecewise or self.is_exact_310p_dflash_full_decode_only
+        )
+        if self.is_exact_310p_dflash_full_decode_only and component is None:
+            raise ValueError(
+                "310P DFlash FULL_DECODE_ONLY requires an explicit graph component at wrapper construction"
+            )
+        if self.is_exact_310p_dflash_full_decode_only and retained_input_provider is None:
+            raise ValueError(
+                "310P DFlash FULL_DECODE_ONLY requires an explicit retained input provider at wrapper construction"
+            )
+        if component is None:
+            component = "target"
+        if component not in {"target", "draft"}:
+            raise ValueError(f"ACL graph component must be target or draft, got {component!r}")
+        self.component = component
+        self.retained_input_provider = retained_input_provider
+        self._debug_piecewise_component = os.getenv("VLLM_ASCEND_310P_DFLASH_PIECEWISE_DEBUG_COMPONENT")
+        if self._debug_piecewise_component not in (None, "both", "target", "draft"):
+            raise ValueError("VLLM_ASCEND_310P_DFLASH_PIECEWISE_DEBUG_COMPONENT must be one of: both, target, draft")
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
+
+        # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
+        # need to initialize a ACLGraphWrapper.
+        assert self.runtime_mode != CUDAGraphMode.NONE
+        self.graph_pool = current_platform.get_global_graph_pool()
+
+        if cudagraph_options is None:
+            cudagraph_options = CUDAGraphOptions()
+        self.aclgraph_options = cudagraph_options
+        # the entries for different batch descriptors that we need to capture
+        # aclgraphs for.
+        self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
+        self.enable_enpu = enable_enpu
+        self.use_eagle = use_eagle
+        _acl_graph_wrappers.add(self)
+
+    def __getattr__(self, key: str):
+        # allow accessing the attributes of the runnable.
+        if hasattr(self.runnable, key):
+            return getattr(self.runnable, key)
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self._runnable_str}"
+            )
+        raise AttributeError(f"Attribute {key} not found. Set VLLM_LOGGING_LEVEL=DEBUG for more details.")
+
+    def unwrap(self) -> Callable:
+        # in case we need to access the original runnable.
+        return self.runnable
+
+    def _debug_component_is_enabled(self, component: str) -> bool:
+        selector = self._debug_piecewise_component
+        if (
+            selector is None
+            or selector == "both"
+            or not self.is_debugging_mode
+            or not self.is_exact_310p_dflash_piecewise
+            or self.runtime_mode != CUDAGraphMode.PIECEWISE
+        ):
+            return True
+        return selector == component
+
+    def _capture_input_contracts(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        forward_context: Any | None = None,
+        batch_descriptor: BatchDescriptor | None = None,
+    ) -> tuple[GraphInputTensorContract, ...] | None:
+        if not self.validate_input_contracts:
+            return None
+        contracts = capture_graph_input_contracts(args, kwargs)
+        if not self.is_exact_310p_dflash_full_decode_only:
+            return contracts
+        assert self.retained_input_provider is not None
+        if forward_context is None:
+            forward_context = get_forward_context()
+        if batch_descriptor is None:
+            batch_descriptor = forward_context.batch_descriptor
+        retained_sources = self.retained_input_provider(
+            forward_context,
+            batch_descriptor,
+        )
+        return contracts + capture_graph_input_sources(retained_sources)
+
+    def _validate_replay_input_contracts(
+        self,
+        entry: ACLGraphEntry,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        if entry.input_contracts is None:
+            return
+        capture_kwargs: dict[str, Any] = {}
+        if self.is_exact_310p_dflash_full_decode_only:
+            capture_kwargs = {
+                "forward_context": get_forward_context(),
+                "batch_descriptor": entry.batch_descriptor,
+            }
+        actual_contracts = self._capture_input_contracts(
+            args,
+            kwargs,
+            **capture_kwargs,
+        )
+        assert actual_contracts is not None
+        try:
+            validate_graph_input_contracts(
+                entry.input_contracts,
+                actual_contracts,
+            )
+        except GraphInputContractError as exc:
+            scope = (
+                "310P DFlash FULL_DECODE_ONLY"
+                if self.is_exact_310p_dflash_full_decode_only
+                else "310P DFlash Piecewise"
+            )
+            raise GraphInputContractError(
+                f"{scope} graph input contract failed: "
+                f"component={entry.component}, rank={entry.rank}, "
+                f"mode={self.runtime_mode.name}, "
+                f"descriptor={entry.batch_descriptor}: {exc}"
+            ) from exc
+
+    def _complete_full_decode_capture(
+        self,
+        entry: ACLGraphEntry,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        if not self.is_exact_310p_dflash_full_decode_only:
+            return
+        if entry.aclgraph is None or entry.output is None:
+            raise RuntimeError("FULL_DECODE_ONLY capture cannot complete before graph and output binding")
+        self._validate_replay_input_contracts(entry, args, kwargs)
+        entry.contract_validated = True
+        entry.aclgraph.replay()
+        torch.npu.current_stream().synchronize()
+        entry.warmup_replay_count += 1
+        record_full_decode_capture(
+            component=self.component,
+            local_rank=entry.rank if entry.rank is not None else self._debug_rank(),
+            runtime_mode=self.runtime_mode,
+            descriptor=entry.batch_descriptor,
+            capture_count=entry.capture_count,
+            warmup_replay_count=entry.warmup_replay_count,
+            output_bound=entry.output is not None,
+            contract_validated=entry.contract_validated,
+        )
+
+    @staticmethod
+    def _debug_rank() -> int:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank()
+        return 0
+
+    def __call__(self, *args, **kwargs):
+        forward_context = get_forward_context()
+        batch_descriptor = forward_context.batch_descriptor
+        aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
+
+        if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
+            # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
+            # running without aclgraphs.
+            # We do not trigger capture/replay if the runtime mode is not
+            # matches. This enables properly dispatching to the correct
+            # CUDAGraphWrapper when nesting multiple instances with different
+            # runtime modes.
+            return self.runnable(*args, **kwargs)
+
+        component = (
+            self.component
+            if self.is_exact_310p_dflash_full_decode_only
+            else "draft"
+            if getattr(_EXTRA_CTX, "is_draft_model", False)
+            else "target"
+        )
+        if not self._debug_component_is_enabled(component):
+            logger.debug_once(
+                "[310p-dflash-piecewise/graph] event=debug-bypass component=%s ",
+                component,
+            )
+            return self.runnable(*args, **kwargs)
+
+        if batch_descriptor not in self.concrete_aclgraph_entries:
+            # create a new entry for this batch descriptor
+            self.concrete_aclgraph_entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
+
+        entry = self.concrete_aclgraph_entries[batch_descriptor]
+
+        if entry.aclgraph is None:
+            if self.aclgraph_options.debug_log_enable:
+                # Since we capture aclgraph for many different shapes and
+                # capturing is fast, we don't need to log it for every
+                # shape. E.g. we only log it for the first subgraph in
+                # piecewise mode.
+                logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
+            # validate that aclgraph capturing is legal at this point.
+            validate_cudagraph_capturing_enabled()
+
+            input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+            entry.input_addresses = input_addresses
+            # FULL providers include graph-task workspaces and retained
+            # attention tensors that exist only after graph construction.
+            # Piecewise keeps its existing pre-capture call-argument contract.
+            entry.input_contracts = (
+                None if self.is_exact_310p_dflash_full_decode_only else self._capture_input_contracts(args, kwargs)
+            )
+            if entry.input_contracts is not None:
+                entry.component = component
+                entry.rank = self._debug_rank()
+                logger.debug(
+                    "[310p-dflash-graph] event=capture-begin component=%s "
+                    "rank=%d mode=%s descriptor=%s tensor_count=%d",
+                    entry.component,
+                    entry.rank,
+                    self.runtime_mode.name,
+                    entry.batch_descriptor,
+                    len(entry.input_contracts),
+                )
+            aclgraph = torch.npu.NPUGraph()
+            debug_dump_path = None
+            if self.is_exact_310p_dflash_full_decode_only:
+                debug_dump_path = _prepare_aclgraph_debug_dump(
+                    aclgraph,
+                    component=component,
+                    rank=self._debug_rank(),
+                    descriptor=entry.batch_descriptor,
+                )
+
+            with ExitStack() as stack:
+                if self.aclgraph_options.gc_disable:
+                    # during every model forward for piecewise aclgraph
+                    # mode, we will capture many pieces of aclgraphs
+                    # (roughly one per layer). running gc again and again
+                    # across layers will make the aclgraph capture very slow.
+                    # therefore, we only run gc for the first graph,
+                    # and disable gc for the rest of the graphs.
+                    stack.enter_context(patch("gc.collect", lambda: None))
+                    stack.enter_context(patch("torch.npu.empty_cache", lambda: None))
+
+                # mind-exploding: carefully manage the reference and memory.
+
+                # Sync offloader's copy stream before capture.
+                # Ensure any pre-capture prefetches from offloader are complete.
+                from vllm.model_executor.offloader.base import get_offloader
+
+                get_offloader().sync_prev_onload()
+                forward_context.capturing = True
+                try:
+                    with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                        # `output` is managed by pytorch's aclgraph pool
+                        output = self.runnable(*args, **kwargs)
+                        # Join offloader's copy stream after forward to avoid
+                        # unjoined stream error. The last layer's start_prefetch
+                        # forks copy_stream, but wait_prefetch only happens in
+                        # the next forward pass.
+                        get_offloader().join_after_forward()
+                        if self.aclgraph_options.weak_ref_output:
+                            # by converting it to weak ref,
+                            # the original `output` will immediately be released
+                            # to save memory. It is only safe to do this for
+                            # the last graph in piecewise aclgraph mode, because
+                            # the output of the last graph will not be used by
+                            # any other acl graph.
+                            output = weak_ref_tensors(output)
+                except RuntimeError as exc:
+                    if _is_old_hdk_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with an old Ascend HDK/CANN stack "
+                            "signature (`Alloc sq cq fail`). Please upgrade Ascend HDK to "
+                            "25.5.1 or later and use the matching CANN stack.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
+                    elif _is_stream_resource_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with a known stream-resource exhaustion "
+                            "signature. Consider reducing cudagraph_capture_sizes, lowering "
+                            "max_cudagraph_capture_size, preferring FULL or FULL_DECODE_ONLY for "
+                            "mostly uniform decode workloads, or temporarily disabling graph mode "
+                            "to confirm the failure is capture-related.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
+                    raise
+
+            if debug_dump_path is not None:
+                aclgraph.debug_dump(str(debug_dump_path))
+                logger.debug(
+                    "[310p-dflash-graph] event=native-graph-dump component=%s rank=%d descriptor=%s path=%s",
+                    component,
+                    self._debug_rank(),
+                    entry.batch_descriptor,
+                    debug_dump_path,
+                )
+
+            if self.is_exact_310p_dflash_full_decode_only:
+                entry.input_contracts = self._capture_input_contracts(
+                    args,
+                    kwargs,
+                    forward_context=forward_context,
+                    batch_descriptor=entry.batch_descriptor,
+                )
+                assert entry.input_contracts is not None
+                entry.component = component
+                entry.rank = self._debug_rank()
+                logger.debug(
+                    "[310p-dflash-graph] event=contract-captured component=%s "
+                    "rank=%d mode=%s descriptor=%s tensor_count=%d",
+                    entry.component,
+                    entry.rank,
+                    self.runtime_mode.name,
+                    entry.batch_descriptor,
+                    len(entry.input_contracts),
+                )
+                for contract in entry.input_contracts:
+                    logger.debug(
+                        "[310p-dflash-graph] event=contract-tensor "
+                        "component=%s rank=%d descriptor=%s role=%s "
+                        "data_ptr=0x%x base_ptr=0x%x storage_offset=%d "
+                        "shape=%s stride=%s dtype=%s alignment=%d "
+                        "alignment_ok=%s ownership=%s",
+                        entry.component,
+                        entry.rank,
+                        entry.batch_descriptor,
+                        contract.path,
+                        contract.data_ptr,
+                        contract.base_ptr,
+                        contract.storage_offset,
+                        contract.shape,
+                        contract.stride,
+                        contract.dtype,
+                        contract.required_alignment,
+                        contract.alignment_ok,
+                        contract.ownership,
+                    )
+
+            # here we always use weak ref for the workspaces
+            # to save memory
+            global _graph_params
+            global _draft_graph_params
+            global _draft_graph_prefill_params
+            weak_ref_workspaces(_graph_params)
+            weak_ref_workspaces(_draft_graph_params)
+            weak_ref_workspaces(_draft_graph_prefill_params)
+
+            # here we always use weak ref for the output
+            # to save memory
+            entry.output = weak_ref_tensors(output)
+            entry.aclgraph = aclgraph
+            entry.capture_count += 1
+            self._complete_full_decode_capture(entry, args, kwargs)
+
+            compilation_counter.num_cudagraph_captured += 1
+
+            # important: we need to return the output, rather than
+            # the weak ref of the output, so that pytorch can correctly
+            # manage the memory during acl graph capture
+            return output
+
+        # The exact-scope recursive contract carries tensor paths and storage
+        # metadata, so run it before the legacy flat positional-address check.
+        self._validate_replay_input_contracts(entry, args, kwargs)
+        if self.is_debugging_mode:
+            # check if the input addresses are the same
+            new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+            assert new_input_addresses == entry.input_addresses, (
+                f"Input addresses for aclgraphs are different "
+                f"during replay. Expected {entry.input_addresses}, "
+                f"got {new_input_addresses}"
+            )
+        logger.info_once("Replaying aclgraph")
+        # In async scheduling or multi-threaded (MT) scenarios, it is possible that
+        # the CPU's record event (from update_attn_params) for the iteration i completes
+        # before the grph replay of iteration i-1.
+        # To ensure proper ordering, we must call synchronize here before replaying,
+        # so that update_attn_params only executes after the previous graph replay has fully completed.
+        # If we do not in main model and in full-graph mode when using merge-eagle-graph,
+        # we do not need to synchronize.
+        # When enable_enpu is on, model_runner orders update vs replay; skip here.
+        # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+        if not self.enable_enpu and need_sync:
+            torch.npu.current_stream().synchronize()
+        if self.is_exact_310p_dflash_full_decode_only:
+            component = entry.component or self.component
+            rank = entry.rank if entry.rank is not None else self._debug_rank()
+            actual_tokens = getattr(forward_context, "num_actual_tokens", None)
+            logger.debug(
+                "[310p-dflash-graph] event=replay-enter component=%s "
+                "rank=%d mode=%s descriptor=%s actual_tokens=%s "
+                "replay_count=%d",
+                component,
+                rank,
+                self.runtime_mode.name,
+                entry.batch_descriptor,
+                actual_tokens,
+                entry.replay_count + 1,
+            )
+            try:
+                entry.aclgraph.replay()
+                # ACL graph errors are asynchronous by default. DEBUG mode
+                # synchronizes immediately so the failing target/draft replay
+                # receives the error instead of an unrelated later operation.
+                if self.is_debugging_mode:
+                    torch.npu.current_stream().synchronize()
+            except RuntimeError as exc:
+                logger.exception(
+                    "[310p-dflash-graph] event=replay-error component=%s "
+                    "rank=%d mode=%s descriptor=%s actual_tokens=%s",
+                    component,
+                    rank,
+                    self.runtime_mode.name,
+                    entry.batch_descriptor,
+                    actual_tokens,
+                )
+                raise RuntimeError(
+                    "310P DFlash FULL graph replay failed: "
+                    f"component={component}, rank={rank}, "
+                    f"mode={self.runtime_mode.name}, "
+                    f"descriptor={entry.batch_descriptor}, "
+                    f"actual_tokens={actual_tokens}"
+                ) from exc
+            logger.debug(
+                "[310p-dflash-graph] event=replay-exit component=%s "
+                "rank=%d mode=%s descriptor=%s actual_tokens=%s "
+                "replay_count=%d",
+                component,
+                rank,
+                self.runtime_mode.name,
+                entry.batch_descriptor,
+                actual_tokens,
+                entry.replay_count + 1,
+            )
+        else:
+            entry.aclgraph.replay()
+        entry.replay_count += 1
+        if entry.input_contracts is not None and entry.replay_count == 1:
+            logger.debug(
+                "[310p-dflash-graph] event=replay component=%s "
+                "rank=%d mode=%s descriptor=%s capture_count=%d "
+                "replay_count=%d tensor_count=%d contract=stable",
+                entry.component,
+                entry.rank,
+                self.runtime_mode.name,
+                entry.batch_descriptor,
+                entry.capture_count,
+                entry.replay_count,
+                len(entry.input_contracts),
+            )
+        return entry.output
+
+
+def weak_ref_workspaces(params):
+    if params is None:
+        return
+    for num_tokens in params.workspaces:
+        if params.workspaces[num_tokens] is None:
+            continue
+        params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
+
+
+def update_full_graph_params(
+    attn_backend,
+    update_stream,
+    forward_context,
+    num_tokens,
+    vllm_config,
+    speculative_config=None,
+    num_dcp_pcp_tokens=None,
+    draft_attn_metadatas=None,
+):
+    impl_cls = attn_backend.get_impl_cls()
+    impl_cls.update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config,
+        num_dcp_pcp_tokens,
+        draft_attn_metadatas,
+    )
+
+
+@dataclass
+class GraphParams:
+    events: dict[int, list[torch.npu.ExternalEvent]]
+    workspaces: dict[int, torch.Tensor]
+    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[int, list[tuple]]
+
+
+_graph_params: GraphParams | None = None
+
+
+def set_graph_params(aclgraph_capture_sizes: list[int]):
+    global _graph_params
+    if _graph_params is not None:
+        raise ValueError("Graph parameters have already been set!")
+    _graph_params = GraphParams(
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+    )
+
+
+def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
+    global _graph_params
+    if _graph_params is not None:
+        _graph_params.workspaces[num_tokens] = workspace
+
+
+def get_graph_params():
+    return _graph_params
+
+
+_draft_graph_params: GraphParams | None = None
+
+
+def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
+    global _draft_graph_params
+    if _draft_graph_params is not None:
+        raise ValueError("DraftGraph parameters have already been set!")
+    _draft_graph_params = GraphParams(
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+    )
+
+
+def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
+    global _draft_graph_params
+    if _draft_graph_params is not None:
+        _draft_graph_params.workspaces[num_tokens] = workspace
+
+
+def get_draft_graph_params():
+    return _draft_graph_params
+
+
+_draft_graph_prefill_params: GraphParams | None = None
+
+
+def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
+    global _draft_graph_prefill_params
+    if _draft_graph_prefill_params is not None:
+        raise ValueError("DraftGraph preill parameters have already been set!")
+    _draft_graph_prefill_params = GraphParams(
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+    )
+
+
+def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any):
+    global _draft_graph_prefill_params
+    if _draft_graph_prefill_params is not None:
+        _draft_graph_prefill_params.workspaces[num_tokens] = workspace
+
+
+def get_draft_graph_prefill_params():
+    return _draft_graph_prefill_params
