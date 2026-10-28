@@ -1,0 +1,44 @@
+# 507014 复现外置资产清单（assets_manifest.txt）
+# git 无法携带的二进制/模型资产：SHA256 对账 + 获取方式
+# 打包建议（源机执行）：
+#   tar czf 507014_repro_assets.tar.gz \
+#     $(git -C /home/w00804146/310P/vllm-ascend-g1d rev-parse --show-toplevel)/vllm_ascend/{vllm_ascend_C.cpython-312-aarch64-linux-gnu.so,libmf310p_v2_trial_device_g1d.so,libmf310p_device.so} \
+#     $(git -C /home/w00804146/310P/vllm-ascend-g1d rev-parse --show-toplevel)/vllm_ascend/_cann_ops_custom \
+#     /home/h00949337/vllm-venv/lib/python3.12/site-packages/memfabric_hybrid
+#   模型单独携带（38G）。
+
+[必需] V2 设备库（D1R4 会话原版二进制）
+  file   = libmf310p_v2_trial_device_g1d.so
+  sha256 = d9a6de660677b13dbd83688dd250fbcdd3ea62c3427179b5060a1e64c5fbfa73
+  来源   = 源机 /home/w00804146/310P/vllm-ascend-g1d/vllm_ascend/（diag 分支 g1d worktree 构建产物）
+
+[必需] vllm-ascend C 插件（D1R4 会话原版二进制）
+  file   = vllm_ascend_C.cpython-312-aarch64-linux-gnu.so
+  sha256 = bcbb4f67c5e32401bd5d575ee7559f769ecbeb1d541e23df4bf4e3fa09c97550
+  来源   = 同上目录
+
+[必需] libmf310p_device.so
+  file   = libmf310p_device.so
+  sha256 = （随上两者同目录拷贝, 未单独核验）
+  来源   = 同上目录
+
+[必需] 自定义算子包（gitignore 构建产物, 新克隆缺失——缺它 serve 首请求即死于 aclnnCausalConv1dV310）
+  dir    = _cann_ops_custom/（含 vendors/custom_transformer 全部, ~5.6M）
+  来源   = 源机同上目录
+
+[必需] 生产版 memfabric python 包（python 层 1.2.1, Host SO 由本手册 §3 diag 构建热替换）
+  dir    = memfabric_hybrid/ + memfabric_hybrid-1.2.1.dist-info
+  来源   = 源机 /home/h00949337/vllm-venv/lib/python3.12/site-packages/
+
+[必需] 模型
+  dir    = Qwen3.6-35B-A3B-w8a8（38G, 10 分片 + tokenizer + index.json）
+  来源   = 源机 /home/data/Qwen/Qwen3.6-35B-A3B-w8a8
+
+[可选] torch 栈复用（源机 venv symlink 用; 目标机无源机资产时改用 pip 自装）
+  说明   = torch==2.10.0 / torch_npu==2.10.0.post4 均在华为云 pip 镜像有 aarch64 wheel（已验证）
+           vllm==0.27.1 aarch64 wheel 307MB 同样可下
+
+[校验基准] diag 分支可复现构建的直接证据
+  file   = libmf_sdma_orch_v12.json（§3 构建产物）
+  sha256 = 90172726965f4944ed955237c296faf1622762897f742ffbecf69a9e2fb554d0
+  说明   = 与 D1R4 交接包记录的 launch JSON 逐字节一致
