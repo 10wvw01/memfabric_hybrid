@@ -109,15 +109,26 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
  * 读零(smem_shm_get_global_rank 等失效)。 */
 static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
 {
+    /* MemSetAccess 的 location.id 走系统枚举表: 必须填物理设备号, 填 user 逻辑号在
+     * ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不暴露, 非恒等映射(如 =6,7)时实测
+     * 报 507899(2026-10-28 探针实测, issue #26); 与 MallocPhysical 的 user 号命名空间
+     * 不同, 勿统一。 */
+    int32_t phyDevId = -1;
+    auto convRet = DlAclApi::AclrtGetPhyDevIdByLogicDevId(static_cast<int32_t>(deviceId), &phyDevId);
+    if (convRet != BM_OK || phyDevId < 0) {
+        BM_LOG_ERROR("get phyDevId failed, ret: " << convRet << " deviceId: " << deviceId);
+        return BM_ERROR;
+    }
     aclrtMemAccessDesc acc{};
     acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    acc.location.id = static_cast<uint32_t>(deviceId);
+    acc.location.id = static_cast<uint32_t>(phyDevId); // 授权设备号(物理号)
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     auto ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, &acc, 1);
     if (ret != BM_OK) { // 授权失败
         BM_LOG_ERROR("set meta device access failed, ret: " << ret << " addr: 0x" << std::hex
                                                             << HYBM_DEVICE_META_ADDR << " size: 0x" << allocSize
-                                                            << " deviceId: " << deviceId);
+                                                            << " deviceId: " << deviceId
+                                                            << " phyDevId: " << phyDevId);
         return BM_ERROR;
     }
     return BM_OK;
