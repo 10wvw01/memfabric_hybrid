@@ -71,7 +71,7 @@ FUNCTION(ADD_UNIT_TEST TEST_NAME)
         add_dependencies(${TEST_TARGET_NAME} googletest)
     endif ()
     install(TARGETS ${TEST_TARGET_NAME}
-            DESTINATION ${PROJECT_OUTPUT_PATH}/bin/ut/
+            DESTINATION bin/ut/
             PERMISSIONS ${CACHE_INSTALL_EXE_PERMISSIONS})
     IF (ADD_UNIT_TEST_INCLUDE_PATHS)
         target_include_directories(${TEST_TARGET_NAME} PUBLIC ${ADD_UNIT_TEST_INCLUDE_PATHS})

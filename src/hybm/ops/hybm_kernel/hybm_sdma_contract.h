@@ -31,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 14; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 28; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -90,7 +90,7 @@ struct HybmSdmaOrchResult {
     uint32_t mainRet;     /* 主返回码(0=成功/1=失败) */
     uint32_t consumed;    /* 本 epoch 消费邮件数(低 16 位有效) */
     uint32_t exitReason;  /* 退出原因(0=时限/1=停止/2=错误) */
-    uint64_t headAfter;   /* 面包屑: 退出时 SQ head 采样 */
+    uint64_t headAfter;   /* 逐单日志: 退出时 SQ head 采样 */
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
@@ -110,6 +110,27 @@ constexpr uint32_t HYBM_SDMA_ORCH_EXIT_ERROR = 2;             /* 错误退出 */
 constexpr uint32_t HYBM_SDMA_ORCH_HEARTBEAT_HZ = 10;  /* host 报时频率(每 100ms 一跳) */
 /* 工作区报时槽偏移(工作区布局: resultAddr 即基址, RESULT 0 / OVF 64 / STOP 128): */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF = 136; /* host 心跳计数 8B(每 100ms +1, kernel 读) */
+/* ---- 诊断逐单日志(工作区, host D2H 可读; 每封搬运记录请求原文/计算地址/SQ 游标) ----
+ * 逐单定位丢件类故障: 单条记录即可裁决"读到空请求(写到错误地址)/ SQE 未执行 / doorbell 异常"。
+ * 开销: 每封 ~1 次缓存行维护(微秒级), 常驻。 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF = 144; /* u64: 最近一次 doorbell 尾值 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DBRET_OFF = 152;    /* u64: 低 32 位=该次 doorbell 返回码 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF = 176; /* u64: 累计逐单日志条数(环形游标) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_OFF = 184;     /* 60 × 64B 环形逐单日志 */
+constexpr uint32_t HYBM_SDMA_ORCH_DBG_RING_SLOTS = 60;       /* (4096-184-32)/64 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF = 4088; /* 8B: 尾值防 0 占位 SQE 的暂存地址 */
+struct HybmSdmaOrchDbgMail {                                  /* 单条逐单日志(64B, 单缓存行) */
+    uint64_t seq;         /* 消费的请求序号 */
+    uint64_t reqF0;       /* 请求槽读回 4 字(原文; 全 0=读到空请求, 写到错误地址特征) */
+    uint64_t reqF1;
+    uint64_t reqF2;
+    uint64_t reqF3;
+    uint64_t arrMailSlot; /* 计算出的对端到达邮件地址(异常值检测) */
+    uint64_t sqTailBefore;/* SQE 入环前 shadow 尾 */
+    uint64_t sqTailAfter; /* SQE 入环后 shadow 尾 */
+};
+static_assert(sizeof(HybmSdmaOrchDbgMail) == 64, "DbgMail 尺寸漂移"); /* 布局锁 64B */
+
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 永不退出的专用值(不判报时, 诊断用) */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;       /* 空闲退避 100µs(实测 ≈130µs) */

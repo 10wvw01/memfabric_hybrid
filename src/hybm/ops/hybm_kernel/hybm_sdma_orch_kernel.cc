@@ -80,7 +80,7 @@ constexpr uint32_t DRV_SQCQ_PROP_SQ_BASE = 6;   // 属性编号: SQ 环基址
 constexpr uint32_t DRV_SQCQ_PROP_SQ_DEPTH = 7;  // 属性编号: SQ 环深度
 constexpr uint32_t kInfoValueLen = 8;           // HAL 请求 value 数组长度(配置/查询同)
 constexpr size_t kSqeSize = 64;                 // SQE 尺寸(64B = 8×u64)
-constexpr uint32_t kSqFullRetry = 1000;         // SQ 满重试次数(×1ms)
+constexpr uint32_t kSqFullRetry = 1000;              // SQ 满活查询自旋上限(×1ms)
 constexpr uint32_t kSqFullBackoffUs = 1000;     // SQ 满退避粒度
 
 // HAL 请求结构(HAL 侧按定长 value 数组解释; 前五域为定位五元组)
@@ -177,20 +177,38 @@ struct SqContext {
     volatile ock::mf::HybmSdmaOrchResult *result; // 结果区(诊断)
     uint64_t sqBase;  // SQ 环基址
     uint32_t sqDepth; // SQ 环深度
-    uint32_t sqHead;  // SQ head(活查询初值)
+    uint32_t sqHead;  // SQ head(满环时活查询刷新)
     uint32_t sqTail;  // SQ shadow tail
     uint32_t streamId; // SQE 的 rt_stream_id
     uint32_t devId;   // doorbell HAL 路径用
     uint32_t sqId;    // 目标 SQ
 };
 
-// SQE 入环: 只写环 + 推进 shadow tail, 不敲铃(调用方统一 doorbell); SQ 满返回 240
-int32_t submitSqe(SqContext *c, const uint8_t sqe[kSqeSize])
+int32_t cp1QueryProp(uint32_t devId, uint32_t sqId, uint32_t prop, uint32_t *v0, uint32_t *v1);
+
+// SQE 入环: 只写环 + 推进 shadow tail, 不敲铃(调用方统一 doorbell)。
+// 满环检查活查询 head 重算(hcomm LaunchTask 同款): shadow 回绕后对 epoch 入口 head 快照
+// 的模减会失明(used 恒小), 覆写固件未消费 SQE 造成邮件无声丢失(并发丢件挂死（507014） 根因);
+// 活查询保证 used 始终以固件真实消费位置为基准。返回 0 成功; 1363=活查询超时环满。
+int32_t submitSqe(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, const uint8_t sqe[kSqeSize])
 {
     uint32_t used = (c->sqTail >= c->sqHead) ? (c->sqTail - c->sqHead)
                                              : (c->sqDepth - c->sqHead + c->sqTail);
     if (c->sqDepth - used < 1) {
-        return 240; // 环满(调用方退避重试)
+        uint32_t retry = 0;
+        do { // 满环: 活查询固件 head 重算(非 epoch 快照), 1ms 退避, 上限 1s
+            usleep(kSqFullBackoffUs);
+            uint32_t liveHead = 0;
+            if (cp1QueryProp(p->devId, c->sqId, DRV_SQCQ_PROP_SQ_HEAD, &liveHead, nullptr) != 0) {
+                return 1363; // 错误码: head 活查询失败
+            }
+            c->sqHead = liveHead;
+            used = (c->sqTail >= c->sqHead) ? (c->sqTail - c->sqHead)
+                                            : (c->sqDepth - c->sqHead + c->sqTail);
+        } while (c->sqDepth - used < 1 && ++retry < kSqFullRetry);
+        if (c->sqDepth - used < 1) {
+            return 1363; // 错误码: 活查询后仍满(消费侧停摆)
+        }
     }
     volatile uint8_t *slot = reinterpret_cast<volatile uint8_t *>(c->sqBase) +
                              static_cast<uint64_t>(c->sqTail) * kSqeSize;
@@ -256,7 +274,7 @@ int32_t cp1LiveQuery(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
     if (rDepth != 0) {
         return 1100 + (rDepth & 0xFF); // 11xx: DEPTH 失败
     }
-    uint64_t base = (static_cast<uint64_t>(hi) << 32) | lo;
+    const uint64_t base = (static_cast<uint64_t>(hi) << 32) | lo;
     if (base == 0 || ctx->sqDepth == 0) {
         return 1200; // 12xx: 无效通道
     }
@@ -283,6 +301,7 @@ void finishResult(volatile ock::mf::HybmSdmaOrchResult *result)
     memBarrier();
 }
 
+
 // 读请求游标/停止标志(AICore/SQE 写 → AICPU 读, 失效取新值)
 inline uint64_t loadCell(uint64_t addr)
 {
@@ -297,44 +316,82 @@ inline void storeCell(uint64_t addr, uint64_t v)
     cacheFlushLine(addr & ~static_cast<uintptr_t>(63));
 }
 
-// SQE 三连入环(不敲铃): ① 数据(src→dst, 可带 reduce opcode) ② 到达戳(邮件像 seq 字段→对端戳槽)
+// v15 诊断逐单日志: 逐单落工作区环形缓冲(读回原文/计算地址/SQ 游标), host D2H 可读。
+// 单线程 kernel 无并发; 计数持久于工作区(跨 epoch 累计, 环形覆盖最旧)。
+void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf::HybmSdmaReqMail &mail,
+                uint64_t arrMailSlot, uint64_t sqTailBefore, uint64_t sqTailAfter)
+{
+    using namespace ock::mf;
+    const uintptr_t ws = static_cast<uintptr_t>(p->resultAddr);
+    const uint64_t cnt = loadCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF);
+    volatile ock::mf::HybmSdmaOrchDbgMail *e = reinterpret_cast<volatile ock::mf::HybmSdmaOrchDbgMail *>(
+        ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_RING_OFF +
+        (cnt % ock::mf::HYBM_SDMA_ORCH_DBG_RING_SLOTS) * sizeof(ock::mf::HybmSdmaOrchDbgMail));
+    e->seq = seq;
+    e->reqF0 = mail.src;
+    e->reqF1 = mail.dst;
+    e->reqF2 = mail.len;
+    e->reqF3 = mail.imm;
+    e->arrMailSlot = arrMailSlot;
+    e->sqTailBefore = sqTailBefore;
+    e->sqTailAfter = sqTailAfter;
+    cacheFlushLine(reinterpret_cast<uintptr_t>(e)); /* 64B 恰一行 */
+    storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF, cnt + 1);
+}
+
+// SQE 三连入环(不敲铃): ① 数据(src→dst, 可带 reduce opcode) ② 到达戳(本端暂存单号→对端戳槽)
 // ③ 完成戳(同源→本端戳槽); 同队列 FIFO 保证 ②③ 晚于 ① 落地。返回 0 成功。
+// v25: ②③ 拷贝数据源=本端暂存(原为对端邮件内容首字段——跨芯片写在途时 SDMA 读回旧值, 并发丢件挂死（507014）)。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint64_t seq,
-                      const ock::mf::HybmSdmaReqMail &mail, uint64_t arrMailSlot, uint64_t peerArrStampSlot,
+                      const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t peerArrStampSlot,
                       uint8_t sqeOpcode)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
+    /* 尾值防 0(v21, 并发丢件挂死（507014） 修复): 本封三连若恰好使 shadow 尾落到 0, 该批 doorbell
+     * 值为 0——固件将其当"空环"哨兵静默丢弃, SQE 完好在环但永不执行(实测确定性丢件)。
+     * 先插入一条无害占位 SQE(工作区 8B 自拷贝), 尾值落到 1; 小正值回绕形态实测安全。 */
+    if ((ctx->sqTail + 3) % ctx->sqDepth == 0) {
+        const uint64_t scratch = p->resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF;
+        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(seq + 3),
+                          scratch, scratch, 8,
+                          p->devId, p->overflowAddr, ssid);
+        int32_t padRet = submitSqe(p, ctx, sqe);
+        if (padRet != 0) {
+            return 1365; // 错误码: 占位 SQE 入环失败
+        }
+    }
     buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(seq), mail.src, mail.dst,
                       static_cast<uint32_t>(mail.len), p->devId, p->overflowAddr, ssid, sqeOpcode);
-    for (uint32_t retry = 0; submitSqe(ctx, sqe) == 240; retry++) { // SQ 满退避重试
-        if (retry >= kSqFullRetry) {
-            return 1360; // 错误码: SQ 持续满
-        }
-        usleep(kSqFullBackoffUs);
+    int32_t r = submitSqe(p, ctx, sqe); // 满环活查询在 submitSqe 内自旋(上限 1s)
+    if (r != 0) {
+        return 1360; // 错误码: SQ 持续满/查询失败
     }
-    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(seq + 1), arrMailSlot,
-                      peerArrStampSlot, 8, p->devId, p->overflowAddr, ssid); // ② 到达戳
-    if (submitSqe(ctx, sqe) != 0) {
+    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(seq + 1), stageSlot,
+                      peerArrStampSlot, 8, p->devId, p->overflowAddr, ssid); // ② 到达戳(源=本端暂存)
+    if (submitSqe(p, ctx, sqe) != 0) {
         return 1361; // 错误码: 到达戳失败
     }
-    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(seq + 2), arrMailSlot,
+    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(seq + 2), stageSlot,
                       p->quietBase + (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8, 8, p->devId,
-                      p->overflowAddr, ssid); // ③ 完成戳
-    if (submitSqe(ctx, sqe) != 0) {
+                      p->overflowAddr, ssid); // ③ 完成戳(源=本端暂存)
+    if (submitSqe(p, ctx, sqe) != 0) {
         return 1362; // 错误码: 完成戳失败
     }
     return 0;
 }
 
-/* 批末敲铃: 统一屏障 + doorbell(环内积压时 N 封一铃, 降 HAL 调用开销) */
+/* 批末敲铃: 统一屏障 + doorbell(环内积压时 N 封一铃, 降 HAL 调用开销)。
+ * 尾值永不为 0 由 issueMailSqes 的占位 SQE 保证(0 会被固件当"空环"哨兵丢弃,
+ * 并发丢件挂死（507014） 根因)。尾值与返回码落诊断区(v15 逐单日志)。 */
 int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 {
     memBarrier();                                                // SQE 写序后(批内唯一 dsb)
-    if (doorbellViaHal(p->devId, ctx->sqId, ctx->sqTail) != 0) { // 批末一次敲铃
-        return 1390;                                             // 错误码: 敲铃失败
-    }
-    return 0;
+    const int32_t r = doorbellViaHal(p->devId, ctx->sqId, ctx->sqTail); // 批末一次敲铃
+    const uintptr_t ws = static_cast<uintptr_t>(p->resultAddr);
+    storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF, ctx->sqTail);
+    storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_DBRET_OFF, static_cast<uint64_t>(static_cast<uint32_t>(r)));
+    return (r != 0) ? 1390 : 0;                                 // 错误码: 敲铃失败
 }
 
 // 消费一封请求邮件: 写到达邮件像 → SQE 三连 → reqHead 推进。
@@ -360,10 +417,16 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     cacheFlushLine(arrMailSlot & ~static_cast<uintptr_t>(63)); // 刷出邮件像(SQE 可读)
     const uint64_t peerArrStamp = peerRes + SMEM_SHM_SDMA_RS_ARR_STAMP +
                                   (seq % SMEM_SHM_SDMA_RS_ARR_SLOTS) * 8; // 对端到达戳槽
-    auto ret = issueMailSqes(p, ctx, ssid, seq, mail, arrMailSlot, peerArrStamp, sqeOpcode);
+    /* v25: 单号写本端暂存(本地写+刷出, 本端 SDMA 立即可见)——②③ 的拷贝数据源 */
+    const uint64_t stageSlot = p->reqBase - SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_RS_STAGE +
+                               (seq % SMEM_SHM_SDMA_RS_STAGE_SLOTS) * 8;
+    storeCell(stageSlot, seq + 1);
+    const uint64_t tailBefore = ctx->sqTail;
+    auto ret = issueMailSqes(p, ctx, ssid, seq, mail, stageSlot, peerArrStamp, sqeOpcode);
     if (ret != 0) {
         return ret;
     }
+    dbgLogMail(p, seq, mail, arrMailSlot, tailBefore, ctx->sqTail); // v15 逐单日志(最后写, 失败路径不记)
     storeCell(p->reqBase - SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_RS_REQ_HEAD, seq + 1); // reqHead 推进
     return 0;
 }
@@ -449,7 +512,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         }
     }
     uint32_t headA = ctx.sqHead; // head 采样初值(查询失败时兜底)
-    (void)cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &headA, nullptr); // 面包屑: head 采样
+    (void)cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &headA, nullptr); // 逐单日志: head 采样
     result->headAfter = headA;
     finishResult(result);
     return (result->exitReason == HYBM_SDMA_ORCH_EXIT_ERROR) ? 1 : 0;
