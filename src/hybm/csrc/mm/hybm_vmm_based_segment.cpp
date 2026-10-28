@@ -237,6 +237,8 @@ Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_me
         aclrtPhysicalMemProp prop{};
         prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
         prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
+        /* MallocPhysical 的 location.id 走进程打开表: 填 user 逻辑号(传物理号实测 107001),
+         * 与 SetAccess 的物理号命名空间不同, 见 FillAclAccessDesc */
         prop.location.id = static_cast<uint32_t>(deviceId_);
         prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
         prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
@@ -301,6 +303,27 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
                 << info.rankId << " superPodId:" << info.superPodId << " serverId:" << info.serverId
                 << " devId:" << info.devicePhyId << " segType:" << options_.segType << " size:" << info.size);
     exportMap_[slice->index_] = exInfo;
+    return BM_OK;
+}
+
+/* 310P3 ACL 路径 SetAccess 授权描述: MemSetAccess 的 location.id 走驱动系统枚举表
+ * (物理设备号), 传 user 逻辑号在 ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不
+ * 暴露, 非恒等映射(如 =6,7)时实测授权给未打开的设备, 报 507899(2026-10-28 探针
+ * 实测, issue #26); 与 MallocPhysical 的 prop.location.id(进程打开表, user 号)
+ * 是两个命名空间, 勿统一两侧取值。 */
+
+static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t rankId)
+{
+    int32_t phyDevId = -1;
+    auto ret = DlAclApi::AclrtGetPhyDevIdByLogicDevId(static_cast<int32_t>(userDevId), &phyDevId);
+    if (ret != BM_OK || phyDevId < 0) {
+        BM_LOG_ERROR("AclrtGetPhyDevIdByLogicDevId failed, ret:" << ret << " userDevId:" << userDevId
+                                                                 << " rankId:" << rankId);
+        return (ret != BM_OK) ? ret : BM_DL_FUNCTION_FAILED;
+    }
+    desc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    desc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
+    desc.location.id = static_cast<uint32_t>(phyDevId);
     return BM_OK;
 }
 
@@ -400,9 +423,14 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
                 continue;
             }
             aclrtMemAccessDesc desc{};
-            desc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-            desc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-            desc.location.id = dev;
+            /* 换算失败即终止: 回退/跳过=把显性报错变成无声的错误授权 */
+            auto faRet = FillAclAccessDesc(desc, dev, options_.rankId);
+            if (faRet != BM_OK) {
+                (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+                ReleaseHandle(handle);
+                slices_.erase(slice->index_);
+                return faRet;
+            }
             auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &desc, 1);
             if (saRet != BM_OK) {
                 BM_LOG_WARN("AclrtMemSetAccess(RW) dev:" << dev << " failed:" << saRet << " addr:0x" << std::hex
@@ -412,9 +440,13 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         }
         /* Also set for local device */
         aclrtMemAccessDesc localDesc{};
-        localDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-        localDesc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-        localDesc.location.id = static_cast<uint32_t>(deviceId_);
+        auto faRet = FillAclAccessDesc(localDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
+        if (faRet != BM_OK) {
+            (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+            ReleaseHandle(handle);
+            slices_.erase(slice->index_);
+            return faRet;
+        }
         auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &localDesc, 1);
         if (saRet != BM_OK) {
             BM_LOG_WARN("AclrtMemSetAccess(RW) local dev failed:" << saRet << " addr:0x" << std::hex << allocAddr
@@ -801,9 +833,14 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
     }
     /* SetAccess on imported VA for local device */
     aclrtMemAccessDesc impDesc{};
-    impDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    impDesc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-    impDesc.location.id = static_cast<uint32_t>(deviceId_);
+    auto faRet = FillAclAccessDesc(impDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
+    if (faRet != BM_OK) {
+        BM_LOG_ERROR("FillAclAccessDesc(imported) failed, ret:" << faRet << " rankId:" << options_.rankId
+                                                                << " remoteRank:" << im.rankId
+                                                                << " va:" << VaToStr(lva));
+        ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
+        return BM_ERROR;
+    }
     auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(lva), im.size, &impDesc, 1);
     if (saRet != BM_OK) {
         BM_LOG_WARN("[rank " << options_.rankId << "] AclrtMemSetAccess on imported VA failed:" << saRet
