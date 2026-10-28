@@ -26,14 +26,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
-#include <fcntl.h>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <unistd.h>
 
-#include <sys/file.h>
-#include <sys/stat.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #include "dl_rt_api.h"
 #include "mf_env_define.h"
@@ -44,7 +43,6 @@ namespace {
 /* ACL_STREAM_DEVICE_USE_ONLY 的值(acl_rt.h:0x20): SQ 注册进 CP1 trs 表(AICPU 可查可投的前提) */
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;       /* 单 block(kernel 状态机单线程语义) */
-constexpr uint32_t HYBM_SDMA_ORCH_KFC_TIMEOUT_S = 25;  /* KFC 设备 shell 命令超时(部署链专用) */
 constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费 kernel 入口符号 */
 /* CWD 缺省 json 名随 KVER 生成(主构建经 CMake 注入 MF_SDMA_ORCH_KVER, 与设备侧文件名同步;
  * 独立编译场景无注入时用兜底值, 须与 hybm_kernel/CMakeLists 的 KVER 手动同步) */
@@ -54,16 +52,8 @@ constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费
 #define HYBM_SDMA_KVER_STR_(x) #x
 #define HYBM_SDMA_KVER_STR(x) HYBM_SDMA_KVER_STR_(x)
 constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_v" HYBM_SDMA_KVER_STR(MF_SDMA_ORCH_KVER) ".json";
-constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
-constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
 /* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 须在本卡设备上部署) */
 constexpr char HYBM_SDMA_ORCH_DEV_SEARCH_DIR[] = "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device";
-constexpr char HYBM_SDMA_ORCH_CUST_DEV_DIR[] = "/home/CustAiCpuUser/lib"; /* CUST 迁移设备侧落盘目录 */
-constexpr char HYBM_SDMA_ORCH_DEPLOY_LOCK[] = "/tmp/.mf_sdma_orch_deploy.lock"; /* 部署互斥锁(host 侧) */
-constexpr uint32_t HYBM_SDMA_ORCH_DEPLOY_RETRY = 5;   /* 复制/校验重试次数(迁移异步完成裕量) */
-constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 512; /* KFC 命令缓冲尺寸(命令为受控常量拼接) */
-/* KFC 命令退出码非 0 时 stream sync 的回传码(实测): 用于区分"文件缺失"与"通道异常" */
-constexpr int32_t HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR = 507018;
 constexpr uint32_t HYBM_SDMA_ORCH_SUPERVISOR_MAX_ERR = 16; /* 监督线程连续失败上限(放弃后数据面停在背压) */
 
 /* 解析每轮时长(秒): MF_SDMA_ORCH_EPOCH_BUDGET_S 显式指定;
@@ -175,11 +165,7 @@ Result SdmaOrchestrator::InitCpStream(uint16_t devId)
         BM_LOG_ERROR("rtStreamGetSqid failed, ret: " << ret << " devId: " << devId);
         return ret;
     }
-    ret = DlAclApi::AclrtCreateStream(&launchStream_); // 普通流(可提任务; CP_PROCESS_USE 流拒收本进程下发, 实测 507000)
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("create launch stream failed, ret: " << ret << " devId: " << devId);
-    }
-    return ret;
+    return BM_OK;
 }
 
 Result SdmaOrchestrator::AllocWorkspace()
@@ -223,32 +209,6 @@ static std::string FindInstalledJson()
     }
     return "";
 }
-
-/* 部署互斥锁 RAII: 同 host 多进程(双 rank/多池)并发部署时串行化, 防复制竞态;
- * 锁文件打开失败不致命(单进程无影响) */
-class DeployFlockGuard {
-public:
-    /* O_NOFOLLOW: 拒绝跟随预置符号链接(防锁文件劫持); O_CLOEXEC: 子进程不继承;
-     * 0600: 属主读写 */
-    DeployFlockGuard()
-        : fd_(open(HYBM_SDMA_ORCH_DEPLOY_LOCK, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600))
-    {
-        if (fd_ < 0) {
-            BM_LOG_INFO("deploy lock open failed, errno: " << errno); // 尽力而为, 不阻断
-            return;
-        }
-        (void)flock(fd_, LOCK_EX); // 排它锁(阻塞等对端部署完成, 部署为秒级)
-    }
-    ~DeployFlockGuard()
-    {
-        if (fd_ >= 0) {
-            (void)flock(fd_, LOCK_UN);
-            (void)close(fd_);
-        }
-    }
-private:
-    int fd_; // -1 = 未持锁
-};
 
 /* 取路径目录部分(最后一个 '/' 之前; 无 '/' 返回空串) */
 static std::string DirOf(const std::string &path)
@@ -319,23 +279,24 @@ Result SdmaOrchestrator::LoadOrchestratorKernel()
         return BM_INVALID_PARAM;
     }
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + devSoName;
-    const auto gate = KfcExec("test -f " + dst, true); // 探测(文件缺失为首轮预期, 降级 INFO)
-    if (gate != HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR && gate != BM_OK) {
-        // KFC 不可用(锁定环境): 按预部署假定直接加载, 文件若真缺失由数据面 wait 显式报错
-        BM_LOG_ERROR("kfc channel unavailable (ret: " << gate << "), assume pre-deployed, dst: " << dst);
-    } else if (gate == BM_OK) { // 设备侧已部署(预部署/同卡先启进程)
-        auto ret = TryLoadKernel(resolved);
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("kernel load failed though deployed, ret: " << ret << " json: " << resolved);
-        }
-        return ret;
-    } else { // 507018: 设备侧文件缺失 → 自动部署(迁移+复制+校验)后加载
-        BM_LOG_INFO("kernel not on device, auto deploy, devId: " << devId_ << " dst: " << dst);
-        return DeployOrchestratorKernel(resolved, dst);
+    /* 2026-10-18 实测(310P3+CANN9.1): torch_npu 宿主进程内执行一条 KFC system() 命令——
+     * 即使是首轮 test -f 探测的预期"文件缺失"退出码——即令后续全部 launch(含普通 torch
+     * 算子)持续 507018/aicpu 异常, 时间/新流均不可恢复, 仅新进程可行; 纯 ACL 进程不受影响。
+     * 因此探测+迁移+复制+校验必须全部在 fork+exec 的独立助手进程内执行, 本进程零 KFC 命令。
+     * 助手缺失或失败时明确报错, 不回退进程内部署、不"假定已部署"(锁定环境两路径均不可信)。 */
+    bool helperRan = false;
+    auto ret = RunDeployHelper(resolved, dst, helperRan);
+    if (!helperRan) {
+        BM_LOG_ERROR("deploy helper not found (MF_SDMA_ORCH_DEPLOY_HELPER or libmf_hybm_core.so 同目录/"
+                     "../bin/), refusing in-process KFC deploy in torch host, dst: " << dst);
+        return BM_FILE_NOT_ACCESS;
     }
-    auto ret = TryLoadKernel(resolved); // 通道异常分支的兜底加载(预部署假定)
     if (ret != BM_OK) {
-        BM_LOG_ERROR("kernel load failed, ret: " << ret << " json: " << resolved);
+        return ret; // RunDeployHelper 已分层记录失败原因
+    }
+    ret = TryLoadKernel(resolved);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("kernel load failed after helper deploy, ret: " << ret << " json: " << resolved);
     }
     return ret;
 }
@@ -355,197 +316,79 @@ Result SdmaOrchestrator::TryLoadKernel(const std::string &jsonPath)
     return DlAclApi::AclrtBinaryGetFunction(binHandle_, HYBM_SDMA_ORCH_FUNC_NAME, &funcHandle_);
 }
 
-Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &launchJsonPath, const std::string &dst)
+/* fork+exec 部署助手查找: 显式 env → 本 so 同目录(安装包 lib64) → 前缀 bin/。
+ * 找不到返回空串(调用方明确报错, 不回退进程内 KFC 部署)。 */
+static std::string FindDeployHelper()
 {
-    DeployFlockGuard lock; // host 侧进程间互斥
-    if (KfcExec("test -f " + dst, true) == BM_OK) { // 锁内复查: 对端进程可能刚部署完
-        auto ret = TryLoadKernel(launchJsonPath);
-        if (ret == BM_OK) {
-            BM_LOG_INFO("kernel deployed by peer process, devId: " << devId_);
-            return BM_OK;
+    const char *env = getenv("MF_SDMA_ORCH_DEPLOY_HELPER");
+    if (env != nullptr && *env != '\0' && access(env, X_OK) == 0) {
+        return std::string(env);
+    }
+    Dl_info info = {};
+    if (dladdr(reinterpret_cast<void *>(&SdmaOrchestrator::GetInstance), &info) == 0 || info.dli_fname == nullptr) {
+        return "";
+    }
+    std::string soDir(info.dli_fname);
+    auto pos = soDir.find_last_of('/');
+    if (pos == std::string::npos) {
+        return "";
+    }
+    soDir.resize(pos);
+    for (const auto &cand : {soDir + "/orch_deploy_helper", soDir + "/../bin/orch_deploy_helper"}) {
+        if (access(cand.c_str(), X_OK) == 0) {
+            return cand;
         }
-        BM_LOG_ERROR("kernel load failed though peer deployed, ret: " << ret << " json: " << launchJsonPath);
-        return ret;
     }
-    const std::string dir = DirOf(launchJsonPath); // 三件套同目录(launch json 旁)
-    uint64_t soSize = 0;
-    auto ret = MigrateViaCustChannel(dir, soSize);
-    if (ret != BM_OK) {
-        return ret;
-    }
-    const std::string devSo = dst.substr(dst.find_last_of('/') + 1);
-    ret = CopyToSearchPath(devSo, soSize);
-    if (ret != BM_OK) {
-        return ret;
-    }
-    ret = TryLoadKernel(launchJsonPath);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("kernel load still fails after deploy, ret: " << ret << " devId: " << devId_
-                     << " json: " << launchJsonPath);
-    }
-    return ret;
+    return "";
 }
 
-Result SdmaOrchestrator::MigrateViaCustChannel(const std::string &dir, uint64_t &soSize)
+/* fork+exec orch_deploy_helper: 探测+CUST 迁移+复制+校验全部在子进程执行(新 ACL
+ * 上下文, 非零退出码无碍), 本进程不执行任何 KFC 命令——torch_npu 宿主一条非零
+ * 退出 KFC 命令即永久打死设备上下文(2026-10-18 实测, 310P3+CANN9.1)。
+ * 退出码 0/3=已部署/本就在, 2=部署失败, 1/127=助手自身故障。 */
+Result SdmaOrchestrator::RunDeployHelper(const std::string &launchJsonPath, const std::string &dst,
+                                         bool &helperRan)
 {
-    const std::string hostSo = dir + "/" + HYBM_SDMA_ORCH_CUST_SO;
-    struct stat st = {};
-    if (stat(hostSo.c_str(), &st) != 0) {
-        BM_LOG_ERROR("cust kernel so missing, path: " << hostSo);
+    helperRan = false;
+    const std::string helper = FindDeployHelper();
+    if (helper.empty()) {
         return BM_FILE_NOT_ACCESS;
     }
-    soSize = static_cast<uint64_t>(st.st_size); // 设备侧完整性校验用
-    const std::string custJson = dir + "/" + HYBM_SDMA_ORCH_CUST_JSON;
-    char resolved[PATH_MAX] = {0};
-    if (realpath(custJson.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) {
-        BM_LOG_ERROR("cust json not accessible, path: " << custJson);
-        return BM_FILE_NOT_ACCESS;
-    }
-    /* 迁移前清残留(防历史/对端残留与本轮迁移文件拼接; flock 已保证无并发迁移) */
-    const std::string cleanCmd = "rm -f " + std::string(HYBM_SDMA_ORCH_CUST_DEV_DIR) + "/" +
-                                 HYBM_SDMA_ORCH_CUST_SO + ".*";
-    if (KfcExec(cleanCmd) != BM_OK) {
-        BM_LOG_ERROR("deploy clean residue failed, devId: " << devId_);
+    /* fork 前备好全部参数: 子进程内仅做 async-signal-safe 的 exec */
+    char devStr[16] = {0};
+    (void)snprintf(devStr, sizeof(devStr), "%u", devId_);
+    const char *helperArgv[] = {helper.c_str(), devStr, launchJsonPath.c_str(), nullptr};
+    const pid_t pid = fork();
+    if (pid < 0) {
+        BM_LOG_ERROR("deploy helper fork failed, errno: " << errno);
         return BM_ERROR;
     }
-    aclrtBinaryLoadOption loadOption{};
-    loadOption.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
-    loadOption.value.cpuKernelMode = 1; /* mode=1: H2D 迁移通道(CUSTAICPUKernel 专用), 本身不落盘 */
-    aclrtBinaryLoadOptions loadOptions{};
-    loadOptions.options = &loadOption;
-    loadOptions.numOpt = 1;
-    aclrtBinHandle bh = nullptr;
-    auto ret = DlAclApi::AclrtBinaryLoadFromFile(resolved, &loadOptions, &bh);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("cust migrate load failed, ret: " << ret << " json: " << resolved);
-        return ret;
+    if (pid == 0) { // 子进程: 立即 exec(不触碰父进程任何 ACL/线程状态)
+        (void)execv(helper.c_str(), const_cast<char **>(helperArgv));
+        _exit(127); // exec 失败
     }
-    aclrtFuncHandle fh = nullptr;
-    ret = DlAclApi::AclrtBinaryGetFunction(bh, HYBM_SDMA_ORCH_FUNC_NAME, &fh); // GetFunction 才触发设备写文件
-    if (ret != BM_OK) {
-        /* 返回值不可靠: 实测 CUST 模式下正确入口名也可能 107000 且文件照样落盘,
-         * 不作失败处理, 以复制+完整性校验为最终判据 */
-        BM_LOG_INFO("cust migrate getfunc ret: " << ret << " (tolerated, verify later)");
-    }
-    custBinHandle_ = bh; // 保活: 持句柄至进程退出(迁移进程退出才触发清理链, 本进程即用户进程)
-    BM_LOG_INFO("cust migrate done, devId: " << devId_ << " soSize: " << soSize);
-    return BM_OK;
-}
-
-/* 加载 KFC 通道入口: 写临时 json → mode=0 加载 → 取 op "K" 句柄 → 删临时文件
- * (json 须带 .json 扩展名——无扩展名实测加载 107000; mkstemp 模板须以 X 结尾
- * 与扩展名冲突, 故用 pid+计数排它创建; CWD 可能只读, 用 /tmp) */
-Result SdmaOrchestrator::LoadKfcChannel(aclrtFuncHandle &fh)
-{
-    if (kfcFuncHandle_ != nullptr) { // 已缓存(首次装载后复用)
-        fh = kfcFuncHandle_;
-        return BM_OK;
-    }
-    fh = nullptr;
-    char path[64] = {0};
-    int fd = -1;
-    for (uint32_t i = 0; i < 16 && fd < 0; i++) { // 计数上限 16(同名残留/并发冲突防御)
-        (void)snprintf(path, sizeof(path), "/tmp/mf_kfc_%d_%u.json", static_cast<int>(getpid()), i);
-        fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
-    }
-    if (fd < 0) {
-        BM_LOG_ERROR("kfc tmpfile failed, errno: " << errno);
-        return BM_FILE_NOT_ACCESS;
-    }
-    // 最小 KFC json(functionName=system, kernelSo 指向不存在文件触发 dlsym 回退)
-    static constexpr char KFC_JSON_CONTENT[] =
-        "{\"K\":{\"opInfo\":{\"opKernelLib\":\"KFCKernel\",\"kernelSo\":\"kfc_min.so\","
-        "\"functionName\":\"system\"}}}";
-    const ssize_t wantLen = static_cast<ssize_t>(sizeof(KFC_JSON_CONTENT) - 1);
-    if (write(fd, KFC_JSON_CONTENT, sizeof(KFC_JSON_CONTENT) - 1) != wantLen) {
-        BM_LOG_ERROR("kfc tmpfile write failed, errno: " << errno << " json: " << path);
-        (void)close(fd);
-        (void)unlink(path);
-        return BM_FILE_NOT_ACCESS;
-    }
-    (void)close(fd);
-    aclrtBinaryLoadOption loadOption{};
-    loadOption.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
-    loadOption.value.cpuKernelMode = 0;
-    aclrtBinaryLoadOptions loadOptions{};
-    loadOptions.options = &loadOption;
-    loadOptions.numOpt = 1;
-    aclrtBinHandle bh = nullptr;
-    auto ret = DlAclApi::AclrtBinaryLoadFromFile(path, &loadOptions, &bh);
-    (void)unlink(path); // json 已消费即删
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("kfc load failed, ret: " << ret << " json: " << path);
-        return ret;
-    }
-    ret = DlAclApi::AclrtBinaryGetFunction(bh, "K", &fh);
-    if (ret == BM_OK) {
-        kfcFuncHandle_ = fh; // 缓存句柄(部署链全程复用)
-    } else {
-        BM_LOG_ERROR("kfc getfunc failed, ret: " << ret);
-    }
-    return ret;
-}
-
-Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
-{
-    if (cmd.size() >= HYBM_SDMA_ORCH_CMD_BUF_SIZE) {
-        BM_LOG_ERROR("kfc cmd too long, len: " << cmd.size());
-        return BM_INVALID_PARAM;
-    }
-    aclrtFuncHandle fh = nullptr;
-    auto ret = LoadKfcChannel(fh);
-    if (ret != BM_OK) {
-        return ret;
-    }
-    char buf[HYBM_SDMA_ORCH_CMD_BUF_SIZE] = {0};
-    strncpy(buf, cmd.c_str(), sizeof(buf) - 1);
-    aclrtLaunchKernelAttr attr{}; // 超时属性: 防设备 shell 挂死卡初始化
-    attr.id = aclrtLaunchKernelAttrId::ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT;
-    attr.value.timeout = HYBM_SDMA_ORCH_KFC_TIMEOUT_S;
-    aclrtLaunchKernelCfg cfg{};
-    cfg.attrs = &attr;
-    cfg.numAttrs = 1;
-    // 命令串作为 host args 透传 → 设备 OS 内 system() 执行
-    ret = DlAclApi::AclrtLaunchKernelWithHostArgs(fh, 1, launchStream_, &cfg, buf, strlen(buf) + 1, nullptr, 0);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("kfc launch failed, ret: " << ret << " cmd: " << cmd);
-        return ret;
-    }
-    ret = DlAclApi::AclrtSynchronizeStream(launchStream_);
-    if (ret != BM_OK) { // sync 非 0 = 命令退出码非 0(或流错误)
-        if (probe && ret == HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR) {
-            BM_LOG_INFO("kfc probe miss (expected on first run), sync: " << ret << " cmd: " << cmd);
-        } else {
-            BM_LOG_ERROR("kfc cmd failed, sync: " << ret << " cmd: " << cmd);
+    int status = 0;
+    for (int waited = 0; waited < 1800; ++waited) { // 上限 180s(迁移秒级, 重试含 sleep)
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            helperRan = true;
+            if (WIFEXITED(status)) {
+                const int rc = WEXITSTATUS(status);
+                BM_LOG_INFO("deploy helper rc: " << rc << " dst: " << dst);
+                return (rc == 0 || rc == 3) ? BM_OK : BM_ERROR;
+            }
+            BM_LOG_ERROR("deploy helper terminated abnormally, status: " << status);
+            return BM_ERROR;
         }
-    }
-    return ret;
-}
-
-Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize)
-{
-    // 复制源: 迁移落盘文件(裸 glob——不匹配时 cat 快速失败, 禁用可展开为空的 $() 形态防 stdin 挂死)
-    const std::string src = std::string(HYBM_SDMA_ORCH_CUST_DEV_DIR) + "/" + HYBM_SDMA_ORCH_CUST_SO + ".*";
-    const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
-    const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
-    /* 完整性校验: 入口符号存在 + 精确尺寸一致(防截断/拼接; 设备侧工具极简——实测可用
-     * grep/awk/顶层管道, wc/stat/md5sum/cmp 均缺失, 故用 ls -l 第 5 列取尺寸) */
-    const std::string verifyCmd = "grep -q " + std::string(HYBM_SDMA_ORCH_FUNC_NAME) + " " + dst +
-                                  " && ls -l " + dst + " | awk '{print $5}' | grep -qx " +
-                                  std::to_string(soSize);
-    for (uint32_t i = 0; i < HYBM_SDMA_ORCH_DEPLOY_RETRY; i++) { // 重试为迁移异步完成留裕量
-        if (KfcExec(copyCmd) != BM_OK) {
-            sleep(1);
-            continue;
+        if (r < 0) {
+            BM_LOG_ERROR("deploy helper waitpid failed, errno: " << errno);
+            return BM_ERROR;
         }
-        if (KfcExec(verifyCmd) == BM_OK) {
-            BM_LOG_INFO("kernel deployed to CP1 search path, devId: " << devId_ << " dst: " << dst);
-            return BM_OK;
-        }
-        sleep(1); // 校验失败等一拍再重试(重 cat 幂等)
+        usleep(100000); // 100ms 轮询
     }
-    BM_LOG_ERROR("deploy copy/verify failed after retries, devId: " << devId_ << " dst: " << dst
-                 << " expectedSize: " << soSize);
+    BM_LOG_ERROR("deploy helper timeout (180s), killing");
+    (void)kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
     return BM_ERROR;
 }
 
@@ -795,10 +638,6 @@ void SdmaOrchestrator::Cleanup()
         (void)DlAclApi::AclrtDestroyStream(cpStream_); // SQ 随流注销
         cpStream_ = nullptr;
     }
-    if (launchStream_ != nullptr) {
-        (void)DlAclApi::AclrtDestroyStream(launchStream_);
-        launchStream_ = nullptr;
-    }
     if (workspace_ != 0) {
         (void)DlAclApi::AclrtFree(reinterpret_cast<void *>(workspace_.load()));
         workspace_ = 0;
@@ -806,7 +645,6 @@ void SdmaOrchestrator::Cleanup()
     /* binHandle_ 无对应卸载接口(DlAclApi 未封装), 随进程生命周期释放 */
     binHandle_ = nullptr;
     funcHandle_ = nullptr;
-    custBinHandle_ = nullptr;
     refCount_ = 0;
     sqId_ = 0;
     streamId_ = 0;

@@ -2,16 +2,18 @@
 
 > **定位**：把自定义 AICPU kernel `.so` 放进设备 CP1 搜索路径
 > （`/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`）的手动部署与诊断工具。
-> **产品库初始化已内置自动部署**（`src/hybm/csrc/entity/hybm_sdma_orchestrator.cpp`，
-> 首次加载失败时自动走迁移+就位+校验），常规使用**无需本工具**；
-> 本工具用于预部署、部署链排查、以及非产品 kernel 的手动落盘。
+> **产品库初始化已内置自动部署**（`src/hybm/csrc/entity/hybm_sdma_orchestrator.cpp`
+> 经 fork+exec `orch_deploy_helper` 执行探测+迁移+复制+校验；torch_npu 宿主进程内
+> 执行 KFC 命令会永久打死设备上下文，故部署链必须整体在助手进程内运行），
+> 常规使用**无需手动跑本目录工具**；`deployer`/`mini_kfc` 用于预部署、部署链排查、
+> 以及非产品 kernel 的手动落盘。
 
 `deployer` 的入口函数名经参数传入（默认 `HybmSdmaOrchEpoch`，与产品 json 一致）。
 
 ## 构建
 
 ```bash
-make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0   # 产物: deployer mini_kfc
+make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0   # 产物: deployer mini_kfc orch_deploy_helper
 ```
 
 ## 机制（为什么需要"迁移+复制"两步）
@@ -59,5 +61,6 @@ sleep 22                                                                        
 ## 安全告示
 
 `mini_kfc` 在设备 OS 内执行任意 shell 命令，**仅限开发/诊断环境使用，禁止随产品
-运行时分发**。产品库内置的自动部署只执行固定格式的复制/校验命令串（路径与文件名
-均为受控常量），见 `hybm_sdma_orchestrator.cpp` 的 `KfcExec`。
+运行时分发**。产品库内置的自动部署只经 `orch_deploy_helper` 执行固定格式的
+探测/复制/校验命令串（路径与文件名均为受控常量，独立进程内运行），
+见 `hybm_sdma_orchestrator.cpp` 的 `RunDeployHelper` 与 `orch_deploy_helper.cpp`。

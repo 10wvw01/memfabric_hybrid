@@ -14,7 +14,7 @@
  *
  * 邮箱化: host 侧 submit/wait 数据面 API 废止(搬运由 AICore 经
  * smem_shm_sdma_signal/wait/quiet 设备侧自驱), 本类职责收敛为:
- *   1. 传输准备(CP 流/工作区/epoch kernel 加载, 含设备侧自动部署);
+ *   1. 传输准备(CP 流/工作区/epoch kernel 加载, 设备侧自动部署经 fork+exec 助手进程);
  *   2. ConfigureOrch: 段尾保留区初始化(双环清零) + epoch 参数装配 + 首轮内联下发
  *      (失败立即报错返回) + 监督线程启动;
  *   3. StopEpoch: 写停止标志 → 停监督线程 → kernel ≤1ms 自退 → 同步确认 → 读结果区诊断。
@@ -103,14 +103,11 @@ private:
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
-    Result LoadOrchestratorKernel();       /* json 解析 + 部署探测 + 自动部署后加载 */
+    Result LoadOrchestratorKernel();       /* json 解析 + 强制助手部署后加载(零进程内 KFC) */
     Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
-    Result DeployOrchestratorKernel(const std::string &launchJsonPath, const std::string &dst); /* 自动部署 */
-    Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
-    Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
-    /* KFC 通道执行一条设备 OS 命令; probe=true 时"文件缺失"退出码降级为 INFO(首轮探测预期, 仅部署链内部使用) */
-    Result KfcExec(const std::string &cmd, bool probe = false);
-    Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 设备内复制+完整性校验 */
+    /* fork+exec 部署助手: 探测+CUST迁移+复制+校验在子进程执行(宿主上下文零 KFC 命令);
+     * 助手缺失/失败由调用方明确报错, 不回退进程内部署 */
+    Result RunDeployHelper(const std::string &launchJsonPath, const std::string &dst, bool &helperRan);
     Result LaunchEpoch(void *stream);     /* 单轮下发到指定流(首轮 ConfigureOrch 内联, 后续由监督线程) */
     void SupervisorLoop();                 /* 监督线程: 每 100ms 写报时计数+读结果区, 发现当前轮退出即重新拉起 */
     void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
@@ -126,14 +123,11 @@ private:
     uint32_t sqId_{0};              /* CP 流 SQ id */
     int32_t streamId_{0};           /* CP 流 id(SQE 的 rt_stream_id) */
     void *cpStream_{nullptr};       /* CP 流句柄(DEVICE_USE_ONLY) */
-    void *launchStream_{nullptr};   /* KFC 部署通道流(init 期专用; epoch 不用——见 epochStream_) */
     void *epochStream_{nullptr};    /* 搬运 kernel 提交流(普通流, 每轮任务下发于此;
                                       * 曾尝试带隔离标志建流使全设备同步看不见它, 实测装机版本无效且
                                       * 拒收任务下发, 已回退——见平台事实 2026-10-12 条目) */
     aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
     aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchEpoch 函数句柄 */
-    aclrtBinHandle custBinHandle_{nullptr}; /* CUST 迁移句柄(保活: 持至进程退出) */
-    aclrtFuncHandle kfcFuncHandle_{nullptr}; /* KFC 通道句柄缓存(首次装载后复用, 免每次部署重装) */
     std::atomic<bool> ready_{false};       /* 就绪标志(原子: 无锁读与锁内写并发) */
     std::atomic<uint64_t> workspace_{0};   /* 工作区设备地址(原子: 同上) */
     std::atomic<bool> stopFlag_{false};    /* 监督线程退出标志(StopEpoch 置位) */
