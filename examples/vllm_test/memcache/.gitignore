@@ -1,0 +1,9 @@
+kernel_meta/
+retest_logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# run_test.sh --protocol 生成的协议切换临时配置
+.mmc-local-integration-*.conf
+.l3_*.conf
