@@ -26,3 +26,6 @@ test*
 !test*.c
 minitest*
 !minitest*.c
+build_ut/
+output_ut/
+!test/

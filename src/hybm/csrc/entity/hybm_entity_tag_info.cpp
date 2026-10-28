@@ -34,17 +34,15 @@ Result HybmEntityTagInfo::TagInfoInit(hybm_options option)
 
 Result HybmEntityTagInfo::AddRankTag(uint32_t rankId, const std::string &tag)
 {
-    if (tag.empty()) {
-        BM_LOG_WARN("Add an empty tag for rankId:" << rankId);
-        return BM_OK;
-    }
-    if (!ock::mf::NetValidator::IsValidTag(tag)) {
-        BM_LOG_ERROR("Failed to check tag:" << tag << " is invalid, must be 1-30 chars of [a-zA-Z0-9_]");
+    static const std::string defaultTag = "HYBM_DEFAULT_TAG_FOR_EMPTY";
+    const std::string &effectiveTag = tag.empty() ? defaultTag : tag;
+    if (!ock::mf::NetValidator::IsValidTag(effectiveTag)) {
+        BM_LOG_ERROR("Failed to check tag:" << effectiveTag << " is invalid, must be 1-30 chars of [a-zA-Z0-9_]");
         return BM_INVALID_PARAM;
     }
     std::unique_lock lock(mutex_);
-    rankTagInfo_[rankId] = tag;
-    BM_LOG_DEBUG("Success to add tag:" << tag << " rankId:" << rankId);
+    rankTagInfo_[rankId] = effectiveTag;
+    BM_LOG_DEBUG("Success to add tag:" << effectiveTag << " rankId:" << rankId);
     return BM_OK;
 }
 

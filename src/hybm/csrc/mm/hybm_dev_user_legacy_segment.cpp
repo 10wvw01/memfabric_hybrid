@@ -10,14 +10,17 @@
  * See the Mulan PSL v2 for more details.
 */
 #include "dl_acl_api.h"
+#include "hybm_define.h"
 #include "hybm_networks_common.h"
 #include "hybm_ex_info_transfer.h"
 #include "hybm_va_manager.h"
+#include "hybm_vmm_handle_registry.h"
 #include "hybm_dev_user_legacy_segment.h"
 
 namespace ock {
 namespace mf {
 constexpr uint8_t MAX_DEVICE_COUNT = 16;
+
 HybmDevUserLegacySegment::HybmDevUserLegacySegment(const MemSegmentOptions &options, int eid) noexcept
     : HybmDevLegacySegment{options, eid}
 {}
@@ -52,13 +55,29 @@ Result HybmDevUserLegacySegment::ReserveMemorySpace(void **address) noexcept
 Result HybmDevUserLegacySegment::UnReserveMemorySpace() noexcept
 {
     BM_LOG_INFO("un-reserve memory space.");
-    if (!memNames_.empty()) {
-        for (auto &name : memNames_) {
-            DlAclApi::RtIpcDestroyMemoryName(name.c_str());
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    std::set<std::string> vmmNames;
+    for (auto &rs : registerSlices_) {
+        if (rs.second.shareableHandle != 0) {
+            vmmNames.insert(rs.second.name);
         }
-        BM_LOG_INFO("Finish to destroy memory names.");
-    } else {
-        BM_LOG_INFO("Sender does not need to destroy memory names.");
+    }
+    if (!memNames_.empty()) {
+        if (is310P) {
+            for (auto &name : memNames_) {
+                if (vmmNames.find(name) == vmmNames.end()) {
+                    DlAclApi::AclrtIpcMemClose(name.c_str());
+                }
+            }
+            BM_LOG_INFO("Finish to close 310P3 IPC keys (non-VMM).");
+        } else {
+            for (auto &name : memNames_) {
+                if (vmmNames.find(name) == vmmNames.end()) {
+                    DlAclApi::RtIpcDestroyMemoryName(name.c_str());
+                }
+            }
+            BM_LOG_INFO("Finish to destroy memory names (non-VMM).");
+        }
     }
     memNames_.clear();
     CloseMemory();
@@ -86,25 +105,59 @@ Result HybmDevUserLegacySegment::RegisterMemory(const void *addr, uint64_t size,
     }
 
     char name[DEVICE_SHM_NAME_SIZE + 1U]{};
-    auto ret = DlAclApi::RtIpcSetMemoryName(addr, size, name, sizeof(name));
-    if (ret != 0) {
-        BM_LOG_ERROR("RtIpcSetMemoryName failed, ret: " << ret << " addr: 0x" << std::hex << addr << " size: " << size);
-        return BM_DL_FUNCTION_FAILED;
-    }
-    std::unique_lock<std::mutex> uniqueLock{mutex_};
-    for (auto &remoteDev : importedDeviceInfo_) {
-        if (!CanSdmaReaches(remoteDev.second.superPodId, remoteDev.second.serverId, remoteDev.second.devicePhyId)) {
-            continue;
-        }
-        ret = DlAclApi::RtSetIpcMemorySuperPodPid(name, remoteDev.second.sdid, (int *)&remoteDev.second.pid, 1);
-        if (ret != 0) {
-            BM_LOG_ERROR("set shm(" << name << ") for sdid=" << remoteDev.second.sdid << " pid=" << remoteDev.second.pid
-                                    << " failed: " << ret);
-            DlAclApi::RtIpcDestroyMemoryName(name);
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    Result ret = 0;
+    uint64_t shareableHandle = 0;
+
+    if (is310P) {
+        /* atomically look up + export VMM handle under lock to prevent UAF:
+         * if we returned a handle copy and used it outside the lock, another
+         * thread could call hybm_free_vmm_buffer which erases the entry and
+         * calls AclrtFreePhysical on the same handle */
+        auto exportRet = VmmHandleRegistry::ExportShareableHandle(const_cast<void *>(addr), &shareableHandle);
+        if (exportRet == 0 && shareableHandle != 0) {
+            BM_LOG_INFO("VMM export shareable handle, addr:0x" << std::hex << addr << " size:" << size);
+        } else if (exportRet == -1) {
+            /* not a VMM buffer, fall through to IPC key path below */
+            shareableHandle = 0;
+        } else {
+            BM_LOG_ERROR("HybmExportVmmShareableHandle failed, ret:" << exportRet << " addr:0x" << std::hex << addr
+                                                                       << " size:" << size);
             return BM_DL_FUNCTION_FAILED;
         }
-        BM_LOG_INFO("set shm(" << name << ") for sdid=" << remoteDev.second.sdid << " pid=" << remoteDev.second.pid
-                               << " success.");
+    }
+    if (is310P && shareableHandle == 0) {
+        ret = DlAclApi::AclrtIpcMemGetExportKey(const_cast<void *>(addr), size, name, sizeof(name),
+                                                ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
+        if (ret != 0) {
+            BM_LOG_ERROR("AclrtIpcMemGetExportKey failed, ret: " << ret << " addr: 0x" << std::hex << addr
+                                                                 << " size: " << size);
+            return BM_DL_FUNCTION_FAILED;
+        }
+    } else if (!is310P) {
+        ret = DlAclApi::RtIpcSetMemoryName(addr, size, name, sizeof(name));
+        if (ret != 0) {
+            BM_LOG_ERROR("RtIpcSetMemoryName failed, ret: " << ret << " addr: 0x" << std::hex << addr
+                                                            << " size: " << size);
+            return BM_DL_FUNCTION_FAILED;
+        }
+    }
+    std::unique_lock<std::mutex> uniqueLock{mutex_};
+    if (!is310P) {
+        for (auto &remoteDev : importedDeviceInfo_) {
+            if (!CanSdmaReaches(remoteDev.second.superPodId, remoteDev.second.serverId, remoteDev.second.devicePhyId)) {
+                continue;
+            }
+            ret = DlAclApi::RtSetIpcMemorySuperPodPid(name, remoteDev.second.sdid, (int *)&remoteDev.second.pid, 1);
+            if (ret != 0) {
+                BM_LOG_ERROR("set shm(" << name << ") for sdid=" << remoteDev.second.sdid
+                                        << " pid=" << remoteDev.second.pid << " failed: " << ret);
+                DlAclApi::RtIpcDestroyMemoryName(name);
+                return BM_DL_FUNCTION_FAILED;
+            }
+            BM_LOG_INFO("set shm(" << name << ") for sdid=" << remoteDev.second.sdid << " pid=" << remoteDev.second.pid
+                                   << " success.");
+        }
     }
 
     uint64_t gva = reinterpret_cast<uint64_t>(lvaBase_) + allocatedSize_;
@@ -114,13 +167,21 @@ Result HybmDevUserLegacySegment::RegisterMemory(const void *addr, uint64_t size,
                                                  options_.rankId, true);
     if (ret != 0) {
         BM_LOG_ERROR("AddVaInfo failed, size: " << size << " ret: " << ret);
-        DlAclApi::RtIpcDestroyMemoryName(name);
+        if (shareableHandle != 0) {
+            BM_LOG_INFO("VMM export, no IPC name to clean up.");
+        } else if (is310P) {
+            DlAclApi::AclrtIpcMemClose(name);
+        } else {
+            DlAclApi::RtIpcDestroyMemoryName(name);
+        }
         slice = nullptr;
         return ret;
     }
 
-    memNames_.emplace_back(name);
-    registerSlices_.emplace(slice->index_, RegisterSlice{slice, name});
+    if (shareableHandle == 0) {
+        memNames_.emplace_back(name);
+    }
+    registerSlices_.emplace(slice->index_, RegisterSlice{slice, name, shareableHandle});
     allocatedSize_ += size;
     uniqueLock.unlock();
     return BM_OK;
@@ -139,10 +200,21 @@ Result HybmDevUserLegacySegment::ReleaseSliceMemory(const MemSlicePtr &slice) no
         return BM_INVALID_PARAM;
     }
 
-    auto ret = DlAclApi::RtIpcDestroyMemoryName(pos->second.name.c_str());
-    if (ret != 0) {
-        BM_LOG_ERROR("destroy memory name failed: " << ret);
-        return BM_DL_FUNCTION_FAILED;
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    if (pos->second.shareableHandle != 0) {
+        BM_LOG_INFO("VMM export slice, no IPC name to destroy, index:" << slice->index_);
+    } else if (is310P) {
+        auto ret = DlAclApi::AclrtIpcMemClose(pos->second.name.c_str());
+        if (ret != 0) {
+            BM_LOG_ERROR("AclrtIpcMemClose failed: " << ret);
+            return BM_DL_FUNCTION_FAILED;
+        }
+    } else {
+        auto ret = DlAclApi::RtIpcDestroyMemoryName(pos->second.name.c_str());
+        if (ret != 0) {
+            BM_LOG_ERROR("destroy memory name failed: " << ret);
+            return BM_DL_FUNCTION_FAILED;
+        }
     }
 
     registerSlices_.erase(pos);
@@ -185,6 +257,7 @@ Result HybmDevUserLegacySegment::Export(const MemSlicePtr &slice, std::string &e
     info.rankId = options_.rankId;
     HybmDevLegacySegment::GetDeviceInfo(sdId, info.serverId, info.superPodId);
     std::copy_n(pos->second.name.c_str(), std::min(pos->second.name.size(), sizeof(info.name) - 1), info.name);
+    info.shareableHandle = pos->second.shareableHandle;
     auto ret = LiteralExInfoTranslater<UserHbmExportSliceInfo>{}.Serialize(info, exInfo);
     if (ret != BM_OK) {
         BM_LOG_ERROR("export info failed: " << ret);
@@ -287,20 +360,33 @@ void HybmDevUserLegacySegment::RemoveSliceInfo(const uint32_t rankId) noexcept
         auto &sliceInfo = sIt->second;
         if ((options_.dataOpType & HYBM_DOP_TYPE_SDMA) &&
             CanSdmaReaches(sliceInfo.superPodId, sliceInfo.serverId, sliceInfo.devicePhyId)) {
-            void *address = reinterpret_cast<void *>(static_cast<ptrdiff_t>(remoteSlice->vAddress_ << 16 >> 16));
-            BM_LOG_INFO("RtIpcCloseMemory start address="
-                        << address
-                        << ", vAddress_ = " << reinterpret_cast<void *>(static_cast<ptrdiff_t>(remoteSlice->vAddress_))
-                        << ", deviceId=" << devicePhyId_ << ", sliceInfo.devicePhyId=" << sliceInfo.devicePhyId
-                        << ", sliceInfo.rankId=" << sliceInfo.rankId);
-            auto ret = DlAclApi::RtIpcCloseMemory(address);
-            if (ret != 0) {
-                BM_LOG_WARN("Unable to close memory, address="
-                            << address << ", vAddress_"
+            bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+            if (importedVmmInfo_.count(rIt->second.name) > 0) {
+                CleanupImportedVmm(rIt->second.name);
+            } else if (is310P) {
+                BM_LOG_INFO("AclrtIpcMemClose name=" << rIt->second.name << ", deviceId=" << devicePhyId_
+                                                     << ", sliceInfo.devicePhyId=" << sliceInfo.devicePhyId
+                                                     << ", sliceInfo.rankId=" << sliceInfo.rankId);
+                auto ret = DlAclApi::AclrtIpcMemClose(rIt->second.name.c_str());
+                if (ret != 0) {
+                    BM_LOG_WARN("AclrtIpcMemClose failed, name=" << rIt->second.name << ", ret:" << ret);
+                }
+            } else {
+                void *address = reinterpret_cast<void *>(static_cast<ptrdiff_t>(remoteSlice->vAddress_ << 16 >> 16));
+                BM_LOG_INFO("RtIpcCloseMemory start address="
+                            << address << ", vAddress_ = "
                             << reinterpret_cast<void *>(static_cast<ptrdiff_t>(remoteSlice->vAddress_))
                             << ", deviceId=" << devicePhyId_ << ", sliceInfo.devicePhyId=" << sliceInfo.devicePhyId
-                            << ", sliceInfo.rankId=" << sliceInfo.rankId << ", ret:" << ret
-                            << ", This may affect future memory registration.");
+                            << ", sliceInfo.rankId=" << sliceInfo.rankId);
+                auto ret = DlAclApi::RtIpcCloseMemory(address);
+                if (ret != 0) {
+                    BM_LOG_WARN("Unable to close memory, address="
+                                << address << ", vAddress_"
+                                << reinterpret_cast<void *>(static_cast<ptrdiff_t>(remoteSlice->vAddress_))
+                                << ", deviceId=" << devicePhyId_ << ", sliceInfo.devicePhyId=" << sliceInfo.devicePhyId
+                                << ", sliceInfo.rankId=" << sliceInfo.rankId << ", ret:" << ret
+                                << ", This may affect future memory registration.");
+                }
             }
         }
         BM_LOG_INFO("RemoveSliceInfo, rankId=" << rankId << ", remoteSlice->index_=" << remoteSlice->index_
@@ -313,6 +399,10 @@ void HybmDevUserLegacySegment::RemoveSliceInfo(const uint32_t rankId) noexcept
 
 Result HybmDevUserLegacySegment::Mmap() noexcept
 {
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    if (is310P) {
+        return BM_OK;
+    }
     BM_LOG_ERROR("HybmDevUserLegacySegment NOT SUPPORT Mmap");
     return BM_NOT_SUPPORTED;
 }
@@ -344,6 +434,10 @@ MemSlicePtr HybmDevUserLegacySegment::GetMemSlice(hybm_mem_slice_t slice, bool q
 
 Result HybmDevUserLegacySegment::Unmap() noexcept
 {
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    if (is310P) {
+        return BM_OK;
+    }
     BM_LOG_INFO("HybmDevUserLegacySegment NOT SUPPORT Unmap");
     return BM_NOT_SUPPORTED;
 }
@@ -374,15 +468,19 @@ Result HybmDevUserLegacySegment::ImportDeviceInfo(const std::string &info) noexc
         BM_LOG_DEBUG("enable peer access for : " << deviceInfo.devicePhyId);
     }
     std::unique_lock<std::mutex> uniqueLock{mutex_};
-    for (auto &it : registerSlices_) {
-        ret = DlAclApi::RtSetIpcMemorySuperPodPid(it.second.name.c_str(), deviceInfo.sdid, (int *)&deviceInfo.pid, 1);
-        if (ret != 0) {
-            BM_LOG_ERROR("RtSetIpcMemorySuperPodPid failed: " << ret);
-            return BM_DL_FUNCTION_FAILED;
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    if (!is310P) {
+        for (auto &it : registerSlices_) {
+            ret =
+                DlAclApi::RtSetIpcMemorySuperPodPid(it.second.name.c_str(), deviceInfo.sdid, (int *)&deviceInfo.pid, 1);
+            if (ret != 0) {
+                BM_LOG_ERROR("RtSetIpcMemorySuperPodPid failed: " << ret);
+                return BM_DL_FUNCTION_FAILED;
+            }
+            BM_LOG_DEBUG("set whitelist for shm(" << it.second.name << ") sdid=" << deviceInfo.sdid
+                                                  << " pid=" << deviceInfo.pid << " rank=" << deviceInfo.rankId
+                                                  << " devId=" << deviceInfo.devicePhyId);
         }
-        BM_LOG_DEBUG("set whitelist for shm(" << it.second.name << ") sdid=" << deviceInfo.sdid
-                                              << " pid=" << deviceInfo.pid << " rank=" << deviceInfo.rankId
-                                              << " devId=" << deviceInfo.devicePhyId);
     }
 
     importedDeviceInfo_.emplace(deviceInfo.rankId, deviceInfo);
@@ -408,9 +506,15 @@ Result HybmDevUserLegacySegment::ImportSliceInfo(const std::string &info, MemSli
 
     void *address = nullptr;
     std::unique_lock<std::mutex> uniqueLock{mutex_};
-    if ((options_.dataOpType & HYBM_DOP_TYPE_SDMA) &&
-        CanSdmaReaches(sliceInfo.superPodId, sliceInfo.serverId, sliceInfo.devicePhyId)) {
-        if (sliceInfo.devicePhyId != static_cast<uint32_t>(devicePhyId_) &&
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    if (is310P && sliceInfo.shareableHandle != 0) {
+        ret = ImportVmmSlice(sliceInfo, address);
+        if (ret != BM_OK) {
+            return ret;
+        }
+    } else if ((options_.dataOpType & HYBM_DOP_TYPE_SDMA) &&
+               CanSdmaReaches(sliceInfo.superPodId, sliceInfo.serverId, sliceInfo.devicePhyId)) {
+        if (!is310P && sliceInfo.devicePhyId != static_cast<uint32_t>(devicePhyId_) &&
             !enablePeerDevices_.test(sliceInfo.devicePhyId)) {
             auto ret = EnableRemotePeerAccess(sliceInfo.devicePhyId);
             if (ret != BM_OK) {
@@ -420,7 +524,14 @@ Result HybmDevUserLegacySegment::ImportSliceInfo(const std::string &info, MemSli
             BM_LOG_DEBUG("enable peer access for : " << sliceInfo.devicePhyId);
         }
 
-        ret = DlAclApi::RtIpcOpenMemory(&address, sliceInfo.name);
+        if (is310P) {
+            bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), sliceInfo.devicePhyId);
+            uint64_t importFlag =
+                sameCard ? ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT : ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS;
+            ret = DlAclApi::AclrtIpcMemImportByKey(&address, sliceInfo.name, importFlag);
+        } else {
+            ret = DlAclApi::RtIpcOpenMemory(&address, sliceInfo.name);
+        }
         if (ret != 0) {
             BM_LOG_ERROR("IpcOpenMemory(" << sliceInfo.name << ") failed:" << ret << ",sdid=" << sdid_
                                           << ", pid=" << pid_ << ", deviceId=" << devicePhyId_
@@ -450,9 +561,103 @@ Result HybmDevUserLegacySegment::ImportSliceInfo(const std::string &info, MemSli
     return BM_OK;
 }
 
+Result HybmDevUserLegacySegment::ImportVmmSlice(const UserHbmExportSliceInfo &sliceInfo, void *&address) noexcept
+{
+    DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId_), true);
+
+    void *lva = nullptr;
+    auto ret = DlAclApi::AclrtReserveMemAddress(&lva, sliceInfo.size, 0, nullptr, 0);
+    if (ret != 0 || lva == nullptr) {
+        BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " rank:" << sliceInfo.rankId
+                                                           << " size:" << sliceInfo.size);
+        return BM_DL_FUNCTION_FAILED;
+    }
+
+    bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), sliceInfo.devicePhyId);
+    if (sameCard) {
+        BM_LOG_INFO("310P3 VMM import same-card: SetDevice(exporter:" << sliceInfo.devicePhyId
+                                                                      << ") for rank:" << sliceInfo.rankId);
+        DlAclApi::AclrtSetDevice(static_cast<int32_t>(sliceInfo.devicePhyId), true);
+    }
+
+    int32_t canAccess = -1;
+    DlAclApi::AclrtDeviceCanAccessPeer(&canAccess, static_cast<int32_t>(deviceId_),
+                                       static_cast<int32_t>(sliceInfo.devicePhyId));
+    BM_LOG_INFO("310P3 VMM CanAccessPeer:" << canAccess << " local:" << deviceId_ << " peer:" << sliceInfo.devicePhyId
+                                           << " sameCard:" << sameCard);
+
+    aclrtDrvMemHandle aclHandle = nullptr;
+    ret = DlAclApi::AclrtMemImportFromShareableHandle(sliceInfo.shareableHandle, static_cast<int32_t>(deviceId_),
+                                                      &aclHandle);
+    if (sameCard) {
+        DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId_));
+    }
+    if (ret != 0 || aclHandle == nullptr) {
+        BM_LOG_ERROR("AclrtMemImportFromShareableHandle failed, ret:" << ret << " rank:" << sliceInfo.rankId
+                                                                      << " deviceId:" << deviceId_
+                                                                      << " peerDevicePhyId:" << sliceInfo.devicePhyId);
+        DlAclApi::AclrtReleaseMemAddress(lva);
+        return BM_DL_FUNCTION_FAILED;
+    }
+
+    ret = DlAclApi::AclrtMapMem(lva, sliceInfo.size, 0, aclHandle, 0);
+    if (ret != 0) {
+        BM_LOG_ERROR("AclrtMapMem failed, ret:" << ret << " rank:" << sliceInfo.rankId << " lva:" << lva);
+        DlAclApi::AclrtFreePhysical(aclHandle);
+        DlAclApi::AclrtReleaseMemAddress(lva);
+        return BM_DL_FUNCTION_FAILED;
+    }
+
+    aclrtMemAccessDesc impDesc{ACL_RT_MEM_ACCESS_FLAGS_READWRITE,
+                               {static_cast<uint32_t>(deviceId_), aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE},
+                               {}};
+    auto saRet = DlAclApi::AclrtMemSetAccess(lva, sliceInfo.size, &impDesc, 1);
+    if (saRet != 0) {
+        BM_LOG_WARN("AclrtMemSetAccess failed:" << saRet << " (non-fatal) rank:" << sliceInfo.rankId);
+    }
+
+    std::string nameKey(sliceInfo.name);
+    importedVmmInfo_[nameKey] = ImportedVmmInfo{lva, aclHandle};
+    registerAddrs_.insert(lva);
+    address = lva;
+
+    BM_LOG_INFO("VMM import success, rank:" << sliceInfo.rankId << " lva:" << lva
+                                            << " sameCard:" << sameCard);
+    return BM_OK;
+}
+
+void HybmDevUserLegacySegment::CleanupImportedVmm(const std::string &name) noexcept
+{
+    auto it = importedVmmInfo_.find(name);
+    if (it == importedVmmInfo_.end()) {
+        return;
+    }
+    auto &vmm = it->second;
+    if (vmm.mappedVa != nullptr) {
+        DlAclApi::AclrtUnmapMem(vmm.mappedVa);
+    }
+    if (vmm.aclHandle != nullptr) {
+        DlAclApi::AclrtFreePhysical(vmm.aclHandle);
+    }
+    if (vmm.mappedVa != nullptr) {
+        DlAclApi::AclrtReleaseMemAddress(vmm.mappedVa);
+    }
+    BM_LOG_INFO("CleanupImportedVmm, name:" << name << " va:" << vmm.mappedVa);
+    importedVmmInfo_.erase(it);
+}
+
 void HybmDevUserLegacySegment::CloseMemory() noexcept
 {
+    bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
+    for (auto &kv : importedVmmInfo_) {
+        CleanupImportedVmm(kv.first);
+    }
+    importedVmmInfo_.clear();
     for (auto &addr : registerAddrs_) {
+        if (is310P) {
+            BM_LOG_WARN("310P3 ACL IPC does not track imported addr, skip close");
+            break;
+        }
         if (DlAclApi::RtIpcCloseMemory(addr) != 0) {
             BM_LOG_WARN("Unable to close memory. This may affect future memory registration.");
         }

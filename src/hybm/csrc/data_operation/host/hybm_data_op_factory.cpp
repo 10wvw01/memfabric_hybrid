@@ -22,11 +22,13 @@ namespace ock {
 namespace mf {
 DataOperatorPtr DataOperatorFactory::CreateSdmaDataOperator(uint32_t rankId)
 {
-    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+    auto socType = DlAclApi::GetAscendSocType();
+    if (socType == AscendSocType::ASCEND_310P) {
         // 310P: HostDataOpSDMA 的 paramSpace(HalHostRegister)与 STARS SQE 直投均不可用,
         // 以 aclrtMemcpy 算子占 SDMA 槽位(保证 compose 的 hybm_wait 语义)
         return std::make_shared<HostDataOpAclMemcpy>(rankId);
     }
+    (void)rankId;
     return std::make_shared<HostDataOpSDMA>();
 }
 

@@ -108,7 +108,7 @@ private:
     int32_t ImportForTransportPrecheck(const ExchangeInfoReader *desc, uint32_t &count, void *addresses[]);
 
 private:
-    static thread_local bool isSetDevice_;
+    static thread_local int32_t isSetDevice_;
     bool initialized_{false};
     const int32_t id_; /* id of the engine */
     hybm_options options_{};

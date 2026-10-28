@@ -497,10 +497,10 @@ TEST_F(HybmConnBasedSegmentTest, UnReserveMemorySpace_NoInit_NoCrash)
     EXPECT_EQ(ret, BM_OK);
 }
 
-TEST_F(HybmConnBasedSegmentTest, CheckSdmaReaches_Default_ReturnsFalse)
+TEST_F(HybmConnBasedSegmentTest, CheckSdmaReaches_Default_ReturnsTrue)
 {
     HybmConnBasedSegment seg(MakeOptions(), 0);
-    EXPECT_FALSE(seg.CheckSdmaReaches(0));
+    EXPECT_TRUE(seg.CheckSdmaReaches(0));
 }
 
 TEST_F(HybmConnBasedSegmentTest, MemoryInRange_NullAddr_ReturnsFalse)

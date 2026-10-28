@@ -261,3 +261,20 @@ TEST_F(HybmVmmBasedSegmentTest, Destroy_NoCrash)
     opts.segType = HYBM_MST_HBM;
     HybmVmmBasedSegment seg(opts, 0);
 }
+
+/* 310P 工厂分派: 统一路由到共用类(差异由类内 Is310PAclPath 分支处理, 专用段已删除) */
+TEST_F(HybmVmmBasedSegmentTest, CreateDispatchesToVmmBasedFor310P)
+{
+    MOCKER_CPP(&ock::mf::MemSegment::InitDeviceInfo, int32_t (*)(int32_t)).stubs().will(returnValue(BM_OK));
+    MemSegment::socType_ = AscendSocType::ASCEND_310P;
+    MemSegmentOptions opt{};
+    opt.segType = HYBM_MST_HBM;
+    opt.rankId = 0;
+    opt.rankCnt = 2;
+    opt.maxSize = HYBM_LARGE_PAGE_SIZE;
+    opt.size = HYBM_LARGE_PAGE_SIZE;
+    auto seg = MemSegment::Create(opt, 0);
+    GlobalMockObject::verify();
+    ASSERT_NE(seg, nullptr);
+    ASSERT_NE(std::dynamic_pointer_cast<HybmVmmBasedSegment>(seg), nullptr);
+}

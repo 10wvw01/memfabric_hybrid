@@ -13,6 +13,11 @@ add_compile_options(-Wunused-variable -Wunused-value -Wcast-align)
 add_compile_options(-fpermissive -Wno-error)
 add_compile_options(-Wcast-qual -Winvalid-pch -Wwrite-strings -Wsign-compare -Wfloat-equal -Wextra -Wno-deprecated-declarations)
 
+# 310P sdma orchestrator 设备侧版本号(提前声明: hybm/csrc 的缺省 json 名经编译宏引用,
+# 而 hybmm_objects 的求值早于 hybm/ops/hybm_kernel 的同名 CACHE set;
+# hybm/ops/hybm_kernel 处亦有 set, CACHE 幂等不冲突)
+set(MF_SDMA_ORCH_KVER "28" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
+
 add_subdirectory(acc_links/csrc)
 add_subdirectory(util/csrc/ptracer)
 add_subdirectory(smem/csrc/config_store)

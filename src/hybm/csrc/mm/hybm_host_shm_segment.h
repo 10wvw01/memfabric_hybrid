@@ -38,7 +38,7 @@ struct ShmExportInfo {
     char padding_[UNIFIED_EXCHANGE_SEG_INFO_SIZE - 56]{};
 };
 
-static_assert(sizeof(ShmExportInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE, "ShmExportInfo must be 192 bytes");
+static_assert(sizeof(ShmExportInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE, "ShmExportInfo must match UNIFIED_EXCHANGE_SEG_INFO_SIZE");
 
 class HybmHostShmSegment : public MemSegment {
 public:

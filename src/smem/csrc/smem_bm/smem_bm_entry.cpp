@@ -12,10 +12,13 @@
 #include "smem_bm_entry.h"
 
 #include <chrono>
+#include <cstring>
 
 #include "hybm_def.h"
 #include "hybm_big_mem.h"
 #include "hybm_data_op.h"
+#include "hybm.h"
+#include "topology_preflight.h"
 #include "mf_env_define.h"
 #include "mf_env_util.h"
 #include "smem_store_factory.h"
@@ -439,9 +442,34 @@ void SmemBmEntry::InvokeEventCb(uint32_t rankId, smem_bm_group_event_t event)
     }
 }
 
+Result SmemBmEntry::TopologyPreflight()
+{
+    if (hybm_get_soc_type() != HYBM_SOC_TYPE_310P) {
+        return SM_OK;
+    }
+    if ((coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) == 0U) {
+        return SM_OK;
+    }
+    if (coreOptions_.maxHBMSize == 0) {
+        return SM_OK;
+    }
+
+    const int64_t timeoutMs = static_cast<int64_t>(options_.controlOperationTimeout) * 1000;
+    return CheckTopologyP2PSlots(_configStore, options_.rank, coreOptions_.devId, options_.rankSize, timeoutMs, "BM");
+}
+
 Result SmemBmEntry::Join(uint32_t flags)
 {
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
+
+    /* 310P3 HBM pool: topology preflight before any store rendezvous */
+    auto topoRet = TopologyPreflight();
+    if (topoRet != SM_OK) {
+        SM_LOG_ERROR("topology preflight failed, pool:" << options_.id << " rank:" << options_.rank
+                                                        << " ret:" << topoRet);
+        return topoRet;
+    }
+
     const uint32_t groupJoinTimeoutSec =
         mf::MfEnvUtil::GetOptionalUintOrDefault(mf::env::MF_GROUP_JOIN_MAX_TIMEOUT, MF_GROUP_JOIN_DEFAULT_TIMEOUT);
     SM_LOG_INFO("group join timeout sec: " << groupJoinTimeoutSec);
@@ -500,6 +528,12 @@ Result SmemBmEntry::Update(uint32_t flags)
 Result SmemBmEntry::Leave(uint32_t flags)
 {
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
+    /* 310P3 HBM pool: reject dynamic leave (shrink not supported in P1) */
+    if (hybm_get_soc_type() == HYBM_SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_SDMA) != 0U &&
+        coreOptions_.maxHBMSize > 0) {
+        SM_LOG_ERROR("leave not supported for 310P3 HBM pool, poolId:" << options_.id << " rank:" << options_.rank);
+        return SM_INVALID_PARAM;
+    }
     auto ret = globalGroup_->GroupLeave();
     SM_LOG_ERROR_RETURN_IT_IF_NOT_OK(ret, "leave failed, ret: " << ret);
 
@@ -511,6 +545,12 @@ Result SmemBmEntry::ExtendLocalMem(smem_bm_mem_type memType, uint64_t size)
     SM_ASSERT_RETURN(inited_, SM_NOT_INITIALIZED);
     SM_ASSERT_RETURN(memType == SMEM_MEM_TYPE_DEVICE || memType == SMEM_MEM_TYPE_HOST, SM_INVALID_PARAM);
     SM_ASSERT_RETURN(size > 0, SM_INVALID_PARAM);
+    /* 310P3 HOST_SHM DRAM: localDRAMSize==maxDramSize, no room for extend */
+    if (hybm_get_soc_type() == HYBM_SOC_TYPE_310P && (coreOptions_.bmDataOpType & HYBM_DOP_TYPE_HOST_SHM) != 0U &&
+        memType == SMEM_MEM_TYPE_HOST) {
+        SM_LOG_ERROR("extend not supported for 310P3 HOST_SHM DRAM pool, poolId:" << options_.id);
+        return SM_INVALID_PARAM;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     // 1.alloc slice
     auto hybmMemType = memType == SMEM_MEM_TYPE_DEVICE ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;

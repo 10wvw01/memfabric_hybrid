@@ -28,11 +28,12 @@ struct HostExportInfo {
     MemPageTblType pageTblType{};
     MemSegType memSegType{};
     MemSegInfoExchangeType exchangeType{};
-    char padding_[UNIFIED_EXCHANGE_SEG_INFO_SIZE - 56]{};
+    char shmName[64]{};
+    char padding_[UNIFIED_EXCHANGE_SEG_INFO_SIZE - 56 - 64]{};
 };
 
 static_assert(sizeof(HostExportInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE,
-              "HostExportInfo must be UNIFIED_EXCHANGE_SEG_INFO_SIZE(192) bytes");
+              "HostExportInfo must match UNIFIED_EXCHANGE_SEG_INFO_SIZE");
 
 class HybmConnBasedSegment : public MemSegment {
 public:
@@ -62,6 +63,7 @@ public:
     {
         return HYBM_MEM_TYPE_HOST;
     }
+    bool CheckSdmaReaches(uint32_t rankId) const noexcept override;
 
 private:
     void FreeMemory() noexcept;
@@ -80,7 +82,10 @@ private:
     std::map<uint32_t, MemSliceStatus> slices_;
     std::map<uint32_t, std::string> exportMap_;
     std::vector<HostExportInfo> imports_;
-    std::set<uint64_t> mappedGvaMem_; // gva sets
+    std::set<uint64_t> mappedGvaMem_;            // gva sets
+    std::map<uint64_t, uint64_t> mappedGvaSize_; // gva → size for munmap
+    std::set<uint64_t> shmMappedGva_;            // gva sets that have shm-backed mmap
+    std::string shmName_{};
 };
 } // namespace mf
 } // namespace ock
