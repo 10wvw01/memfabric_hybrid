@@ -1,0 +1,11 @@
+utc=2026-10-26T08:04:37Z
+session=smoke4 variant=eager devices=6,7
+v2_tree=46260392a855922daff742e733d85e1c78bc2cce
+mf_tree=5c5562bfea97bfea9eb5679ce92db4e65cebcbef + 5c5562bf(physical-fix)
+90172726965f4944ed955237c296faf1622762897f742ffbecf69a9e2fb554d0  /usr/local/memfabric_hybrid/latest/aarch64-linux/hybm/aicpu_kernel/libmf_sdma_orch_v12.json
+c79141e8c068eabbd5028c9afb2b99d85899eb571ca04a3ecf779bab1410a826  /usr/local/memfabric_hybrid/latest/aarch64-linux/lib64/libmf_hybm_core.so
+c79141e8c068eabbd5028c9afb2b99d85899eb571ca04a3ecf779bab1410a826  /tmp/opencode/venv-repro/lib/python3.12/site-packages/memfabric_hybrid/lib/libmf_hybm_core.so
+d9a6de660677b13dbd83688dd250fbcdd3ea62c3427179b5060a1e64c5fbfa73  /tmp/opencode/vllm-ascend-diag/vllm_ascend/libmf310p_v2_trial_device_g1d.so
+bcbb4f67c5e32401bd5d575ee7559f769ecbeb1d541e23df4bf4e3fa09c97550  /tmp/opencode/vllm-ascend-diag/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so
+expect: v12json=90172726... v2dev=d9a6de66... plugin=bcbb4f67...
+model=/home/data/Qwen/Qwen3.6-35B-A3B-w8a8
