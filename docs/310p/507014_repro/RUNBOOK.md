@@ -258,6 +258,7 @@ grep "\[V2_G1D\]" $L | tail -4          # wait 返回捕获
 | 会话 | 配置 | 结果 |
 |---|---|---|
 | smoke4 | 300s, eager, dev6/7 | **FAULT**：gen 1232 双 rank 507014（rank1 首爆 aclnnSwiGlu 同步点，距冻结 68s=看门狗节拍）；原始证据已随本手册入库：`evidence/smoke4_first_fault/`（serve.log 含 824 帧 MF_DIAG / 728 帧 V2_G1C / 冻结 G1D 帧，provenance 含全部二进制 SHA） |
-| gateA1 | 620s, eager, dev6/7 | 手册入库时仍在运行：3 轮 bench、gen≥3008、507014 计数 0（负载期干净；单场未复现不构成反证，历史会话级复现率 ~21%） |
+| gateA1 | 620s, eager, dev6/7 | **CLEAN**：3 轮 bench、gen 3008、15027 封/方向、507014=0；因运行器早期版本停机死锁 bug，serve 空转 ~48h——11631 个 epoch 干净轮转、零自发故障（免费长测）；日志 654MB 留源机未入库 |
 
 > 统计口径提醒：以**邮件件数**而非会话数为进度度量；smoke4 命中时约 1.5 万件/方向。
+> 修复侧对照：三根因修复已合入 `dev-v1.2.0`（布局 V3 独占缓存行 + RS_STAGE 本端暂存 + SQ 链加固，KVER 28），本手册环境可作"修复前基线 vs 修复后"验证闭环的基线侧。

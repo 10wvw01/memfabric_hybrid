@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
-# MemFabric_Hybrid is licensed under Mulan PSL v2.
 # run_gate_e.sh — Gate E 507014 复现会话运行器（w00930648 容器适配版）
 #
 # 与原版(g1d_run.sh + gate_e_eager.sh)的差异（全部显式列出，保持可审计）:
@@ -162,10 +160,15 @@ while [ $SECONDS -lt $END ] && [ $FAULT -eq 0 ]; do
       --save-result --result-dir "$OUT_DIR" --result-filename "stability_rep${REP}.json" \
       >> "$OUT_DIR/bench.log" 2>&1 || { echo "bench rep $REP failed"; break; }
 done
-# watchdog 继续盯到 serve 完全退出(停机期故障也算数——smoke4 教训)
+# 负载窗结束: 先发起停机, 再盯停机期(507014 常在末代 kernel 停机窗爆——smoke4 教训;
+# 若先等退出再发 TERM, serve 永不自退, 死锁——gateA1 教训)
+if [ $FAULT -eq 0 ]; then
+  kill -TERM -- -"$SERVE_PID" 2>/dev/null || true
+fi
 while kill -0 "$SERVE_PID" 2>/dev/null; do
   if grep -q "507014" "$LOG" 2>/dev/null; then
     echo "[$(date +%T)] *** 507014 DETECTED(含停机期) — 保全现场, 不重启 ***"
+    grep -n "507014" "$LOG" | head -5
     FAULT=1
     break
   fi
