@@ -3,9 +3,10 @@
 > **文档定位**：长寿命参考档案。回答三个问题——hcomm（HCCL 通信基础库）里有没有
 > 本项目双环邮箱（GM 标志 + 内存消息语义同步）这样的机制；每层机制**谁是生产者、
 > 谁是消费者、什么场景使用、支持什么卡**；与我们的做法差在哪。
-> **证据基线**：本机 hcomm 仓快照（310P 设备代码位于 `src/legacy/ascend910/`），
-> 下文全部行号经 2026-10-29 逐条核实，引用前先复核行号漂移。布局权威头
-> `hccl_msg.h` 在 hccl 算子包（本机无此仓），涉及其内容的段落均已标注证据边界。
+> **证据基线**：本机 hcomm 仓快照（310P 设备代码位于 `src/legacy/ascend910/`）；
+> 邮箱布局权威头 `hccl_msg.h` 在本机 CANN 安装目录
+> `/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_msg.h`。
+> 下文全部行号经 2026-10-29 逐条核实，引用前先复核行号漂移。
 > **读者**：要给双环邮箱扩多生产者并行、或想对照官方做法验证"数据 SQE 与标志
 > 同 SQ 保 FIFO"这条路线的机制开发者。
 > **边界**：本文只记录 hcomm 怎么做，不改本项目行为；本项目行为契约以
@@ -18,10 +19,10 @@
 | 1 | hcomm 有 GM 标志消息同步，且是**四层机制**（第 1 节），但全仓没有任何叫 flag 的类或文件（`FlagMgr/FlagInfo/HcclFlag`、文件名 `*flag*` 均零命中）——机制藏在 SQE 类型、算法模板和 KFC 框架里 |
 | 2 | **卡型边界**：第 1 层（AIV 直写 GM）是 910B/910_93 世代 AIV 训练卡的机制，310P 不走这层（`alg_aiv_template` 全目录 310P 零命中）；310P 上 hcomm 的 GM 同步走第 2/3 层（AICPU + SDMA，V2 SQE 专列 `dispatcher_aicpu.cc:74`）——**与我们对话的其实是第 2/3 层** |
 | 3 | 第 1 层同时服务**卡内核间**（同一张卡的 AIV 核之间，读写本端 `flagAddrSelf_`）与**跨节点/跨卡**（写对端 `GM_OUT` flag 区），见 2.1 的图 |
-| 4 | 与本项目双环邮箱最接近的是**第 2 层 MC2/KFC 轮次计数邮箱**：与我们是**同一个场景**——设备上两个执行体（发起方 kernel 与常驻 AICPU 服务）用 GM 邮箱接力，见 2.2 的布局图与时序图 |
+| 4 | 与本项目双环邮箱最接近的是**第 2 层 MC2/KFC 轮次计数邮箱**：与我们是**同一个场景**——设备上两个执行体（发起方 kernel 与常驻 AICPU 服务）用 GM 邮箱接力；邮箱 = 每通信域 16MB workspace、64 槽×48 队列、`TurnCnt` 是 64B 缓存行（valid 掩码 + 计数），见 2.2 |
 | 5 | 核心顺序保证与本项目**完全同款**：数据先走、标志后到，且同走一条队列靠 FIFO 保序——官方与本项目独立走到了同一条路线，互证正确 |
 | 6 | 分歧在认领模型：hcomm **不做跨生产者原子领槽**，全部静态分槽（按 rank/通知类型/队列固定编址）；GM 原子（atomic add）只用于 N:1 到达计数 |
-| 7 | "等一个标志"在三层的实现代价不同：第 1 层 AICore 软件循环轮询、第 2 层**队列引擎执行 COND SQE 内嵌指令循环（硬件轮询）**、第 3 层 notify 表硬件等待——见 2.2 的对比表 |
+| 7 | "等一个标志"在三层的实现代价不同：第 1 层 AICore 软件循环轮询、第 2 层**队列引擎执行 COND SQE 内嵌指令循环（硬件轮询）**、第 3 层 notify 表硬件等待——见 2.2.3 的对比表 |
 | 8 | reduce 操作码两套世代互不兼容（V2 枚举 vs V1 拼接），固件只认权威枚举——与本项目 KVER=11 自造 0x71 编码固件不识别的教训同源 |
 
 ## 1. 四层机制总览：谁生产、谁消费、什么场景、什么卡
@@ -29,7 +30,7 @@
 | 层 | 使用场景 | 适用卡型 | 生产者（写标志方） | 消费者（等标志方） | 标志载体 |
 |---|---|---|---|---|---|
 | 1. AICore 直接信号 | AIV 集合算法：卡内核间屏障 + 跨节点步步间同步 | **910B/910_93（AIV 训练卡）；310P 不走** | 发送方 AIV 核：先拷数据、后写 flag（卡内写本端聚合槽/跨节点写**对端** flag 区） | 等待方 AIV 核：轮询本端 flag 区 | 每 rank CCL buffer 头部 3MB flag 区，32B/槽 |
-| 2. MC2/KFC 轮次邮箱 | 高层 API 算子把通信操作托付给常驻 AICPU 服务进程接力执行 | **各代通用（310P 专列 V2 SQE）** | 客户端算子 kernel（cann/hccl 仓）：写消息槽 + 推进 commitTurnCnt 轮次计数 | AICPU KFC 服务进程：硬件轮询 commit → 取消息 → 执行数据算子；客户端再等 finishedTurnCnt 回执 | workspace 消息槽数组 + 每槽轮次计数 |
+| 2. MC2/KFC 轮次邮箱 | 高层 API 算子把通信操作托付给常驻 AICPU 服务进程接力执行 | **各代通用（310P 专列 V2 SQE）** | 客户端算子 kernel：写消息槽 + 提交 `TurnCnt`（valid 掩码 + 轮次计数） | AICPU KFC 服务进程：硬件轮询 commit → 取消息 → 执行数据算子；客户端再等 finishedTurnCnt 回执 | workspace 邮箱（每通信域 16MB，64 槽×48 队列） |
 | 3. SQE 类型标志 | host/AICPU 编排的流式通信逐链路握手（如 ring 每步 ready/done 配对） | **各代通用**（310P：notify 内部替换为 event；910B/910_93 notify 寄存器 4B、其余 8B，`dispatcher_aicpu.cc:115-118`） | 发送方编排者：在发送流上"数据 SQE 之后"追加 NOTIFY_RECORD/WRITE_VALUE SQE，由队列引擎按序落笔 | 接收方编排者下发的 NOTIFY_WAIT SQE：硬件等待，等到才放行读数据 | MMIO notify 信号量表 / WRITE_VALUE 直写 GM |
 | 4. RDMA 三 flag | 服务器间 RoCE 链路收发握手 | 与卡型无关（跨服务器场景） | 对端 AICPU transport：RDMA WRITE 连数据带 flag | 本端 AICPU transport：自旋轮询 | HBM flag buffer，3×u32 |
 
@@ -39,8 +40,8 @@
 第 1 层  卡内:  其余核 ──原子累加 tag──▶ 本端聚合槽 ◀──轮询累加和── 等待核
          跨节点: 发送方核 ──数据 + Record(tag)──▶ 对端数据区/flag 区 ◀──Wait(tag) 轮询── 接收方核
 
-第 2 层  客户端 kernel ──消息 + commit 轮次++──▶ workspace ◀──COND SQE 硬件轮询── AICPU 服务进程
-         AICPU 服务进程 ──执行数据算子──▶ finished 轮次++ ──▶ 客户端 kernel（等回执）
+第 2 层  客户端 kernel ──消息 + TurnCnt 提交──▶ workspace ◀──COND SQE 硬件轮询── AICPU 服务进程
+         AICPU 服务进程 ──执行数据算子──▶ finished TurnCnt 回写 ──▶ 客户端 kernel（等回执）
 
 第 3 层  发送方流: [数据 SQE → NOTIFY_RECORD SQE] ──队列引擎 FIFO──▶ 标志按序落笔
          接收方流: [NOTIFY_WAIT SQE] 硬件等待 ──▶ 才放行后续读数据 SQE
@@ -124,65 +125,111 @@ AddSignalValue(...)    // SetAtomicAdd<int32_t>() + PipeBarrier<PIPE_ALL>()，GM
 "要执行什么通信操作"写成消息投进 workspace 邮箱，由**常驻 AICPU 服务进程（KFC）**
 接力执行。
 
-#### 2.2.1 邮箱长什么样：内存布局
+#### 2.2.1 邮箱长什么样：内存布局（权威定义）
 
-`HcclMsgArea` 的权威定义在仓外 `hccl_msg.h`（hccl 算子包，本机无）；下图按**本仓
-使用点**（`aicpu_kfc_rpc_serverv2.cc:145-169/467-475` 等）+ **UT 桩镜像**
-（`test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250`，逐字段复刻布局）拼合：
+布局权威头 `hccl_msg.h`（本机 CANN 9.1.0 安装目录
+`/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_msg.h`，
+`namespace HcclApi`）：
 
 ```
-HcclMsgArea（GM workspace，tiling 下发，512B 对齐）
-├─ commMsg                 ── 单/多队列两种形态（服务端按 totalQueueNum 二选一）
-│   ├─ singleMsg 形态:
-│   │   ├─ sendMsgs[HCCL_MSG_CNT]          消息槽数组（单队列）
-│   │   └─ recvMsgs[HCCL_MSG_CNT]          桩注释"为了避免服务端和客户端同时写"
-│   ├─ multiMsg 形态:
-│   │   └─ sendMsgs[MAX_QUE_NUM][HCCL_MSG_CNT]   消息槽数组（MAX_QUE_NUM=48）
-│   ├─ commitTurnCnt[队列][槽].cnt         提交轮次计数（客户端推进，服务端轮询）
-│   ├─ finishedTurnCnt[队列][槽].cnt       完成轮次计数（服务端回写，客户端轮询）
-│   └─ controlMsg                          控制消息（restart/finalize 等）
-└─ paramExtMsgList[HCCL_MSG_CNT]           扩展参数区 HcclMsgExt（valid/xorCheck）
+HcclMsgArea —— workspace 里为每个通信域预留的 16MB（头文件注释原文：
+               "the 16MB space reserved by workspace in struct HcclCombinOpParam
+                and belongs to each comm group"，:133；64B 缓存行对齐）
+├─ commMsg ─ union（单/多队列两种形态，服务端按 totalQueueNum 二选一）
+│   ├─ singleMsg : SingleQueueMsg
+│   │   ├─ sendMsgs[HCCL_MSG_CNT=64]        发送消息槽数组
+│   │   ├─ recvMsgs[HCCL_MSG_CNT=64]        接收消息槽数组
+│   │   │        头文件注释：读写两套消息体，"避免 AICore 与 AICPU 同时读写
+│   │   │        sendcnt/recvcnt"（:130-131）
+│   │   ├─ reserved0[8KB]                   ABI 兼容
+│   │   ├─ commitTurnCnt[64]    TurnCnt[]   提交计数（客户端写，服务端轮询/复位）
+│   │   ├─ finishedTurnCnt[64]  TurnCnt[]   完成计数（服务端写，客户端轮询）
+│   │   ├─ reserved1[1MB]                   ABI 兼容
+│   │   └─ paramExtMsgList[64]              扩展参数区 HcclMsgExt（仅 AlltoAllV 用，
+│   │                                       8256B/条、最多 256 rank，:102-118）
+│   └─ multiMsg : MultiQueueMsg
+│       ├─ sendMsgs[MAX_QUE_NUM=48][64]     消息槽数组（多队列形态）
+│       ├─ commitTurnCnt[48][64]            每队列每槽一份
+│       └─ finishedTurnCnt[48][64]
+├─ controlMsg : ControlHcclMsg             restart/restarting/restartCnt/resetSeq（:158-164）
+└─ apiStats : ApiStates                     按 CMD 类型的 commitStats/waitStats/
+                                           msgStats/snapshots 统计（:166-172）
 ```
 
-单条消息 `HcclMsg` 的字段（UT 桩镜像，`:171-214`）：`commType`（通信原语类型
-AllReduce/AllGather…）、`opType`（sum/prod/max/min）、`sendBuffer/recvBuffer/
-dataCnt/strideCount`、`hcclDataType`、`p2pSrcDestRankId`、`valid`（有效性掩码）、
-`repeatCnt`（本消息重复次数）、`everyTurnRsp/everyTurnWait`（每轮等响应/等消息）、
-`commDepGroupID/commDepHandleID`（跨通信域依赖）、`seqNum`、`version`、`xorCheck`。
+**`TurnCnt` 不是裸计数，是 64B 缓存行结构**（:135-139，字段注释为权威头原文）：
+
+```cpp
+struct TurnCnt {
+    uint64_t valid;       // COMMIT_VALID_MASK, writen by client when Commit, checked by server
+    uint64_t cnt;         // commit cnt, writen by client, reset by server
+    uint64_t reserved[6]; // 补齐 64B 缓存行
+};
+```
+
+即一次"提交"写两个字段：`valid=COMMIT_VALID_MASK(987654321)` 表示本次提交有效，
+`cnt` 置为本轮轮次值；服务端软件校验 valid，硬件（COND SQE）只盯 cnt。配套常量：
+`HCCL_MSG_VALID_MASK=0x5CDF123A`（消息有效掩码）、`FINALIZE_FINISH_CNT=1234567899999999999`
+（服务端收尾哨兵值，hcomm `aicpu_kfc_rpc_serverv2.cc:456` 正是用它）（:27-29）。
+
+单条消息 `HcclMsg`（:86-100，字段注释为权威头原文）：
+
+| 字段 | 含义 |
+|---|---|
+| `commType` | 通信原语类型 AllReduce/AllGather…/Finalize/InterHcclGroupSync |
+| `opType` | reduce 操作类型 sum/prod/max/min |
+| `sendBuffer/recvBuffer` | 源/目的 buffer 地址 |
+| `dataCnt` | 参与操作的数据个数 |
+| `strideCount` | 通信计算融合切分多轮时的数据块步长（不连续内存描述） |
+| `addMsg.v0Msg` | V0 附加信息：`hcclDataType`、`p2pSrcDestRankId`、`valid`、`repeatCnt`（本消息派发的任务数）、`everyTurnRsp/everyTurnWait`、`commDepGroupID/commDepHandleID`（跨通信域依赖）、`selfHandleID`、`seqNum`、`version`、`xorCheck`（:43-58） |
+| `addMsg.v1Msg` | V1 附加信息：`ccOpTilingData`（tiling 信息）+ 精简版同上（:60-69） |
 
 **`sendMsgs[q][s]` 两个下标是什么**：
-- **q = 队列号**（0..MAX_QUE_NUM-1，桩值 48）：消息面按队列分片，服务端每个
+- **q = 队列号**（0..MAX_QUE_NUM-1 = 48）：消息面按队列分片，服务端每个
   AICPU block 认领一段队列（`GetLocalQueueRange`，`aicpu_kfc_rpc_serverv2.cc:65`）；
   单队列形态退化为 `sendMsgs[s]`。
-- **s = 消息槽号**（0..HCCL_MSG_CNT-1，HCCL_MSG_CNT 值在仓外 `hccl_msg.h`）：
-  服务端每队列持一个 `msgPos` 游标，消费一槽后 `(msgPos+1) % HCCL_MSG_CNT` 环回
-  （`aicpu_kfc_process.cc:1151`）。
-- 客户端**选队列与选槽的具体策略在 cann/hccl 仓**（本机无），本仓可见的是服务端
-  消费侧与布局。
+- **s = 消息槽号**（0..HCCL_MSG_CNT-1 = 64）：服务端每队列持一个 `msgPos` 游标，
+  消费一槽后 `(msgPos+1) % HCCL_MSG_CNT` 环回（`aicpu_kfc_process.cc:1151`）。
+- 客户端（生产侧）设备 kernel 的选队列/选槽策略**本机不可见**：本机 `hccl` 仓
+  （`/home/w00930648/hccl`）是 host 侧算子仓（src/ops 等），不含 310P KFC 客户端
+  kernel；opp 安装的 `mc2_templates` 是新一代模板、不含 `commitTurnCnt`。语义以
+  权威头字段注释为准（"writen by client when Commit, checked by server"）。
+
+**计数模式 vs 队列模式的官方取舍**（权威头 :130-132 注释原文）："Current
+HcclMsgArea use count mode. Two msg bodies are used, one for read and one for
+write…If using msg queue mode, then the state change can be in one msg, because
+it will not be written simultaneously."——hcomm 选了**计数模式**（消息体只读不
+改写、状态变化全在旁边的 TurnCnt 计数里，代价是要 send/recv 两套消息体）；本项目
+双环邮箱选的是**队列模式**（游标+槽复用、单消息体）。两条路线在同一个设计点上
+分叉，可作我们评审时的官方对照。
 
 #### 2.2.2 一轮的时序
 
 ```mermaid
 sequenceDiagram
-    participant C as 客户端算子 kernel（cann/hccl 仓）
+    participant C as 客户端算子 kernel（设备侧，本机无源码）
     participant W as workspace 邮箱 HcclMsgArea
     participant S as AICPU KFC 服务进程（常驻，本仓）
     C->>W: ① 写消息 sendMsgs[q][s]
-    C->>W: ② commitTurnCnt[s].cnt 置为本轮 turnNum
-    S->>W: ③ COND SQE 硬件轮询 commit >= turnNum
+    C->>W: ② 提交 TurnCnt valid=COMMIT_VALID_MASK, cnt=turnNum
+    S->>W: ③ COND SQE 硬件轮询 commit cnt >= turnNum
     S->>W: ④ 按 msgPos 取消息（valid/xor/seq 三重校验）
     S->>S: ⑤ 执行数据算子 HcclLaunchOp
-    S->>W: ⑥ 回写 finishedTurnCnt[s].cnt = turnNum
-    C->>W: ⑦ 轮询 finished >= turnNum 得知完成
+    S->>W: ⑥ 回写 finishedTurnCnt —— cnt = turnNum
+    C->>W: ⑦ 轮询 finished cnt >= turnNum 得知完成
 ```
 
-**"commitTurnCnt[s] 推进到本轮 turn"是什么意思**：不是 +1 自增，而是**把该槽的
-计数写成全局单调的轮次值**。turnNum = (repeatCnt-1)*rankSize + (step+1)
+**"提交到本轮 turn"是什么意思**：客户端把该槽 `TurnCnt.cnt` **写成全局单调的
+轮次值**（不是 +1 自增）。turnNum = (repeatCnt-1)*rankSize + (step+1)
 （`mc2_handler.cc:41`），第 r 轮第 i 步对应唯一值；每槽一个独立计数器，等待方用
 `>=` 比较——"计数即轮次"，无需读游标做模运算，同一槽多轮复用也安全。回写同理：
 服务端把 `finishedTurnCnt[s].cnt` 写成同一个 turnNum，客户端等 `>=` 即知完成。
 期望值来源：预填 0,1,2,… 的等差数组（`mc2_handler.cc:19`），服务端构造等待 SQE 时
 从 `valueAddr` 直接读出（`dispatcher_aicpu.cc:128`）。
+
+**回绕自洽**：权威头注明 cnt "reset by server"——服务端复位 cnt 的动作，就是
+COND SQE 在末轮追加的那条 store 0（`aicpu_hccl_sqcq.cc:211-219`）：等最后一轮的
+同时把计数清零，下一大轮从 0 重新数起。槽位回绕靠 msgPos 模运算，轮次回绕靠
+末轮清零，两套机制各管一层。
 
 #### 2.2.3 "硬件轮询"是什么：谁在轮、调用什么
 
@@ -201,7 +248,7 @@ Mc2HandlerPub::Mc2WaitValue                mc2_handler.cc:23-47（算 turnNum）
         ├─ stream.GetNextSqeBufferAddr()     从 SQ 环取一个 64B 槽
         └─ AddOneWaitStartSqe(...)           aicpu_hccl_sqcq.cc:182-231
              内嵌 ISA：load 轮值→r3, load 发送计数→r2,
-             r2<r3 则 BLTU 回跳重读; 末轮追加 store 0 清零
+             r2<r3 则 BLTU 回跳重读; 末轮追加 store 0 清零（=服务端复位 cnt）
     →（SQE 随流下发，队列引擎执行）
 ```
 
@@ -218,20 +265,20 @@ Mc2HandlerPub::Mc2WaitValue                mc2_handler.cc:23-47（算 turnNum）
 
 | hcomm KFC | 本项目双环邮箱 |
 |---|---|
-| 客户端算子 kernel（cann/hccl 仓，发起方） | 调 signal 的 AICore（发起方） |
+| 客户端算子 kernel（发起方） | 调 signal 的 AICore（发起方） |
 | 常驻 AICPU KFC 服务进程（执行方） | AICPU epoch 消费 kernel（执行方） |
-| sendMsgs 消息 + commitTurnCnt 生产进度 | 请求环邮件 + `RS_REQ_TAIL` 生产游标 |
+| sendMsgs 消息 + TurnCnt 提交 | 请求环邮件 + `RS_REQ_TAIL` 生产游标 |
 | finishedTurnCnt 完成回执 | 到达环邮件 `RS_ARR_MAIL`（回执） |
-| 单槽复用 + turn 计数表达轮次 | 多槽环形 + 双游标（`RS_REQ_HEAD`/`RS_ARR_HEAD`） |
+| 计数模式：槽复用 + turn 计数，读写两套消息体 | 队列模式：多槽环形 + 双游标，单消息体 |
 | 等待侧 COND SQE 硬件轮询 | 我方 AICPU kernel 软件轮询（epoch 主循环） |
 
-**生产者**：客户端算子 kernel——写 `sendMsgs[q][s]` 消息，并把
-`commitTurnCnt[s]` 置为本轮 turn 值。
+**生产者**：客户端算子 kernel——写 `sendMsgs[q][s]` 消息，提交该槽 `TurnCnt`
+（valid=COMMIT_VALID_MASK、cnt=turnNum）。
 **消费者**：AICPU KFC 服务进程——每（句柄，重复轮）三连：`HcclLaunchCcoreWait`
-（COND SQE 硬件轮询 commitTurnCnt 到本轮）→ 取消息执行数据算子（`HcclLaunchOp`）
-→ `HcclLaunchCcorePost`（回写 finishedTurnCnt 回执）（`comm_kfc_aicpu_server.cc:121-123`）；
-客户端轮询 finishedTurnCnt 得知完成。注意这是**请求与回执两对生产/消费**：消息
-正向（客户端→服务端），回执反向（服务端→客户端）。
+（COND SQE 硬件轮询 commitTurnCnt.cnt 到本轮）→ 取消息执行数据算子
+（`HcclLaunchOp`）→ `HcclLaunchCcorePost`（回写 finishedTurnCnt 回执）
+（`comm_kfc_aicpu_server.cc:121-123`）；客户端轮询 finishedTurnCnt 得知完成。注意
+这是**请求与回执两对生产/消费**：消息正向（客户端→服务端），回执反向（服务端→客户端）。
 
 其余细节：
 
@@ -241,8 +288,8 @@ Mc2HandlerPub::Mc2WaitValue                mc2_handler.cc:23-47（算 turnNum）
   `ProcessExpectPrepareMsg :268-283`）；读写边界 `dsb ld/st`
   （`:319/:326/:361` 等）。
 - 初始化时全部槽复位（valid=~MASK、cnt=0，`:467-475`）。
-- **回绕**：槽位靠 msgPos 模运算环回；轮次靠"末轮清零"——最后一轮的 COND SQE
-  追加一条 store 0（`aicpu_hccl_sqcq.cc:211-219`），下一大轮从 0 重新数起。
+- hcomm 仓内 UT 桩（`test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250`）
+  逐字段镜像了本布局，与权威头一致，可作交叉印证。
 
 ### 2.3 第 3 层：SQE 类型标志——传输层逐链路握手
 
@@ -356,8 +403,8 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
 
 | 本项目双环邮箱 | hcomm 对应物（层） | 备注 |
 |---|---|---|
-| 请求环 `RS_REQ_RING` 64 槽，邮件 `HybmSdmaReqMail` 32B（contract.h:37-42，layout.h:49-50） | `sendMsgs[队列][槽]`（第 2 层） | 同为 GM 槽数组，方向同为"发起方→执行方" |
-| 生产游标 `RS_REQ_TAIL`（AICore 写）/消费游标 `RS_REQ_HEAD`（AICPU 写），独占缓存行（layout.h:51-52） | 每队列 `msgPos` 游标环回（第 2 层） | 都是单消费者按序推进；hcomm 槽本身不带生产游标，生产进度由 commitTurnCnt 表达、COND SQE 硬件轮询 |
+| 请求环 `RS_REQ_RING` 64 槽，邮件 `HybmSdmaReqMail` 32B（contract.h:37-42，layout.h:49-50） | `sendMsgs[48 队列][64 槽]`（第 2 层） | 同为 GM 槽数组，方向同为"发起方→执行方" |
+| 生产游标 `RS_REQ_TAIL`（AICore 写）/消费游标 `RS_REQ_HEAD`（AICPU 写），独占缓存行（layout.h:51-52） | 每队列 `msgPos` 游标环回 + `TurnCnt` 计数提交（第 2 层） | 都是单消费者按序推进；hcomm 生产进度由 TurnCnt.cnt 表达、COND SQE 硬件轮询，TurnCnt 同样独占 64B 缓存行 |
 | 到达环 `RS_ARR_MAIL` 1024 深度 + 消费游标 `RS_ARR_HEAD`（AICore 写，layout.h:57-58） | `finishedTurnCnt` 完成计数 + 客户端轮询（第 2 层） | 回执方向一致；hcomm 用"值>=turn"比较，单调值本身就是状态，无需独立消费游标 |
 | imm 标签路由 `[63:48]magic/[47:40]opcode/[39:0]tag`（contract.h:44-62） | tag 值标志（值==tag 判定）+ 等差 turnNums 数组（第 1/2 层） | 同为"值即语义"，免额外元数据握手 |
 | epoch 分轮消费（epochBudgetS 15s + host 心跳报时，contract.h:76/104-112） | turnNum 逻辑轮次（按通信步单调） | 时间轮 vs 逻辑轮；hcomm 轮次与通信步一一对应 |
@@ -365,6 +412,7 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
 | reduce 构造 FP32=0x02/FP16=0x03 SQE（contract.h:51-52，注释直引 hcomm 权威源） | `SdmaReduceOpcode` 枚举（第 3 层，sqcqv2.cc:15-20） | 同一权威源 |
 | 完成戳 `RS_QUIET` 64 槽（SQE 写，layout.h:53-54） | `finishedTurnCnt` 回写（第 2 层） | quiet（静默/全部落地）语义两边都有 |
 | 暂存区 `RS_STAGE_SLOTS=512`（到达戳数据源本端暂存，layout.h:65） | —（AICPU 内存天然一致，无需暂存） | 我方为 AICore DCache 双向陷阱的对策（机制档案定论 2） |
+| 队列模式：槽复用、单消息体、游标独占行 | 计数模式：TurnCnt(valid+cnt) 表状态、读写两套消息体（hccl_msg.h:130-132 注释） | 同一设计点的两条官方路线，见 2.2.1 |
 
 ## 4. 关键差异与取舍
 
@@ -372,7 +420,7 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
 |---|---|---|---|---|
 | 1 | 槽位认领 | 静态分槽（rank/通知类型/队列固定编址），零原子零竞争 | 单生产者单消费者双环 + 独占行游标 | 生产者模型不同：hcomm 的生产者集合（rank/平面/队列）静态已知；本项目单流水线内环+游标最简 |
 | 2 | 多生产者扩展 | 加槽/加队列（多 SQ 分片），从不在共享槽上做原子领槽 | 同路线（imm 路由 + 多 SQ 分片） | GM 原子只在 N:1 汇聚值得付（hcomm 的 AddSignalValue 到达计数） |
-| 3 | 回绕 | 末轮清零 + ping-pong/三缓冲 bank | 环形复用（模运算） | 两侧都以单调值为语义锚（turn/seq）；清零实现更简，环形复用吞吐更稳 |
+| 3 | 回绕 | 末轮清零（=服务端复位 cnt，权威头注明 "reset by server"）+ ping-pong/三缓冲 | 环形复用（模运算） | 两侧都以单调值为语义锚（turn/seq）；清零实现更简，环形复用吞吐更稳 |
 | 4 | 可见性 | AICore 管线事件 + AICPU dsb/dmb，无 cache 维护 | dcci 纪律（机制档案定论 2/3） | 同一问题两套解：hcomm 靠一致性与屏障，我方显式维护缓存行 |
 | 5 | 硬件 notify | 与 GM 标志并存（传输层 notify、算法层 GM） | 全内存方案（定论 5：310P3 notify/事件对全弃用） | hcomm 自己在 310P V2 上也把 notify 内部替换成 event——佐证我方弃用决策 |
 | 6 | 等待执行者 | 三档齐备：核软件轮询 / COND SQE 硬件轮询 / notify 硬件事件 | AICPU epoch 主循环软件轮询 | COND SQE 是我方可借鉴档位——见第 5 节启示 6 |
@@ -397,13 +445,16 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
    等待"换成 COND SQE 硬件轮询——配方与 310P V2 兼容性已在本仓证实
    （`aicpu_hccl_sqcq.cc:182-261`，310P 专列可用）；属优化项，当前不必动。
 
-## 6. hcomm 侧引用位置清单
+## 6. 引用位置清单
 
-全部位于 `/home/w00930648/hcomm/` 下（未注明者均在 `src/legacy/ascend910/` 内），
-行号为 2026-10-29 快照：
+hcomm 仓路径 `/home/w00930648/hcomm/`（未注明者均在 `src/legacy/ascend910/` 内）；
+权威头路径 `/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/`；
+行号均为 2026-10-29 快照：
 
 | 主题 | 位置 |
 |---|---|
+| **邮箱布局权威头（常量/结构全套）** | `/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_msg.h:27-181`（HCCL_MSG_CNT=64 :127、MAX_QUE_NUM=48 :151、TurnCnt :135-139、SingleQueueMsg :141-149、MultiQueueMsg :152-156、HcclMsgArea :174-181、16MB/每通信域注释 :133、计数vs队列模式注释 :130-132） |
+| 邮箱布局 UT 桩镜像（交叉印证） | /home/w00930648/hcomm/test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250 |
 | AICore GM 信号原语 | algorithm/base/alg_aiv_template/aiv_interface/sync_interface.h:29-98 |
 | 第 1 层卡型判定（910_93） | algorithm/base/alg_aiv_template/aiv_communication_base.h:255/490 |
 | flag 区常量 | algorithm/base/alg_aiv_template/aiv_communication_base.h:155/203-204/238-241 |
@@ -414,8 +465,6 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
 | LocalRecord/LocalWait（卡内，本端 flag 区） | algorithm/base/alg_aiv_template/aiv_crossnode_91093_base.h:762-781 |
 | 槽位公式 / N:1 原子计数 | algorithm/base/alg_aiv_template/aiv_crossnode_91093_base.h:755-758/795-806/831-841 |
 | CCL buffer 尺寸 | algorithm/impl/resource_manager/ccl_buffer_manager.h:21-22 |
-| 邮箱布局权威头（仓外） | hccl 算子包 `hccl_msg.h`（本机无；引用见 `framework/device/aicpu_kfc/common/aicpu_kfc_def.h` `#include "hccl_msg.h"`） |
-| 邮箱布局 UT 桩镜像（HcclMsg 字段/MAX_QUE_NUM=48） | test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250 |
 | turnNum 公式与 wait/write | algorithm/base/mc2_handler/mc2_handler.cc:19/41/46/60 |
 | Mc2Handler 结构 | algorithm/pub_inc/op_context.h:49 |
 | COND SQE 内嵌 ISA / 写值 SQE | platform/task/rtsq_interact/aicpu_hccl_sqcq.cc:182-261 |
@@ -448,7 +497,8 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
 | notify | 硬件信号量（内存映射寄存器表），RECORD 记录、WAIT 等待 |
 | send_ready / send_done | 链路握手两个 notify 语义：前者"我的数据就绪/要来了"，后者"完成/同步回执" |
 | turn / 轮次 | hcomm 的单调轮次计数，等价于按通信步递增的轮次号 |
-| 队列号 q / 槽号 s | 邮箱 `sendMsgs[q][s]` 的两个下标：队列分片号（按 AICPU block 认领）/ 队列内消息槽位（msgPos 游标环回） |
+| TurnCnt | 64B 缓存行结构：valid（提交有效掩码）+ cnt（轮次计数）——hcomm 邮箱的提交/完成单位 |
+| 队列号 q / 槽号 s | 邮箱 `sendMsgs[q][s]` 的两个下标：队列分片号（MAX_QUE_NUM=48，按 AICPU block 认领）/ 队列内消息槽位（HCCL_MSG_CNT=64，msgPos 游标环回） |
 | KFC | kernel framework core，hcomm 的设备侧框架进程（AICPU 上常驻） |
 | AIV | AICore vector 核（910B/910_93 训练卡） |
 | 双环邮箱 | 本项目 SDMA mail 机制：请求环（AICore→AICPU）+ 到达环（AICPU→AICore），单生产者单消费者，游标独占缓存行 |
