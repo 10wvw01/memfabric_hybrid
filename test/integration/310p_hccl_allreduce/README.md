@@ -68,8 +68,18 @@ flowchart LR
 ### 三个问题的直答
 
 **① 什么时候拉起 AICPU？——本流程从头到尾没有拉起 AICPU kernel。**
-全日志任务普查 0 个 AICPU 任务；`HCCL_OP_EXPANSION_MODE=AI_CPU` 旋钮与默认模式
-任务构成**逐项相同**（该旋钮对 host-API 单机路径不生效）。AICPU kernel 族在
+全日志任务普查 0 个 AICPU 任务。`HCCL_OP_EXPANSION_MODE=AI_CPU` 无效的**根因已定位**
+（hcomm 源码，与本机 9.1.0 同代）：env 被正常解析（日志 `aicpuUnfold[1]`，
+externalinput.cc），但——
+- 决定执行形态的 `OpParam.aicpuUnfoldMode` 在本版 host 侧**唯一赋值点**是 alltoall
+  预处理（`alltoall_operator.cc:434`），且带 `deviceType_ == DEV_TYPE_910_93` 门槛；
+  **AllReduce 没有赋值点，恒 false**，算法 tag 恒为 `_host`；
+- config API 路线（`HcclCommConfig` → `CommConfig::SetConfigOpExpansionMode:345`）按
+  设备矩阵硬挡，源码注释原文"**目前只有A3和300I支持Aicpu展开**"，代码仅放行
+  `910_93 || 910B`（此处"300I"指 910B 系 A2 推理卡，非 310P3）；
+- 即便支持设备，`IsSupportUnifiedMarch`（coll_alg_utils.cc:49）还要求双环拓扑 +
+  **图模式** + 单机——单算子 opbase 流式调用连 isGraphMode 都不满足。
+即 310P3 **不在 AICPU 展开的设备支持矩阵**（型号能力，非故障）。AICPU kernel 族在
 **通信域初始化时注册**（含 `RunAicpuRpcSrvLaunchV2_<op>` 每算子入口）——那是
 **设备侧高级接口路径**（融合算子 kernel 内调 `AscendC::Hccl::AllReduce→Commit→
 Wait`）的就绪条件：kernel 客户端写邮箱、AicpuKfc 服务上 AICPU 消费（机制与证据见

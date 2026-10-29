@@ -129,7 +129,12 @@ AICPU kernel（`launch_aicpu.cc → ccl_kernel.json → RegisterCpuKernel`，含
 `MEMCPY_ASYNC / NOTIFY_RECORD(写对端) / EVENT_WAIT` 与 AICore 归约核
 （`dynamic_add_int32_v51`，`tbe_vector_reduce.cc:259`）排入 op 流、队列引擎按序
 执行——**全程零 AICPU kernel 任务**（任务普查实测；`HCCL_OP_EXPANSION_MODE=AI_CPU`
-旋钮对 host-API 单机路径不生效，两变体任务构成逐项相同）。**本节所述 KFC 邮箱
+无效根因已定位：env 解析正常（`aicpuUnfold[1]`），但 310P3 **不在 AICPU 展开设备
+支持矩阵**——hcomm `CommConfig::SetConfigOpExpansionMode` 注释原文"目前只有A3和
+300I支持Aicpu展开"、代码仅放行 `910_93||910B`；且本版 AllReduce 的
+`OpParam.aicpuUnfoldMode` 无 host 侧赋值点（唯一赋值在 alltoall 预处理且带 910_93
+门槛），恒走 host；支持设备还需双环+图模式+单机，`IsSupportUnifiedMarch`
+coll_alg_utils.cc:49）。**本节所述 KFC 邮箱
 机制（RpcSrv/AicpuKfc 服务 + COND SQE）服务的是设备侧高级接口路径**（kernel 内
 `AscendC::Hccl` 融合通信：客户端 kernel 的 core 0 写邮箱，host 不可能当邮箱客户端）
 ——注册族即该路径的就绪证据，其客户端为预编译产物，host-API 测试覆盖不到。
