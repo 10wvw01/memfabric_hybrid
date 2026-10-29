@@ -609,10 +609,14 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
 
 hcomm 仓路径 `/home/w00930648/hcomm/`（未注明者均在 `src/legacy/ascend910/` 内）；
 权威头路径 `/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/`；
+**cann/hccl 开源仓（host 侧算子层）** `/home/w00930648/hccl/`（仓版本 9.2.0，装机二
+进制 9.1.0——结构可对照、行号可能略偏）；
 行号均为 2026-10-29 快照：
 
 | 主题 | 位置 |
 |---|---|
+| **host API 入口与两路分流** | cann/hccl 仓 `src/ops/all_reduce/all_reduce_op.cc:23-51`（HcclAllReduce 本体）；分流条件 `src/common/hccl_common.h:272` `shouldGoOutPlace`——**仅 950/960 走新路径** `AllReduceOutPlace → AllReduceOutPlaceCommon（:215-271）→ HcclExecOp（src/ops/op_common/op_common.cc:743）`；其余设备（310P3/910B/910_93）走 `HcclAllReduceInner` 老路径（装机库内部符号、开源仓当前形态无此函数），执行主体在 hcomm 仓 `framework/communicator/impl/hccl_communicator_host.cc:4574`（HcclCommunicator::ExecOp）→ `algorithm/impl/operator/all_reduce_operator.cc` 算子模板 |
+| HCCL↔HCOMM dlsym 解耦层 | cann/hccl 仓 `src/common/hcomm_dlsym/` |
 | **邮箱布局权威头（常量/结构全套）** | `/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_msg.h:27-181`（HCCL_MSG_CNT=64 :127、MAX_QUE_NUM=48 :151、TurnCnt :135-139、SingleQueueMsg :141-149、MultiQueueMsg :152-156、HcclMsgArea :174-181、16MB/每通信域注释 :133、计数vs队列模式注释 :130-132） |
 | MC2 tiling 配置（queueNum/commBlockNum/devType） | /usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_tiling_msg.h:19-51 |
 | 设备侧高级接口声明（Hccl 类五步用法/core 0 纪律/Commit/Wait） | /usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/hccl.h:30-47/56-74/222/336/402/289-307 |

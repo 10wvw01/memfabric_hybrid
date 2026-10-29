@@ -118,6 +118,7 @@ SQE）属于①中设备侧融合算子路径，本测试覆盖不到。
 
 | 环节 | 本机证据 |
 |---|---|
+| host API 入口源码 | 开源仓 `/home/w00930648/hccl`（9.2.0）：`src/ops/all_reduce/all_reduce_op.cc:23`（HcclAllReduce）→ `src/common/hccl_common.h:272`（shouldGoOutPlace，**仅 950/960 走新路径**）→ 310P3 走 `HcclAllReduceInner` 老路径（装机库内部符号、开源仓无）→ 执行主体在 hcomm 仓 `framework/communicator/impl/hccl_communicator_host.cc:4574`（HcclCommunicator::ExecOp，开源） |
 | 阶段边界与耗时 | 测试打印 `[1]/[2]/[3]/[4]`（`stdbuf -o0` 后与 slog 同流对齐）：init≈4.1s、op≈150ms、销毁≈6.3s |
 | 拓扑检测 | slog `topoinfo_detect.cc:207/332`、`op_base.cc:1614 [Init][CommRootInfo][Flat]nRanks[2]`（本机 lo:60000） |
 | AICPU kernel 族注册（init 期） | slog `launch_aicpu.cc:264/244` → `launch_device.cc:33 LoadBinaryFromFile(ccl_kernel.json)` → `program.cc:850 RegisterCpuKernel[...]`（20+ 项，含 `RunAicpuRpcSrvLaunchV2_<op>`） |
