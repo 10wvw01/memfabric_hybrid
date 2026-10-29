@@ -211,20 +211,49 @@ it will not be written simultaneously."——hcomm 选了**计数模式**（消�
 双环邮箱选的是**队列模式**（游标+槽复用、单消息体）。两条路线在同一个设计点上
 分叉，可作我们评审时的官方对照。
 
-#### 2.2.2 一轮的时序
+#### 2.2.2 kernel 侧怎么用：这是 API（`AscendC::Hccl` 设备侧高级接口）
+
+kernel **不直接摸邮箱**——sendMsgs/TurnCnt 是内部线格式（布局头放在 adv_api 的
+`internal/` 目录即此意）。kernel 调 `AscendC::Hccl` 类（设备侧 HCCL 高级接口，
+`__aicore__ inline`，声明在本机安装目录 `adv_api/hccl/hccl.h`，服务端为 AICPU），
+头文件用法注释（:35-42）五步：
+
+1. `Init(context, initTiling)` —— 初始化；`initTiling` 即 `Mc2InitTilingInner`
+   （queueNum/commBlockNum/devType，2.2.1 的队列配置）
+2. `handleId = AllReduce(sendBuf, recvBuf, count, dataType, op, repeat)` ——
+   Prepare 类接口：**写 sendMsgs 槽**（commType/opType/sendBuffer/recvBuffer/
+   dataCnt/repeatCnt/selfHandleID…），返回句柄（0..63，即 hccl_msg.h 的
+   `HCCL_MAX_HANDLE_ID`）；模板参数 `commit=true` 可把第 3 步合并进本次调用
+   （:56 "true: simultaneously notify server to execute"）
+3. `Commit(handleId)` —— **提交**：写 `TurnCnt.valid=COMMIT_VALID_MASK` +
+   `cnt=turnNum`，服务端到此才看得见（"notify the execution of the
+   corresponding comm task"）；调用次数须等于 repeat（:289-295）
+4. `Wait(handleId)` —— 阻塞等完成（轮询 finishedTurnCnt，:297-307），或
+   `Query(handleId)` 非阻塞查已完成次数（上限 repeat）
+5. `Finalize()` —— 通知不再有任务，服务端收尾退出（对应 `FINALIZE_FINISH_CNT`
+   哨兵）
+
+**生产者纪律（头文件 note 原文）**："Only the core 0 can write fields for
+hcclMsgArea"（:69-71）——多核 kernel 下**只有 0 号核写邮箱**，官方用单写者规避
+多生产者竞争。repeat>1 时后续任务的 buffer 地址由服务端按步长公式自动推进
+（:63-67，对应 `strideCount` 字段）；接口另有 `QueueBarrier(queueID)` /
+`GetQueueNum()` / `BatchWrite(..., queueID)` 等队列相关入口（:222/336/402）；
+:43 注明在 Atlas A2 训练/推理系列与 910_93 上调用须指定 AICube/AIVector 核。
+
+API 调用 ↔ 邮箱动作对照与一轮时序：
 
 ```mermaid
 sequenceDiagram
-    participant C as 客户端算子 kernel（设备侧，本机无源码）
+    participant C as 客户端算子 kernel（AscendC::Hccl 高级接口，仅 core 0 写）
     participant W as workspace 邮箱 HcclMsgArea
     participant S as AICPU KFC 服务进程（常驻，本仓）
-    C->>W: ① 写消息 sendMsgs[q][s]
-    C->>W: ② 提交 TurnCnt valid=COMMIT_VALID_MASK, cnt=turnNum
+    C->>W: ① Prepare——AllReduce(...) 写 sendMsgs[q][s]，返回 handleId
+    C->>W: ② Commit(handle) —— TurnCnt valid=COMMIT_VALID_MASK, cnt=turnNum
     S->>W: ③ COND SQE 硬件轮询 commit cnt >= turnNum
     S->>W: ④ 按 msgPos 取消息（valid/xor/seq 三重校验）
     S->>S: ⑤ 执行数据算子 HcclLaunchOp
     S->>W: ⑥ 回写 finishedTurnCnt —— cnt = turnNum
-    C->>W: ⑦ 轮询 finished cnt >= turnNum 得知完成
+    C->>W: ⑦ Wait(handle) —— 轮询 finished cnt >= turnNum 得知完成
 ```
 
 **"提交到本轮 turn"是什么意思**：客户端把该槽 `TurnCnt.cnt` **写成全局单调的
@@ -464,6 +493,7 @@ hcomm 仓路径 `/home/w00930648/hcomm/`（未注明者均在 `src/legacy/ascend
 |---|---|
 | **邮箱布局权威头（常量/结构全套）** | `/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_msg.h:27-181`（HCCL_MSG_CNT=64 :127、MAX_QUE_NUM=48 :151、TurnCnt :135-139、SingleQueueMsg :141-149、MultiQueueMsg :152-156、HcclMsgArea :174-181、16MB/每通信域注释 :133、计数vs队列模式注释 :130-132） |
 | MC2 tiling 配置（queueNum/commBlockNum/devType） | /usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_tiling_msg.h:19-51 |
+| 设备侧高级接口声明（Hccl 类五步用法/core 0 纪律/Commit/Wait） | /usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/hccl.h:30-47/56-74/222/336/402/289-307 |
 | 新一代替代路线（仓内无邮箱符号的证据） | /home/w00930648/hccl（cann/hccl 开源仓）src/ops/*/template/{ccu,aiv,aicpu} |
 | 邮箱布局 UT 桩镜像（交叉印证） | /home/w00930648/hcomm/test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250 |
 | AICore GM 信号原语 | algorithm/base/alg_aiv_template/aiv_interface/sync_interface.h:29-98 |
