@@ -120,6 +120,19 @@ AddSignalValue(...)    // SetAtomicAdd<int32_t>() + PipeBarrier<PIPE_ALL>()，GM
 **适用卡型**：KFC 框架层，各代通用；310P1/310P3 走 V2 SQE 专列
 （`dispatcher_aicpu.cc:74`）。**这正是 310P 上运行的机制**。
 
+**本机实证（2026-10-29，dev0+dev1 同卡双芯 2-rank 单次 AllReduce，PASS）**：
+`HcclCommInitAll`（单进程多设备通信域）+ INT32 SUM 精确校验，默认模式与
+`HCCL_OP_EXPANSION_MODE=AI_CPU` 两变体均正确。日志证据链：
+`launch_aicpu.cc:264/244 → LoadBinaryFromFile(ccl_kernel.json) →
+RegisterCpuKernel[HcclKernelEntrance, libccl_kernel.so]`（每 rank 一次，线程 552439），
+另有 `TbeVectorReduce Init`（AICore 归约算子）与 ring 算法选择——即 hcomm 设备库
+`libccl_kernel.so` 的 AICPU 入口经 KFC 通道执行（`ccl_kernel.json` 的
+`opKernelLib=KFCKernel`，与本项目 epoch kernel 同通道，见平台事实 F 表），归约计算
+在 AICore，链路逐步握手即 2.3 节机制。实测两条纪律：① `HcclCommInitAll` 前须先
+`aclrtSetDevice`（否则 HCCL_E_RUNTIME=15，内部 rtGetDevice 拿不到当前设备）；
+② 集合通信的提交会阻塞等对端参与，rank 必须各自线程并发出（单线程顺序下发
+~2 分钟后 HCCL_E_TIMEOUT=9）。
+
 **场景**：与本项目双环邮箱**同场景**——设备上两个执行体用 GM 邮箱接力，host 不进
 数据面。hcomm 侧：host 发起集合通信后，客户端算子 kernel 不自己搬数据，而是把
 "要执行什么通信操作"写成消息投进 workspace 邮箱，由**常驻 AICPU 服务进程（KFC）**
