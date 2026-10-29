@@ -15,7 +15,7 @@ set -euo pipefail
 
 # ---------- 路径常量 ----------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SRC="$SCRIPT_DIR/test_allreduce_2dev.cc"
+SRC="$SCRIPT_DIR/310p_hccl_allreduce.cc"
 BIN="/tmp/mf_310p_hccl_allreduce"
 BUILD_ONLY=0
 RUN_ONLY=0
