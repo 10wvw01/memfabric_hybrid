@@ -237,11 +237,38 @@ kernel **不直接摸邮箱**——sendMsgs/TurnCnt 是内部线格式（布局�
    哨兵）
 
 **生产者纪律（头文件 note 原文）**："Only the core 0 can write fields for
-hcclMsgArea"（:69-71）——多核 kernel 下**只有 0 号核写邮箱**，官方用单写者规避
+hcclMsgArea"（:69-71）——多核 kernel 下**只有 0 号核写邮箱**（Prepare/Commit 由
+core 0 调用），其余核只调 `Wait`（"All cores will invoke Wait"）；官方用单写者规避
 多生产者竞争。repeat>1 时后续任务的 buffer 地址由服务端按步长公式自动推进
 （:63-67，对应 `strideCount` 字段）；接口另有 `QueueBarrier(queueID)` /
 `GetQueueNum()` / `BatchWrite(..., queueID)` 等队列相关入口（:222/336/402）；
 :43 注明在 Atlas A2 训练/推理系列与 910_93 上调用须指定 AICube/AIVector 核。
+
+**Prepare 一次调用往邮箱写了什么（逐字段，以 AllReduce 为例）**——目标地址
+`workSpace + commMsg.multiMsg.sendMsgs[q][s]`，**每条 `HcclMsg` 恰 64B（一个缓存行**，
+前 15 个 u32 字 + xorCheck 收尾 = 16 字对齐）：
+
+| 字段 | AllReduce 时的取值 | 服务端怎么消费 |
+|---|---|---|
+| `commType` | `HCCL_CMD_ALLREDUCE`（HcclCMDType 枚举首项，hccl_common.h:25） | 据此分派算子（aicpu_kfc_utils.cc:454 按 commType.msgType 分类处理） |
+| `opType` | `HCCL_REDUCE_SUM/PROD/MAX/MIN` | 决定归约操作 |
+| `sendBuffer/recvBuffer` | 用户 GM 缓冲地址 | 通信的数据源/落点；服务端 dfx 甚至拿它做通信后核对（utils.cc:307 "sendBuffer after comm"） |
+| `dataCnt` | count | 参与元素数 |
+| `strideCount` | 0（常规）；通信计算融合切分多轮时非 0 | 切分轮间步长 |
+| `addMsg.v0Msg.valid` | `0x5CDF123A` | 非 MASK 视为空槽；消费后复位 `~MASK`（rpc_serverv2.cc:370/396） |
+| `addMsg.v0Msg.repeatCnt` | 默认 1 | >1 时后续轮缓冲由服务端按步长公式自动推进（hccl.h:63-67） |
+| `addMsg.v0Msg.selfHandleID` | 本次返回的 handleId | 服务端 `handleIdToMsgPos_` 映射句柄↔槽位（comm_kfc_aicpu_server.h:44） |
+| `addMsg.v0Msg.seqNum` | 消息序号 | 小于期望值直接丢弃（ProcessExpectPrepareMsg） |
+| `addMsg.v0Msg.xorCheck` | **前 15 个 u32 字的异或**（UT 桩 GenXorStub 镜像算法） | 校验消息完整性，不符报"data is modified!"（rpc_serverv2.cc:379-384） |
+| 其余 | hcclDataType、p2pSrcDestRankId、everyTurnRsp/everyTurnWait、commDepGroupID/commDepHandleID（默认 -1）、version | 数据类型/点对点对端/每轮等响应/跨通信域依赖/布局版本（v0/v1） |
+
+**handleId 怎么来**：int8 范围 **0..63**（`HCCL_MAX_HANDLE_ID=63`，hccl_msg.h:31，
+句柄空间即 64）；Prepare 分配并填进 `selfHandleID`，后续 `Commit/Wait/Query` 全拿它
+寻址。**Commit 写什么**：该槽独立的 64B `TurnCnt`——`valid=987654321`（服务端软件
+校验）+ `cnt=turnNum`（全局单调轮次值，非 ++）。消息体与 TurnCnt 是**两次独立写入**：
+消息先落笔、Commit 后服务端才看得见——"数据先走、标志后到"在邮箱层的体现。
+客户端选 q/s 的策略在实现体（本机无）；服务端按 `msgPos` 游标推进消费
+`(msgPos+1)%64`。
 
 **证据边界**：本机仅有该接口的**声明头与官方注释**（`adv_api/hccl/hccl.h`）；其引用
 的实现体 `impl/adv_api/detail/hccl/impl/hccl_impl_def.h` 不在安装中（include/impl
