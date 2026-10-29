@@ -88,6 +88,22 @@ host API 的 host 没法当邮箱客户端（客户端必须是 kernel 的 core 
 AICore 归约核与搬运任务的次序同样由流序约束。AICPU 参与协同的形态（邮箱 + COND
 SQE）属于①中设备侧融合算子路径，本测试覆盖不到。
 
+### 本测试覆盖什么、不覆盖什么（与机制文档的关系）
+
+- **覆盖**：310P host 应用的真实路径（HOST 展开）——host 编排 + 队列引擎 FIFO
+  （数据先落笔、标志后落笔）+ notify 跨芯片握手 + SDMA 搬运 + AICore 归约核。
+  即 [hcomm-GM标志消息同步机制](../../../docs/310p/hcomm-GM标志消息同步机制.md)
+  **2.3 节（SQE 类型标志 / 链路握手）在 host 展开形态下的语义验证**，外加
+  host-API AllReduce 数据正确性。
+- **不覆盖**：机制文档 **2.2 节（KFC 邮箱）**。其客户端是设备侧融合算子
+  （`AscendC::Hccl` 高级接口），host API 走不到；且本机无法用户侧驱动该机制
+  （三重证据：装机 libhccl 无 AICPU 执行的 AllReduce 算法 / ADV API 实现头缺失
+  （`lib/hccl/hccl.h` 不在安装中，华为自带 mc2_templates 源码本机也编不了）/
+  全部近期设备日志零 RpcSrv·AicpuKfc 活动——详见机制文档 2.2 实证段）。
+- 本机上"kernel 写请求邮箱 + AICPU 消费"这一机制模式的**可运行实例**：
+  [310p_sdma_stability](../310p_sdma_stability/README.md)（本项目双环邮箱，
+  真机长稳 PASS）。
+
 ### 环节取证对照表
 
 | 环节 | 本机证据 |

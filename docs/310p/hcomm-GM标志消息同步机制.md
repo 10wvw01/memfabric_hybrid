@@ -19,7 +19,7 @@
 | 1 | hcomm 有 GM 标志消息同步，且是**四层机制**（第 1 节），但全仓没有任何叫 flag 的类或文件（`FlagMgr/FlagInfo/HcclFlag`、文件名 `*flag*` 均零命中）——机制藏在 SQE 类型、算法模板和 KFC 框架里 |
 | 2 | **卡型边界**：第 1 层（AIV 直写 GM）是 910B/910_93 世代 AIV 训练卡的机制，310P 不走这层（`alg_aiv_template` 全目录 310P 零命中）；310P 上 hcomm 的 GM 同步走第 2/3 层（AICPU + SDMA，V2 SQE 专列 `dispatcher_aicpu.cc:74`）——**与我们对话的其实是第 2/3 层** |
 | 3 | 第 1 层同时服务**卡内核间**（同一张卡的 AIV 核之间，读写本端 `flagAddrSelf_`）与**跨节点/跨卡**（写对端 `GM_OUT` flag 区），见 2.1 的图 |
-| 4 | 与本项目双环邮箱最接近的是**第 2 层 MC2/KFC 轮次计数邮箱**：与我们是**同一个场景**——设备上两个执行体（发起方 kernel 与常驻 AICPU 服务）用 GM 邮箱接力；邮箱 = 每通信域 16MB workspace、64 槽×48 队列、`TurnCnt` 是 64B 缓存行（valid 掩码 + 计数），见 2.2 |
+| 4 | 与本项目双环邮箱最接近的是**第 2 层 MC2/KFC 轮次计数邮箱**：与我们是**同一类设计（GM 邮箱接力的两执行体模型）**；邮箱 = 每通信域 16MB workspace、64 槽×48 队列、`TurnCnt` 是 64B 缓存行（valid 掩码 + 计数），见 2.2。**边界**：其客户端是设备侧融合算子（`AscendC::Hccl` 高级接口），host API 不走此路径（实测走 HOST 展开）；本机无法用户侧驱动该机制（三重证据见 2.2 实证段），本机上这一模式的可运行实例即本项目双环邮箱 |
 | 5 | 核心顺序保证与本项目**完全同款**：数据先走、标志后到，且同走一条队列靠 FIFO 保序——官方与本项目独立走到了同一条路线，互证正确 |
 | 6 | 分歧在认领模型：hcomm **不做跨生产者原子领槽**，全部静态分槽（按 rank/通知类型/队列固定编址）；GM 原子（atomic add）只用于 N:1 到达计数 |
 | 7 | "等一个标志"在三层的实现代价不同：第 1 层 AICore 软件循环轮询、第 2 层**队列引擎执行 COND SQE 内嵌指令循环（硬件轮询）**、第 3 层 notify 表硬件等待——见 2.2.3 的对比表 |
@@ -115,10 +115,11 @@ AddSignalValue(...)    // SetAtomicAdd<int32_t>() + PipeBarrier<PIPE_ALL>()，GM
   `PipeBarrier<PIPE_ALL>`；ping-pong（tag%2 偏移）与三缓冲 bank 避免读写自干扰。
 - 勿混淆：AscendC 的 `SetFlag<event>/WaitFlag<event>` 是核内管线事件，不是 GM 标志。
 
-### 2.2 第 2 层：MC2/KFC 轮次计数邮箱——与本项目双环邮箱同一个场景
+### 2.2 第 2 层：MC2/KFC 轮次计数邮箱——与本项目双环邮箱同构的设计
 
 **适用卡型**：KFC 框架层，各代通用；310P1/310P3 走 V2 SQE 专列
-（`dispatcher_aicpu.cc:74`）。**这正是 310P 上运行的机制**。
+（`dispatcher_aicpu.cc:74`）。KFC 通道在 310P 上真实可用（本项目 epoch kernel 即经
+KFCKernel 通道常驻运行）；但 **host-API 集合通信不走本层**（见下方实证段）。
 
 **本机实证（2026-10-29，dev0+dev1 同卡双芯 2-rank 单次 AllReduce，PASS，用例
 [310p_hccl_allreduce](../../../test/integration/310p_hccl_allreduce/README.md)）**：
@@ -131,15 +132,22 @@ AICPU kernel（`launch_aicpu.cc → ccl_kernel.json → RegisterCpuKernel`，含
 旋钮对 host-API 单机路径不生效，两变体任务构成逐项相同）。**本节所述 KFC 邮箱
 机制（RpcSrv/AicpuKfc 服务 + COND SQE）服务的是设备侧高级接口路径**（kernel 内
 `AscendC::Hccl` 融合通信：客户端 kernel 的 core 0 写邮箱，host 不可能当邮箱客户端）
-——注册族即该路径的就绪证据，其客户端为预编译产物，host-API 测试覆盖不到。实测
+——注册族即该路径的就绪证据，其客户端为预编译产物，host-API 测试覆盖不到。
+本机不可用户侧驱动该机制的**三重证据**：① 装机 libhccl 无 AICPU 执行的 AllReduce
+算法（开源仓新世代的 `AicpuAllReducePipeLineUBX` 未随 9.1.0 发布）；② ADV API
+实现头缺失（`adv_api/hccl.h` 引用的 `impl/adv_api/detail/...` 与 AscendC 库约定的
+`lib/hccl/hccl.h` 均不在安装中——连华为自带的 mc2_templates 源码本机也编不了）；
+③ 全部近期设备日志/plog 中 0 次出现 RpcSrv/AicpuKfc/HcclKernelEntrance（从未有
+负载跑过该服务端）。**本机上这一机制模式的可运行实例，就是本项目双环邮箱**
+（08 示例 / 310p_sdma_stability 长稳压测，同为"kernel 写请求邮箱 + AICPU 消费"）。实测
 纪律：① `HcclCommInitAll` 前须先 `aclrtSetDevice`（否则 HCCL_E_RUNTIME=15）；
 ② 提交会阻塞等对端参与，rank 须各自线程并发出（单线程顺序下发 ~2 分钟后
 HCCL_E_TIMEOUT=9）。
 
-**场景**：与本项目双环邮箱**同场景**——设备上两个执行体用 GM 邮箱接力，host 不进
-数据面。hcomm 侧：host 发起集合通信后，客户端算子 kernel 不自己搬数据，而是把
-"要执行什么通信操作"写成消息投进 workspace 邮箱，由**常驻 AICPU 服务进程（KFC）**
-接力执行。
+**场景**：与本项目双环邮箱**同构**——设备上两个执行体用 GM 邮箱接力，host 不进
+数据面。hcomm 侧的客户端是**融合算子 kernel**（host 只负责拉起算子）：算子 kernel
+不自己搬数据，而是调 `AscendC::Hccl` 高级接口把"要执行什么通信操作"写成消息投进
+workspace 邮箱，由**常驻 AICPU 服务进程（KFC）**接力执行。
 
 #### 2.2.1 邮箱长什么样：内存布局（权威定义）
 
@@ -321,7 +329,7 @@ Mc2HandlerPub::Mc2WaitValue                mc2_handler.cc:23-47（算 turnNum）
 | 第 2 层 COND SQE | **队列引擎执行内嵌 ISA 循环** | SQE 硬件轮询 | 不占核不占 AICPU，流自动推进 |
 | 第 3 层 notify | notify 表**硬件事件等待** | MMIO 信号量 | 最省；310P 上被替换为 event 模拟 |
 
-**与我方双环邮箱的对应**（同场景、角色互补）：
+**与我方双环邮箱的对应**（同构、角色互补）：
 
 | hcomm KFC | 本项目双环邮箱 |
 |---|---|
