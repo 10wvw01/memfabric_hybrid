@@ -364,6 +364,58 @@ Mc2HandlerPub::Mc2WaitValue                mc2_handler.cc:23-47（算 turnNum）
 - hcomm 仓内 UT 桩（`test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250`）
   逐字段镜像了本布局，与权威头一致，可作交叉印证。
 
+#### 2.2.4 910B/A3 上的 AICPU 展开细节（两条路线，汇入同一执行核）
+
+310P3 不在支持矩阵（见 2.2 实证段），AICPU 展开的正主是 **910B（910B 系 300I）与
+910_93（A3）**——`CommConfig::SetConfigOpExpansionMode` 注释原文"目前只有A3和
+300I支持Aicpu展开"（此处 300I 指 910B 系 A2 推理卡）。两条 AICPU 路线**汇入同一
+执行核** `HcclCommAicpu::ExecOp`（framework/device/framework/aicpu_communicator.cc:2091）：
+
+**路线 A：host-API AICPU 展开（plan-as-tiling）**
+
+1. host 规划后**把整个算子计划序列化成 `OpTilingData`**：algName/tag、输入输出
+   指针、opType/reduceType/长度、重试策略、`aicpuUnfoldMode/aicpuCacheEnable`、
+   userStreamId；按算子附 DataDes（AllToAllV 的 counts/displs 矩阵内联在 tiling 后）。
+2. 以 `RunAicpuRpcSrvLaunchV2_<op>`（ccl_kernel.json，`opKernelLib=KFCKernel`）
+   下发——**整个算子=一次 kernel launch**，取代 host 模式下 host 逐个排上千个
+   流任务。
+3. AICPU 侧 `AicpuHcclProcess::AicpuRunRpcServerV2`（aicpu_hccl_process.cc:380）：
+   重建 `hccl::OpParam`（与 host 侧同构；流=AICPU 通信域主流）→ Suspending 通道/
+   cqe 错误态防错检查 → `hrtSetLocalDeviceSatMode`（浮点溢出模式）→
+   **`hcclCommAicpu->ExecOp(newTag, algName, opParam, commParam)`**。
+4. 设备侧算法逐步构造 **V1 SQE** 提交队列引擎（SDMA 搬运/notify/COND/写值）；
+   `TaskOrchestrator::WaitFinishWhileLoop` 轮询排空 + `CheckTaskTimeout` 自检
+   （task_orchestrator.cc:1124/1161）；trace 收尾
+   （"AicpuRunRpcServerV2:success,take time N us"）。
+
+**路线 B：设备侧融合算子（ADV API，即 2.2 邮箱）**
+
+kernel（AICore）core 0 调 `AscendC::Hccl`：`Init→Prepare→Commit` 写 sendMsgs +
+TurnCnt；`RunAicpuRpcSrvLaunch`（V1，KFCTask{inputA/outputC/context/workSpace/
+tilingData}）拉起 AicpuKfc 服务循环：COND SQE 硬件轮询 commitTurnCnt ≥ turn →
+三重校验取件 → 执行（进同一执行核）→ finishedTurnCnt 回写 → kernel `Wait` 返回。
+
+**910B 特有细节（区别于 310P）**：
+
+- **V1 SQE 家族**（dispatcher_aicpu.cc:74 起 else 分支）：`SDMA=11、COND=20`；
+  V1 独有构造器 `RdmaDbSend`、`FlipPlaceHolder`（流重放边界标记，算子级重试用，
+  平台事实 F 表定案）、`CacheMemcpyPlaceHolder`（p2p notify record 前的 cache 写
+  占位，保数据可见，:199-200）；
+- **reduce 操作码拼接式**：数据类型 nibble（FP16=0x60/FP32=0x70）| 操作 nibble
+  （ADD=0x01/MAX/MIN/EQUAL）——与 310P V2 的枚举式（0x02/0x03）互不兼容（见 2.3）；
+- **notify 寄存器宽度 4B**（910B/910_93，其余芯片 8B，:115-118）；
+- **AICPU 任务模型**（平台事实 F 表定案）：AICPU 只做"编排提交 SQE + 轮询排空"，
+  等远端数据用 COND/硬件 wait SQE（不占 AICPU 核），计算在 AICore、搬运是固件
+  SDMA——常态算子秒级完成；
+- **算子级重试与故障恢复**：`PrepareOpRetryHandler` + 翻转 SQE 流回放；跨服务器
+  链路异常由 STARS 检出触发重执行；NsRecovery 经 Suspending 通道
+  （`kfcControlTransferH2D`）做通信域级恢复。
+
+**注意**：本版 host-API 侧完整接入展开的是 **AllToAll 族**（alltoall_operator.cc:352
+有 910B 专列分支 `aicpuUnfoldModeFor910B`；:434 的赋值带 910_93 门槛）；AllReduce
+的 host-API 在本版仍走 host（`OpParam.aicpuUnfoldMode` 无 host 侧赋值点），它的
+AICPU 路径是路线 B（A2/910_93 的 `Hccl` 类融合算子）。
+
 ### 2.3 第 3 层：SQE 类型标志——传输层逐链路握手
 
 **适用卡型**：各代通用（310P：notify 内部替换为 event；910B/910_93 notify 寄存器
