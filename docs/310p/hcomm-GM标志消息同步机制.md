@@ -189,10 +189,19 @@ struct TurnCnt {
   单队列形态退化为 `sendMsgs[s]`。
 - **s = 消息槽号**（0..HCCL_MSG_CNT-1 = 64）：服务端每队列持一个 `msgPos` 游标，
   消费一槽后 `(msgPos+1) % HCCL_MSG_CNT` 环回（`aicpu_kfc_process.cc:1151`）。
-- 客户端（生产侧）设备 kernel 的选队列/选槽策略**本机不可见**：本机 `hccl` 仓
-  （`/home/w00930648/hccl`）是 host 侧算子仓（src/ops 等），不含 310P KFC 客户端
-  kernel；opp 安装的 `mc2_templates` 是新一代模板、不含 `commitTurnCnt`。语义以
+- **队列规模不是写死的**：tiling 配置头 `hccl_tiling_msg.h`（与 `hccl_msg.h` 同
+  目录）的 `Mc2InitTilingInner` 带 `queueNum/commBlockNum/devType`（:22-32），
+  随 tiling 下发告知邮箱队列规模，服务端按 `GetLocalQueueRange` 认领分片。
+- 客户端（生产侧，写消息/提交 TurnCnt 的设备 kernel）**源码不在本机任何仓**：
+  本机 `cann/hccl` 开源仓（`/home/w00930648/hccl`，gitcode.com/cann/hccl，新一代
+  至 Ascend950）确实带设备侧模板（`src/ops/*/template/{ccu,aiv,aicpu}`），但那是
+  **替代**邮箱机制的新路线——CCU 引擎 kernel、AIV kernel、AICPU 直接指令模板
+  （`ins_temp_*`），全仓 `hccl_msg`/`commitTurnCnt`/`sendMsgs` 零命中；安装目录
+  host 侧库（`libhccl*.so`）二进制无 `commitTurnCnt` 字符串，opp `mc2_templates`
+  同样不含。310P 世代的 KFC 客户端仅以预编译设备 kernel 随 CANN 分发。语义以
   权威头字段注释为准（"writen by client when Commit, checked by server"）。
+  这也印证该机制属 legacy——hcomm 仓 AGENTS.md 声明 `legacy/` 不承接新特性，
+  新一代开源栈已改走 CCU 引擎与直接指令模板。
 
 **计数模式 vs 队列模式的官方取舍**（权威头 :130-132 注释原文）："Current
 HcclMsgArea use count mode. Two msg bodies are used, one for read and one for
@@ -454,6 +463,8 @@ hcomm 仓路径 `/home/w00930648/hcomm/`（未注明者均在 `src/legacy/ascend
 | 主题 | 位置 |
 |---|---|
 | **邮箱布局权威头（常量/结构全套）** | `/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_msg.h:27-181`（HCCL_MSG_CNT=64 :127、MAX_QUE_NUM=48 :151、TurnCnt :135-139、SingleQueueMsg :141-149、MultiQueueMsg :152-156、HcclMsgArea :174-181、16MB/每通信域注释 :133、计数vs队列模式注释 :130-132） |
+| MC2 tiling 配置（queueNum/commBlockNum/devType） | /usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/include/adv_api/hccl/internal/hccl_tiling_msg.h:19-51 |
+| 新一代替代路线（仓内无邮箱符号的证据） | /home/w00930648/hccl（cann/hccl 开源仓）src/ops/*/template/{ccu,aiv,aicpu} |
 | 邮箱布局 UT 桩镜像（交叉印证） | /home/w00930648/hcomm/test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250 |
 | AICore GM 信号原语 | algorithm/base/alg_aiv_template/aiv_interface/sync_interface.h:29-98 |
 | 第 1 层卡型判定（910_93） | algorithm/base/alg_aiv_template/aiv_communication_base.h:255/490 |
