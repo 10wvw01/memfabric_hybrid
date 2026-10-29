@@ -17,9 +17,9 @@
 | # | 结论 |
 |---|---|
 | 1 | hcomm 有 GM 标志消息同步，且是**四层机制**（第 1 节），但全仓没有任何叫 flag 的类或文件（`FlagMgr/FlagInfo/HcclFlag`、文件名 `*flag*` 均零命中）——机制藏在 SQE 类型、算法模板和 KFC 框架里 |
-| 2 | **卡型边界**：第 1 层（AIV 直写 GM）是 910B/910_93 世代 AIV 训练卡的机制，310P 不走这层（`alg_aiv_template` 全目录 310P 零命中）；310P 上 hcomm 的 GM 同步走第 2/3 层（AICPU + SDMA，V2 SQE 专列 `dispatcher_aicpu.cc:74`）——**与我们对话的其实是第 2/3 层** |
+| 2 | **卡型边界**：第 1 层（AIV 直写 GM）与第 2 层的 AICPU 展开均属 **910B/910_93 世代**机制；310P3 属 host 编排路径，不在本文展开（实测记录见 [310p_hccl_allreduce 用例](../../../test/integration/310p_hccl_allreduce/README.md)） |
 | 3 | 第 1 层同时服务**卡内核间**（同一张卡的 AIV 核之间，读写本端 `flagAddrSelf_`）与**跨节点/跨卡**（写对端 `GM_OUT` flag 区），见 2.1 的图 |
-| 4 | 与本项目双环邮箱最接近的是**第 2 层 MC2/KFC 轮次计数邮箱**：与我们是**同一类设计（GM 邮箱接力的两执行体模型）**；邮箱 = 每通信域 16MB workspace、64 槽×48 队列、`TurnCnt` 是 64B 缓存行（valid 掩码 + 计数），见 2.2。**边界**：其客户端是设备侧融合算子（`AscendC::Hccl` 高级接口），host API 不走此路径（实测走 HOST 展开）；本机无法用户侧驱动该机制（三重证据见 2.2 实证段），本机上这一模式的可运行实例即本项目双环邮箱 |
+| 4 | 与本项目双环邮箱最接近的是**第 2 层 MC2/KFC 轮次计数邮箱**：与我们是**同一类设计（GM 邮箱接力的两执行体模型）**；邮箱 = 每通信域 16MB workspace、64 槽×48 队列、`TurnCnt` 是 64B 缓存行（valid 掩码 + 计数），见 2.2 |
 | 5 | 核心顺序保证与本项目**完全同款**：数据先走、标志后到，且同走一条队列靠 FIFO 保序——官方与本项目独立走到了同一条路线，互证正确 |
 | 6 | 分歧在认领模型：hcomm **不做跨生产者原子领槽**，全部静态分槽（按 rank/通知类型/队列固定编址）；GM 原子（atomic add）只用于 N:1 到达计数 |
 | 7 | "等一个标志"在三层的实现代价不同：第 1 层 AICore 软件循环轮询、第 2 层**队列引擎执行 COND SQE 内嵌指令循环（硬件轮询）**、第 3 层 notify 表硬件等待——见 2.2.3 的对比表 |
@@ -117,37 +117,11 @@ AddSignalValue(...)    // SetAtomicAdd<int32_t>() + PipeBarrier<PIPE_ALL>()，GM
 
 ### 2.2 第 2 层：MC2/KFC 轮次计数邮箱——与本项目双环邮箱同构的设计
 
-**适用卡型**：KFC 框架层，各代通用；310P1/310P3 走 V2 SQE 专列
-（`dispatcher_aicpu.cc:74`）。KFC 通道在 310P 上真实可用（本项目 epoch kernel 即经
-KFCKernel 通道常驻运行）；但 **host-API 集合通信不走本层**（见下方实证段）。
-
-**本机实证（2026-10-29，dev0+dev1 同卡双芯 2-rank 单次 AllReduce，PASS，用例
-[310p_hccl_allreduce](../../../test/integration/310p_hccl_allreduce/README.md)）**：
-host-API 路径为 **HOST 展开**——通信域初始化时装载 TBE 向量归约模块并注册整族
-AICPU kernel（`launch_aicpu.cc → ccl_kernel.json → RegisterCpuKernel`，含
-`RunAicpuRpcSrvLaunchV2_<op>` 每算子入口，**仅注册**）；op 调用时 host 直接把
-`MEMCPY_ASYNC / NOTIFY_RECORD(写对端) / EVENT_WAIT` 与 AICore 归约核
-（`dynamic_add_int32_v51`，`tbe_vector_reduce.cc:259`）排入 op 流、队列引擎按序
-执行——**全程零 AICPU kernel 任务**（任务普查实测；`HCCL_OP_EXPANSION_MODE=AI_CPU`
-无效根因已定位：env 解析正常（`aicpuUnfold[1]`），但 310P3 **不在 AICPU 展开设备
-支持矩阵**——hcomm `CommConfig::SetConfigOpExpansionMode` 注释原文"目前只有A3和
-300I支持Aicpu展开"、代码仅放行 `910_93||910B`；且本版 AllReduce 的
-`OpParam.aicpuUnfoldMode` 无 host 侧赋值点（唯一赋值在 alltoall 预处理且带 910_93
-门槛），恒走 host；支持设备还需双环+图模式+单机，`IsSupportUnifiedMarch`
-coll_alg_utils.cc:49）。**本节所述 KFC 邮箱
-机制（RpcSrv/AicpuKfc 服务 + COND SQE）服务的是设备侧高级接口路径**（kernel 内
-`AscendC::Hccl` 融合通信：客户端 kernel 的 core 0 写邮箱，host 不可能当邮箱客户端）
-——注册族即该路径的就绪证据，其客户端为预编译产物，host-API 测试覆盖不到。
-本机不可用户侧驱动该机制的**三重证据**：① 装机 libhccl 无 AICPU 执行的 AllReduce
-算法（开源仓新世代的 `AicpuAllReducePipeLineUBX` 未随 9.1.0 发布）；② ADV API
-实现头缺失（`adv_api/hccl.h` 引用的 `impl/adv_api/detail/...` 与 AscendC 库约定的
-`lib/hccl/hccl.h` 均不在安装中——连华为自带的 mc2_templates 源码本机也编不了）；
-③ 全部近期设备日志/plog 中 0 次出现 RpcSrv/AicpuKfc/HcclKernelEntrance（从未有
-负载跑过该服务端）。**本机上这一机制模式的可运行实例，就是本项目双环邮箱**
-（08 示例 / 310p_sdma_stability 长稳压测，同为"kernel 写请求邮箱 + AICPU 消费"）。实测
-纪律：① `HcclCommInitAll` 前须先 `aclrtSetDevice`（否则 HCCL_E_RUNTIME=15）；
-② 提交会阻塞等对端参与，rank 须各自线程并发出（单线程顺序下发 ~2 分钟后
-HCCL_E_TIMEOUT=9）。
+**适用卡型**：910B（910B 系 300I/A2 推理卡）与 910_93（A3）——`CommConfig::
+SetConfigOpExpansionMode` 注释原文"目前只有A3和300I支持Aicpu展开"。310P3 不消费
+本层（host-API 实测走 host 编排、AICPU 零任务；时间线/任务普查/旋钮根因记录于用例
+[310p_hccl_allreduce](../../../test/integration/310p_hccl_allreduce/README.md)，本文
+不展开）。本文以下均按 910B/A3 场景描述 kernel ↔ AICPU 协作。
 
 **场景**：与本项目双环邮箱**同构**——设备上两个执行体用 GM 邮箱接力，host 不进
 数据面。hcomm 侧的客户端是**融合算子 kernel**（host 只负责拉起算子）：算子 kernel
@@ -364,14 +338,57 @@ Mc2HandlerPub::Mc2WaitValue                mc2_handler.cc:23-47（算 turnNum）
 - hcomm 仓内 UT 桩（`test/ut/aicpu_kfc/stub/llt_aicpu_kfc_stub_mc2.h:171-250`）
   逐字段镜像了本布局，与权威头一致，可作交叉印证。
 
-#### 2.2.4 910B/A3 上的 AICPU 展开细节（两条路线，汇入同一执行核）
+#### 2.2.4 910B/A3 场景：kernel ↔ AICPU 协作细节
 
-310P3 不在支持矩阵（见 2.2 实证段），AICPU 展开的正主是 **910B（910B 系 300I）与
-910_93（A3）**——`CommConfig::SetConfigOpExpansionMode` 注释原文"目前只有A3和
-300I支持Aicpu展开"（此处 300I 指 910B 系 A2 推理卡）。两条 AICPU 路线**汇入同一
-执行核** `HcclCommAicpu::ExecOp`（framework/device/framework/aicpu_communicator.cc:2091）：
+两条 AICPU 路线**汇入同一执行核** `HcclCommAicpu::ExecOp`
+（framework/device/framework/aicpu_communicator.cc:2091）。
 
-**路线 A：host-API AICPU 展开（plan-as-tiling）**
+**路线 B（本节主叙事）：融合算子 kernel ↔ AICPU 邮箱协作**（A2/910_93 的
+`AscendC::Hccl` 类，serverType=AICPU）。一轮 AllReduce 的完整协议：
+
+```mermaid
+sequenceDiagram
+    participant K as 融合 kernel（AICore，core 0）
+    participant W as workspace（HcclMsgArea，16MB/通信域）
+    participant S as AICPU 服务（AicpuKfc 循环）
+    participant E as 队列引擎（执行 V1 SQE）
+    K->>W: ① Prepare——写 sendMsgs[q][s]（commType/缓冲区/长度/repeat…），返回 handle
+    K->>W: ② Commit——TurnCnt.valid=COMMIT_VALID_MASK, cnt=turnNum
+    S->>E: ③ 入 COND SQE——内嵌 ISA 硬件轮询 commitTurnCnt[s].cnt ≥ turnNum
+    E-->>S: 计数达标放行（末轮 ISA 追加 store 0 清零）
+    S->>W: ④ 取件——msgPos 游标 + valid/xor/seqNum 三重校验
+    S->>E: ⑤ 执行——ExecOp → 设备侧算法构造 V1 SQE（SDMA 数据 + notify 握手 + COND）
+    E-->>E: FIFO：数据先落笔，标志后落笔（对端 wait 放行）
+    S->>E: ⑥ 入写值 SQE——turnValue[turnNum] 写 finishedTurnCnt[s].cnt
+    K->>W: ⑦ Wait——轮询 finished ≥ turnNum，数据就绪
+```
+
+回合级协议的源码要点（`aicpu_dispatcher.cc:286-347`，`TASK_PREPARE_KERNEL`
+模式——即 kernel 客户端路径）：
+
+- **等待地址**：`workSpaceAddr + offsetof(HcclMsgArea, commitTurnCnt) +
+  msgPosForKernel*sizeof(TurnCnt) + offsetof(TurnCnt, cnt)`——COND SQE 盯的是
+  **邮箱槽的 cnt 字段本身**，等待值来自 AICPU 上下文的等差数组；
+- **回执地址**：同槽 `finishedTurnCnt[msgPosForKernel].cnt`——服务端入一条
+  写值 SQE，值取自 `ctx->turnValue[turnNum]`（iota 预填）；
+- **末轮清零**：`curTurnCntForKernel ≥ totalTurnCntForKernel` 时 COND SQE 带
+  isLast——内嵌 ISA 追加 store 0（权威头"cnt: reset by server"的实装）；
+- **非 kernel 模式**（AIV 算子参数路径）：改用 `AivAicpuOpParam` 的
+  sendCnt/rcvCnt 字段做回合握手，**每 64B（AC_SQE_SIZE）一个地址**——源码注释
+  原文"保持和AIC的间消息长度一致"。
+
+**kernel 侧 Init 的上下文**：`Init(context, initTiling)` 的 context 即
+`CommKfcContext`（hccl_msg.h:192-205：version/hcclContext/apiCtx{workSpace,
+workSpaceSize, rankId, rankNum}——`apiCtx.workSpace` 就是 16MB 邮箱区）；initTiling
+即 `Mc2InitTilingInner`（hccl_tiling_msg.h:22-32：**queueNum/commBlockNum/devType**
+——队列分片配置，服务端按 `GetLocalQueueRange` 认领）。
+
+**AICPU 任务模型**（平台事实 F 表定案）：AICPU 只做"编排提交 SQE + 轮询排空"——
+`TaskOrchestrator::WaitFinishWhileLoop`（task_orchestrator.cc:1124）排空 +
+`CheckTaskTimeout`（:1161）自检（预算上限主动报错）；等远端数据用 COND/硬件
+wait SQE **不占 AICPU 核**，计算在 AICore、搬运是固件 SDMA。
+
+**路线 A：host-API AICPU 展开（plan-as-tiling，AllToAll 族主战场）**
 
 1. host 规划后**把整个算子计划序列化成 `OpTilingData`**：algName/tag、输入输出
    指针、opType/reduceType/长度、重试策略、`aicpuUnfoldMode/aicpuCacheEnable`、
@@ -384,18 +401,10 @@ Mc2HandlerPub::Mc2WaitValue                mc2_handler.cc:23-47（算 turnNum）
    cqe 错误态防错检查 → `hrtSetLocalDeviceSatMode`（浮点溢出模式）→
    **`hcclCommAicpu->ExecOp(newTag, algName, opParam, commParam)`**。
 4. 设备侧算法逐步构造 **V1 SQE** 提交队列引擎（SDMA 搬运/notify/COND/写值）；
-   `TaskOrchestrator::WaitFinishWhileLoop` 轮询排空 + `CheckTaskTimeout` 自检
-   （task_orchestrator.cc:1124/1161）；trace 收尾
+   `WaitFinishWhileLoop` 排空 + `CheckTaskTimeout` 自检；trace 收尾
    （"AicpuRunRpcServerV2:success,take time N us"）。
 
-**路线 B：设备侧融合算子（ADV API，即 2.2 邮箱）**
-
-kernel（AICore）core 0 调 `AscendC::Hccl`：`Init→Prepare→Commit` 写 sendMsgs +
-TurnCnt；`RunAicpuRpcSrvLaunch`（V1，KFCTask{inputA/outputC/context/workSpace/
-tilingData}）拉起 AicpuKfc 服务循环：COND SQE 硬件轮询 commitTurnCnt ≥ turn →
-三重校验取件 → 执行（进同一执行核）→ finishedTurnCnt 回写 → kernel `Wait` 返回。
-
-**910B 特有细节（区别于 310P）**：
+**910B 特有细节（区别于 310P V2）**：
 
 - **V1 SQE 家族**（dispatcher_aicpu.cc:74 起 else 分支）：`SDMA=11、COND=20`；
   V1 独有构造器 `RdmaDbSend`、`FlipPlaceHolder`（流重放边界标记，算子级重试用，
@@ -404,9 +413,6 @@ tilingData}）拉起 AicpuKfc 服务循环：COND SQE 硬件轮询 commitTurnCnt
 - **reduce 操作码拼接式**：数据类型 nibble（FP16=0x60/FP32=0x70）| 操作 nibble
   （ADD=0x01/MAX/MIN/EQUAL）——与 310P V2 的枚举式（0x02/0x03）互不兼容（见 2.3）；
 - **notify 寄存器宽度 4B**（910B/910_93，其余芯片 8B，:115-118）；
-- **AICPU 任务模型**（平台事实 F 表定案）：AICPU 只做"编排提交 SQE + 轮询排空"，
-  等远端数据用 COND/硬件 wait SQE（不占 AICPU 核），计算在 AICore、搬运是固件
-  SDMA——常态算子秒级完成；
 - **算子级重试与故障恢复**：`PrepareOpRetryHandler` + 翻转 SQE 流回放；跨服务器
   链路异常由 STARS 检出触发重执行；NsRecovery 经 Suspending 通道
   （`kfcControlTransferH2D`）做通信域级恢复。
