@@ -240,6 +240,12 @@ hcclMsgArea"（:69-71）——多核 kernel 下**只有 0 号核写邮箱**，�
 `GetQueueNum()` / `BatchWrite(..., queueID)` 等队列相关入口（:222/336/402）；
 :43 注明在 Atlas A2 训练/推理系列与 910_93 上调用须指定 AICube/AIVector 核。
 
+**证据边界**：本机仅有该接口的**声明头与官方注释**（`adv_api/hccl/hccl.h`）；其引用
+的实现体 `impl/adv_api/detail/hccl/impl/hccl_impl_def.h` 不在安装中（include/impl
+目录不存在，全安装 find 无 `hccl_impl*`）。故"Commit 写 valid+cnt"是权威头字段
+注释（hccl_msg.h:136-137，注释点名 "when Commit"）与服务端源码行为的互证，
+非实现体直读。
+
 API 调用 ↔ 邮箱动作对照与一轮时序：
 
 ```mermaid
