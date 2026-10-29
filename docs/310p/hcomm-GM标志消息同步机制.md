@@ -120,18 +120,21 @@ AddSignalValue(...)    // SetAtomicAdd<int32_t>() + PipeBarrier<PIPE_ALL>()，GM
 **适用卡型**：KFC 框架层，各代通用；310P1/310P3 走 V2 SQE 专列
 （`dispatcher_aicpu.cc:74`）。**这正是 310P 上运行的机制**。
 
-**本机实证（2026-10-29，dev0+dev1 同卡双芯 2-rank 单次 AllReduce，PASS）**：
-`HcclCommInitAll`（单进程多设备通信域）+ INT32 SUM 精确校验，默认模式与
-`HCCL_OP_EXPANSION_MODE=AI_CPU` 两变体均正确。日志证据链：
-`launch_aicpu.cc:264/244 → LoadBinaryFromFile(ccl_kernel.json) →
-RegisterCpuKernel[HcclKernelEntrance, libccl_kernel.so]`（每 rank 一次，线程 552439），
-另有 `TbeVectorReduce Init`（AICore 归约算子）与 ring 算法选择——即 hcomm 设备库
-`libccl_kernel.so` 的 AICPU 入口经 KFC 通道执行（`ccl_kernel.json` 的
-`opKernelLib=KFCKernel`，与本项目 epoch kernel 同通道，见平台事实 F 表），归约计算
-在 AICore，链路逐步握手即 2.3 节机制。实测两条纪律：① `HcclCommInitAll` 前须先
-`aclrtSetDevice`（否则 HCCL_E_RUNTIME=15，内部 rtGetDevice 拿不到当前设备）；
-② 集合通信的提交会阻塞等对端参与，rank 必须各自线程并发出（单线程顺序下发
-~2 分钟后 HCCL_E_TIMEOUT=9）。
+**本机实证（2026-10-29，dev0+dev1 同卡双芯 2-rank 单次 AllReduce，PASS，用例
+[310p_hccl_allreduce](../../../test/integration/310p_hccl_allreduce/README.md)）**：
+host-API 路径为 **HOST 展开**——通信域初始化时装载 TBE 向量归约模块并注册整族
+AICPU kernel（`launch_aicpu.cc → ccl_kernel.json → RegisterCpuKernel`，含
+`RunAicpuRpcSrvLaunchV2_<op>` 每算子入口，**仅注册**）；op 调用时 host 直接把
+`MEMCPY_ASYNC / NOTIFY_RECORD(写对端) / EVENT_WAIT` 与 AICore 归约核
+（`dynamic_add_int32_v51`，`tbe_vector_reduce.cc:259`）排入 op 流、队列引擎按序
+执行——**全程零 AICPU kernel 任务**（任务普查实测；`HCCL_OP_EXPANSION_MODE=AI_CPU`
+旋钮对 host-API 单机路径不生效，两变体任务构成逐项相同）。**本节所述 KFC 邮箱
+机制（RpcSrv/AicpuKfc 服务 + COND SQE）服务的是设备侧高级接口路径**（kernel 内
+`AscendC::Hccl` 融合通信：客户端 kernel 的 core 0 写邮箱，host 不可能当邮箱客户端）
+——注册族即该路径的就绪证据，其客户端为预编译产物，host-API 测试覆盖不到。实测
+纪律：① `HcclCommInitAll` 前须先 `aclrtSetDevice`（否则 HCCL_E_RUNTIME=15）；
+② 提交会阻塞等对端参与，rank 须各自线程并发出（单线程顺序下发 ~2 分钟后
+HCCL_E_TIMEOUT=9）。
 
 **场景**：与本项目双环邮箱**同场景**——设备上两个执行体用 GM 邮箱接力，host 不进
 数据面。hcomm 侧：host 发起集合通信后，客户端算子 kernel 不自己搬数据，而是把
