@@ -245,21 +245,23 @@ core 0 调用），其余核只调 `Wait`（"All cores will invoke Wait"）；�
 :43 注明在 Atlas A2 训练/推理系列与 910_93 上调用须指定 AICube/AIVector 核。
 
 **Prepare 一次调用往邮箱写了什么（逐字段，以 AllReduce 为例）**——目标地址
-`workSpace + commMsg.multiMsg.sendMsgs[q][s]`，**每条 `HcclMsg` 恰 64B（一个缓存行**，
-前 15 个 u32 字 + xorCheck 收尾 = 16 字对齐）：
+`workSpace + commMsg.multiMsg.sendMsgs[q][s]`，**每条 `HcclMsg` 恰 64B（一个缓存行），
+`sizeof(TurnCnt)=64、offsetof(TurnCnt,cnt)=8`——本机 g++ 编译 CANN 头实测**：
+`g++ -I…/asc/include -I…/asc x.cc`（include `adv_api/hccl/internal/hccl_msg.h` 后
+打 sizeof）。前 15 个 u32 字 + xorCheck 收尾 = 16 字对齐：
 
 | 字段 | AllReduce 时的取值 | 服务端怎么消费 |
 |---|---|---|
-| `commType` | `HCCL_CMD_ALLREDUCE`（HcclCMDType 枚举首项，hccl_common.h:25） | 据此分派算子（aicpu_kfc_utils.cc:454 按 commType.msgType 分类处理） |
-| `opType` | `HCCL_REDUCE_SUM/PROD/MAX/MIN` | 决定归约操作 |
-| `sendBuffer/recvBuffer` | 用户 GM 缓冲地址 | 通信的数据源/落点；服务端 dfx 甚至拿它做通信后核对（utils.cc:307 "sendBuffer after comm"） |
+| `commType` | `HCCL_CMD_ALLREDUCE`（HcclCMDType 枚举首项，hccl_common.h:25） | `FormatOpData` 读 `commType.prepareType` 转成 `HcclOpData.opType`（comm_kfc_aicpu_server.cc:23/26，:119 调用后 :122 执行） |
+| `opType` | `HCCL_REDUCE_SUM/PROD/MAX/MIN` | `FormatOpData` → `HcclOpData.reduceOp`（同上 :27） |
+| `sendBuffer/recvBuffer` | 用户 GM 缓冲地址 | 通信的数据源/落点；dfx 打印核对（aicpu_kfc_utils.cc:298-310 PrintApiBufferByMsgPos "sendBuffer after comm"） |
 | `dataCnt` | count | 参与元素数 |
 | `strideCount` | 0（常规）；通信计算融合切分多轮时非 0 | 切分轮间步长 |
-| `addMsg.v0Msg.valid` | `0x5CDF123A` | 非 MASK 视为空槽；消费后复位 `~MASK`（rpc_serverv2.cc:370/396） |
+| `addMsg.v0Msg.valid` | `0x5CDF123A` | 非 MASK 视为空槽；消费后复位 `~MASK`（ReadMsgFromMemory，aicpu_kfc_utils.cc:554-580；rpc_serverv2.cc:370/396 同款检查） |
 | `addMsg.v0Msg.repeatCnt` | 默认 1 | >1 时后续轮缓冲由服务端按步长公式自动推进（hccl.h:63-67） |
 | `addMsg.v0Msg.selfHandleID` | 本次返回的 handleId | 服务端 `handleIdToMsgPos_` 映射句柄↔槽位（comm_kfc_aicpu_server.h:44） |
-| `addMsg.v0Msg.seqNum` | 消息序号 | 小于期望值直接丢弃（ProcessExpectPrepareMsg） |
-| `addMsg.v0Msg.xorCheck` | **前 15 个 u32 字的异或**（UT 桩 GenXorStub 镜像算法） | 校验消息完整性，不符报"data is modified!"（rpc_serverv2.cc:379-384） |
+| `addMsg.v0Msg.seqNum` | 消息序号 | 小于期望值直接丢弃（aicpu_kfc_rpc_serverv2.cc:268-283 ProcessExpectPrepareMsg） |
+| `addMsg.v0Msg.xorCheck` | **除 xorCheck 自身外全部 u32 字的异或**（`AicpuKfcUtils::GenXor`，aicpu_kfc_utils.cc:357-368：循环上界 `sizeof(DataBlock)/4 - 1`） | `ReadMsgFromMemory` 拷贝后重算比对，不符报 "Data is modified" 并返回 HCCL_E_AGAIN（aicpu_kfc_utils.cc:566-577） |
 | 其余 | hcclDataType、p2pSrcDestRankId、everyTurnRsp/everyTurnWait、commDepGroupID/commDepHandleID（默认 -1）、version | 数据类型/点对点对端/每轮等响应/跨通信域依赖/布局版本（v0/v1） |
 
 **handleId 怎么来**：int8 范围 **0..63**（`HCCL_MAX_HANDLE_ID=63`，hccl_msg.h:31，
@@ -633,6 +635,9 @@ hcomm 仓路径 `/home/w00930648/hcomm/`（未注明者均在 `src/legacy/ascend
 | notify 寄存器宽度按卡型（910B/910_93=4B） | platform/task/dispatcher_aicpu.cc:115-118 |
 | 服务端 Wait→数据→Post 编排 | framework/device/aicpu_kfc/decoupler/comm_kfc_aicpu_server.cc:121-123 |
 | 邮箱消费/校验/复位 | framework/device/aicpu_kfc/framework/aicpu_kfc_rpc_serverv2.cc:145-169/268-283/319-396/467-475 |
+| 字段消费（FormatOpData：HcclMsg→HcclOpData） | framework/device/aicpu_kfc/decoupler/comm_kfc_aicpu_server.cc:23-43（:119 调用） |
+| xor 计算与消息消费序列 | framework/device/aicpu_kfc/common/aicpu_kfc_utils.cc:357-368（GenXor）/554-580（ReadMsgFromMemory） |
+| dfx 缓冲打印 | framework/device/aicpu_kfc/common/aicpu_kfc_utils.cc:298-310 |
 | msgPos 游标环回 | framework/device/aicpu_kfc/framework/aicpu_kfc_process.cc:1151 |
 | 队列分片 | framework/device/aicpu_kfc/framework/aicpu_kfc_rpc_serverv2.cc:65 |
 | 链路握手原语（ready/done 配对、Post/Wait） | platform/resource/transport/host/transport_p2p.cc:884-984 |
