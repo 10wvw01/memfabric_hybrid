@@ -317,9 +317,8 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
 
 /* 310P3 ACL 路径 SetAccess 授权描述: MemSetAccess 的 location.id 走驱动系统枚举表
  * (物理设备号), 传 user 逻辑号在 ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不
- * 暴露, 非恒等映射(如 =6,7)时实测授权给未打开的设备, 报 507899(2026-10-28 探针
- * 实测, issue #26); 与 MallocPhysical 的 prop.location.id(进程打开表, user 号)
- * 是两个命名空间, 勿统一两侧取值。 */
+ * 暴露, 非恒等映射(如 =6,7)时授权给未打开的设备, 报 507899; 与 MallocPhysical
+ * 的 prop.location.id(进程打开表, user 号)是两个命名空间, 勿统一两侧取值。 */
 
 static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t rankId)
 {
