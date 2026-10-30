@@ -604,6 +604,24 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
    （例如消费侧需要同时盯多个计数、或想把 AICPU 核让给业务），可评估把"到达
    等待"换成 COND SQE 硬件轮询——配方与 310P V2 兼容性已在本仓证实
    （`aicpu_hccl_sqcq.cc:182-261`，310P 专列可用）；属优化项，当前不必动。
+7. **邮件完整性校验字段（P1 廉价收益）**：hcomm 每条消息带 xorCheck（全消息
+   异或）+ valid 模式（空槽判定），消费侧 `ReadMsgFromMemory` 拷贝即校验。我们的
+   请求邮件可加一个校验字段——507014 类"写到错误地址/读到空请求"故障将从
+   "事后逐单日志分析"变成"消费侧即时检出+拒收"。逐单日志是诊断面，校验字段是
+   契约面，两者互补。
+8. **DFX 常驻化（P1）**：hcomm 的 apiStats（按 CMD 类型的 commit/wait 统计 +
+   snapshots）与 cqeStatus/pollStatus 健康标志，配合 task census（每个任务一条
+   日志）形成快诊断面。我方 result 区已有 consumed/exitReason/逐单日志，可扩：
+   每 epoch 平均/最大单件时延、错误分类计数、健康标志位——serve 长驻场景的
+   分级告警基础。
+9. **错误分类与重放边界（P3）**：hcomm 把校验失败返回 HCCL_E_AGAIN（可重试
+   语义）、用翻转 SQE 标记流回放边界、NsRecovery 做通信域级恢复。我方可对应：
+   邮件校验失败/超时归为瞬态（可丢可重），SQE/doorbell 错误归为致命（退出
+   epoch）；epoch 边界天然是重放边界——将来若加重试，按此分级。
+10. **多池并存时的资源隔离参考**：hcomm 每通信域独立 16MB 工作区 + 每远端
+    rank 独立 stream/notify 四元组；声明式 kernel 注册表（ccl_kernel.json）。
+    我方 launch json（CP1 按文件名 dlopen 缓存）同思路，多池/多流水线并存时
+    按通信域粒度隔离。
 
 ## 6. 引用位置清单
 
