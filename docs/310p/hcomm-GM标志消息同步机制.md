@@ -195,6 +195,20 @@ struct TurnCnt {
 - **队列规模不是写死的**：tiling 配置头 `hccl_tiling_msg.h`（与 `hccl_msg.h` 同
   目录）的 `Mc2InitTilingInner` 带 `queueNum/commBlockNum/devType`（:22-32），
   随 tiling 下发告知邮箱队列规模，服务端按 `GetLocalQueueRange` 认领分片。
+- **多队列何时启用（三个条件）**：① 硬件——本进程占多个 AICPU block
+  （`HcclAicpuUtils::GetBlockNum()` 为 AICPU 平台 API 实测值，上限
+  `MAX_AICPU_NUM_BLOCKS=6`，framework/device/utils/hccl_aicpu_utils.cc:288）；
+  ② host 配置——通信域初始化时 tiling 声明 `totalQueueNum = commBlockNum×queueNum`
+  （aicpu_kfc_rpc_serverv2.cc:38），校验 `≤LOCAL_STREAM_MAX_NUM=40` 且
+  `blockNum ≤ min(6, totalQueueNum)`；queueNum=0 即单队列形态；③ 业务——单通信
+  域内**并发多请求在飞**（融合算子一次 Prepare 多个 handle 不等前一个、多 kernel
+  共享通信域、图模式流水线）。单队列=单消费者=串行；多队列让多 AICPU block
+  并行消费。
+- **分片与投递**：消费侧静态均分（`GetLocalQueueRange`，rpc_serverv2.cc:65-81：
+  `base=total/block`+余数微调，每块只扫自己的段、各自独立 msgPos，**无 work
+  stealing、无跨块原子**）；生产侧按 queueID 定向投递（ADV API 的
+  `BatchWrite(..., queueID)` / `QueueBarrier(queueID)`）。另有跨 block 轮栅栏：
+  原子 threadCount/round 汇合，threadNum=GetBlockNum()（aicpu_kfc_utils.cc:507-517）。
 - 客户端（生产侧，写消息/提交 TurnCnt 的设备 kernel）**源码不在本机任何仓**：
   本机 `cann/hccl` 开源仓（`/home/w00930648/hccl`，gitcode.com/cann/hccl，新一代
   至 Ascend950）确实带设备侧模板（`src/ops/*/template/{ccu,aiv,aicpu}`），但那是
@@ -589,9 +603,13 @@ KVER=28 快照；布局单一事实源 `src/smem/include/device/smem_shm_sdma_la
 
 1. **"数据 SQE 与标志同 SQ FIFO"路线定案**：官方与数据 SQE 同环的 record SQE、
    服务端 Wait→数据→Post 三连，与我方完全同构——这条核心保证无需再动摇。
-2. **多生产者并行的官方答案**：静态分槽（按 rank 固定槽/多 SQ 分片），不是共享环上
-   原子领槽；GM 原子只做 N:1 到达计数（AddSignalValue + sum==期望值）——与我方
-   imm 路由的定位一致，扩展时照此加槽/加队列即可。
+2. **多生产者/多消费者扩展的官方答案**：生产侧静态分槽（按 rank 固定槽/多 SQ
+   分片），从不在共享槽上做原子领槽；GM 原子只做 N:1 到达计数（AddSignalValue +
+   sum==期望值）——与我方 imm 路由的定位一致，扩展时照此加槽/加队列即可。
+   **消费侧对偶**：多 AICPU block 并行消费=按块静态均分队列段（GetLocalQueueRange
+   均分+余数微调，各扫各段、独立游标，无 work stealing）——若我方将来要并行
+   消费，配方是"请求环按核分段/每核一环+定向投递"，而不是共享环上的竞争取件；
+   可预测性优先于峰值吞吐（上限参考：AICPU≤6 block、队列总数≤40）。
 3. **防陈旧/损坏消息三重校验**（valid 掩码 + seqNum 期望值 + xorCheck）值得借鉴：
    我方排 507014 丢件时自建的逐单日志（contract.h:113-132）是同思路的诊断面；
    若未来要把"消费侧拒收"做成契约，可参考这套组合。
