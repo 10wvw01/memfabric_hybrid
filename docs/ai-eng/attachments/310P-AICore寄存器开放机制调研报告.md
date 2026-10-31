@@ -1,6 +1,6 @@
 # 310P AICore 寄存器开放机制调研报告（含 memfabric 六通道寄存器化判定与驱动改动需求）
 
-> **产出方式**：AI（opencode + GLM，model id `gateway/glm-5.3`）在人工提示词驱动下全程产出，2026-10-31。过程记录见[AI协作实录](../AI协作实录-寄存器机制调研.md)。
+> **产出方式**：我与 AI（opencode + GLM）协作产出——提示词设计、方向决策与结论把关由我完成，调研执行与验证由 AI 完成，2026-10-31。过程记录见[协作实录](../AI协作实录-寄存器机制调研.md)。
 > **调研环境**：310P3 ×8（`npu-smi info` 实测），驱动 26.1.0 / Innerversion V100R001C10SPC008B221（`/usr/local/Ascend/driver/version.info` 实测），CANN 9.1.0。
 > **调研对象**：`~/pypto`（framework 副本为主，experiments/runtime 为孪生副本）、`~/driver`（wgm-310p 分支）、`~/memfabric_hybrid`。
 > **证据标注**：【实测】= 本机一手验证；【源码】= 源码逐行读到；【推断】= 基于证据推断，未验证。
