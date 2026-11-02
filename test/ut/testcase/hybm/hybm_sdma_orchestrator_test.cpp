@@ -36,10 +36,6 @@
 
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 引擎子命名空间
-namespace {     // 匿名命名空间(用例私有常量)
-/* 工作区槽数上限(prep 头文件与设备头文件一致性由布局用例守护) */
-constexpr uint32_t SDMA_ORCH_WS_SLOTS = 64;
-} // namespace
 
 /* 用例 1: Acquire 在资源缺失环境(UT stub)必然失败, 且失败后状态干净可重试 */
 TEST(SdmaOrchestratorTest, AcquireFailsCleanlyAndRetriable)
@@ -65,40 +61,57 @@ TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
     EXPECT_NE(hybm_sdma_get_info(nullptr), BM_OK); /* 出参 null 拒绝 */
 }
 
-/* 用例 3: 双头布局锁(hybm 契约与 smem 设备头镜像一致; 违反即布局回归) */
+/* 用例 3: 双头布局锁(hybm 契约与 smem 设备头镜像一致; 违反即布局回归)
+ * v29 4-rank 化: 保留区 48KB→192KB, 请求环/完成戳/暂存按对端 ×3, 到达环 per-peer ×3;
+ * 邮件像经暂存由 SQE ⓪ 投递(AICPU 对对端零直写——跨卡直写实测不返回) */
 TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 {
     /* 布局头钉死值(单一事实源; 漂移即回归) */
-    EXPECT_EQ(SMEM_SHM_SDMA_RESERVED, 48UL * 1024UL);
+    EXPECT_EQ(SMEM_SHM_SDMA_RESERVED, 192UL * 1024UL);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING, 0x0000U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL, 0x0800U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD, 0x0840U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET, 0x0880U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_STAMP, 0x0A80U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_MAIL, 0x2A80U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_HEAD, 0xAA80U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE, 0xAB00U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING_STRIDE, 0x800U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL, 0x1800U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD, 0x18C0U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_CURSOR_STRIDE, 0x40U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET, 0x1980U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET_SLOTS, 64U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET_STRIDE, 0x200U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE, 0x1F80U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE_SLOTS, 512U);
-    /* 布局不变式: 区块不重叠且落在保留区内 */
-    EXPECT_GE(SMEM_SHM_SDMA_RS_REQ_TAIL, SMEM_SHM_SDMA_RS_REQ_RING + 32U * SDMA_ORCH_WS_SLOTS); // 游标不压环
-    EXPECT_GT(SMEM_SHM_SDMA_RS_QUIET, SMEM_SHM_SDMA_RS_REQ_HEAD);                               // 戳不压游标
-    EXPECT_GE(SMEM_SHM_SDMA_RS_ARR_STAMP, SMEM_SHM_SDMA_RS_QUIET + 8U * 64U);                  // 到达戳不压完成戳(同写者相邻合法)
-    EXPECT_GE(SMEM_SHM_SDMA_RS_ARR_MAIL, SMEM_SHM_SDMA_RS_ARR_STAMP + 8U * 1024U);              // 邮件不压戳
-    EXPECT_LE(SMEM_SHM_SDMA_RS_ARR_HEAD + 8U, SMEM_SHM_SDMA_RESERVED);                          // 全落在 48KB 内
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE_STRIDE, 0x4000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_RINGS, 0xDF80U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_STAMP, 0x0000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_MAIL, 0x2000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_HEAD, 0xA000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 1024U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_STRIDE, 0xA040U);
+    EXPECT_EQ(SMEM_SHM_SDMA_MAX_RANKS, 4U);
+    EXPECT_EQ(SMEM_SHM_SDMA_MAX_PEERS, 3U);
+    /* 布局不变式: 本端三组数组各自 3 份完整覆盖且相互不压(数组首尾相接恒等式) */
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING + 3U * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE, SMEM_SHM_SDMA_RS_REQ_TAIL);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL + 3U * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, SMEM_SHM_SDMA_RS_REQ_HEAD);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD + 3U * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, SMEM_SHM_SDMA_RS_QUIET);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET + 3U * SMEM_SHM_SDMA_RS_QUIET_STRIDE, SMEM_SHM_SDMA_RS_STAGE);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE + 3U * SMEM_SHM_SDMA_RS_STAGE_STRIDE, SMEM_SHM_SDMA_RS_PEER_RINGS);
+    /* 到达环: 环内区块不重叠 + 全部落保留区内(含最深一环的游标) */
+    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_MAIL, SMEM_SHM_SDMA_RS_PEER_STAMP + 8U * 1024U);            // 邮件不压戳
+    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_HEAD, SMEM_SHM_SDMA_RS_PEER_MAIL + 32U * 1024U);            // 游标不压邮件
+    EXPECT_LE(SMEM_SHM_SDMA_RS_PEER_RINGS + SMEM_SHM_SDMA_MAX_PEERS * SMEM_SHM_SDMA_RS_PEER_STRIDE,
+              SMEM_SHM_SDMA_RESERVED);                                                          // 全落在 192KB 内
     /* v23 缓存行分隔纪律(共行回写竞态=并发丢件挂死类根因) */
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL & 0x3FU, 0U);  // reqTail 独占行首
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD & 0x3FU, 0U);  // reqHead 独占行首
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET & 0x3FU, 0U);     // 完成戳区行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_STAMP & 0x3FU, 0U); // 到达戳区行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_MAIL & 0x3FU, 0U);  // 到达邮件区行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_HEAD & 0x3FU, 0U);  // arrHead 独占行首
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE & 0x3FU, 0U);     // 暂存区行对齐
-    EXPECT_GT(SMEM_SHM_SDMA_RS_STAGE, SMEM_SHM_SDMA_RS_ARR_HEAD);                       // 暂存不压游标
-    EXPECT_LE(SMEM_SHM_SDMA_RS_STAGE + 8U * SMEM_SHM_SDMA_RS_STAGE_SLOTS, SMEM_SHM_SDMA_RESERVED); // 落在 48KB 内
-    EXPECT_GT(SMEM_SHM_SDMA_RS_STAGE_SLOTS, 1024U / 3U); // 暂存槽数 > 在途邮件上界(SQ 环深/3)
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL & 0x3FU, 0U);   // reqTail 数组行对齐
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD & 0x3FU, 0U);   // reqHead 数组行对齐
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET & 0x3FU, 0U);      // 完成戳数组行对齐
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE & 0x3FU, 0U);      // 暂存数组行对齐
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_RINGS & 0x3FU, 0U); // 到达环数组行对齐
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_STRIDE & 0x3FU, 0U); // 环间距行对齐(各环区块互不共行)
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_MAIL & 0x3FU, 0U);  // 邮件区行对齐
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_HEAD & 0x3FU, 0U);  // 环内游标独占行首
+    EXPECT_GT(SMEM_SHM_SDMA_RS_STAGE_SLOTS, 1024U / 3U); // 暂存槽数 > 单环在途邮件上界(SQ 环深/3)
     /* 环深度契约 */
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);   // 请求环 64
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_ARR_SLOTS, 1024U); // 到达环 1024
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);        // 每对端请求环 64
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 1024U);      // 每对端到达环 1024
     /* 工作区布局(result/ovf/stop) */
     EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);                       // ovf 在 result 后
     EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U);                   // stop 不压 ovf
@@ -112,17 +125,20 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 /* 用例 3b: 契约不变式(KFCKernel/type 5 不受设备侧 28s 强制结束约束; v11: 按时长分轮+主机报时) */
 TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 {
-    /* 参数布局锁: rsv0→epochBudgetS 原位替换, 72B 总尺寸不变(旧 host 传 0 走默认 15s) */
-    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 72U);
+    /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部追加 rank/rsv/poolBaseGva), 80B */
+    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 80U);
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U); // 第 4 个 u32 槽位
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);       // 保留区基址(定位原点)
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, rank), 64U);          // v29 追加: 本端 rank
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, poolBaseGva), 80U - 8U); // v29 追加: 池窗口基址
     /* 永不退出的专用值: 全 F(不判报时/无循环上限, 跑到停止/错误); 与默认值 0 语义区分 */
     EXPECT_EQ(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, 0xFFFFFFFFu);
     EXPECT_NE(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S);
     /* launch attr 超时: 必须 0(永不超时)——有限值到达即把任务标记为 507017 超时,
      * StopEpoch 的 sync 提前返回不等 kernel 退出; attr 缺省为默认超时 ≈6.4s 同样误杀 */
     EXPECT_EQ(HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S, 0U);
-    /* 契约版本单调递增(部署链按文件名缓存刷新, 禁止回退) */
-    EXPECT_GE(HYBM_SDMA_ORCH_KVER, 28U);
+    /* 契约版本单调递增(部署链按文件名缓存刷新, 禁止回退); v30=邮件像 SQE 投递 */
+    EXPECT_GE(HYBM_SDMA_ORCH_KVER, 30U);
 }
 
 /* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; 仅存 host API) */

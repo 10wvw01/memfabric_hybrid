@@ -70,8 +70,11 @@ public:
     /* 引用计数 +1; 首次进入执行传输准备(CP 流→工作区→kernel 含自动部署) */
     Result Acquire(uint16_t devId);
 
-    /* 段尾保留区初始化 + epoch 参数装配 + 监督线程启动(实体在段就绪后调用, 一次绑定) */
-    Result ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize);
+    /* 段尾保留区初始化 + epoch 参数装配 + 监督线程启动(实体在段就绪后调用, 一次绑定)
+     * v29 4-rank 化: ownRank/poolBaseGva 供 epoch kernel 做对端到达环路由
+     * (peerRank = (dstSeg - poolBaseGva)/symSize, 环下标按收发双方 rank 压缩) */
+    Result ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
+                         uint64_t poolBaseGva);
 
     /* 引用计数 -1; 归零停止监督线程并逆序清理 */
     void Release();

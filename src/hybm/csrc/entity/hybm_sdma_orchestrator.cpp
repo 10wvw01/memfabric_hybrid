@@ -49,7 +49,7 @@ constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费
 /* CWD 缺省 json 名随 KVER 生成(主构建经 CMake 注入 MF_SDMA_ORCH_KVER, 与设备侧文件名同步;
  * 独立编译场景无注入时用兜底值, 须与 hybm_kernel/CMakeLists 的 KVER 手动同步) */
 #ifndef MF_SDMA_ORCH_KVER
-#define MF_SDMA_ORCH_KVER 28
+#define MF_SDMA_ORCH_KVER 30
 #endif
 #define HYBM_SDMA_KVER_STR_(x) #x
 #define HYBM_SDMA_KVER_STR(x) HYBM_SDMA_KVER_STR_(x)
@@ -549,7 +549,8 @@ Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint6
     return BM_ERROR;
 }
 
-Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize)
+Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
+                                       uint64_t poolBaseGva)
 {
     std::lock_guard<std::mutex> guard(mutex_);
     if (configured_) { /* 约束: 双环一次绑定, 每进程单 SDMA 池 */
@@ -558,6 +559,16 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     }
     if (symSize == 0 || (symSize & (symSize - 1)) != 0) { // 2 的幂(对端段基址掩码算术依赖)
         BM_LOG_ERROR("symSize not power of two, symSize: " << symSize);
+        return BM_INVALID_PARAM;
+    }
+    if (ownRank >= SMEM_SHM_SDMA_MAX_RANKS) { // 到达环按 MAX_RANKS-1 设计, 超限无环可路由
+        BM_LOG_ERROR("orch rank exceeds layout limit, rank: " << ownRank
+                                                              << " maxRanks: " << SMEM_SHM_SDMA_MAX_RANKS);
+        return BM_INVALID_PARAM;
+    }
+    if (poolBaseGva == 0 || ownSegGva < poolBaseGva) { // 池窗口基址(对端 rank 路由原点)
+        BM_LOG_ERROR("orch pool base invalid, poolBaseGva: 0x" << std::hex << poolBaseGva << std::dec
+                                                               << " ownSegGva: 0x" << std::hex << ownSegGva);
         return BM_INVALID_PARAM;
     }
     const uint64_t resBase = ownSegGva + physSize - SMEM_SHM_SDMA_RESERVED;
@@ -575,8 +586,7 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     epochParam_.streamId = streamId_;
     const uint32_t budgetS = ResolveEpochBudgetS(); /* 每轮时长(默认 15s)或永不退出的专用值(诊断) */
     epochParam_.epochBudgetS = budgetS;
-    epochParam_.reqBase = resBase + SMEM_SHM_SDMA_RS_REQ_RING;
-    epochParam_.quietBase = resBase + SMEM_SHM_SDMA_RS_QUIET;
+    epochParam_.resBase = resBase; /* 本端保留区基址(v29: 三请求环/完成戳/暂存均由此定位) */
     const uint64_t wsBase = workspace_.load();
     /* 停止标志/overflow/结果区放工作区而非段内: 销毁序安全(段先销毁也不影响停止语义) */
     epochParam_.stopAddr = wsBase + HYBM_SDMA_ORCH_WS_STOP_OFF;
@@ -584,6 +594,9 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     epochParam_.resultAddr = wsBase + HYBM_SDMA_ORCH_WS_RESULT_OFF;
     epochParam_.symSize = symSize;
     epochParam_.physSize = physSize;
+    epochParam_.rank = ownRank;             /* v29: 请求环/到达环路由(本端视角) */
+    epochParam_.rsv = 0;                   /* 填充显式置 0 */
+    epochParam_.poolBaseGva = poolBaseGva; /* v29: dstSeg → 目的 rank 的换算原点(路由复核) */
     /* 首轮内联下发: 失败立即报错(池创建失败, 调用方可重试)——监督线程只负责后续重拉,
      * 不得吞掉首轮失败造成池看似就绪实则无消费者的静默半死 */
     ret = DlAclApi::AclrtCreateStream(&epochStream_);
@@ -614,8 +627,10 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     BM_LOG_INFO("sdma orch configured, devId: " << devId_ << " epochBudgetS: "
               << (budgetS == HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT ? std::string("resident")
                                                                    : std::to_string(budgetS))
-              << " reqBase: 0x" << std::hex << epochParam_.reqBase
-              << " arrivalDepth: " << SMEM_SHM_SDMA_RS_ARR_SLOTS);
+              << " resBase: 0x" << std::hex << epochParam_.resBase << " rank: " << std::dec
+              << epochParam_.rank << " poolBaseGva: 0x" << std::hex << epochParam_.poolBaseGva
+              << " peerRings: " << SMEM_SHM_SDMA_MAX_PEERS
+              << " arrivalDepth: " << SMEM_SHM_SDMA_RS_PEER_SLOTS);
     return BM_OK;
 }
 

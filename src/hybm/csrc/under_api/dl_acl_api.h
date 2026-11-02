@@ -171,6 +171,7 @@ using rtEnableP2PFunc = int32_t (*)(uint32_t, uint32_t, uint32_t);
 using rtDisableP2PFunc = int32_t (*)(uint32_t, uint32_t);
 using rtGetLogicDevIdByUserDevIdFunc = int32_t (*)(const int32_t, int32_t *const);
 using aclrtGetPhyDevIdByLogicDevIdFunc = int32_t (*)(const int32_t, int32_t *const);
+using aclrtGetLogicDevIdByPhyDevIdFunc = int32_t (*)(const int32_t, int32_t *const);
 using rtIpcOpenMemoryFunc = int32_t (*)(void **, const char *);
 using rtIpcCloseMemoryFunc = int32_t (*)(const void *);
 using aclrtIpcMemGetExportKeyFunc = int32_t (*)(void *, uint64_t, char *, uint64_t, uint64_t);
@@ -706,6 +707,16 @@ public:
         return pAclrtGetPhyDevIdByLogicDevId(logicDevId, phyDevId);
     }
 
+    /* 物理设备号 → 本进程逻辑设备号(ASCEND_RT_VISIBLE_DEVICES 重映射下两者不同;
+     * EnablePeerAccess 等接口以本进程逻辑号为入参, 传物理号会误指或越界) */
+    static inline Result AclrtGetLogicDevIdByPhyDevId(const int32_t phyDevId, int32_t *const logicDevId)
+    {
+        if (pAclrtGetLogicDevIdByPhyDevId == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtGetLogicDevIdByPhyDevId(phyDevId, logicDevId);
+    }
+
     static inline Result RtMemcpyAsync(void *dst, size_t destMax, const void *src, size_t count, uint32_t kind,
                                        void *stream)
     {
@@ -858,6 +869,7 @@ private:
     static rtMemcpyAsyncFunc pRtMemcpyAsync;
     static rtGetLogicDevIdByUserDevIdFunc pRtGetLogicDevIdByUserDevId;
     static aclrtGetPhyDevIdByLogicDevIdFunc pAclrtGetPhyDevIdByLogicDevId;
+    static aclrtGetLogicDevIdByPhyDevIdFunc pAclrtGetLogicDevIdByPhyDevId;
 
     static aclrtMallocPhysicalFunc pAclrtMallocPhysical;
     static aclrtFreePhysicalFunc pAclrtFreePhysical;
