@@ -460,18 +460,20 @@ self.m_store.put(keys, addrs, sizes)
 
 ### 3.8 对测试的影响：双写导致的隔离难题
 
-由于「MemCache hit → vLLM 本地也被更新」（场景一），如果不在 hit 请求前清除 vLLM 本地缓存：
+由于「MemCache hit → vLLM 本地也被更新」（场景一），如果 vLLM 本地缓存开启且不在 hit 请求前清除：
 
 ```
 第 1 次请求（miss）  → prefill + 双写（vLLM + MemCache）
 第 2 次请求（同一 prompt）→ vLLM 本地命中 → Lookup 跳过 → 无法验证 MemCache 贡献
 ```
 
-解决方法：在 hit 请求前调 `POST /reset_prefix_cache`（`block_pool.py:761`）清空 vLLM 本地字典，强制走 MemCache connector：
+**当前测试方案**：使用 `--no-enable-prefix-caching` + `--kv-transfer-config` 启动 vLLM。vLLM 的 block hasher 仍然创建（`engine/core.py:214`：`enable_prefix_caching or kv_connector is not None`），`request.block_hashes` 照常生成，MemCache connector 的 lookup/save 正常工作。但 vLLM 本地 prefix cache 被永久关闭：
 
 ```
-第 2 次请求前 reset → vLLM 本地 miss → 走 MemCache → hit → TTFT 降幅来自 MemCache
+vLLM 本地始终 miss → 每条请求走 MemCache connector → hit/miss 完全由 MemCache 决定
 ```
+
+> **注意**：关闭 prefix caching 后，hybrid 模型的 attention block_size=640、mamba block_size=8192，需传 `--prefix-match-unit 128`（GCD(640,8192)）解决 connector 的 `hash_block_size` 整除性断言。
 
 ### 3.9 MemCache 侧的额外跳过逻辑
 
@@ -540,7 +542,9 @@ BlockPool 自带 LRU eviction：
 - 新请求分配时若空闲块不足，从 eviction 候选尾部淘汰（LRU）。
 - 与 MemCache 不同，vLLM 本地缓存**无 watermark**，按需淘汰。
 
-### 4.7 reset_prefix_cache
+### 4.7 reset_prefix_cache（旧方案，已弃用）
+
+> **注意**：当前测试方案使用 `--no-enable-prefix-caching` + `--kv-transfer-config` 永久关闭 vLLM 本地缓存，不再需要 `reset_prefix_cache`。以下内容仅作为历史参考保留。
 
 `block_pool.py:761` `reset_prefix_cache` 只在 EngineCore 进程内执行：
 
@@ -559,15 +563,19 @@ for block in self.blocks:
 
 **只清 EngineCore 进程的字典**，不通知 worker 进程。worker NPU 上的 KV tensor 数据仍在，但下次该 `block_id` 被新请求复用时直接覆盖写入。
 
-### 4.8 reset 失败的根因
+### 4.8 reset 失败的根因（旧方案问题）
 
 `block_pool.py:770-777` 的前置条件：所有 block 必须 `ref_cnt == 0`（除 null block）。如果有 in-flight 请求占用 block，`num_used_blocks != 1` 直接返回 `False`。
 
 `scheduler.py:2336` `reset_running_requests=True` 会先把所有 running 请求 preempt 到 waiting 队列把 ref_cnt 降到 0，再 reset。`scheduler.py:2363` 进一步断言：如果 preempt 后仍失败，是"running requests waiting for remote KV transfer"（`scheduler.py:2367-2368`）——即有请求卡在等 MemCache 异步加载。
 
-### 4.9 reset_external 对 MemCache 无效
+> 这是旧方案（`reset_prefix_cache`）的核心缺陷：TP=4 下并发请求更多，in-flight 占用 block 概率更高，reset 更容易失败。新方案（`--no-enable-prefix-caching`）从根本上避免了此问题。
+
+### 4.9 reset_external 对 MemCache 无效（旧方案参考）
 
 `AscendStoreConnector` 未覆写 `reset_cache()`，继承基类空实现。`scheduler.py:2389` 调 `self.connector.reset_cache()` 实际是 no-op。如需清 MemCache 数据，需重启 vLLM + MetaService。
+
+> 新方案下 vLLM 本地缓存始终为空，无需 reset；MemCache 数据清除仍需重启 vLLM + MetaService。
 
 ---
 
@@ -697,13 +705,17 @@ const size_t numEvictObjs =
 
 **源码核实**：grep `/vllm-workspace/vllm/vllm/v1/worker/` 确认无任何 `BlockPool`/`cached_block_hash_to_block`/`BlockHashToBlockMap` 引用。BlockPool / `cached_block_hash_to_block` 字典只在 EngineCore（scheduler）进程**唯一一份**（`block_pool.py:184`，`kv_cache_coordinator.py:90`），worker 进程完全没有副本。
 
-### 8.2 修正二：TP=4 reset 效果弱的原因
+### 8.2 修正二：TP=4 reset 效果弱的原因（旧方案，已弃用）
+
+> **注意**：当前测试方案使用 `--no-enable-prefix-caching` 永久关闭 vLLM 本地缓存，以下 reset 相关问题不再存在。
 
 **错误说法**：TP=4 下 `reset_prefix_cache` 清除效果弱于 TP=2 是因为「vLLM 本地缓存按 TP rank 各自维护，更多 rank 的本地 BlockPool 副本状态需要同步」。
 
 **源码核实**：BlockPool 只有一份，不存在「多 rank 副本同步」问题。`reset_prefix_cache` 清除效果弱的真正原因是 `block_pool.py:770-777` 的前置条件：所有 block 必须 `ref_cnt == 0`（除 null block）。如果有 in-flight 请求占用 block，`num_used_blocks != 1` 直接返回 `False`。TP=4 下并发请求更多，in-flight 占用 block 的概率更高，导致 reset 更容易失败。
 
-### 8.3 修正三：reset_prefix_cache 的前置条件
+### 8.3 修正三：reset_prefix_cache 的前置条件（旧方案，已弃用）
+
+> **注意**：当前测试方案使用 `--no-enable-prefix-caching` 永久关闭 vLLM 本地缓存，以下 reset 相关问题不再存在。
 
 **注意**：`POST /reset_prefix_cache` 是同步操作（直接赋空字典，`block_pool.py:780`），但有前置条件检查：`num_used_blocks != 1` 时返回 `False`（`block_pool.py:770-778`）。若 reset 失败，HTTP 仍返回 200，但实际字典未清空。测试代码应检查返回体中的 `reset_successful` 字段，不能仅依赖 HTTP status code。
 
@@ -736,24 +748,27 @@ const size_t numEvictObjs =
 | `v1/core/block_pool.py` | `:143` `BlockPool` | 唯一一份 block_hash→block 字典 |
 | `v1/core/block_pool.py` | `:225` `cache_full_blocks` | prefill 后缓存 block（插入字典） |
 | `v1/core/block_pool.py` | `:607` `_insert_block_hash` | 实际插入字典操作 |
-| `v1/core/block_pool.py` | `:761` `reset_prefix_cache` | 清空本地缓存字典 |
+| `v1/core/block_pool.py` | `:761` `reset_prefix_cache` | 清空本地缓存字典（旧方案，已弃用） |
 | `v1/core/kv_cache_coordinator.py` | `:90` `BlockPool(...)` | 创建 BlockPool |
 | `v1/core/kv_cache_coordinator.py` | `:192` `allocate_new_computed_blocks` | 分配 ext_comp block |
 | `v1/core/single_type_kv_cache_manager.py` | `:282` `allocate_external_computed_blocks` | 为外部 token 分配新 block |
 | `v1/core/single_type_kv_cache_manager.py` | `:403` `cache_blocks` | 触发 block 缓存 |
-| `v1/core/kv_cache_manager.py` | `:207` `get_computed_blocks` | 查本地 prefix cache |
+| `v1/core/kv_cache_manager.py` | `:207` `get_computed_blocks` | 查本地 prefix cache（关闭时直接返回空） |
 | `v1/core/kv_cache_manager.py` | `:283` `allocate_slots` | 分配 slot（含 ext_comp 处理） |
 | `v1/core/kv_cache_manager.py` | `:498-502` | cache_blocks 调用（含 ext_comp token） |
 | `v1/core/sched/scheduler.py` | `:269` `KVCacheManager(...)` | 创建 KVCacheManager |
 | `v1/core/sched/scheduler.py` | `:753-790` | 本地 + 外部命中查询流程 |
 | `v1/core/sched/scheduler.py` | `:935-947` | allocate_slots 调用 |
-| `v1/core/sched/scheduler.py` | `:2326` `reset_prefix_cache` | scheduler 侧 reset 入口 |
+| `v1/core/sched/scheduler.py` | `:2326` `reset_prefix_cache` | scheduler 侧 reset 入口（旧方案，已弃用） |
 | `v1/core/sched/scheduler.py` | `:2543` `_update_waiting_for_remote_kv` | 异步加载完成后补 cache |
+| `v1/engine/core.py` | `:214` `request_block_hasher` | connector 存在时创建 hasher（`enable_prefix_caching or kv_connector`） |
 | `v1/engine/core.py` | `:153` `Scheduler(...)` | EngineCore 创建 Scheduler |
 | `v1/engine/core.py` | `:995` `EngineCoreProc` | EngineCore 进程封装 |
 | `v1/engine/core_client.py` | `:467` `MPClient` | 多进程客户端 |
 | `v1/engine/utils.py` | `:164` `context.Process(...)` | spawn EngineCore 进程 |
 | `v1/worker/worker.py` | `:434` `torch.npu.set_device` | worker 绑定单卡 |
+| `model_executor/models/config.py` | `:557-559` `MambaModelConfig` | mamba_cache_mode 设置（已适配 connector） |
+| `config/vllm.py` | `:2300-2303` `validate_mamba_block_size` | mamba_block_size 校验（已适配 connector） |
 
 ### MemCache 侧
 

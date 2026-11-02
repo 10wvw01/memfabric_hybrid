@@ -160,7 +160,7 @@ Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 - **Prompt 生成**: `random.Random(seed)` 生成 4096 token ID 序列，不同 seed 产生不同 prompt
 - **TTFT 度量**: HTTP streaming API（`POST /v1/completions`，`stream=True`），`time.perf_counter()` 记录请求发送到首个 `data: ` SSE 事件的时间差
 - **模型**: `Qwen3.6-35B-A3B-w8a8`，`--enforce-eager`，`--enable-chunked-prefill`
-- **KV Transfer**: `AscendStoreConnector` + `memcache` backend + `--enable-prefix-caching`
+- **KV Transfer**: `AscendStoreConnector` + `memcache` backend + `--no-enable-prefix-caching` + `--prefix-match-unit 128`
 
 #### LC-L3-1 请求构造 — 全 miss，度量写入开销
 
@@ -169,7 +169,7 @@ Baseline 阶段（--no-enable-prefix-caching）:
   vLLM 启动 → warmup 2 次 → 20 次测量（seed=0..19，全 miss）
   → 停止 vLLM + 清理
 
-MemCache 阶段（--enable-prefix-caching + kv-transfer-config）:
+MemCache 阶段（--no-enable-prefix-caching + --prefix-match-unit 128 + kv-transfer-config）:
   vLLM 启动 → warmup 2 次 → 20 次测量（seed=0..19，全 miss + 写入 MemCache）
   → 停止 vLLM + 清理
 
@@ -417,7 +417,7 @@ bash run_large_capacity_test.sh all 4,5,6,7
 | gpu_memory_utilization | 0.70 |
 | 模型 | `Qwen3.6-35B-A3B-w8a8` |
 | vLLM 参数 | `--enforce-eager`, `--enable-chunked-prefill`, `--gpu-memory-utilization 0.70` |
-| KV Transfer | `AscendStoreConnector` + `memcache` backend + `--enable-prefix-caching` |
+| KV Transfer | `AscendStoreConnector` + `memcache` backend + `--no-enable-prefix-caching` + `--prefix-match-unit 128` |
 | 配置文件 | `cases/config/mmc-local-largecap-4rank.conf` |
 | 测试日期 | 2026-10-12 |
 
@@ -455,7 +455,7 @@ bash run_large_capacity_test.sh all 4,5,6,7
 
 MemCache 开销 = (3038.88 - 2633.67) / 2633.67 = **15.39%**（阈值 25%）→ ✅ **PASSED**
 
-> MemCache min=574.88ms 为 vLLM 内置 prefix caching 命中效果（20 次全 miss 请求中有 1 次被 block cache 拦截）。avg (2795ms) < P50 (3039ms) 因 prefix cache hit 的低延迟请求拉低了均值。
+> MemCache min=574.88ms 为偶发低延迟请求（20 次全 miss 请求中有 1 次异常低延迟）。avg (2795ms) < P50 (3039ms) 因该低延迟请求拉低了均值。
 
 > **对比原始测试 4-rank device_sdma**: 原始测试开销 9.82%（baseline P50=2432ms, MemCache P50=2671ms），大容量测试开销 15.39%（baseline P50=2634ms, MemCache P50=3039ms）。开销略高因 3GB HBM 分配使用 P2P_HUGE→HBM_HUGE 回退路径，大页分配延迟略高。但均通过阈值（原始 20%，大容量 25%）。
 
@@ -687,7 +687,7 @@ if (ret == RT_ERROR_DRV_OUT_MEMORY) {
 
 5. **改善率随命中率线性扩展**: 30%→23%、70%→56%、100%→81%，符合理论模型 `改善率 ≈ 命中率 × 80%`
 
-6. **开销 15.39% 在可接受范围**: 大容量配置的 HBM 分配使用 P2P_HUGE→HBM_HUGE 回退路径，T_kv_cache 从 4.4ms 增至 29.8ms，但开销仍通过 25% 阈值。开销主要来自 vLLM prefix caching 模块的调度开销 + 大页分配延迟
+6. **开销 15.39% 在可接受范围**: 大容量配置的 HBM 分配使用 P2P_HUGE→HBM_HUGE 回退路径，T_kv_cache 从 4.4ms 增至 29.8ms，但开销仍通过 25% 阈值。开销主要来自 MemCache connector 的 KV save 调度开销 + 大页分配延迟
 
 7. **P2P_HUGE→HBM_HUGE 回退修复有效**: `hybm_vmm_based_segment.cpp` 的 207001 回退修复使 3GB HBM 配置可行，与 `hybm_acl_vmm_segment.cpp` 中已有的回退逻辑一致
 

@@ -7,3 +7,6 @@ __pycache__/
 # run_test.sh --protocol 生成的协议切换临时配置
 .mmc-local-integration-*.conf
 .l3_*.conf
+
+# vLLM NPU 编译图融合结果（运行时产物）
+fusion_result.json

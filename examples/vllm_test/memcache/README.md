@@ -25,8 +25,8 @@ ttft_test/
 │   └── python/memcache/
 │       ├── workload/                        # Layer 2: prefill TTFT（6 个核心场景）
 │       ├── largecap/                        # 大容量测试: HBM→DRAM eviction + rewarm（5 场景）+ eviction repro（2 场景）
-│       └── integration/                      # Layer 3: 统一测试文件 vllm_ttft_test.py
-│           └── vllm_ttft_test.py            # 7 个测试函数：3.7/3.8/3.9 + 4rank 变体 + throughput bench
+│       └── integration/                      # 统一测试文件 vllm_integration_test.py
+│           └── vllm_integration_test.py     # 6 个测试函数：全 miss 基准 + 50% 命中 + 100% 命中 + 4rank 变体
 ├── aux_scripts/             # 辅助脚本（环境清理、故障复现）
 │   ├── clean_stale_env.sh
 │   ├── repro_207001.c / repro_207001_run.sh
@@ -246,24 +246,26 @@ vLLM 开启 `--enable-prefix-caching` 时有自带的 GPU 驻留 block-level pre
 
 读取时 vLLM **优先查本地**：本地命中则直接用 GPU block，跳过 MemCache connector。若不排除本地缓存，hit 测试的 TTFT 降幅无法区分是 vLLM 本地缓存还是 MemCache 的贡献。
 
-#### 排除手段：`reset_local_prefix_cache()`
+#### 排除手段：`--no-enable-prefix-caching` + `--kv-transfer-config`
 
-测试在 hit 请求前调用 `POST /reset_prefix_cache`（vLLM dev API，通过 `VLLM_SERVER_DEV_MODE=1` 启用），**只清除 vLLM 本地 hash→block 映射字典，不碰 MemCache 数据**。该清除是**同步内存操作**（直接赋空字典），HTTP 响应返回时即已完成。
+测试在 MemCache 模式下使用 `--no-enable-prefix-caching` + `--kv-transfer-config` 启动 vLLM。vLLM 的 block hasher 仍然创建（`v1/engine/core.py:214`：`enable_prefix_caching or kv_connector is not None`），因此 `request.block_hashes` 照常生成，MemCache connector 的 lookup/save 正常工作。但 vLLM 本地 prefix cache 被永久关闭：
 
-```
-清除前：vLLM 本地命中 → 跳过 connector → 无法验证 MemCache 效果
-清除后：vLLM 本地 miss → 回落到 MemCache connector → 可度量 MemCache 贡献
-```
+- `get_computed_blocks` 始终返回 `(empty, 0, 0)`（`v1/core/kv_cache_manager.py:228`），每条请求都走 connector lookup
+- 无需 `VLLM_SERVER_DEV_MODE=1` 或 `POST /reset_prefix_cache`
+- 无 reset 失败风险（`v1/core/block_pool.py:770` 的 `num_used_blocks != 1` 前置条件问题）
+- `local_hit_rate` 始终为 0%，`external_hit_rate` 直接反映 MemCache 贡献
 
-各测试用例的调用方式：
+> **注意**：关闭 prefix caching 后，hybrid 模型（如 Qwen3.5）的 attention block_size=640、mamba block_size=8192，AscendStoreConnector 的 `pool_worker.py:171` 断言 `group_block_size % hash_block_size == 0` 会因 `8192 % 640 ≠ 0` 失败。需显式传 `--prefix-match-unit 128`（GCD(640, 8192)）解决。
+
+各测试用例的隔离方式：
 
 | 测试 | 隔离方法 |
 |------|---------|
-| L3-1（开销对比） | Baseline 用 `--no-enable-prefix-caching` 完全禁用；MemCache 模式全 miss（unique prompts），不依赖 hit 隔离 |
-| L3-2（100% hit） | 每对请求之间调 `reset_local_prefix_cache()`，强制 hit 走 MemCache |
-| L3-3（30%/50% hit） | pre-populate 后调 `reset_local_prefix_cache()`，混合请求中 hit 部分走 MemCache |
-| LC-L3-2（大容量 hit） | 同 L3-2 模式，40-key pre-populate + reset |
-| LC-L3-3（eviction 混合） | pre-populate 30 keys 后 reset，混合 30%/70% hit |
+| L3-1（开销对比） | Baseline 和 MemCache 模式均用 `--no-enable-prefix-caching`；MemCache 模式全 miss（unique prompts），不依赖 hit 隔离 |
+| L3-2（100% hit） | `--no-enable-prefix-caching` + connector，每条请求走 MemCache lookup；miss 后 sleep 1s 等待 async save，再重发同一 prompt |
+| L3-3（30%/50% hit） | 同上；pre-populate 后 sleep 1s，混合请求中 hit 部分走 MemCache |
+| LC-L3-2（大容量 hit） | 同 L3-2 模式，40-key pre-populate |
+| LC-L3-3（eviction 混合） | pre-populate 30 keys 后混合 30%/70% hit |
 
 #### 三种缓存来源区分
 
@@ -271,15 +273,11 @@ vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_
 
 | 缓存来源 | 日志指标 | 判定条件 |
 |---------|---------|---------|
-| vLLM 本地命中 | `Prefix cache hit rate: XX%` | `local_computed >= token_len`，connector 被跳过 |
+| vLLM 本地命中 | `Prefix cache hit rate: XX%` | `local_computed >= token_len`，connector 被跳过（本方案下始终为 0%） |
 | MemCache 命中 | `External prefix cache hit rate: XX%` | `local_computed = 0`，`external_hit > 0` |
 | 全 miss | — | `local_computed = 0`，`external_hit = 0` |
 
-测试日志中 `vLLM local hit=0.0%` 证明本地缓存已被清空，hit 的 TTFT 降幅来自 MemCache external hit。
-
-#### `reset_external` 参数说明
-
-`POST /reset_prefix_cache` 支持 `?reset_external=true` 查询参数，意图是同时清除 MemCache 外部缓存。但当前 `AscendStoreConnector` **未实现** `reset_cache()`（继承基类空实现），所以 `reset_external=true` 对 MemCache **无实际清除效果**。测试中如需清除 MemCache 数据，需重启 vLLM + MetaService。
+测试日志中 `vLLM local hit=0.0%` 证明本地缓存已永久关闭，hit 的 TTFT 降幅来自 MemCache external hit。
 
 ## 注意事项
 
@@ -296,8 +294,8 @@ vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_
    bash /path/memcache/debug/test/clean_stale_env.sh
    # 用 -k 指定单个测试
    MMC_TEST_TENSOR_PARALLEL_SIZE=4 MMC_TEST_DEVICE_IDS=2,3,6,7 \
-      pytest cases/python/memcache/integration/vllm_ttft_test.py -v -s -k test_prefix_cache_hit_e2e_ttft_4rank
+       pytest cases/python/memcache/integration/vllm_integration_test.py -v -s -k test_prefix_cache_hit_e2e_ttft_4rank
    ```
 7. **/dev/shm**: host_shm 协议下 dram.size 不超过 1GB；4-rank 时 4 × 1GB = 4GB（/dev/shm 8GB 充足）；largecap 模式自动 resize 到 100GB
-8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；可用 marker：`workload`、`largecap`、`rank2`、`rank4`、`throughput`
+8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；可用 marker：`workload`、`largecap`、`rank2`、`rank4`
 9. **文件日志**: 加 `--log` 参数将输出 tee 到 `retest_logs/` 目录

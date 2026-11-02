@@ -68,7 +68,7 @@ def reset_prefix_cache(host, port):
 
 
 def run_benchmark(url, model, input_len, output_len, num_prompts, request_rate, num_warmups,
-                  cache_test=False, warmup_delay=3.0, do_reset_prefix_cache=False, host=None, port=None):
+                  cache_test=False, warmup_delay=3.0, host=None, port=None):
     mode = "cache-hit (repeated prompts)" if cache_test else "all-miss (unique prompts)"
     print(f"\n[INFO] Mode: {mode}")
     print(f"[INFO] Warmup: {num_warmups} requests...")
@@ -79,10 +79,6 @@ def run_benchmark(url, model, input_len, output_len, num_prompts, request_rate, 
         if warmup_delay > 0:
             time.sleep(warmup_delay)
     print(f"[INFO] Warmup done")
-
-    if do_reset_prefix_cache and host and port:
-        reset_prefix_cache(host, port)
-        time.sleep(1)
 
     print(f"[INFO] Benchmark: {num_prompts} requests at {request_rate} req/s...")
     interval = 1.0 / request_rate
@@ -176,8 +172,6 @@ def main():
     parser.add_argument("--output-file", default="")
     parser.add_argument("--cache-test", action="store_true",
                         help="Send repeated prompts to test cache hit rate")
-    parser.add_argument("--reset-prefix-cache", action="store_true",
-                        help="Reset vLLM internal prefix cache after warmup to isolate MemCache hit")
     args = parser.parse_args()
 
     url = f"http://{args.host}:{args.port}/v1/completions"
@@ -192,7 +186,6 @@ def main():
         args.num_prompts, args.request_rate, args.num_warmups,
         cache_test=args.cache_test,
         warmup_delay=args.warmup_delay,
-        do_reset_prefix_cache=args.reset_prefix_cache,
         host=args.host, port=args.port,
     )
 

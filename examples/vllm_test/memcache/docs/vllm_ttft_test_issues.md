@@ -225,3 +225,141 @@ Python API（`put_from_layers`）的分配器有跨 rank + DRAM fallback 逻辑�
 - 但 async 失败后不再直接 return，而是 fallback 到同步 `AclrtMemcpy`（不依赖 `stream_`，只用当前 device context）
 - 同步 `AclrtMemcpy` 成功完成 HBM→DRAM eviction
 - `bm put failed` 从 34/38 降为 0，eviction 成功率从 0% 提升到 100%，DRAM 层恢复可用
+
+---
+
+## 4. 其他已知错误与根因分析
+
+除 107002 外，测试过程中收集到的其他错误/警告。以下内容剥离测试次数等数据，聚焦根因、影响与修复状态。
+
+### 4.1 207000 SDID 查询失败（MemCache 专属，硬件限制）
+
+**错误码**: 207000
+
+**错误消息样本**:
+```
+WARN [HYBM hybm_mem_segment.cpp:227 InitDeviceInfo] get server id failed: 207000 deviceId: 0 — using boot id fallback
+WARN [HYBM hybm_mem_segment.cpp:236 InitDeviceInfo] get super pod id failed: 207000 deviceId: 0 — using invalid fallback
+```
+
+**根因**: 310P3 硬件不支持 SDID（Server ID / Super Pod ID）查询，ACL 接口返回 207000。`InitDeviceInfo` 在 `hybm_mem_segment.cpp` 中尝试查询 SDID 用于跨节点寻址，310P3 单卡场景无此能力。
+
+**修复状态**: 已知行为，使用 boot id fallback。`HybmGetServerId()` / `HybmGetSuperPodId()` 在 207000 时分别降级为 boot id 和 invalid 值，不影响同卡 die-pair 内的 SDMA / P2P / host_shm 通信。
+
+**影响**: 无。仅在 MemCache 模式下出现（baseline 无 store 初始化，不触发），属于硬件限制下的预期降级。
+
+### 4.2 EngineDeadError（vLLM 关闭时，良性竞态）
+
+**严重级别**: ERROR
+
+**错误消息样本**:
+```
+ERROR [async_llm.py:704] AsyncLLM output_handler failed.
+ERROR [async_llm.py:704] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue.
+```
+
+**根因**: vLLM 关闭时，测试框架发送 SIGTERM 终止 EngineCore，而 async output handler 仍在等待输出，引发 `EngineDeadError`。这是 vLLM 强制关闭时的正常竞态条件。
+
+**时序**:
+```
+1. API server: shutdown triggered
+2. Process manager: force killing remaining processes
+3. EngineCore: trigger received signal=SIGTERM
+4. EngineCore: start mode=abort
+5. MPClient: complete
+6. AsyncLLM output_handler failed → EngineDeadError  ← 良性错误
+7. API server: signalling HTTP server shutdown
+```
+
+**修复状态**: 无需修复，vLLM 自身行为。错误发生在测试框架主动 `stop_vllm()` 之后，不影响测试结果与度量数据。
+
+### 4.3 KV Cache 2MB 物理地址对齐警告（已通过 patch 降级）
+
+**严重级别**: WARNING（patch 后）；patch 前为 assert 崩溃
+
+**错误消息样本**:
+```
+WARNING kv cache tensor ptr 0x12d2885c8000 not 2MB-aligned (storage_key=0x12d2885c8000, new_start=0x12d288400000); skipping alignment adjustment for this region
+```
+
+**根因**: vLLM KV cache tensor 指针由 vLLM 显存分配器决定，未保证 2MB 物理对齐。`AscendStoreConnector` 的 `KVPoolWorker._align_kv_ptrs`（`pool_worker.py:758`）将 tensor 起始地址向下 2MB 对齐（memfabric_hybrid 大页要求），当 `new_start < storage_key`（对齐后地址越过 raw tensor 边界）时，原代码 `assert new_start >= storage_key` 崩溃，vLLM 启动失败。
+
+**适配改动**: 通过 `patches/vllm_ascend_310p_kv_transfer.patch` 将 `pool_worker.py:758` 的 assert 改为 `logger.warning` + `continue`，跳过该 region 的对齐调整，不再阻断启动：
+
+```python
+# patch 前
+assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
+# patch 后
+if new_start < storage_key:
+    logger.warning("kv cache tensor ptr 0x%x not 2MB-aligned ...; skipping alignment adjustment for this region", ...)
+    continue
+```
+
+**影响**: 跳过对齐调整的 region 可能影响 SDMA 传输效率（非对齐传输需额外拷贝），但不影响功能正确性。所有 MemCache 测试均出现此 WARN，host_shm 与 device_sdma 一致。
+
+**与 `--no-enable-prefix-caching` 的关系**: **无关**。该问题在启用 `--kv-transfer-config`（MemCache connector）时即触发，是 `register_kv_caches` → `_align_kv_ptrs` 的必经路径，不区分 prefix caching 开关。详见测试报告 3.4.5 节"易混淆澄清"。
+
+### 4.4 HBM Allocator 满（预期 eviction 触发）
+
+**严重级别**: WARN（device_sdma 专属）
+
+**错误消息样本**:
+```
+warning [MMC mmc_blob_allocator.cpp:59 Alloc] Allocator rank: 1 mediaType: HBM, cap:1069875200/1073741824 cannot allocate with size: 5488640
+```
+
+**根因**: HBM 容量接近上限（99.6%），`mmc_blob_allocator.cpp:59` 拒绝分配，触发 `GetNeedEvictList`（`mmc_global_allocator.h:337`，watermark 90%）执行 HBM→DRAM eviction。
+
+**修复状态**: 无需修复，这是两级存储（HBM→DRAM）的正常行为。host_shm 协议无 HBM pool，不触发。
+
+### 4.5 BmUnregister -3000（清理竞态，建议优化）
+
+**严重级别**: ERROR（device_sdma 专属，vLLM 关闭时）
+
+**错误消息样本**:
+```
+error [MMC mmc_global_allocator.h:201 Stop] location not found, rank: 0, mediaType: HBM
+error [MMC mmc_meta_service.cpp:195 BmUnregister] Unmount loc { 0, 0 } failed, error code -3000
+```
+
+**根因**: vLLM 关闭时，MetaService 的 heartbeat timeout 先于 `BmUnregister` 清理了 rank 的 HBM location。当 `BmUnregister` 随后执行时已找不到 location，返回 -3000。
+
+**修复状态**: 良性竞态，不影响测试结果（关闭阶段发生）。**建议优化**：调整关闭顺序，`BmUnregister` 在 heartbeat timeout 机制触发前主动执行，避免清理竞态。
+
+### 4.6 HeartBeat Timeout / LinkBroken / Socket 读取失败（关闭时连接断开）
+
+**严重级别**: WARN / ERROR（vLLM 关闭时）
+
+**错误消息样本**:
+```
+warning [MMC mmc_net_engine_acc.cpp:515 HandleLinkBroken] Old linkId: 3, rankId: 0
+warning [MMC mmc_meta_service.cpp:101 operator()] HeartBeat timeout for rank=1, linkId:1, clearing resource
+error [AccLink acc_tcp_listener.cpp:195 ProcessNewConnection] Failed to read header from the socket connected from 127.0.0.1:60860
+```
+
+**根因**: vLLM 关闭时 worker 进程退出，与 MetaService 的 ACC link 连接断开。`HandleLinkBroken` 检测到链路断开，heartbeat timeout 清理 rank 资源，`acc_tcp_listener` 读取 socket header 失败。
+
+**修复状态**: 无需修复，连接关闭时的正常行为。
+
+---
+
+## 5. 错误严重性分类
+
+| 类别 | 错误 | 严重性 | 影响测试结果 | 需要修复 | 当前状态 |
+|------|------|--------|-------------|---------|---------|
+| 功能性 | 107002 async memcpy 失败 | WARN | 否（sync fallback 成功） | 已修复 | fallback 机制生效，eviction 100% 成功 |
+| 硬件限制 | 207000 SDID 查询失败 | WARN | 否（boot id fallback） | 否 | 硬件限制，预期降级 |
+| 关闭竞态 | EngineDeadError | ERROR | 否（关闭后发生） | 否 | vLLM 行为 |
+| 对齐 | KV cache 2MB 未对齐 | WARNING | 否（跳过对齐调整） | 已通过 patch 降级 | assert → warning + continue |
+| 容量管理 | HBM Allocator 满 | WARN | 否（触发 eviction） | 否 | 预期行为 |
+| 清理竞态 | BmUnregister -3000 | ERROR | 否（已清理） | 建议优化 | 清理顺序待优化 |
+| 连接断开 | HeartBeat/LinkBroken | WARN | 否（关闭时正常） | 否 | 正常行为 |
+| 连接断开 | Socket 读取失败 | ERROR | 否（关闭时正常） | 否 | 正常行为 |
+
+---
+
+## 6. 建议关注项与修复状态
+
+1. **BmUnregister -3000 清理竞态**: 建议优化 MetaService 关闭顺序，`BmUnregister` 在 heartbeat timeout 前主动执行，避免清理竞态。当前为良性错误，不影响功能。
+
+2. **KV cache 2MB 对齐**: 当前通过 `vllm_ascend_310p_kv_transfer.patch` 将 assert 降级为 warning + continue，功能可用但非对齐 region 的 SDMA 传输效率可能受影响。长期建议优化 vLLM 显存分配器或 AscendStoreConnector 的对齐逻辑，从源头保证 KV tensor 2MB 对齐。

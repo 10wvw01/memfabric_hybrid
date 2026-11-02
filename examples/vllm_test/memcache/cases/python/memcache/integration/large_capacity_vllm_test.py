@@ -113,7 +113,7 @@ KV_TRANSFER_CONFIG_MEMCACHE = json.dumps(
 
 
 # ---------------------------------------------------------------------------
-# Helpers (shared with vllm_ttft_test.py)
+# Helpers (shared with vllm_integration_test.py)
 # ---------------------------------------------------------------------------
 def _npu_available() -> bool:
     try:
@@ -338,7 +338,8 @@ class VLLMTTFTBenchmark:
             "--additional-config", ADDITIONAL_CONFIG_JSON,
         ]
         if with_memcache:
-            cmd.append("--enable-prefix-caching")
+            cmd.append("--no-enable-prefix-caching")
+            cmd.extend(["--prefix-match-unit", "128"])
             cmd.extend(["--kv-transfer-config", KV_TRANSFER_CONFIG_MEMCACHE])
         else:
             cmd.append("--no-enable-prefix-caching")
@@ -646,7 +647,7 @@ def test_large_scale_cache_hit_4rank(benchmark):
             prompt = _build_prompt_ids(PROMPT_TOKENS, seed=seed)
             miss_ttft = benchmark.measure_e2e_ttft_ms(prompt)
             miss_latencies.append(miss_ttft)
-            benchmark.reset_local_prefix_cache()
+            time.sleep(1)
             hit_ttft = benchmark.measure_e2e_ttft_ms(prompt)
             hit_latencies.append(hit_ttft)
             print(f"  pair {i + 1}/{MEASURED_REQUESTS}: miss={miss_ttft:.2f}ms, hit={hit_ttft:.2f}ms (seed={seed})")
@@ -714,7 +715,7 @@ def test_eviction_aware_mixed_4rank(benchmark, hit_rate):
             if (i + 1) % 10 == 0:
                 print(f"  pre-populate {i + 1}/{EVICT_PREPOP_COUNT} done")
 
-        benchmark.reset_local_prefix_cache()
+        time.sleep(1)
 
         miss_seeds = [LARGE_MISS_SEED_BASE + i for i in range(miss_count)]
         requests = []

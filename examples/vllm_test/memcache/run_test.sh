@@ -8,12 +8,14 @@
 #
 # Options:
 #   --memcache-dir <DIR>                    memcache repo dir (required)
-#   --type workload|integration|largecap|bench|hitdecode  test type (default: workload)
+#   --type workload|integration|largecap|bench  test type (default: workload)
+#                                           integration now includes hitdecode tests
+#                                           use -m hitdecode to select subset
 #   --rank 2|4                              rank count: 2-rank (TP=2) or 4-rank (TP=4) (integration/bench, required for integration)
 #   --layer layer2|layer3|all               largecap layer selection (default: all)
 #   --protocol host_shm|device_sdma         protocol (integration only, default: config default)
 #   --device-ids <a,b,...>                  NPU device IDs (default: 6,7 for 2-rank, 0,1,2,3 for 4-rank, 4,5,6,7 for largecap)
-#   --filter <name>                         pytest -m marker filter (e.g. rank2, rank4, throughput, workload, largecap)
+#   --filter <name>                         pytest -m marker filter (e.g. rank2, rank4, throughput, hitdecode)
 #   --log                                   enable file logging to retest_logs/
 #   --gpu-mem-util <float>                  GPU mem util (default: 0.80, largecap: 0.70)
 #   --skip-clean                            skip env cleanup before tests
@@ -90,12 +92,12 @@ done
 [[ ! -d "$MEMCACHE_DIR" ]] && { echo "[ERROR] 目录不存在: $MEMCACHE_DIR"; exit 1; }
 
 case "$TEST_TYPE" in
-    workload|integration|largecap|bench|hitdecode) ;;
-    *) echo "[ERROR] --type 只能是 workload, integration, largecap, bench 或 hitdecode"; exit 1 ;;
+    workload|integration|largecap|bench) ;;
+    *) echo "[ERROR] --type 只能是 workload, integration, largecap 或 bench"; exit 1 ;;
 esac
 
-# --rank validation (required for integration, bench, and hitdecode)
-if [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" || "$TEST_TYPE" == "hitdecode" ]]; then
+# --rank validation (required for integration and bench)
+if [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" ]]; then
     if [[ -z "$RANK" ]]; then
         echo "[ERROR] --type $TEST_TYPE 需要指定 --rank 2 或 --rank 4"
         exit 1
@@ -106,8 +108,8 @@ if [[ -n "$RANK" && "$RANK" != "2" && "$RANK" != "4" ]]; then
     exit 1
 fi
 
-# Device ID count must match rank count (for integration, bench, and hitdecode)
-if [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" || "$TEST_TYPE" == "hitdecode" ]]; then
+# Device ID count must match rank count (for integration and bench)
+if [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" ]]; then
     DEV_COUNT=$(echo "$DEVICE_IDS" | tr ',' '\n' | wc -l)
     if [[ -n "$DEVICE_IDS" && "$DEV_COUNT" -ne "$RANK" ]]; then
         echo "[ERROR] --device-ids 设备数 ($DEV_COUNT) 与 --rank ($RANK) 不匹配"
@@ -119,7 +121,7 @@ fi
 if [[ -z "$DEVICE_IDS" ]]; then
     if [[ "$TEST_TYPE" == "largecap" ]]; then
         DEVICE_IDS="4,5,6,7"
-    elif [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" || "$TEST_TYPE" == "hitdecode" ]]; then
+    elif [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" ]]; then
         if [[ "$RANK" == "4" ]]; then
             DEVICE_IDS="0,1,2,3"
         else
@@ -382,7 +384,7 @@ run_integration() {
         exit 0
     fi
     ensure_meta_service
-    local test_file="$PKG_DIR/cases/python/memcache/integration/vllm_ttft_test.py"
+    local test_file="$PKG_DIR/cases/python/memcache/integration/vllm_integration_test.py"
     if [[ -n "$TEST_FILTER" ]]; then
         run_pytest "$test_file" -v -s -m "$TEST_FILTER"
     elif [[ "$RANK" == "4" && "$SPLIT_TESTS" -eq 1 ]]; then
@@ -390,8 +392,9 @@ run_integration() {
         # because 310P3 vLLM exit leaves orphan NPU context (HBM not released).
         local overall=0
         local test_names=(
-            "test_memcache_vs_baseline_e2e_ttft_4rank"
-            "test_prefix_cache_hit_e2e_ttft_4rank"
+            "test_full_miss_baseline_4rank"
+            "test_50pct_hit_4rank"
+            "test_100pct_hit_4rank"
         )
         for tname in "${test_names[@]}"; do
             log ""
@@ -494,7 +497,7 @@ run_bench() {
 
     log "[INFO] === Round 2/2: cache-hit (repeated prompts) ==="
     set +e
-    python3 "$bench_py" $common_args --cache-test --reset-prefix-cache \
+    python3 "$bench_py" $common_args --cache-test \
       --label memcache-hit --output-file "$hit_file" 2>&1 | { [[ -n "$LOG_FILE" ]] && tee -a "$LOG_FILE" || cat; }
     set -e
 
@@ -524,59 +527,6 @@ PY
 }
 
 # ============================================================================
-# Hitdecode: partial prefix hit (2k) + long decode (1.5k) tests
-# ============================================================================
-run_hitdecode() {
-    if ! python3 -c "import vllm" 2>/dev/null; then
-        log "[SKIP] vLLM not available, skipping hitdecode tests"
-        exit 0
-    fi
-    ensure_meta_service
-    local test_file="$PKG_DIR/cases/python/memcache/integration/vllm_ttft_hit_decode_test.py"
-    if [[ -n "$TEST_FILTER" && "$SPLIT_TESTS" -eq 0 ]]; then
-        run_pytest "$test_file" -v -s -m "$TEST_FILTER"
-    elif [[ "$RANK" == "4" && "$SPLIT_TESTS" -eq 1 ]]; then
-        local overall=0
-        local test_names=(
-            "test_partial_prefix_hit_2k_ttft_4rank"
-            "test_decode_1_5k_full_miss_4rank"
-            "test_decode_1_5k_full_hit_4rank"
-            "test_decode_1_5k_partial_hit_2k_4rank"
-        )
-        # If filter is set, only run matching test names
-        if [[ -n "$TEST_FILTER" && "$TEST_FILTER" != "hitdecode" ]]; then
-            local filtered_names=()
-            for tname in "${test_names[@]}"; do
-                [[ "$tname" == *"$TEST_FILTER"* ]] && filtered_names+=("$tname")
-            done
-            test_names=("${filtered_names[@]}")
-        fi
-        for tname in "${test_names[@]}"; do
-            log ""
-            log "[INFO] === Split run: $tname ==="
-            run_pytest "$test_file" -v -s -k "$tname"
-            local rc=$?
-            [[ $rc -ne 0 ]] && overall=$rc
-            if [[ -f "$CLEAN_SCRIPT" ]]; then
-                log "[INFO] Cleaning NPU between split tests..."
-                if [[ -n "$LOG_FILE" ]]; then
-                    bash "$CLEAN_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
-                else
-                    bash "$CLEAN_SCRIPT"
-                fi
-            fi
-            stop_meta_service
-            sleep 10
-            ensure_meta_service
-        done
-        return $overall
-    else
-        local marker="hitdecode"
-        run_pytest "$test_file" -v -s -m "$marker"
-    fi
-}
-
-# ============================================================================
 # Main dispatch
 # ============================================================================
 OVERALL_EXIT=0
@@ -587,17 +537,14 @@ case "$TEST_TYPE" in
         ;;
     integration)
         run_integration || OVERALL_EXIT=$?
-        ;;
-    bench)
-        run_bench || OVERALL_EXIT=$?
-        # Cleanup vLLM processes after bench
+        # Cleanup vLLM processes after integration
         pkill -9 -f "vllm serve" 2>/dev/null || true
         sleep 3
         pkill -9 -f "VLLM::" 2>/dev/null || true
         ;;
-    hitdecode)
-        run_hitdecode || OVERALL_EXIT=$?
-        # Cleanup vLLM processes after hitdecode
+    bench)
+        run_bench || OVERALL_EXIT=$?
+        # Cleanup vLLM processes after bench
         pkill -9 -f "vllm serve" 2>/dev/null || true
         sleep 3
         pkill -9 -f "VLLM::" 2>/dev/null || true
