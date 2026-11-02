@@ -1,4 +1,4 @@
-# 09_310p_aicore_aicpu_sdma_4rank：310P 双卡四 die 4-rank 设备发起 SDMA 协同（全对全）
+# 09_310p_aicore_aicpu_sdma_4rank：310P 双卡四 die 4-rank 设备发起 SDMA 协同（全对全 + 多 AICore AllReduce）
 
 ## 场景
 
@@ -8,9 +8,9 @@
 - 4 rank 同时运行 AICore kernel：每 rank 向 3 个对端 signal 投递搬运请求
   （跨 die 走 HCCS，跨卡走 P2P+PCIe）
 - 各 rank 的 AICPU epoch kernel 代投 SDMA SQE：邮件像/到达戳/完成戳/数据
-  **全部经 SDMA SQE 投递**（AICPU 对对端内存零直写——跨卡直写实测 stall，
-  设备侧 CPU 核无跨卡 store 通路），请求环与到达环均**按对端划分**
-  （多发送方/多目的地并发互不踩踏、序号无空洞）
+  **全部经 SDMA SQE 投递**（AICPU 对对端内存零直写——跨卡直写实测不返回，
+  设备侧 CPU 核无跨卡 store 通路），邮箱队列**按对端 × AICore block 划分**
+  （3 对端 × 8 block = 24 队列，多发送方/多 block/多目的地并发互不干扰、序号无空洞）
 - 接收方 `wait_any`（归并收件，`m.peer` 标来源）与 `wait_peer`（显式按对端）
   双形态齐用；host 零数据面（仅建池/起 kernel/收结果）
 
@@ -27,6 +27,15 @@
   - **`m.seq` 每发送方环内连续无空洞**（旧单环协议在交错多目的地下序号断档，
     本阶段即其真机回归用例）
   - `m.imm` 轮次对账；首封基址+连续增量校验（对前序流量不敏感）
+- **③ 多 AICore AllReduce**：`<<<8>>>` 起 8 个 AICore block，每 block 独立流水
+  （无块间同步）——填本 block 1MB 分片 → 发 3 对端（走独占队列 (对端, 本 block)，
+  算完即发不等其它 block）→ 收 3 对端同列分片（block 列对齐）→ 规约（u32 SUM）
+  → 分片自校验。验证点：
+  - 8 block 并发 signal/wait 的队列隔离（24 队列双射分区的正确性）
+  - 通信与计算在 block 间重叠（各 block 流水独立，无聚合等待）
+  - AllReduce 语义：每 rank 结果 = Σ 四 rank 贡献（host D2H 8MB 逐元素校验，
+    pattern 含源 rank 可溯源）；规约 op 为 u32 SUM（fp32 引擎内联 reduce 已由
+    08 ⑤ 的 SQE opcode 验证，协议同构）
 
 kernel 侧异常（wait 超时/溢出、路由非法、序号断档、拒投）经**判定词**（段内
 12MB 处，编码含阶段/对端/错误码）显式暴露，host D2H 读回解码打印。
@@ -42,19 +51,24 @@ kernel 判定词、3 个到达环的游标快照（`N=2E` 表示对端 N 的环�
 ## 使用能力（设备侧自驱）
 
 `smem_shm_create`（SDMA 位，310P 上协同自动启用）→ `smem_shm_sdma_get_workspace`
-（就绪判定）→ AICore kernel 内 `smem_shm_sdma_ctx(gva)` 入口一次预计算 →
-`smem_shm_sdma_signal_at`（dst 自动路由到对端请求环）/ `smem_shm_sdma_wait_any_at`
-（归并，`m.peer` 标来源）/ `smem_shm_sdma_wait_peer_at`（显式按对端）/
-`smem_shm_sdma_quiet_at`（逐环末封判定）→ `smem_shm_destroy`。
+（就绪判定）→ AICore kernel 内 `smem_shm_sdma_ctx(gva)` 入口一次预计算（自动携带
+本 block 号 `GetBlockIdx()`）→ `smem_shm_sdma_signal_at`（dst 自动路由到
+(对端, 本 block) 独占队列，单 block 环境自动用 block 0 队列，既有用例零改动）/
+`smem_shm_sdma_wait_any_at`（归并轮询本 block 列，`m.peer` 标来源）/
+`smem_shm_sdma_wait_peer_at`（显式按对端，收 (对端, 本 block) 子环）/
+`smem_shm_sdma_quiet_at`（逐发送队列末封判定）→ `smem_shm_destroy`。
 
 ## 规模建议
 
 - world_size=4 固定（mpirun -np 4 拉起；devId = rank，即 dev0/1+dev2/3）
 - 拓扑：2×Duo（每卡 2 rank）或 4 卡各 1 rank——每卡 P2P 槽位预算 4/8、3/8 均通过
   （库内拓扑预检，超限建池显式拒绝 `SM_NO_RESOURCES`）
-- 单次搬运 ≤ 1MB（AICPU SQE 上限）；len 须 4 字节对齐
-- 每对端请求环深 64（单环满环背压不影响其他对端）；到达环深 1024/对端
-- 每 rank 段末尾 192KB 为邮箱保留区（memfabric 托管，勿存放用户数据）
+- 单封长度 ≤ 4GB（SQE length 为 u32 字段，1GB 单封同引擎实测通过）；len 须 4 字节
+  对齐；多封分块是接收侧流水粒度的调优参数，非硬件要求
+- 邮箱队列按对端×block 划分：每队列请求环深 64（单队列满环背压不影响其他队列）、
+  到达子环深 512；最多 8 个 AICore block 并发（`<<<N>>>` N ≤ 8，超出以实机为准）
+- 每 rank 段末尾 1.25MB 为邮箱保留区（memfabric 托管，勿存放用户数据）
+- 本示例每 rank 物理贡献 64MB（③ 数据区 40MB：贡献 8MB + 接收 24MB + 结果 8MB）
 
 ## 必要条件
 
@@ -82,12 +96,15 @@ bash run.sh --run-only    # 仅运行
 1. ①：4 rank 各自 `mismatch=0/98304` PASS（终态 = pattern+INC，pattern 含源/目的
    rank 可溯源），判定词 PASS
 2. ②：4 rank 判定词 PASS（`m.peer` 路由/`m.seq` 环内连续/`m.imm` 对账全过）
-3. 4 rank 全部 `=== EX09 rN PASS ===`，退出码 0（任一 rank 失败即整体 FAIL）
-4. 回归：08 示例（2-rank）在新布局下行为不变、全量 PASS
+3. ③：4 rank 各 `mismatch=0/2097152`（8 block 分片自校验 + host D2H 逐元素），
+   块数探针 = 8，判定词全 PASS
+4. 4 rank 全部 `=== EX09 rN PASS ===`，退出码 0（任一 rank 失败即整体 FAIL）
+5. 回归：08 示例（2-rank）在新布局下行为不变、全量 PASS
 
 ## 已知边界
 
 - 8-rank 全互联不可达（每卡 8 个 P2P 槽位硬约束，全 mesh 8-rank 需 12 槽）——
   建池即被库内拓扑预检拒绝，属预期行为
 - 跨卡带宽（~10–14 GB/s）低于跨 die（~17–19 GB/s），①全对全耗时由跨卡路径主导
-  （实测量级：① 12 有向对×128KB ≈ 4ms，② 交错 96 封/rank < 1ms）
+  （实测量级：① 12 有向对×128KB ≈ 4ms，② 交错 96 封/rank < 1ms，
+  ③ 8MB AllReduce 全链 ≈ 62ms——含 AICore 标量填充/规约/校验，非纯通信口径）
