@@ -24,7 +24,8 @@
  *   5. smem 层 sdma 协同 API 的无效 handle 拒绝
  */
 #include <gtest/gtest.h> // googletest 框架
-#include <cstddef>       // offsetof
+#include <cstddef>      // offsetof
+#include <vector>
 
 #include "hybm_sdma_orchestrator.h" // 被测单例(public 接口: Acquire/Ready/GetRefCountForTest/Release)
 
@@ -62,56 +63,84 @@ TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
 }
 
 /* 用例 3: 双头布局锁(hybm 契约与 smem 设备头镜像一致; 违反即布局回归)
- * v29 4-rank 化: 保留区 48KB→192KB, 请求环/完成戳/暂存按对端 ×3, 到达环 per-peer ×3;
- * 邮件像经暂存由 SQE ⓪ 投递(AICPU 对对端零直写——跨卡直写实测不返回) */
+ * v29 4-rank 化: 请求/到达环按对端划分; v30 邮件像经 SQE ⓪ 投递;
+ * v31 邮箱队列按 AICore block 扩展(对端 × block = 24 队列) */
 TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 {
     /* 布局头钉死值(单一事实源; 漂移即回归) */
-    EXPECT_EQ(SMEM_SHM_SDMA_RESERVED, 192UL * 1024UL);
+    EXPECT_EQ(SMEM_SHM_SDMA_RESERVED, 1280UL * 1024UL);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING, 0x0000U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING_STRIDE, 0x800U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL, 0x1800U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD, 0x18C0U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL, 0xC000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD, 0xC600U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_CURSOR_STRIDE, 0x40U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET, 0x1980U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET, 0xCC00U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET_SLOTS, 64U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET_STRIDE, 0x200U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE, 0x1F80U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE, 0xFC00U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE_SLOTS, 512U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE_STRIDE, 0x4000U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_RINGS, 0xDF80U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_RINGS, 0x6FC00U);
     EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_STAMP, 0x0000U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_MAIL, 0x2000U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_HEAD, 0xA000U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 1024U);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_STRIDE, 0xA040U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_MAIL, 0x1000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_HEAD, 0x5000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 512U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_STRIDE, 0x5040U);
     EXPECT_EQ(SMEM_SHM_SDMA_MAX_RANKS, 4U);
     EXPECT_EQ(SMEM_SHM_SDMA_MAX_PEERS, 3U);
-    /* 布局不变式: 本端三组数组各自 3 份完整覆盖且相互不压(数组首尾相接恒等式) */
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING + 3U * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE, SMEM_SHM_SDMA_RS_REQ_TAIL);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL + 3U * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, SMEM_SHM_SDMA_RS_REQ_HEAD);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD + 3U * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, SMEM_SHM_SDMA_RS_QUIET);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET + 3U * SMEM_SHM_SDMA_RS_QUIET_STRIDE, SMEM_SHM_SDMA_RS_STAGE);
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE + 3U * SMEM_SHM_SDMA_RS_STAGE_STRIDE, SMEM_SHM_SDMA_RS_PEER_RINGS);
-    /* 到达环: 环内区块不重叠 + 全部落保留区内(含最深一环的游标) */
-    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_MAIL, SMEM_SHM_SDMA_RS_PEER_STAMP + 8U * 1024U);            // 邮件不压戳
-    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_HEAD, SMEM_SHM_SDMA_RS_PEER_MAIL + 32U * 1024U);            // 游标不压邮件
-    EXPECT_LE(SMEM_SHM_SDMA_RS_PEER_RINGS + SMEM_SHM_SDMA_MAX_PEERS * SMEM_SHM_SDMA_RS_PEER_STRIDE,
-              SMEM_SHM_SDMA_RESERVED);                                                          // 全落在 192KB 内
-    /* v23 缓存行分隔纪律(共行回写竞态=并发丢件挂死类根因) */
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL & 0x3FU, 0U);   // reqTail 数组行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD & 0x3FU, 0U);   // reqHead 数组行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET & 0x3FU, 0U);      // 完成戳数组行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE & 0x3FU, 0U);      // 暂存数组行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_RINGS & 0x3FU, 0U); // 到达环数组行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_STRIDE & 0x3FU, 0U); // 环间距行对齐(各环区块互不共行)
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_MAIL & 0x3FU, 0U);  // 邮件区行对齐
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_HEAD & 0x3FU, 0U);  // 环内游标独占行首
-    EXPECT_GT(SMEM_SHM_SDMA_RS_STAGE_SLOTS, 1024U / 3U); // 暂存槽数 > 单环在途邮件上界(SQ 环深/3)
+    EXPECT_EQ(SMEM_SHM_SDMA_MAX_BLOCKS, 8U);
+    EXPECT_EQ(SMEM_SHM_SDMA_QUEUE_COUNT, 24U);
+    /* 布局不变式: 本端四组数组各 24 队列完整覆盖且相互不压(数组首尾相接恒等式) */
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE,
+              SMEM_SHM_SDMA_RS_REQ_TAIL);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_TAIL + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
+              SMEM_SHM_SDMA_RS_REQ_HEAD);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_HEAD + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
+              SMEM_SHM_SDMA_RS_QUIET);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_QUIET + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_QUIET_STRIDE,
+              SMEM_SHM_SDMA_RS_STAGE);
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_STAGE_STRIDE,
+              SMEM_SHM_SDMA_RS_PEER_RINGS);
+    /* 到达子环: 队列内区块不重叠 + 全部落保留区内(含最深一队列的游标) */
+    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_MAIL, SMEM_SHM_SDMA_RS_PEER_STAMP + 8U * 512U);           // 邮件不压戳
+    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_HEAD, SMEM_SHM_SDMA_RS_PEER_MAIL + 32U * 512U);           // 游标不压邮件
+    EXPECT_LE(SMEM_SHM_SDMA_RS_PEER_RINGS + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_PEER_STRIDE,
+              SMEM_SHM_SDMA_RESERVED);                                                        // 全落在 1.25MB 内
+    /* v23 缓存行分隔纪律(共行回写竞态=并发丢件挂死类根因; 多 block 并发写同区各槽独占行) */
+    for (uint64_t v : {SMEM_SHM_SDMA_RS_REQ_TAIL, SMEM_SHM_SDMA_RS_REQ_HEAD, SMEM_SHM_SDMA_RS_QUIET,
+                       SMEM_SHM_SDMA_RS_STAGE, SMEM_SHM_SDMA_RS_PEER_RINGS}) {
+        EXPECT_EQ(v & 0x3FU, 0U) << "base 0x" << std::hex << v;
+    }
+    for (uint64_t v : {SMEM_SHM_SDMA_RS_REQ_RING_STRIDE, SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
+                       SMEM_SHM_SDMA_RS_QUIET_STRIDE, SMEM_SHM_SDMA_RS_STAGE_STRIDE,
+                       SMEM_SHM_SDMA_RS_PEER_STRIDE, SMEM_SHM_SDMA_RS_PEER_MAIL, SMEM_SHM_SDMA_RS_PEER_HEAD}) {
+        EXPECT_EQ(v & 0x3FU, 0U) << "stride 0x" << std::hex << v;
+    }
+    /* 暂存槽数 > 单队列在途上界(SQ 环深/4——每封 4 支 SQE ①⓪②③) */
+    EXPECT_GT(SMEM_SHM_SDMA_RS_STAGE_SLOTS, 1024U / 4U);
+    /* 到达深度 > 单子环在途上界(请求环未消费 64 + SQ 在途 256) */
+    EXPECT_GT(SMEM_SHM_SDMA_RS_PEER_SLOTS, 64U + 1024U / 4U);
     /* 环深度契约 */
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);        // 每对端请求环 64
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 1024U);      // 每对端到达环 1024
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);   // 每队列请求环 64
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 512U);  // 每队列到达子环 512
+    /* 队列下标编码不变式: (对端, block) 双射 [0, 队列数) */
+    for (uint32_t own = 0; own < SMEM_SHM_SDMA_MAX_RANKS; own++) {
+        std::vector<uint32_t> seen(SMEM_SHM_SDMA_QUEUE_COUNT, 0);
+        for (uint32_t peer = 0; peer < SMEM_SHM_SDMA_MAX_RANKS; peer++) {
+            if (peer == own) {
+                continue;
+            }
+            for (uint32_t b = 0; b < SMEM_SHM_SDMA_MAX_BLOCKS; b++) {
+                const uint32_t q = SmemShmSdmaQueueIdx(SmemShmSdmaPeerRingIdx(own, peer), b);
+                EXPECT_LT(q, SMEM_SHM_SDMA_QUEUE_COUNT) << "own:" << own << " peer:" << peer << " b:" << b;
+                seen[q]++;
+            }
+        }
+        for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
+            EXPECT_EQ(seen[q], 1U) << "own:" << own << " q:" << q; // 恰好一次(双射)
+        }
+    }
     /* 工作区布局(result/ovf/stop) */
     EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);                       // ovf 在 result 后
     EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U);                   // stop 不压 ovf
@@ -137,8 +166,8 @@ TEST(SdmaOrchestratorTest, V9ResidentInvariants)
     /* launch attr 超时: 必须 0(永不超时)——有限值到达即把任务标记为 507017 超时,
      * StopEpoch 的 sync 提前返回不等 kernel 退出; attr 缺省为默认超时 ≈6.4s 同样误杀 */
     EXPECT_EQ(HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S, 0U);
-    /* 契约版本单调递增(部署链按文件名缓存刷新, 禁止回退); v30=邮件像 SQE 投递 */
-    EXPECT_GE(HYBM_SDMA_ORCH_KVER, 30U);
+    /* 契约版本单调递增(部署链按文件名缓存刷新, 禁止回退); v31=队列按 block 扩展 */
+    EXPECT_GE(HYBM_SDMA_ORCH_KVER, 31U);
 }
 
 /* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; 仅存 host API) */

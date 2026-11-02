@@ -158,6 +158,7 @@ struct smem_shm_sdma_ctx_t {
     uint64_t phys;       /* 段物理大小 */
     uint32_t rank;       /* 本端 rank */
     uint32_t rankSize;   /* 世界大小 */
+    uint32_t block;      /* 本 AICore block 号(GetBlockIdx, 队列下标 block 维) */
 };
 
 SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
@@ -168,6 +169,7 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
     c.rankSize = smem_shm_get_global_rank_size(0);
     c.phys = smem_shm_get_phys_size(0);
     c.res = static_cast<__gm__ uint8_t *>(gva) + c.symm * c.rank + (c.phys - SMEM_SHM_SDMA_RESERVED);
+    c.block = static_cast<uint32_t>(AscendC::GetBlockIdx()); /* v31: 队列按 block 划分 */
     return c;
 }
 
@@ -196,7 +198,8 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_at(const smem_shm_sdma_ctx_t &c
         return false; /* 自送/越界目的(非池窗口内对端段), 拒投 */
     }
     const uint32_t peerRank = static_cast<uint32_t>(peerQ);
-    const uint32_t r = SmemShmSdmaPeerRingIdx(ctx.rank, peerRank); /* 本端请求环下标 */
+    /* v31: 队列 = (对端环下标, 本 block)——各 AICore block 各走各队, 背压仅限本队列 */
+    const uint32_t r = SmemShmSdmaQueueIdx(SmemShmSdmaPeerRingIdx(ctx.rank, peerRank), ctx.block);
     const uint64_t ringOff = r * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE;
     const uint64_t tailOff = SMEM_SHM_SDMA_RS_REQ_TAIL + r * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
     const uint64_t headOff = SMEM_SHM_SDMA_RS_REQ_HEAD + r * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
@@ -239,8 +242,11 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait_peer_at(const sme
                                                                         uint32_t peerRank)
 {
     smem_shm_sdma_mail_t m = {0, 0, 0, 0, 0, SMEM_SHM_SDMA_MAIL_TIMEOUT};
+    /* v31: 到达子环 = (对端环下标, 本 block)——收发 block 列对齐 */
     const uint64_t ring = SMEM_SHM_SDMA_RS_PEER_RINGS +
-                          static_cast<uint64_t>(SmemShmSdmaPeerRingIdx(ctx.rank, peerRank)) *
+                          static_cast<uint64_t>(SmemShmSdmaQueueIdx(SmemShmSdmaPeerRingIdx(ctx.rank,
+                                                                                          peerRank),
+                                                                    ctx.block)) *
                               SMEM_SHM_SDMA_RS_PEER_STRIDE;
     const uint64_t head = SdmaReadCell(ctx.res, ring + SMEM_SHM_SDMA_RS_PEER_HEAD);
     const uint64_t expect = head + 1; /* 戳=序号+1(1 基), 0 表空——序号 0 与未写入槽位才可区分 */
@@ -289,7 +295,10 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait_any_at(const smem
     uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
     for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {
         for (uint32_t ringIdx = 0; ringIdx < peerCnt; ringIdx++) {
-            const uint64_t ring = SMEM_SHM_SDMA_RS_PEER_RINGS + ringIdx * SMEM_SHM_SDMA_RS_PEER_STRIDE;
+            /* v31: 只轮询本 block 列的到达子环(对端 ringIdx × 本 block) */
+            const uint64_t ring = SMEM_SHM_SDMA_RS_PEER_RINGS +
+                                  static_cast<uint64_t>(SmemShmSdmaQueueIdx(ringIdx, ctx.block)) *
+                                      SMEM_SHM_SDMA_RS_PEER_STRIDE;
             const uint64_t head = SdmaReadCell(ctx.res, ring + SMEM_SHM_SDMA_RS_PEER_HEAD);
             const uint64_t expect = head + 1;
             const uint64_t stamp = SdmaReadCell(ctx.res, ring + SMEM_SHM_SDMA_RS_PEER_STAMP +
@@ -325,9 +334,12 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_mail_t smem_shm_sdma_wait_any_at(const smem
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(const smem_shm_sdma_ctx_t &ctx)
 {
     const uint32_t peerCnt = smem_shm_sdma_peer_cnt(ctx);
-    for (uint32_t r = 0; r < peerCnt; r++) {
+    for (uint32_t pr = 0; pr < peerCnt; pr++) {
+        /* v31: 逐发送队列判定——队列 = (对端环下标, 本 block), 各队列末封戳到即该队列全部到 */
         const uint64_t tail = SdmaReadCell(ctx.res, SMEM_SHM_SDMA_RS_REQ_TAIL +
-                                                        r * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
+                                                        static_cast<uint64_t>(SmemShmSdmaQueueIdx(pr,
+                                                                                                  ctx.block)) *
+                                                            SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
         if (tail == 0) {
             continue; /* 该环从未投递 */
         }
@@ -335,7 +347,11 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(const smem_shm_sdma_ctx_t &ct
         uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
         bool landed = false;
         for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {
-            const uint64_t stamp = SdmaReadCell(ctx.res, SMEM_SHM_SDMA_RS_QUIET + r * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
+            const uint64_t stamp = SdmaReadCell(ctx.res,
+                                                 SMEM_SHM_SDMA_RS_QUIET +
+                                                     static_cast<uint64_t>(SmemShmSdmaQueueIdx(pr,
+                                                                                               ctx.block)) *
+                                                         SMEM_SHM_SDMA_RS_QUIET_STRIDE +
                                                      ((tail - 1) % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8);
             if (stamp == expect) { /* 该环末封已落地(FIFO 序即该环全部) */
                 landed = true;
