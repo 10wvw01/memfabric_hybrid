@@ -679,17 +679,25 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
             devicePhyId_ != static_cast<int>(info.devicePhyId) &&
             CanLocalHostReaches(info.superPodId, info.serverId, info.devicePhyId)) {
             if (Is310PAclPath()) {
-                /* 310P3: no manual EnablePeerAccess — p3_store_repro test proved ACL handles it.
-                 * Same-card: just log, ctx trick is applied in Mmap.
-                 * Cross-card: no P2P enable needed. */
+                /* 310P3: same-card ctx trick is applied in Mmap; cross-card P2P must be explicitly enabled.
+                 * 15_peer_needed measured cross-card must be bidirectionally EnablePeerAccess (one direction fails
+                 * with 507899); p3_store_repro/04_vmm_cross only verified host-copy paths can succeed without EPA
+                 * — device-side access (AICPU/STARS SQE) without EPA gets devmm page fault
+                 * (EX09 4-rank real-machine test: cross-card epoch mail write faults at peer reserved area).
+                 * Each rank enables toward all cross-card peers of its imports, naturally forming bidirectionality. */
                 if (IsSameCard(info.devicePhyId)) {
                     BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 Import: rank:" << info.rankId
                                          << " sameCard:true (deviceId:" << deviceId_ << "/2 == peer:"
                                          << info.devicePhyId << "/2) — ctx trick will be applied in Mmap");
-                } else {
-                    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 Import: rank:" << info.rankId
-                                         << " sameCard:false (deviceId:" << deviceId_ << "/2 != peer:"
-                                         << info.devicePhyId << "/2) — no P2P enable, ACL handles internally");
+                } else if (p2pLeases_.find(static_cast<int32_t>(info.devicePhyId)) == p2pLeases_.end()) {
+                    auto epRet = EnableRemotePeerAccess(info.devicePhyId);
+                    if (epRet != BM_OK) {
+                        BM_LOG_ERROR("310P3 cross-card enable peer access failed, ret:" << epRet
+                                    << " local_user:" << deviceId_ << " remote_phy:" << info.devicePhyId
+                                    << " remoteRank:" << info.rankId); // Root cause: ret/local device/peer rank
+                        return epRet;
+                    }
+                    p2pLeases_.insert(static_cast<int32_t>(info.devicePhyId));
                 }
             } else {
                 if (IsSameCard(info.physicalChipId)) {
@@ -730,33 +738,22 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
 uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
 {
     if (Is310PAclPath()) {
-        /* 同卡(die 对): 两进程共享同一设备 OS 的 VA 分配器, 窗口起点一致(真机已证),
-         * 对端切片直接映射到其槽位地址(导出方 gva 即窗口内地址), 对称算术成立 */
-        if (IsSameCard(im.devicePhyId)) {
-            const uint64_t windowBase = reinterpret_cast<uint64_t>(localVirtualAddress_);
-            const uint64_t windowEnd = windowBase + totalVirtualSize_;
-            if (im.gva < windowBase || im.gva + im.size > windowEnd) {
-                BM_LOG_ERROR("310P import gva out of window, rank:" << im.rankId << " gva:" << VaToStr(im.gva)
-                                                                    << " size:" << im.size
-                                                                    << " windowBase:" << VaToStr(windowBase)
-                                                                    << " windowEnd:" << VaToStr(windowEnd));
-                return 0;
-            }
-            return im.gva;
-        }
-        /* 跨卡: 两卡 VA 分配器独立、窗口起点不保证一致, 对称算术不成立; 独立 reserve
-         * 映射, 跨卡拷贝经 AddVaInfo 的 gva→lva 翻译(不依赖对称窗口) */
-        void *lva = nullptr;
-        auto ret = DlAclApi::AclrtReserveMemAddress(&lva, im.size, 0, nullptr, 0);
-        if (ret != BM_OK || lva == nullptr) {
-            BM_LOG_ERROR("AclrtReserveMemAddress for cross-card import failed, ret:" << ret << " rank:" << im.rankId
-                                                                                     << " size:" << im.size);
+        /* 310P: 窗口为固定基址整体预留(两卡窗口起点一致, 4-rank 实测四卡同基址)。
+         * 对端切片(同卡/跨卡)一律映射到其槽位地址——对称算术全局成立: 设备侧原语
+         * (AICore 掩码算术/epoch kernel 代投 SDMA SQE)直接以池 GVA 寻址, 不经
+         * host 拷贝的 gva→lva 翻译层; 跨卡若映射到独立 reserve 的 lva, 设备侧
+         * 访问该 GVA 必页错误(EX09 4-rank 实机: devmm "Reserve addr is invalid")。
+         * 窗口起点一致性由固定基址显性失败保障(被占/未命中建池即报错) */
+        const uint64_t windowBase = reinterpret_cast<uint64_t>(localVirtualAddress_);
+        const uint64_t windowEnd = windowBase + totalVirtualSize_;
+        if (im.gva < windowBase || im.gva + im.size > windowEnd) {
+            BM_LOG_ERROR("310P import gva out of window, rank:" << im.rankId << " gva:" << VaToStr(im.gva)
+                                                                << " size:" << im.size
+                                                                << " windowBase:" << VaToStr(windowBase)
+                                                                << " windowEnd:" << VaToStr(windowEnd));
             return 0;
         }
-        BM_LOG_INFO("ReserveLva(310P cross-card): rank:" << im.rankId << " peerGva:" << VaToStr(im.gva)
-                                                         << " localLva:" << VaToStr(reinterpret_cast<uint64_t>(lva)));
-        reservedLva_.push_back(lva);
-        return reinterpret_cast<uint64_t>(lva);
+        return im.gva;
     }
     if (!options_.enable56BitsGva) {
         return im.deviceVa;

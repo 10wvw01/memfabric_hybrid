@@ -319,9 +319,18 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
      * Test verified: cross-card (dev0->dev2/dev3) returns 0 (SUCCESS), repeat calls also return 0.
      * Same-card cross-die (dev0->dev1) returns 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR) because
      * kernel driver rejects P2P on same-card dies (shared PCIe). This is expected and safe to ignore
-     * for same-card, but cross-card 507899 indicates a real P2P failure. */
+     * for same-card, but cross-card 507899 indicates a real P2P failure.
+     * 入参为物理号, EPA 接口要本进程逻辑号(ASCEND_RT_VISIBLE_DEVICES 重映射下两者不同,
+     * 无重映射时恰好相等——早期实测据此误传物理号, 重映射下报 100000/107001/误指同卡 507899)。 */
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
-        Result ret = DlAclApi::AclrtDeviceEnablePeerAccess(remotePhyId, 0);
+        int32_t remoteLogicId = -1;
+        auto convRet = DlAclApi::AclrtGetLogicDevIdByPhyDevId(remotePhyId, &remoteLogicId);
+        if (convRet != BM_OK || remoteLogicId < 0) {
+            BM_LOG_ERROR("phy to logic dev id convert failed, ret:" << convRet << " remote_phy:" << remotePhyId
+                                                                    << " local_user:" << deviceId_);
+            return BM_DL_FUNCTION_FAILED;
+        }
+        Result ret = DlAclApi::AclrtDeviceEnablePeerAccess(remoteLogicId, 0);
         bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(devicePhyId_), remotePhyId);
         if (ret != 0) {
             if (ret == ACL_ERROR_RT_DRV_INTERNAL_ERROR && sameCard) {
@@ -330,11 +339,13 @@ Result MemSegment::EnableRemotePeerAccess(int32_t remotePhyId) noexcept
             } else {
                 BM_LOG_ERROR("AclrtDeviceEnablePeerAccess failed:" << ret << " local_user:" << deviceId_
                                                                    << " remote_phy:" << remotePhyId
+                                                                   << " remote_logic:" << remoteLogicId
                                                                    << " sameCard:" << sameCard);
                 return BM_DL_FUNCTION_FAILED;
             }
         }
-        BM_LOG_DEBUG("310P3 P2P enabled: local_user:" << deviceId_ << " remote_phy:" << remotePhyId << " ret:" << ret
+        BM_LOG_DEBUG("310P3 P2P enabled: local_user:" << deviceId_ << " remote_phy:" << remotePhyId
+                                                      << " remote_logic:" << remoteLogicId << " ret:" << ret
                                                       << " sameCard:" << sameCard);
         return BM_OK;
     }

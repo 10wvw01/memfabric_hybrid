@@ -72,6 +72,7 @@ rtDisableP2PFunc DlAclApi::pRtDisableP2P = nullptr;
 rtMemcpyAsyncFunc DlAclApi::pRtMemcpyAsync = nullptr;
 rtGetLogicDevIdByUserDevIdFunc DlAclApi::pRtGetLogicDevIdByUserDevId = nullptr;
 aclrtGetPhyDevIdByLogicDevIdFunc DlAclApi::pAclrtGetPhyDevIdByLogicDevId = nullptr;
+aclrtGetLogicDevIdByPhyDevIdFunc DlAclApi::pAclrtGetLogicDevIdByPhyDevId = nullptr;
 
 aclrtMallocPhysicalFunc DlAclApi::pAclrtMallocPhysical = nullptr;
 aclrtFreePhysicalFunc DlAclApi::pAclrtFreePhysical = nullptr;
@@ -160,6 +161,8 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pRtGetLogicDevIdByUserDevId, rtGetLogicDevIdByUserDevIdFunc, rtHandle, "rtGetLogicDevIdByUserDevId");
     DL_LOAD_SYM_OPTIONAL(pAclrtGetPhyDevIdByLogicDevId, aclrtGetPhyDevIdByLogicDevIdFunc, rtHandle,
                          "aclrtGetPhyDevIdByLogicDevId");
+    DL_LOAD_SYM_OPTIONAL(pAclrtGetLogicDevIdByPhyDevId, aclrtGetLogicDevIdByPhyDevIdFunc, rtHandle,
+                         "aclrtGetLogicDevIdByPhyDevId");
     DL_LOAD_SYM(pRtMemcpyAsync, rtMemcpyAsyncFunc, rtHandle, "rtMemcpyAsyncWithoutCheckKind");
 
     /* ACL VMM 符号集(310P 内存池): OPTIONAL 加载, 910B/950 环境缺失不阻塞 */
@@ -259,6 +262,7 @@ void DlAclApi::CleanupLibrary()
     pAclrtDestroyContext = nullptr;
     pAclrtSetStreamAttribute = nullptr;
     pAclrtGetPhyDevIdByLogicDevId = nullptr;
+    pAclrtGetLogicDevIdByPhyDevId = nullptr;
     pAclrtMallocPhysical = nullptr;
     pAclrtFreePhysical = nullptr;
     pAclrtReserveMemAddress = nullptr;
