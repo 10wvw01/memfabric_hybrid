@@ -20,9 +20,13 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 - 验证 SHM API 设备发起语义在 310P 落地：`smem_shm_create(SDMA)` → 传输准备
   （CP 流 + 工作区 + 编排 kernel）全自动完成
 - 验证 AICore 直接 GM 访问 AclVmm 池 GVA（产/读改写/dcci 轮询标志）
-- **两阶段验收语义**：
+- **验收语义**：
   - ① 多 chunk 流水（8×128KB）——功能正确性（1MB 逐字校验）
   - ② 串行 ×8（chunks=1 同步逐次）——无重叠对照
+  - ⑤ SDMA inline reduce——搬运同时累加（dst += src，SUM×FP32）
+  - ⑥ 多 AICore block 并发——`<<<8>>>` 起 8 个 block，每 block 在独占邮箱队列
+    （对端环下标 × 16 + block，2-rank 下 block b 恒用队列 b）独立跑"产→发→收→
+    改→回"闭环；逐 block 状态字（阶段值定位卡点）+ host D2H 逐字校验
   - 输出**通信被计算掩盖**的加速比量化（流水稳态 ≈ AICore 单 chunk 计算时间）
 
 ## 使用能力（设备侧自驱）
@@ -62,7 +66,8 @@ gva 首参；高频路径 `smem_shm_sdma_reserved(gva)` 预计算 + `_at` 变体
 2. **掩盖量化**：①流水总时延 < ②串行总时延（输出加速比；串行基线含逐轮 launch 与
    轮间会合开销，加速比度量的是"批量流水 vs 逐轮往返"的合并收益，非纯通算掩盖——
    纯掩盖收益受 (T计算+T通信)/max(T计算,T通信) ≤ 2x 结构上限约束）
-3. `destroy`/`uninit`/`MPI_Finalize` 干净退出
+3. ⑥多 block 并发：8 block 状态字全通过、r0 全量（1MB）逐字校验 mismatch=0
+4. `destroy`/`uninit`/`MPI_Finalize` 干净退出
 
 > 长稳压测与全设备同步探针（原 ③④）已迁 `test/integration/310p_sdma_stability/`，
 > 属测试内容不随示例分发。
