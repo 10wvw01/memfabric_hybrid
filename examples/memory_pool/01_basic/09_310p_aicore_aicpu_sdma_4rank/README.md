@@ -10,7 +10,8 @@
 - 各 rank 的 AICPU epoch kernel 代投 SDMA SQE：邮件像/到达戳/完成戳/数据
   **全部经 SDMA SQE 投递**（AICPU 对对端内存零直写——跨卡直写实测不返回，
   设备侧 CPU 核无跨卡 store 通路），邮箱队列**按对端 × AICore block 划分**
-  （3 对端 × 8 block = 24 队列，多发送方/多 block/多目的地并发互不干扰、序号无空洞）
+  （3 对端 × 16 队列槽位 = 48 队列，对齐 hcomm 规模；block 0..7 在用、8..15 预留，
+  多发送方/多 block/多目的地并发互不干扰、序号无空洞）
 - 接收方 `wait_any`（归并收件，`m.peer` 标来源）与 `wait_peer`（显式按对端）
   双形态齐用；host 零数据面（仅建池/起 kernel/收结果）
 
@@ -31,7 +32,7 @@
   （无块间同步）——填本 block 1MB 分片 → 发 3 对端（走独占队列 (对端, 本 block)，
   算完即发不等其它 block）→ 收 3 对端同列分片（block 列对齐）→ 规约（u32 SUM）
   → 分片自校验。验证点：
-  - 8 block 并发 signal/wait 的队列隔离（24 队列双射分区的正确性）
+  - 8 block 并发 signal/wait 的队列隔离（48 队列编码双射的正确性）
   - 通信与计算在 block 间重叠（各 block 流水独立，无聚合等待）
   - AllReduce 语义：每 rank 结果 = Σ 四 rank 贡献（host D2H 8MB 逐元素校验，
     pattern 含源 rank 可溯源）；规约 op 为 u32 SUM（fp32 引擎内联 reduce 已由
@@ -65,9 +66,11 @@ kernel 判定词、3 个到达环的游标快照（`N=2E` 表示对端 N 的环�
   （库内拓扑预检，超限建池显式拒绝 `SM_NO_RESOURCES`）
 - 单封长度 ≤ 4GB（SQE length 为 u32 字段，1GB 单封同引擎实测通过）；len 须 4 字节
   对齐；多封分块是接收侧流水粒度的调优参数，非硬件要求
-- 邮箱队列按对端×block 划分：每队列请求环深 64（单队列满环背压不影响其他队列）、
-  到达子环深 512；最多 8 个 AICore block 并发（`<<<N>>>` N ≤ 8，超出以实机为准）
-- 每 rank 段末尾 1.25MB 为邮箱保留区（memfabric 托管，勿存放用户数据）
+- 邮箱队列按对端×队列槽位划分（每对端 16 槽位共 48 队列，对齐 hcomm MAX_QUE_NUM=48；
+  队列长度 64 槽/队列亦对齐 hcomm HCCL_MSG_CNT=64）：每队列请求环深 64（单队列满环
+  背压不影响其他队列）、到达子环深 512；最多 8 个 AICore block 并发（`<<<N>>>` N ≤ 8，
+  block 0..7 用对应槽位，8..15 预留冗余）
+- 每 rank 段末尾 2MB 为邮箱保留区（memfabric 托管，勿存放用户数据）
 - 本示例每 rank 物理贡献 64MB（③ 数据区 40MB：贡献 8MB + 接收 24MB + 结果 8MB）
 
 ## 必要条件

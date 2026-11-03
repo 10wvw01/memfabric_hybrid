@@ -17,12 +17,13 @@
  *   - 发往不同对端的邮件在对端环上序号有空洞, 接收方 head+1 连续性期望失配;
  *   仅支持"每目的段唯一远端写者"(2-rank)。
  * v29 按对端划分请求环与到达环(每对端一套环, 各自独立序号);
- * v31 邮箱队列按 AICore block 扩展(每对端 × 每 block 一套队列, 3×8=24)。
+ * v31 邮箱队列按 AICore block 扩展; v32 每对端 16 队列槽位(3×16=48, hcomm 同规模,
+ * block 0..7 在用、8..15 预留冗余)。
  * 本文件在主机内存上仿真 4 rank 段尾保留区, 收发两侧使用与 kernel/设备原语
  * 完全相同的共享布局常量与映射函数, 验证 4-rank 路由正确性与多发送方/多 block
  * 并发隔离:
  *   1. 环下标映射不变式(全 12 有向对, 每视角双射) + 队列下标双射(对端 × block)
- *   2. 布局地址不变式(24 队列不重叠且落 1.25MB; 缓存行纪律)
+ *   2. 布局地址不变式(48 队列不重叠且落 2MB; 缓存行纪律)
  *   3. 路由往返一致(signal 侧 dst→队列 与 kernel 侧 队列→目的 rank 互逆)
  *   4. 全对全投递: 12 有向对各 1 封, wait_peer 逐对校验内容/来源
  *   5. 多目的地交错: 单发送方轮流发 3 对端, 各对端环序号连续无空洞
@@ -166,7 +167,7 @@ RecvMail SimWaitAny(RankSim &rank, uint32_t ownRank, uint32_t block = 0)
 }
 } // namespace
 
-/* 用例 1: 环/队列下标映射不变式——每视角双射(对端 × block 全 24 队列恰一次) */
+/* 用例 1: 环/队列下标映射不变式——每视角双射(在用队列恰一次, 预留槽位无映射) */
 TEST(Sdma4RankProtocolTest, RingAndQueueIdxBijection)
 {
     for (uint32_t own = 0; own < RANKS; own++) {
@@ -188,13 +189,16 @@ TEST(Sdma4RankProtocolTest, RingAndQueueIdxBijection)
             }
         }
         for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
-            EXPECT_EQ(seen[q], 1U) << "own:" << own << " q:" << q; /* 恰好一次(双射) */
+            /* 在用槽位(block < MAX_BLOCKS)恰好一次; 预留槽位(8..15)无映射恒零 */
+            EXPECT_EQ(seen[q],
+                      (q % SMEM_SHM_SDMA_QUEUES_PER_PEER < SMEM_SHM_SDMA_MAX_BLOCKS) ? 1U : 0U)
+                << "own:" << own << " q:" << q;
         }
     }
 }
 
-/* 用例 2: 布局地址不变式——四组本端数组各 24 队列首尾相接, 到达子环队列内不重叠、
- * 全部落 1.25MB; 各基址/间距 64B 对齐(跨写者字段独占行纪律) */
+/* 用例 2: 布局地址不变式——四组本端数组各 48 队列首尾相接, 到达子环队列内不重叠、
+ * 全部落 2MB; 各基址/间距 64B 对齐(跨写者字段独占行纪律) */
 TEST(Sdma4RankProtocolTest, LayoutAddressInvariants)
 {
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_RING + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE,
@@ -449,11 +453,12 @@ TEST(Sdma4RankProtocolTest, ContractParamInvariants)
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);      /* 保留区基址(队列定位原点) */
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, rank), 64U);         /* 本端 rank(队列路由) */
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, poolBaseGva), 72U);  /* 池窗口基址(路由复核) */
-    EXPECT_GE(HYBM_SDMA_ORCH_KVER, 31U);                       /* v31 = 队列按 AICore block 扩展 */
+    EXPECT_GE(HYBM_SDMA_ORCH_KVER, 32U);                       /* v32 = 48 队列对齐 hcomm 规模 */
     EXPECT_EQ(SMEM_SHM_SDMA_MAX_RANKS, 4U);
     EXPECT_EQ(SMEM_SHM_SDMA_MAX_PEERS, 3U);
     EXPECT_EQ(SMEM_SHM_SDMA_MAX_BLOCKS, 8U);
-    EXPECT_EQ(SMEM_SHM_SDMA_QUEUE_COUNT, 24U);
+    EXPECT_EQ(SMEM_SHM_SDMA_QUEUES_PER_PEER, 16U);
+    EXPECT_EQ(SMEM_SHM_SDMA_QUEUE_COUNT, 48U);
 }
 } // namespace mf
 } // namespace ock
