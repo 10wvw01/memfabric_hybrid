@@ -11,7 +11,7 @@ ttft_test/
 ├── verify.sh                # 验证部署结果
 ├── run_test.sh              # 统一测试运行脚本（workload / integration / largecap / bench）
 ├── start_service.sh         # 启动 MetaService + vLLM（支持 --detach 后台模式）
-├── pytest.ini               # pytest 配置（注册 marker：throughput / rank2 / rank4 / workload / largecap）
+├── pytest.ini               # pytest 配置（注册 marker：throughput / rank1 / rank2 / rank4 / workload / largecap）
 ├── patches/
 │   ├── memcache_modified_files.patch                  # memcache pymmc.cpp pybind11 枚举 static_cast 适配
 │   ├── fix_310p_p2p_huge_fallback_to_hbm_huge.patch   # memfabric_hybrid 207001 P2P_HUGE 回退补丁
@@ -109,6 +109,12 @@ bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 4 --
 
 # 5. 吞吐基准测试（2-rank, cache-miss vs cache-hit）
 bash run_test.sh --memcache-dir /path/to/memcache --type bench --rank 2 --device-ids 6,7
+
+# 6. 纯 DRAM 测试（4-rank, host_shm, 0 HBM, 10GB DRAM, ~16 分钟）
+bash run_test.sh --memcache-dir /path/to/memcache --type puredram --device-ids 4,5,6,7 --log
+
+# 6b. 纯 DRAM 分次运行（推荐，避免 310P3 孤儿 NPU 上下文问题）
+bash run_test.sh --memcache-dir /path/to/memcache --type puredram --device-ids 4,5,6,7 --split --log
 ```
 
 ### 测试过滤（`--filter`）
@@ -118,12 +124,14 @@ bash run_test.sh --memcache-dir /path/to/memcache --type bench --rank 2 --device
 | `--type` | `--rank` | 默认 marker | 说明 |
 |----------|----------|-------------|------|
 | workload | — | `workload` | Layer 2 全部 6 个场景 |
+| integration | 1 | `rank1` | L3 单 rank 变体（TP=1） |
 | integration | 2 | `rank2` | L3-1/L3-2/L3-3（含 30%/50% 参数化） |
 | integration | 4 | `rank4` | L3-4/L3-5（4-rank 变体） |
 | largecap | — | `largecap`（L2）/ `rank4`（L3） | 大容量测试 |
-| bench | 2/4 | — | 吞吐基准，无 marker 过滤 |
+| puredram | — | `rank4` | 纯 DRAM（host_shm, 0 HBM, 10GB DRAM）4-rank |
+| bench | 1/2/4 | — | 吞吐基准，无 marker 过滤 |
 
-可用 marker：`workload`、`largecap`、`rank2`、`rank4`、`throughput`
+可用 marker：`workload`、`largecap`、`rank1`、`rank2`、`rank4`、`throughput`
 
 ```bash
 # 只跑 throughput bench
@@ -135,15 +143,15 @@ bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--memcache-dir <DIR>` | memcache 仓库目录（必选） | — |
-| `--type <TYPE>` | 测试类型：workload / integration / largecap / bench | workload |
+| `--type <TYPE>` | 测试类型：workload / integration / largecap / bench / puredram | workload |
 | `--rank <N>` | rank 数：2 或 4（integration/bench 必选） | — |
 | `--protocol <PROTO>` | 协议：host_shm 或 device_sdma（integration） | 配置默认 |
-| `--device-ids <a,b,...>` | NPU 设备 ID（逗号分隔） | 2-rank: 6,7 / 4-rank: 0,1,2,3 |
+| `--device-ids <a,b,...>` | NPU 设备 ID（逗号分隔） | 2-rank: 6,7 / 4-rank: 0,1,2,3 / largecap,puredram: 4,5,6,7 |
 | `--filter <name>` | pytest `-m` marker 过滤 | 按 type/rank 自动 |
-| `--gpu-mem-util <float>` | GPU 显存利用率 | 0.80（largecap: 0.70） |
+| `--gpu-mem-util <float>` | GPU 显存利用率 | 0.80（largecap: 0.70, puredram: 0.60） |
 | `--log` | 输出 tee 到 `retest_logs/` 目录 | 关 |
 | `--skip-clean` | 跳过测试前环境清理 | 关 |
-| `--split` | 4-rank integration: 逐个测试分次运行，中间清理 NPU | 关 |
+| `--split` | 4-rank integration/puredram: 逐个测试分次运行，中间清理 NPU | 关 |
 | `--bench-num-prompts <N>` | bench: 每轮请求数 | 20 |
 | `--bench-request-rate <N>` | bench: 请求速率 | 5 |
 | `--bench-input-len <N>` | bench: 输入 token 长度 | 1024 |
@@ -229,6 +237,9 @@ Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 | L3-3 | 部分命中率 TTFT | 30%/50% 混合请求 | 实际命中 ≥70%，改善 > hit_rate×20% | `rank2` |
 | L3-4 | 4-rank MemCache vs Baseline | 同 L3-1，TP=4 | 同上 | `rank4` |
 | L3-5 | 4-rank Prefix cache hit | 同 L3-2，TP=4 | 同上 | `rank4` |
+| L3-1r | 1-rank MemCache vs Baseline | 同 L3-1，TP=1 | 同上 | `rank1` |
+| L3-2r | 1-rank Prefix cache hit | 同 L3-2，TP=1 | 同上 | `rank1` |
+| L3-3r | 1-rank 部分命中率 TTFT | 同 L3-3，TP=1 | 同上 | `rank1` |
 | L3-6 | Throughput bench（可选） | `vllm bench serve` | 默认 deselected | `throughput` |
 
 ### 大容量测试
@@ -282,7 +293,7 @@ vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_
 ## 注意事项
 
 1. **设备选择**: 测试需同卡 die-pair（dev0+1, dev2+3, dev4+5, dev6+7）；4-rank 需 2 组 die-pair（如 dev4,5,6,7），通过 `--device-ids` 指定
-2. **TP 由 --rank 指定**: `run_test.sh --type integration` 通过 `--rank 2` 或 `--rank 4` 选择 TP 和配置文件（2→integration.conf, 4→integration-4rank.conf），设备数必须匹配
+2. **TP 由 --rank 指定**: `run_test.sh --type integration` 通过 `--rank 1`、`--rank 2` 或 `--rank 4` 选择 TP 和配置文件（1→integration-1rank.conf, 2→integration.conf, 4→integration-4rank.conf），设备数必须匹配
 3. **gpu-mem-util**: 默认 0.80；4-rank 若设备显存被其他进程占用，可降低到 0.60（如 `--gpu-mem-util 0.60`）
 4. **环境清理**: 每次测试前必须执行 `clean_stale_env.sh`（run_test.sh 自动调用，可用 `--skip-clean` 跳过）
 5. **孤儿 NPU 上下文**: VLLM::Worker_TP 异常退出后 HBM 可能不释放，需改选其他设备
@@ -297,5 +308,5 @@ vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_
        pytest cases/python/memcache/integration/vllm_integration_test.py -v -s -k test_prefix_cache_hit_e2e_ttft_4rank
    ```
 7. **/dev/shm**: host_shm 协议下 dram.size 不超过 1GB；4-rank 时 4 × 1GB = 4GB（/dev/shm 8GB 充足）；largecap 模式自动 resize 到 100GB
-8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；可用 marker：`workload`、`largecap`、`rank2`、`rank4`
+8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；可用 marker：`workload`、`largecap`、`rank1`、`rank2`、`rank4`
 9. **文件日志**: 加 `--log` 参数将输出 tee 到 `retest_logs/` 目录

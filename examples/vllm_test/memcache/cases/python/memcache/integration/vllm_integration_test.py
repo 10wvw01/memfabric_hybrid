@@ -12,7 +12,7 @@
 
 """vLLM integration tests: MemCache TTFT under full miss, partial hit, and full hit.
 
-Three test scenarios (each with 2-rank and 4-rank variants):
+Three test scenarios (each with 1-rank, 2-rank and 4-rank variants):
 
   1. Full miss (baseline)  — all unique prompts; also compares with/without MemCache overhead
   2. 50% hit               — half prompts pre-populated in MemCache, mixed hit/miss
@@ -26,9 +26,11 @@ Adjust via environment variables:
 
 The TP size and device IDs are controlled by environment variables:
 
-  MMC_TEST_DEVICE_IDS=0,1 MMC_TEST_TENSOR_PARALLEL_SIZE=2  -> 2-rank
+  MMC_TEST_DEVICE_IDS=0 MMC_TEST_TENSOR_PARALLEL_SIZE=1      -> 1-rank
+  MMC_TEST_DEVICE_IDS=0,1 MMC_TEST_TENSOR_PARALLEL_SIZE=2    -> 2-rank
   MMC_TEST_DEVICE_IDS=0,1,2,3 MMC_TEST_TENSOR_PARALLEL_SIZE=4 -> 4-rank
 
+For 1-rank tests, use ``pytest -m rank1`` to select the 1-rank-only subset.
 For 4-rank tests, use ``pytest -m rank4`` to select the 4-rank-only subset.
 
 Cache Isolation Methodology
@@ -803,6 +805,192 @@ def test_100pct_hit(benchmark):
             f"  Cache hit  P50={hit_p50:.2f}ms P99={hit_p99:.2f}ms\n"
             f"  Hit/Miss ratio={ratio:.2%} (threshold: < {PREFIX_CACHE_HIT_RATIO:.0%})"
         )
+
+        assert hit_p50 < miss_p50 * PREFIX_CACHE_HIT_RATIO, (
+            f"Cache hit P50 {hit_p50:.2f}ms >= miss P50 * {PREFIX_CACHE_HIT_RATIO} "
+            f"({miss_p50 * PREFIX_CACHE_HIT_RATIO:.2f}ms)"
+        )
+    finally:
+        benchmark.stop_vllm()
+
+
+# ---------------------------------------------------------------------------
+# 1-rank (TP=1) variants
+# ---------------------------------------------------------------------------
+# Identical logic, separate naming for report clarity.
+#
+# Run with:
+#   MMC_TEST_DEVICE_IDS=0 MMC_TEST_TENSOR_PARALLEL_SIZE=1 pytest -m rank1
+
+
+@pytest.mark.rank1
+def test_full_miss_baseline_1rank(benchmark):
+    """1-rank (TP=1): Full miss baseline with MemCache overhead comparison."""
+    baseline_result = None
+    memcache_result = None
+
+    try:
+        print("\n===== [1-Rank] Phase 1: Baseline vLLM (no MemCache) =====")
+        benchmark.start_vllm_baseline()
+        warmup = [_build_prompt_ids(PROMPT_TOKENS, seed=-(i + 1)) for i in range(WARMUP_REQUESTS)]
+        measure = [_build_prompt_ids(PROMPT_TOKENS, seed=i) for i in range(MEASURED_REQUESTS)]
+        baseline_result = benchmark.measure_ttft_batch(measure, warmup_prompts=warmup)
+        print(f"Baseline: {baseline_result}")
+        benchmark.print_cache_stats("1-Rank Baseline")
+    finally:
+        benchmark.stop_vllm()
+
+    try:
+        print("\n===== [1-Rank] Phase 2: vLLM with MemCache =====")
+        benchmark.start_vllm_with_memcache()
+        warmup = [_build_prompt_ids(PROMPT_TOKENS, seed=-(i + 1)) for i in range(WARMUP_REQUESTS)]
+        measure = [_build_prompt_ids(PROMPT_TOKENS, seed=i) for i in range(MEASURED_REQUESTS)]
+        memcache_result = benchmark.measure_ttft_batch(measure, warmup_prompts=warmup)
+        print(f"MemCache: {memcache_result}")
+        benchmark.print_cache_stats("1-Rank MemCache")
+    finally:
+        benchmark.stop_vllm()
+
+    assert baseline_result is not None, "baseline benchmark failed"
+    assert memcache_result is not None, "memcache benchmark failed"
+
+    baseline_p50 = baseline_result["p50_ms"]
+    memcache_p50 = memcache_result["p50_ms"]
+    overhead = (memcache_p50 - baseline_p50) / baseline_p50 if baseline_p50 > 0 else 1.0
+
+    print(
+        f"\n===== [1-Rank] Full Miss Baseline Comparison =====\n"
+        f"  Baseline P50={baseline_p50:.2f}ms P99={baseline_result['p99_ms']:.2f}ms\n"
+        f"  MemCache P50={memcache_p50:.2f}ms P99={memcache_result['p99_ms']:.2f}ms\n"
+        f"  Overhead={overhead:.2%} (threshold: {MEMCACHE_OVERHEAD_RATIO:.0%})"
+    )
+
+    assert overhead < MEMCACHE_OVERHEAD_RATIO, (
+        f"MemCache E2E TTFT overhead {overhead:.2%} exceeds {MEMCACHE_OVERHEAD_RATIO:.0%} threshold"
+    )
+
+
+@pytest.mark.rank1
+def test_50pct_hit_1rank(benchmark):
+    """1-rank (TP=1): 50% cache hit rate."""
+    try:
+        print("\n===== [1-Rank] Starting vLLM with MemCache for 50% hit test =====")
+        benchmark.start_vllm_with_memcache()
+
+        warmup_prompt = _build_prompt_ids(PROMPT_TOKENS, seed=99)
+        for i in range(WARMUP_REQUESTS):
+            benchmark.measure_e2e_ttft_ms(warmup_prompt)
+            print(f"  warmup {i + 1}/{WARMUP_REQUESTS} done")
+
+        num_requests = MEASURED_REQUESTS
+        hit_count = round(0.5 * num_requests)
+        miss_count = num_requests - hit_count
+
+        hit_seeds = [5000 + i for i in range(hit_count)]
+        for i, seed in enumerate(hit_seeds):
+            prompt = _build_prompt_ids(PROMPT_TOKENS, seed=seed)
+            benchmark.measure_e2e_ttft_ms(prompt)
+            print(f"  pre-populate {i + 1}/{hit_count} (seed={seed}) done")
+
+        time.sleep(3)
+
+        miss_seeds = [6000 + i for i in range(miss_count)]
+        requests = []
+        for seed in hit_seeds:
+            requests.append((_build_prompt_ids(PROMPT_TOKENS, seed=seed), True))
+        for seed in miss_seeds:
+            requests.append((_build_prompt_ids(PROMPT_TOKENS, seed=seed), False))
+
+        rng = random.Random(42)
+        rng.shuffle(requests)
+
+        all_latencies: List[float] = []
+        hit_latencies: List[float] = []
+        miss_latencies: List[float] = []
+        for i, (prompt, is_expected_hit) in enumerate(requests):
+            ttft = benchmark.measure_e2e_ttft_ms(prompt)
+            all_latencies.append(ttft)
+            if is_expected_hit:
+                hit_latencies.append(ttft)
+            else:
+                miss_latencies.append(ttft)
+            label = "hit " if is_expected_hit else "miss"
+            print(f"  measured {i + 1}/{num_requests}: TTFT={ttft:.2f}ms ({label})")
+
+        all_avg = sum(all_latencies) / len(all_latencies)
+        all_p50 = _percentile(all_latencies, 0.50)
+        all_p99 = _percentile(all_latencies, 0.99)
+        hit_avg = sum(hit_latencies) / len(hit_latencies) if hit_latencies else 0.0
+        hit_p50 = _percentile(hit_latencies, 0.50) if hit_latencies else 0.0
+        miss_avg = sum(miss_latencies) / len(miss_latencies) if miss_latencies else 0.0
+        miss_p50 = _percentile(miss_latencies, 0.50) if miss_latencies else 0.0
+
+        actual_hit_count = sum(1 for t in hit_latencies if t < HIT_TTFT_THRESHOLD_MS)
+        improvement = (miss_avg - all_avg) / miss_avg if miss_avg > 0 else 0.0
+
+        print(
+            f"\n===== [1-Rank] 50% Hit Rate E2E TTFT =====\n"
+            f"  Expected hit/total: {hit_count}/{num_requests} (50%)\n"
+            f"  Actual hit (TTFT<{HIT_TTFT_THRESHOLD_MS:.0f}ms): {actual_hit_count}/{hit_count}\n"
+            f"  All   avg={all_avg:.2f}ms P50={all_p50:.2f}ms P99={all_p99:.2f}ms\n"
+            f"  Hit   avg={hit_avg:.2f}ms P50={hit_p50:.2f}ms (count={len(hit_latencies)})\n"
+            f"  Miss  avg={miss_avg:.2f}ms P50={miss_p50:.2f}ms (count={len(miss_latencies)})\n"
+            f"  Improvement (avg): {improvement:.2%}"
+        )
+
+        benchmark.print_cache_stats("1-Rank 50% Hit")
+
+        assert actual_hit_count >= hit_count * 0.5, (
+            f"Only {actual_hit_count}/{hit_count} expected hits had TTFT < {HIT_TTFT_THRESHOLD_MS:.0f}ms"
+        )
+        assert hit_p50 < miss_p50 * PREFIX_CACHE_HIT_RATIO, (
+            f"Hit P50 {hit_p50:.2f}ms >= miss P50 * {PREFIX_CACHE_HIT_RATIO} "
+            f"({miss_p50 * PREFIX_CACHE_HIT_RATIO:.2f}ms)"
+        )
+    finally:
+        benchmark.stop_vllm()
+
+
+@pytest.mark.rank1
+def test_100pct_hit_1rank(benchmark):
+    """1-rank (TP=1): 100% cache hit rate."""
+    try:
+        print("\n===== [1-Rank] Starting vLLM with MemCache for 100% hit test =====")
+        benchmark.start_vllm_with_memcache()
+
+        warmup_prompt = _build_prompt_ids(PROMPT_TOKENS, seed=99)
+        for i in range(WARMUP_REQUESTS):
+            benchmark.measure_e2e_ttft_ms(warmup_prompt)
+            print(f"  warmup {i + 1}/{WARMUP_REQUESTS} done")
+
+        miss_latencies: List[float] = []
+        hit_latencies: List[float] = []
+        for i in range(MEASURED_REQUESTS):
+            miss_prompt = _build_prompt_ids(PROMPT_TOKENS, seed=1000 + i)
+            miss_ttft = benchmark.measure_e2e_ttft_ms(miss_prompt)
+            miss_latencies.append(miss_ttft)
+
+            time.sleep(1)
+
+            hit_ttft = benchmark.measure_e2e_ttft_ms(miss_prompt)
+            hit_latencies.append(hit_ttft)
+
+            print(f"  pair {i + 1}/{MEASURED_REQUESTS}: miss={miss_ttft:.2f}ms, hit={hit_ttft:.2f}ms")
+
+        miss_p50 = _percentile(miss_latencies, 0.50)
+        hit_p50 = _percentile(hit_latencies, 0.50)
+        miss_p99 = _percentile(miss_latencies, 0.99)
+        hit_p99 = _percentile(hit_latencies, 0.99)
+        ratio = hit_p50 / miss_p50 if miss_p50 > 0 else 1.0
+
+        print(
+            f"\n===== [1-Rank] 100% Hit Rate E2E TTFT =====\n"
+            f"  Cache miss P50={miss_p50:.2f}ms P99={miss_p99:.2f}ms\n"
+            f"  Cache hit  P50={hit_p50:.2f}ms P99={hit_p99:.2f}ms\n"
+            f"  Hit/Miss ratio={ratio:.2%} (threshold: < {PREFIX_CACHE_HIT_RATIO:.0%})"
+        )
+
+        benchmark.print_cache_stats("1-Rank 100% Hit")
 
         assert hit_p50 < miss_p50 * PREFIX_CACHE_HIT_RATIO, (
             f"Cache hit P50 {hit_p50:.2f}ms >= miss P50 * {PREFIX_CACHE_HIT_RATIO} "

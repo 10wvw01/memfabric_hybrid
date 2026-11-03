@@ -8,18 +8,19 @@
 #
 # Options:
 #   --memcache-dir <DIR>                    memcache repo dir (required)
-#   --type workload|integration|largecap|bench  test type (default: workload)
+#   --type workload|integration|largecap|bench|puredram  test type (default: workload)
 #                                           integration now includes hitdecode tests
 #                                           use -m hitdecode to select subset
-#   --rank 2|4                              rank count: 2-rank (TP=2) or 4-rank (TP=4) (integration/bench, required for integration)
+#                                           puredram: pure-DRAM (host_shm, 0 HBM) 4-rank
+#   --rank 1|2|4                            rank count: 1-rank (TP=1), 2-rank (TP=2) or 4-rank (TP=4) (integration/bench, required for integration)
 #   --layer layer2|layer3|all               largecap layer selection (default: all)
 #   --protocol host_shm|device_sdma         protocol (integration only, default: config default)
-#   --device-ids <a,b,...>                  NPU device IDs (default: 6,7 for 2-rank, 0,1,2,3 for 4-rank, 4,5,6,7 for largecap)
+#   --device-ids <a,b,...>                  NPU device IDs (default: 0 for 1-rank, 6,7 for 2-rank, 0,1,2,3 for 4-rank, 4,5,6,7 for largecap/puredram)
 #   --filter <name>                         pytest -m marker filter (e.g. rank2, rank4, throughput, hitdecode)
 #   --log                                   enable file logging to retest_logs/
-#   --gpu-mem-util <float>                  GPU mem util (default: 0.80, largecap: 0.70)
+#   --gpu-mem-util <float>                  GPU mem util (default: 0.80, largecap: 0.70, puredram: 0.60)
 #   --skip-clean                            skip env cleanup before tests
-#   --split                                 4-rank integration: run each test separately
+#   --split                                 4-rank integration/puredram: run each test separately
 #                                           with NPU cleanup between (recommended for 310P3)
 #   --bench-num-prompts <N>                 bench: prompts per round (default: 20)
 #   --bench-request-rate <N>                bench: requests per second (default: 5)
@@ -30,6 +31,9 @@
 # Examples:
 #   # Layer 2 workload
 #   bash run_test.sh --memcache-dir /path/to/memcache --type workload --device-ids 6,7
+#
+#   # Layer 3 1-rank (TP=1)
+#   bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 1 --protocol device_sdma --device-ids 0 --log
 #
 #   # Layer 3 2-rank (TP=2)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --protocol host_shm --device-ids 6,7 --log
@@ -42,6 +46,9 @@
 #
 #   # Large-capacity test (TP=4, large HBM + DRAM)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type largecap --layer layer3 --device-ids 4,5,6,7 --log
+#
+#   # Pure-DRAM test (TP=4, host_shm, 0 HBM, 10GB DRAM)
+#   bash run_test.sh --memcache-dir /path/to/memcache --type puredram --device-ids 4,5,6,7 --log
 
 set -euo pipefail
 
@@ -92,19 +99,19 @@ done
 [[ ! -d "$MEMCACHE_DIR" ]] && { echo "[ERROR] 目录不存在: $MEMCACHE_DIR"; exit 1; }
 
 case "$TEST_TYPE" in
-    workload|integration|largecap|bench) ;;
-    *) echo "[ERROR] --type 只能是 workload, integration, largecap 或 bench"; exit 1 ;;
+    workload|integration|largecap|bench|puredram) ;;
+    *) echo "[ERROR] --type 只能是 workload, integration, largecap, bench 或 puredram"; exit 1 ;;
 esac
 
 # --rank validation (required for integration and bench)
 if [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" ]]; then
     if [[ -z "$RANK" ]]; then
-        echo "[ERROR] --type $TEST_TYPE 需要指定 --rank 2 或 --rank 4"
+        echo "[ERROR] --type $TEST_TYPE 需要指定 --rank 1、2 或 --rank 4"
         exit 1
     fi
 fi
-if [[ -n "$RANK" && "$RANK" != "2" && "$RANK" != "4" ]]; then
-    echo "[ERROR] --rank 只能是 2 或 4"
+if [[ -n "$RANK" && "$RANK" != "1" && "$RANK" != "2" && "$RANK" != "4" ]]; then
+    echo "[ERROR] --rank 只能是 1、2 或 4"
     exit 1
 fi
 
@@ -119,11 +126,13 @@ fi
 
 # Type-dependent defaults
 if [[ -z "$DEVICE_IDS" ]]; then
-    if [[ "$TEST_TYPE" == "largecap" ]]; then
+    if [[ "$TEST_TYPE" == "largecap" || "$TEST_TYPE" == "puredram" ]]; then
         DEVICE_IDS="4,5,6,7"
     elif [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" ]]; then
         if [[ "$RANK" == "4" ]]; then
             DEVICE_IDS="0,1,2,3"
+        elif [[ "$RANK" == "1" ]]; then
+            DEVICE_IDS="0"
         else
             DEVICE_IDS="6,7"
         fi
@@ -132,11 +141,11 @@ if [[ -z "$DEVICE_IDS" ]]; then
     fi
 fi
 if [[ -z "$GPU_MEM_UTIL" ]]; then
-    if [[ "$TEST_TYPE" == "largecap" ]]; then
-        GPU_MEM_UTIL="0.70"
-    else
-        GPU_MEM_UTIL="0.80"
-    fi
+    case "$TEST_TYPE" in
+        largecap)    GPU_MEM_UTIL="0.70" ;;
+        puredram)    GPU_MEM_UTIL="0.60" ;;
+        *)           GPU_MEM_UTIL="0.80" ;;
+    esac
 fi
 
 if [[ -n "$PROTOCOL" && "$PROTOCOL" != "host_shm" && "$PROTOCOL" != "device_sdma" ]]; then
@@ -183,6 +192,21 @@ export MMC_META_CONFIG_PATH="$MEMCACHE_DIR/config/mmc-meta.conf"
 # ============================================================================
 # Config selection + protocol switch
 # ============================================================================
+resize_shm_for_dram() {
+    local min_gb="${1:-50}"
+    local target_gb="${2:-100}"
+    local SHM_SIZE SHM_SIZE_GB
+    SHM_SIZE=$(df --output=size -B1 /dev/shm | tail -1)
+    SHM_SIZE_GB=$((SHM_SIZE / 1024 / 1024 / 1024))
+    if [[ "$SHM_SIZE_GB" -lt "$min_gb" ]]; then
+        log "[WARN] /dev/shm is ${SHM_SIZE_GB}GB, need >= ${min_gb}GB for 4 ranks x 10GB DRAM"
+        log "[INFO] Resizing /dev/shm to ${target_gb}GB..."
+        mount -o remount,size=${target_gb}G /dev/shm
+        SHM_SIZE_GB=$(df --output=size -B1 /dev/shm | tail -1 | awk '{printf "%d", $1/1024/1024/1024}')
+    fi
+    log "[INFO] /dev/shm size: ${SHM_SIZE_GB}GB"
+}
+
 case "$TEST_TYPE" in
     workload)
         export MMC_LOCAL_CONFIG_PATH="$PKG_DIR/cases/config/mmc-local-workload.conf"
@@ -191,6 +215,9 @@ case "$TEST_TYPE" in
         if [[ "$RANK" == "4" ]]; then
             BASE_CONFIG="$PKG_DIR/cases/config/mmc-local-integration-4rank.conf"
             export MMC_TEST_TENSOR_PARALLEL_SIZE="4"
+        elif [[ "$RANK" == "1" ]]; then
+            BASE_CONFIG="$PKG_DIR/cases/config/mmc-local-integration-1rank.conf"
+            export MMC_TEST_TENSOR_PARALLEL_SIZE="1"
         else
             BASE_CONFIG="$PKG_DIR/cases/config/mmc-local-integration.conf"
             export MMC_TEST_TENSOR_PARALLEL_SIZE="2"
@@ -208,16 +235,14 @@ case "$TEST_TYPE" in
         fi
         ;;
     largecap)
-        SHM_SIZE=$(df --output=size -B1 /dev/shm | tail -1)
-        SHM_SIZE_GB=$((SHM_SIZE / 1024 / 1024 / 1024))
-        if [[ "$SHM_SIZE_GB" -lt 50 ]]; then
-            log "[WARN] /dev/shm is ${SHM_SIZE_GB}GB, need >= 50GB for 4 ranks x 10GB DRAM"
-            log "[INFO] Resizing /dev/shm to 100GB..."
-            mount -o remount,size=100G /dev/shm
-            SHM_SIZE_GB=$(df --output=size -B1 /dev/shm | tail -1 | awk '{printf "%d", $1/1024/1024/1024}')
-        fi
-        log "[INFO] /dev/shm size: ${SHM_SIZE_GB}GB"
+        resize_shm_for_dram 50 100
         export MMC_LOCAL_CONFIG_PATH="$PKG_DIR/cases/config/mmc-local-largecap-4rank.conf"
+        export MMC_TEST_TENSOR_PARALLEL_SIZE="4"
+        export MMC_TEST_GPU_MEM_UTIL="$GPU_MEM_UTIL"
+        ;;
+    puredram)
+        resize_shm_for_dram 50 100
+        export MMC_LOCAL_CONFIG_PATH="$PKG_DIR/cases/config/mmc-local-puredram-4rank.conf"
         export MMC_TEST_TENSOR_PARALLEL_SIZE="4"
         export MMC_TEST_GPU_MEM_UTIL="$GPU_MEM_UTIL"
         ;;
@@ -368,6 +393,39 @@ run_pytest() {
 # ============================================================================
 # Test type implementations
 # ============================================================================
+
+# Shared cleanup between split tests: kill stale processes + restart MetaService.
+cleanup_between_tests() {
+    if [[ -f "$CLEAN_SCRIPT" ]]; then
+        log "[INFO] Cleaning NPU between split tests..."
+        if [[ -n "$LOG_FILE" ]]; then
+            bash "$CLEAN_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+        else
+            bash "$CLEAN_SCRIPT"
+        fi
+    fi
+    stop_meta_service
+    sleep 10
+    ensure_meta_service
+}
+
+# Run pytest tests one-by-one with NPU cleanup between each.
+# Args: test_file test_name1 test_name2 ...
+run_pytest_split() {
+    local test_file="$1"; shift
+    local -a test_names=("$@")
+    local overall=0
+    for tname in "${test_names[@]}"; do
+        log ""
+        log "[INFO] === Split run: $tname ==="
+        run_pytest "$test_file" -v -s -k "$tname"
+        local rc=$?
+        [[ $rc -ne 0 ]] && overall=$rc
+        cleanup_between_tests
+    done
+    return $overall
+}
+
 run_workload() {
     ensure_meta_service
     local test_dir="$PKG_DIR/cases/python/memcache/workload/"
@@ -387,39 +445,47 @@ run_integration() {
     local test_file="$PKG_DIR/cases/python/memcache/integration/vllm_integration_test.py"
     if [[ -n "$TEST_FILTER" ]]; then
         run_pytest "$test_file" -v -s -m "$TEST_FILTER"
+    elif [[ "$RANK" == "1" && "$SPLIT_TESTS" -eq 1 ]]; then
+        # 1-rank: run each test separately with NPU cleanup between.
+        run_pytest_split "$test_file" \
+            "test_full_miss_baseline_1rank" \
+            "test_50pct_hit_1rank" \
+            "test_100pct_hit_1rank"
     elif [[ "$RANK" == "4" && "$SPLIT_TESTS" -eq 1 ]]; then
         # 4-rank: run each test separately with NPU cleanup between,
         # because 310P3 vLLM exit leaves orphan NPU context (HBM not released).
-        local overall=0
-        local test_names=(
-            "test_full_miss_baseline_4rank"
-            "test_50pct_hit_4rank"
+        run_pytest_split "$test_file" \
+            "test_full_miss_baseline_4rank" \
+            "test_50pct_hit_4rank" \
             "test_100pct_hit_4rank"
-        )
-        for tname in "${test_names[@]}"; do
-            log ""
-            log "[INFO] === Split run: $tname ==="
-            run_pytest "$test_file" -v -s -k "$tname"
-            local rc=$?
-            [[ $rc -ne 0 ]] && overall=$rc
-            # NPU cleanup between tests
-            if [[ -f "$CLEAN_SCRIPT" ]]; then
-                log "[INFO] Cleaning NPU between split tests..."
-                if [[ -n "$LOG_FILE" ]]; then
-                    bash "$CLEAN_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
-                else
-                    bash "$CLEAN_SCRIPT"
-                fi
-            fi
-            stop_meta_service
-            sleep 10
-            ensure_meta_service
-        done
-        return $overall
     else
         local marker="rank2"
-        [[ "$RANK" == "4" ]] && marker="rank4"
+        case "$RANK" in
+            1) marker="rank1" ;;
+            4) marker="rank4" ;;
+        esac
         run_pytest "$test_file" -v -s -m "$marker"
+    fi
+}
+
+run_puredram() {
+    if ! python3 -c "import vllm" 2>/dev/null; then
+        log "[SKIP] vLLM not available, skipping pure-DRAM tests"
+        exit 0
+    fi
+    ensure_meta_service
+    local test_file="$PKG_DIR/cases/python/memcache/integration/pure_dram_vllm_test.py"
+    if [[ -n "$TEST_FILTER" ]]; then
+        log "[INFO] Starting pure-DRAM tests (filter: $TEST_FILTER)..."
+        run_pytest "$test_file" -v -s -m "$TEST_FILTER"
+    elif [[ "$SPLIT_TESTS" -eq 1 ]]; then
+        run_pytest_split "$test_file" \
+            "test_puredram_full_miss_baseline_4rank" \
+            "test_puredram_50pct_hit_4rank" \
+            "test_puredram_100pct_hit_4rank"
+    else
+        log "[INFO] Starting pure-DRAM tests (TP=4, host_shm, 10GB DRAM)..."
+        run_pytest "$test_file" -v -s -m rank4
     fi
 }
 
@@ -576,6 +642,13 @@ case "$TEST_TYPE" in
                 exit 1
                 ;;
         esac
+        ;;
+    puredram)
+        run_puredram || OVERALL_EXIT=$?
+        # Cleanup vLLM processes after pure-DRAM tests
+        pkill -9 -f "vllm serve" 2>/dev/null || true
+        sleep 3
+        pkill -9 -f "VLLM::" 2>/dev/null || true
         ;;
 esac
 

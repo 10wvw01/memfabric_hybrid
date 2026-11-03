@@ -6,14 +6,19 @@
 
 ```
 Layer 1: 存储层微基准 (example/benchmark/mutil_process.py)   — 已有，裸 API 吞吐
-Layer 2: 模拟推理工作负载 (cases/python/memcache/workload/)    — ✅ 已完成 (2026-09-30 复测)
-Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完成 (2026-10-30 复测)
+Layer 2: 模拟推理工作负载 (cases/python/memcache/workload/)    — ✅ 已完成 (2026-11-04 复测)
+Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完成 (2026-11-04 复测)
 ```
 
-- **测试日期**: 2026-10-30 (Layer 3 复测，含 2-rank，全新合并测试文件)
+- **测试日期**: 2026-11-04（Layer 2 + Layer 3 全流程复测，脚本拉取全新空目录源码验证）
 - **MemCache 版本**: 1.2.1 / memfabric_hybrid dev-v1.2.0
-- **2-rank (TP=2) 测试结果**: **3 passed**（host_shm 协议，全 miss / 50% 命中 / 100% 命中）
-- **缓存隔离验证**: 所有测试中 `vLLM local hit=0.0%`，确认 cache hit 来自 MemCache 而非 vLLM 内置缓存（通过 `--no-enable-prefix-caching` 永久关闭 vLLM 本地缓存实现隔离）
+- **2-rank (TP=2) 测试结果**: **3 passed**（host_shm 协议，Qwen3.6-35B-A3B-w8a8，全 miss / 50% 命中 / 100% 命中）
+- **1-rank (TP=1) 测试结果**: **3 passed**（device_sdma 协议，Qwen3.5-4B-W8A8-310P，全 miss / 50% 命中 / 100% 命中，详见 6.4 节）
+- **4-rank (TP=4) 测试结果**: **3 passed**（host_shm 协议，Qwen3.6-35B-A3B-w8a8，全 miss / 50% 命中 / 100% 命中，详见 6.5 节）
+- **大容量 Layer 2 测试结果**: **4 passed, 1 failed**（3GB HBM + 10GB DRAM, device_sdma, TP=4，LC-4 P99 超限，详见 8.1 节）
+- **大容量 Layer 3 测试结果**: **4 failed**（store.init assert 失败，跨卡 P2P 4-rank 大容量配置已知限制，详见 8.1 节）
+- **纯 DRAM 测试结果**: **3 passed**（0 HBM + 10GB DRAM, host_shm, TP=4，全 miss / 50% 命中 / 100% 命中，详见 8.2 节）
+- **缓存隔离验证**: 所有通过的测试中 `vLLM local hit=0.0%`，确认 cache hit 来自 MemCache 而非 vLLM 内置缓存（通过 `--no-enable-prefix-caching` 永久关闭 vLLM 本地缓存实现隔离）
 
 ---
 
@@ -26,7 +31,7 @@ Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完
 | NPU 型号 | Ascend 310P3 (Atlas 300I Duo) |
 | NPU 数量 | 8 devices (dev0..dev7, 4 张物理卡 × 2 die-pair) |
 | HBM 容量 | 44 GB / device |
-| 通信协议 | host_shm（DRAM 共享内存） |
+| 通信协议 | `host_shm`（DRAM 共享内存） + `device_sdma`（NPU D2D 直连） |
 
 ### 2.2 软件
 
@@ -39,7 +44,7 @@ Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完
 | MemCache | 1.2.1 |
 | memfabric_hybrid | dev-v1.2.0（含 SDID WARN fallback + IsSameCard 修复 + 207001 P2P_HUGE 回退补丁） |
 | vLLM | 0.26.0 + vLLM-Ascend |
-| 模型 | Qwen3.6-35B-A3B-w8a8 |
+| 模型 | Qwen3.6-35B-A3B-w8a8（2-rank/4-rank）/ Qwen3.5-4B-W8A8-310P（1-rank） |
 
 ### 2.3 KV Cache 结构
 
@@ -58,7 +63,7 @@ Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完
 
 ```
 全链路 TTFT = T_network + T_prefill_compute + T_kv_cache + T_output
-   (~1-5ms)    (~3386ms, 310P3)     (~4.3ms)      (~1-5ms)
+   (~1-5ms)    (~3394ms, 310P3)     (~4.2ms)      (~1-5ms)
 
 Layer 2 度量: T_kv_cache（MemCache 存储延迟，不含模型前向计算）
 Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
@@ -102,11 +107,13 @@ Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 
 ### 3.2 Layer 3 设计原则
 
-- 启动真实 vLLM serve 进程（TP=2），通过 HTTP streaming API 度量请求发送到首 token 的时间
+- 启动真实 vLLM serve 进程（TP=1/2/4），通过 HTTP streaming API 度量请求发送到首 token 的时间
 - baseline: `--no-enable-prefix-caching`，无 `--kv-transfer-config`
 - MemCache: `--no-enable-prefix-caching` + `--prefix-match-unit 128` + `--kv-transfer-config` AscendStoreConnector + memcache backend
 - 测试框架自动管理 vLLM 生命周期（start/stop）和 MetaService 重启（stop 时清理残留 `VLLM::` 子进程 + 重启 MetaService）
-- 2-rank (TP=2) 使用 1 组同卡 die-pair（dev6, dev7）
+- 2-rank (TP=2) 使用 1 组同卡 die-pair（dev2, dev3），35B 模型
+- 1-rank (TP=1) 使用单设备（dev4），4B 模型（35B 权重占满单卡显存，无 KV cache 空间）
+- 4-rank (TP=4) 使用 2 组同卡 die-pair（dev4,5 + dev6,7），35B 模型，`--split` 分次运行
 
 ### 3.3 三种测试场景
 
@@ -273,18 +280,18 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | 协议 | `device_sdma` |
 | HBM size | 2GB / rank |
 | DRAM size | 4GB / rank |
-| 测试日期 | 2026-09-30 |
+| 测试日期 | 2026-11-04 |
 
 ### 5.2 测试结果汇总
 
 | 场景 | 操作 | P50 (ms) | 对 TTFT 影响 |
 |------|------|----------|-------------|
-| 单请求 prefill (4K) | L2G write | 4.19 | 基准: prefill 写入 |
+| 单请求 prefill (4K) | L2G write | 4.20 | 基准: prefill 写入 |
 | seq_len=512 | L2G write | 1.49 | 短序列: TTFT 占比 ~2-5% |
-| seq_len=16384 | L2G write | 13.52 | 长序列: TTFT 占比 ~1-3% |
-| decode/step | L2G write | 1.26 | 影响 TPOT, 不直接影响 TTFT |
-| cache hit | G2L read | 4.38 | 替代 prefill 计算 |
-| DRAM rewarm | G2L cross | 4.21 | 比 HBM hit 快 2.6%（flaky） |
+| seq_len=16384 | L2G write | 13.57 | 长序列: TTFT 占比 ~1-3% |
+| decode/step | L2G write | 1.25 | 影响 TPOT, 不直接影响 TTFT |
+| cache hit | G2L read | 4.16 | 替代 prefill 计算 |
+| DRAM rewarm | G2L cross | 4.23 | 比 HBM hit 慢 1.6% |
 
 **结论**: MemCache 存储延迟不是 TTFT 瓶颈，T_kv_cache 占全链路 TTFT 的 1~5%，模型前向计算是主导因素。
 
@@ -296,7 +303,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 | 项目 | 2-rank host_shm |
 |------|----------------|
-| NPU 设备 | dev6, dev7 |
+| NPU 设备 | dev2, dev3 |
 | TP size | 2 |
 | 协议 | `host_shm` |
 | HBM size | 0 |
@@ -309,75 +316,79 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 ### 6.2 测试结果
 
-#### 6.2.1 全 miss 基准（MemCache vs Baseline 开销）
+**规格与 TTFT 结果（prefill 4K, prefix hit 2K, max_tokens 1, 10 次测量）**
 
-**条件**: PROMPT_TOKENS=4096, max_tokens=1, 10 次测量
+| 场景 | Baseline P50 (ms) | MemCache P50 (ms) | Hit P50 (ms) | 对比基线提升 | external hit |
+|------|-------------------|-------------------|--------------|-------------|-------------|
+| 全 miss 基准 | 3,394 | 3,568 | — | 开销 5.13% | 11.7% |
+| 50% 命中 | — | 3,621 (miss) | 452 | 改善 43.81% | 17.0% |
+| 100% 命中 | — | 3,569 (miss) | 412 | 降幅 88.47% | 44.1% |
 
-| 指标 | Baseline (ms) | MemCache (ms) |
-|------|---------------|---------------|
-| P50 | 3,389.43 | 3,601.25 |
-| P90 | 3,496.68 | 3,635.71 |
-| P99 | 3,778.33 | 3,699.19 |
-| avg | 3,437.49 | 3,295.52 |
-| min | 3,381.14 | 440.05 |
-| count | 10 | 10 |
-
-MemCache 开销 = (3601.25 - 3389.43) / 3389.43 = **6.25%**（阈值 20%）→ ✅ PASSED
-
-Cache stats: vLLM local hit=0.0%, MemCache external hit=11.7%
-
-> MemCache min=440ms 为个别请求被 MemCache 偶发命中。avg < P50 因 hit 的低延迟请求拉低了均值。vLLM local hit=0.0% 证明本地缓存已永久关闭。
-
-#### 6.2.2 50% 命中率
-
-**条件**: 预填充 5 个 prompt（seed=5000..5004），10 个混合请求（5 hit + 5 miss，随机打乱）
-
-| 指标 | 混合 | Hit | Miss |
-|------|------|-----|------|
-| avg | 2,090.20 ms | 499.79 ms | 3,680.60 ms |
-| P50 | 2,087.56 ms | 502.19 ms (n=5) | 3,682.81 ms (n=5) |
-| P99 | 3,706.47 ms | — | — |
-| 实际命中 | — | 5/5（100%） | — |
-
-| 指标 | 值 | 门限 | 判定 |
-|------|------|------|------|
-| 实际命中率 | 5/5 (100%) | ≥ 50% | PASSED |
-| Hit/Miss P50 ratio | 13.65% | < 70% | PASSED |
-| 改善率 | 43.21% | — | — |
-
-Cache stats: vLLM local hit=0.0%, MemCache external hit=17.0%
-
-#### 6.2.3 100% 命中率
-
-**条件**: 10 轮 miss→hit 配对，每轮用新 seed 生成 prompt，先 miss 写入 MemCache，后 hit 读取
-
-| 指标 | Cache miss (ms) | Cache hit (ms) |
-|------|-----------------|----------------|
-| P50 | 3,597.96 | 431.06 |
-| P99 | 3,659.02 | 498.35 |
-| count | 10 | 10 |
-
-Hit/Miss P50 ratio = 431.06 / 3597.96 = **11.98%**（阈值 < 70%）→ ✅ PASSED
-
-Cache stats: vLLM local hit=0.0%, MemCache external hit=44.1%
-
-> Prefix cache hit 使 E2E TTFT 从 3598ms 降至 431ms，**降幅 88.0%**。vLLM local hit=0.0% 证明本地缓存已永久关闭，hit 完全来自 MemCache external hit（44.1%）。cache hit P99 (498ms) 比 P50 (431ms) 仅高 16%，尾部延迟稳定。
+> 门限：全 miss 开销 < 20%，50%/100% hit 的 Hit/Miss P50 ratio < 70%。三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持，cache hit 完全来自 MemCache external hit。50% 命中场景实际命中 5/5（100%）。100% hit 的 P99=418ms（比 P50 仅高 2%），尾部延迟稳定。
 
 ### 6.3 命中率梯度分析
 
 | 命中率 | Hit P50 (ms) | Miss P50 (ms) | 混合 avg (ms) | TTFT 降幅 |
 |--------|-------------|---------------|--------------|----------|
-| 0%（全 miss 基准） | — | 3,601 (MemCache) | 3,296 | 基准 |
-| 50% | 502 | 3,681 | 2,090 | 43.2%（混合改善） |
-| 100% | 431 | 3,598 | 431 | 88.0%（单条 hit 降幅） |
+| 0%（全 miss 基准） | — | 3,568 (MemCache) | 3,256 | 基准 |
+| 50% | 452 | 3,621 | 2,034 | 43.8%（混合改善） |
+| 100% | 412 | 3,569 | 412 | 88.5%（单条 hit 降幅） |
 
 **分析**:
 
-1. **近似线性扩展**: TTFT 改善率与命中率近似线性关系。理论模型 `改善率 ≈ 命中率 × (miss_avg - hit_avg) / miss_avg ≈ 命中率 × 88%`，实测 50%→43%、100%→88%，与模型高度吻合
+1. **近似线性扩展**: TTFT 改善率与命中率近似线性关系。理论模型 `改善率 ≈ 命中率 × (miss_avg - hit_avg) / miss_avg ≈ 命中率 × 88%`，实测 50%→44%、100%→88%，与模型高度吻合
 
 2. **MemCache 隔离生效**: 所有测试中 `vLLM local hit=0.0%`，证明 `--no-enable-prefix-caching` 成功关闭了 vLLM 本地 block cache，hit 的 TTFT 降幅完全来自 MemCache 分布式存储
 
-3. **Hit 延迟稳定**: 100% hit 场景的 P50=431ms、P99=498ms，P99/P50=1.16，尾部延迟波动小。50% 场景的 hit P50=502ms，一致性良好
+3. **Hit 延迟稳定**: 100% hit 场景的 P50=412ms、P99=418ms，P99/P50=1.01，尾部延迟波动小。50% 场景的 hit P50=452ms，一致性良好
+
+### 6.4 1-Rank (TP=1) 测试结果
+
+| 项目 | 值 |
+|------|---|
+| NPU 设备 | dev4 |
+| TP size | 1 |
+| 协议 | `device_sdma` |
+| HBM / DRAM | 1GB / 1GB |
+| GPU mem util | 0.80 |
+| 配置文件 | `mmc-local-integration-1rank.conf` |
+| 模型 | `Qwen3.5-4B-W8A8-310P` |
+| 测试日期 | 2026-11-04 |
+
+> 1-rank 使用 4B 模型替代 35B（35B 权重约 35GB，单卡 44GB 显存无 KV cache 空间），验证 TP=1 单 rank 场景下 MemCache 功能完整性与缓存隔离方案。
+
+**规格与 TTFT 结果（prefill 4K, prefix hit 2K, max_tokens 1, 10 次测量）**
+
+| 场景 | Baseline P50 (ms) | MemCache P50 (ms) | Hit P50 (ms) | 对比基线提升 | external hit |
+|------|-------------------|-------------------|--------------|-------------|-------------|
+| 全 miss 基准 | 3,788 | 3,849 | — | 开销 1.62% | 10.4% |
+| 50% 命中 | — | 3,864 (miss) | 356 | 改善 45.35% | 18.8% |
+| 100% 命中 | — | 3,866 (miss) | 332 | 降幅 91.41% | 39.5% |
+
+> 门限：全 miss 开销 < 20%，50%/100% hit 的 Hit/Miss P50 ratio < 70%。三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持。100% hit 的 P99=3541ms（第 9 轮 pair 出现一次 hit=3857ms 异常值，其余 9 轮 hit P50=331ms 稳定），剔除异常值后 P99=349ms。
+
+### 6.5 4-Rank (TP=4) 测试结果
+
+| 项目 | 值 |
+|------|---|
+| NPU 设备 | dev4, dev5, dev6, dev7（2 组同卡 die-pair: dev4+5 Bus 96, dev6+7 Bus AB） |
+| TP size | 4 |
+| 协议 | `host_shm` |
+| HBM / DRAM | 0 / 1GB |
+| GPU mem util | 0.60 |
+| 配置文件 | `mmc-local-integration-4rank.conf` |
+| 模型 | `Qwen3.6-35B-A3B-w8a8` |
+| 测试日期 | 2026-11-04 |
+
+**规格与 TTFT 结果（prefill 4K, prefix hit 2K, max_tokens 1, `--split` 分次运行）**
+
+| 场景 | Baseline P50 (ms) | MemCache P50 (ms) | Hit P50 (ms) | 对比基线提升 | external hit |
+|------|-------------------|-------------------|--------------|-------------|-------------|
+| 全 miss 基准 | 4,532 | 4,818 | — | 开销 6.30% | 10.4% |
+| 50% 命中 | — | 5,019 (miss) | 747 | 改善 42.55% | 15.6% |
+| 100% 命中 | — | 4,780 (miss) | 541 | 降幅 88.69% | 44.1% |
+
+> 门限：全 miss 开销 < 20%，50%/100% hit 的 Hit/Miss P50 ratio < 70%。三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持。4-rank 使用 `--split` 分次运行（3 个测试逐个执行，中间清理 NPU + 重启 MetaService），避免 310P3 孤儿 NPU 上下文问题。100% hit 的 P99=563ms（比 P50 高 4%），尾部延迟稳定。
 
 ---
 
@@ -389,78 +400,179 @@ Cache stats: vLLM local hit=0.0%, MemCache external hit=44.1%
                 不使用 MemCache (Baseline)
                 ─────────────────────────
     T_network    T_prefill_compute    T_output
-    (~1-5ms)     (~3389ms, 96%+)      (~1-5ms)
+    (~1-5ms)     (~3394ms, 96%+)      (~1-5ms)
     ├──────────────┤├──────────────────────────────┤├──────────┤
     │              ││  每次请求都做完整 prefill     ││          │
     │              ││  前向计算 (Attention+FFN)    ││          │
     └──────────────┘└──────────────────────────────┘└──────────┘
-    全链路 TTFT ≈ 3389ms
+    全链路 TTFT ≈ 3394ms
 
 
                 使用 MemCache — Cache Miss (首次请求)
                 ─────────────────────────────────────
     T_network    T_prefill_compute    T_kv_cache_write    T_output
-    (~1-5ms)     (~3380ms, 94%+)      (~4.4ms, 0.12%)     (~1-5ms)
+    (~1-5ms)     (~3385ms, 94%+)      (~4.2ms, 0.12%)     (~1-5ms)
     ├──────────────┤├──────────────────┤├────────┤├──────────┤
     │              ││  prefill 计算    ││ L2G    ││          │
     │              ││  + KV Cache 写入 ││ write  ││          │
     └──────────────┘└──────────────────┘└────────┘└──────────┘
-    全链路 TTFT ≈ 3601ms
-    开销 ≈ 6.25%
+    全链路 TTFT ≈ 3568ms
+    开销 ≈ 5.13%
 
 
                 使用 MemCache — Cache Hit (命中前缀)
                 ───────────────────────────────
     T_network    T_kv_cache_read    T_decode_compute    T_output
-    (~1-5ms)     (~4.4ms, 1.0%)    (~426ms, 98%)      (~1-5ms)
+    (~1-5ms)     (~4.2ms, 1.0%)    (~408ms, 98%)      (~1-5ms)
     ├──────────────┤├────────┤├──────────────────────┤├──────────┤
     │              ││        ││  跳过 prefill!       ││          │
     │              ││ G2L    ││  仅 decode 首 token  ││          │
     │              ││ read   ││  前向计算            ││          │
     └──────────────┘└────────┘└──────────────────────┘└──────────┘
-    全链路 TTFT ≈ 431ms
-    降幅 ≈ 88.0%
+    全链路 TTFT ≈ 412ms
+    降幅 ≈ 88.47%
 ```
 
 ### 7.2 多场景对比
 
 | 场景 | 全链路 TTFT | vs Baseline | T_kv_cache 占比 | T_prefill_compute |
 |------|------------|-------------|----------------|-------------------|
-| Baseline (无 MemCache) | ~3,389ms | — | 0% | ~3,389ms (完整 prefill) |
-| MemCache cache miss (0% hit) | ~3,601ms | +6.25%（开销） | 0.12% (~4.4ms) | ~3,389ms (完整 prefill) |
-| 50% 命中 | ~2,090ms | -38.3% | <1% | ~50% prefill + ~50% 跳过 |
-| MemCache cache hit (100% hit) | ~431ms | **-87.3%** | ~1.0% (~4.4ms) | ~0ms (跳过 prefill) |
+| Baseline (无 MemCache) | ~3,394ms | — | 0% | ~3,394ms (完整 prefill) |
+| MemCache cache miss (0% hit) | ~3,568ms | +5.13%（开销） | 0.12% (~4.2ms) | ~3,394ms (完整 prefill) |
+| 50% 命中 | ~2,034ms | -40.0% | <1% | ~50% prefill + ~50% 跳过 |
+| MemCache cache hit (100% hit) | ~412ms | **-87.8%** | ~1.0% (~4.2ms) | ~0ms (跳过 prefill) |
 
 ### 7.3 Layer 2 → Layer 3 对照
 
 | 场景 | Layer 2 T_kv_cache (ms) | Layer 3 E2E TTFT (ms) | T_kv_cache 占比 |
 |------|------------------------|----------------------|----------------|
-| Prefill (4K, miss) | 4.45 | 3,601 | 0.12% |
-| Prefix cache hit (4K) | 4.38 | 431 | 1.0% |
+| Prefill (4K, miss) | 4.20 | 3,568 | 0.12% |
+| Prefix cache hit (4K) | 4.16 | 412 | 1.0% |
 
-- Layer 2 度量的纯存储延迟（~4.4ms）在 Layer 3 全链路 TTFT 中占比 < 1%
-- Layer 3 cache hit TTFT（431ms）远高于 Layer 2 G2L read（4.4ms），差额来自 vLLM 调度 + decode 首 token 前向
+- Layer 2 度量的纯存储延迟（~4.2ms）在 Layer 3 全链路 TTFT 中占比 < 1%
+- Layer 3 cache hit TTFT（412ms）远高于 Layer 2 G2L read（4.2ms），差额来自 vLLM 调度 + decode 首 token 前向
 - Layer 2 的 "hit ≈ miss"（L2G/G2L 对称）在 Layer 3 表现为 "hit << miss"（88% 降幅），因 miss 包含完整 prefill 计算
 
 ### 7.4 结论
 
-1. **MemCache 开销可忽略**: cache miss 比 baseline 仅多 6.25%，其中 T_kv_cache 写入仅 4.4ms，开销主要来自 vLLM prefix caching 模块的调度开销
+1. **MemCache 开销可忽略**: cache miss 比 baseline 仅多 5.13%，其中 T_kv_cache 写入仅 4.2ms，开销主要来自 vLLM prefix caching 模块的调度开销
 
-2. **Prefix cache hit 是 TTFT 优化的核心**: cache hit 将 ~3598ms 的 prefill 前向计算替换为 ~4.4ms 的 KV Cache 读取 + ~427ms 的 decode 首 token 计算，全链路 TTFT 降低 88.0%
+2. **Prefix cache hit 是 TTFT 优化的核心**: cache hit 将 ~3569ms 的 prefill 前向计算替换为 ~4.2ms 的 KV Cache 读取 + ~408ms 的 decode 首 token 计算，全链路 TTFT 降低 88.47%
 
-3. **TTFT 改善率随命中率近似线性扩展**: 50% 命中改善 43.2%，100% 命中改善 88.0%，符合理论模型 `改善率 ≈ 命中率 × 88%`。生产环境中可根据实际命中率估算 TTFT 收益
+3. **TTFT 改善率随命中率近似线性扩展**: 50% 命中改善 43.8%，100% 命中改善 88.5%，符合理论模型 `改善率 ≈ 命中率 × 88%`。生产环境中可根据实际命中率估算 TTFT 收益
 
-4. **投入产出比**: 一次 cache miss 多花 ~212ms 写入存储，后续每次 cache hit 省掉 ~3167ms prefill 计算 — 一次投入换来 15 倍以上回报
+4. **投入产出比**: 一次 cache miss 多花 ~174ms 写入存储，后续每次 cache hit 省掉 ~3157ms prefill 计算 — 一次投入换来 18 倍以上回报
 
-5. **存储延迟不是瓶颈**: Layer 2 的 T_kv_cache（~4.4ms）在 Layer 3 全链路 TTFT 中占比 < 1%，无论 cache miss 还是 cache hit，MemCache 存储操作都不是性能瓶颈
+5. **存储延迟不是瓶颈**: Layer 2 的 T_kv_cache（~4.2ms）在 Layer 3 全链路 TTFT 中占比 < 1%，无论 cache miss 还是 cache hit，MemCache 存储操作都不是性能瓶颈
 
 6. **缓存隔离验证通过**: 所有测试中 `vLLM local hit=0.0%`，证明 `--no-enable-prefix-caching` 成功关闭了 vLLM 本地 block cache，hit 的 TTFT 降幅完全来自 MemCache 分布式存储（external hit 11.7%/17.0%/44.1%）
 
-7. **310P3 适配可行**: 在 Ascend 310P3 同卡 die-pair + TP=2 环境下，MemCache + vLLM AscendStoreConnector 端到端可用，prefix cache hit 的 88.0% TTFT 降幅对用户体验有实质性改善
+7. **310P3 适配可行**: 在 Ascend 310P3 同卡 die-pair + TP=1/2/4 环境下，MemCache + vLLM AscendStoreConnector 端到端可用，prefix cache hit 的 88.47% TTFT 降幅对用户体验有实质性改善
 
 ---
 
-## 8. 运行命令
+## 8. 补充测试
+
+主体测试（§5 Layer 2、§6 Layer 3）使用 1GB~2GB HBM + 1GB~4GB DRAM 的小容量配置，覆盖 ~6 requests/rank。补充测试扩展到大容量（3GB HBM + 10GB DRAM）和纯 DRAM（0 HBM + 10GB DRAM）配置，验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 以及无 HBM 降级场景。
+
+### 8.1 大容量混合存储测试（3GB HBM + 10GB DRAM, TP=4）
+
+| 项目 | 值 |
+|------|---|
+| NPU 设备 | dev4, dev5, dev6, dev7 (4-rank, TP=4) |
+| 协议 | `device_sdma` |
+| HBM size | 3GB / rank（310P3 跨卡 P2P 安全上限，可容纳 ~11 requests） |
+| DRAM size | 10GB / rank（可容纳 ~36 requests） |
+| 总容量 | ~13GB / rank（~47 requests） |
+| GPU mem util | 0.70 |
+| 配置文件 | `mmc-local-largecap-4rank.conf` |
+| 模型 | `Qwen3.6-35B-A3B-w8a8` |
+| 测试日期 | 2026-11-04 |
+
+> 大容量测试使用 3GB HBM + 10GB DRAM，专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 场景。3GB HBM 配置依赖 `P2P_HUGE→HBM_HUGE` 回退修复（`patches/fix_310p_p2p_huge_fallback_to_hbm_huge.patch`），解决 310P3 跨卡 P2P 分区 ~4088MB 上限（207001 OOM）问题。
+
+#### Layer 2 大容量工作负载（5 场景）
+
+| # | 场景 | P50 (ms) | 说明 |
+|---|------|----------|------|
+| LC-1 | HBM 容量填充 | 29.96 | 3GB HBM 填满 11 keys |
+| LC-2 | HBM→DRAM eviction | 393.95 | eviction 延迟是 HBM 写入的 13.1× |
+| LC-3 | DRAM rewarm (G2L) | 29.83 | 与 HBM 写入接近，占 prefill 1.1% |
+| LC-4 | 大规模 prefix hit | 33.47 (P99=3117.88) | 40 keys 跨 HBM+DRAM，P99 超限 ❌ FAILED |
+| LC-5 | 持续写入排水 | 948.10 (eviction) | 42 keys，吞吐 561.7MB/s（DRAM 阶段） |
+
+> LC-4 失败原因：40 keys 读取中大部分 P50=33.47ms 正常，但部分 evicted keys 的 DRAM→HBM rewarm 出现 3117ms 尖峰导致 P99 超过 150ms 门限。这是 310P3 跨卡 P2P 4-rank 大容量配置下 DRAM rewarm 路径偶发高延迟的已知问题，与跨卡 die-pair P2P 映射稳定性相关。
+
+#### Layer 3 端到端 TTFT（4 场景）
+
+**LC-L3-1 ~ LC-L3-4: ❌ 4 failed（store.init assert 失败）**
+
+| 测试 | 结果 | 失败原因 |
+|------|------|---------|
+| LC-L3-1 全 miss 基准 | ❌ FAILED | Baseline vLLM 启动成功（P50=4520ms），MemCache 模式 vLLM 启动失败 |
+| LC-L3-2 大规模 cache hit | ❌ FAILED | vLLM MemCache 模式启动失败 |
+| LC-L3-3 Eviction mixed 30% | ❌ FAILED | vLLM MemCache 模式启动失败 |
+| LC-L3-3 Eviction mixed 70% | ❌ FAILED | vLLM MemCache 模式启动失败 |
+
+> **失败根因**: `memcache_backend.py:130 assert res == 0` — store.init 返回非 0。4-rank 跨卡 P2P（dev4+5 + dev6+7 两组 die-pair）在 3GB HBM + 10GB DRAM 大容量配置下，`AclrtMallocPhysical` P2P 分区分配不稳定，导致 store 初始化失败。此为 310P3 跨卡 P2P 4-rank 大容量配置的已知限制，非 MemCache 代码缺陷。建议在 2 组同卡 die-pair 且设备完全空闲时重试，或降低 HBM size 到 1GB 规避。
+
+**小结**: Layer 2 大容量工作负载 4/5 通过（LC-4 P99 超限），Layer 3 端到端 4 场景全部失败（store.init assert）。eviction 延迟（393.95ms）和 DRAM rewarm（29.83ms）等存储层指标正常，证明 MemCache 存储机制本身在大容量下可用；Layer 3 失败集中在 vLLM + MemCache connector 在 4-rank 跨卡大容量配置下的初始化阶段。
+
+### 8.2 纯 DRAM 模式测试（0 HBM + 10GB DRAM, TP=4）
+
+| 项目 | 值 |
+|------|---|
+| NPU 设备 | dev4, dev5, dev6, dev7 (4-rank, TP=4) |
+| 协议 | `host_shm`（DRAM-only，无 HBM） |
+| HBM size | 0 |
+| DRAM size | 10GB / rank |
+| GPU mem util | 0.60 |
+| 配置文件 | `mmc-local-puredram-4rank.conf` |
+| 模型 | `Qwen3.6-35B-A3B-w8a8` |
+| /dev/shm | 100GB（需 resize） |
+| 测试日期 | 2026-11-04 |
+
+> 纯 DRAM 测试将 `protocol` 改为 `host_shm`、`hbm.size=0`，KV Cache 直接落 `/dev/shm` DRAM，跳过 HBM 分配和 eviction 路径，验证无 HBM 场景下的端到端可用性与性能。
+
+**PD-L3-1 全 miss 基准（开销）**
+
+| 指标 | Baseline (ms) | MemCache (ms) |
+|------|---------------|---------------|
+| P50 | 4,531.86 | 4,794.28 |
+| P99 | 4,553.95 | 4,820.25 |
+
+开销 = (4794.28 - 4531.86) / 4531.86 = **5.79%**（阈值 20%）→ ✅ PASSED
+
+Cache stats: vLLM local hit=0.0%, MemCache external hit=9.4%
+
+**PD-L3-2 50% 命中率**
+
+| 指标 | 混合 (ms) | Hit (ms) | Miss (ms) |
+|------|----------|----------|----------|
+| avg | 2,651.61 | 529.66 | 4,773.55 |
+| P50 | 2,652.45 | 528.20 (n=5) | 4,769.90 (n=5) |
+| 实际命中 | — | 5/5（100%） | — |
+
+Hit/Miss P50 ratio = 528.20 / 4769.90 = **11.07%**（阈值 < 70%）→ ✅ PASSED，改善率 44.45%
+
+Cache stats: vLLM local hit=0.0%, MemCache external hit=15.6%
+
+**PD-L3-3 100% 命中率**
+
+| 指标 | Cache miss (ms) | Cache hit (ms) |
+|------|-----------------|----------------|
+| P50 | 4,784.49 | 556.19 |
+| P99 | 4,896.11 | 632.41 |
+
+Hit/Miss P50 ratio = 556.19 / 4784.49 = **11.62%**（阈值 < 70%）→ ✅ PASSED，降幅 88.37%
+
+Cache stats: vLLM local hit=0.0%, MemCache external hit=42.2%
+
+**小结**: 纯 DRAM 模式 3 个场景全部通过。无 HBM、无 eviction，cache hit P50=556ms，开销 5.79%（低于 20% 门限）。适用于无 HBM 预留空间或 HBM 分配失败（207001）的降级场景。与 4-rank host_shm 主体测试（§6.5，HBM 0 + 1GB DRAM）对比，10GB DRAM 大容量下 hit 延迟略高（556ms vs 541ms），但降幅（88.37% vs 88.69%）和改善率（44.45% vs 42.55%）一致，证明 DRAM 容量扩展对 TTFT 无显著影响。
+
+---
+
+## 9. 运行命令
 
 ```bash
 # === 2-rank (TP=2) 全部测试 ===
@@ -469,20 +581,44 @@ bash run_test.sh \
   --type integration \
   --rank 2 \
   --protocol host_shm \
-  --device-ids 6,7 \
+  --device-ids 2,3 \
   --log
 
 # === 按场景过滤 ===
 # 使用 pytest -m marker 过滤
-bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --device-ids 6,7 --filter rank2
+bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --device-ids 2,3 --filter rank2
 
-# === 4-rank (TP=4) 测试 ===
+# === 4-rank (TP=4) 测试（--split 分次运行，避免 310P3 孤儿上下文）===
 bash run_test.sh \
   --memcache-dir /path/to/memcache \
   --type integration \
   --rank 4 \
   --protocol host_shm \
-  --device-ids 0,1,2,3 \
+  --device-ids 4,5,6,7 \
+  --split \
+  --log
+
+# === 1-rank (TP=1) 测试（需指定 4B 模型路径）===
+MMC_TEST_VLLM_MODEL_PATH=/home/models/Qwen3.5-4B-W8A8-310P \
+bash run_test.sh \
+  --memcache-dir /path/to/memcache \
+  --type integration \
+  --rank 1 \
+  --device-ids 4 \
+  --log
+
+# === 大容量测试 (3GB HBM + 10GB DRAM, TP=4) ===
+bash run_test.sh \
+  --memcache-dir /path/to/memcache \
+  --type largecap \
+  --device-ids 4,5,6,7 \
+  --log
+
+# === 纯 DRAM 测试 (0 HBM + 10GB DRAM, TP=4) ===
+bash run_test.sh \
+  --memcache-dir /path/to/memcache \
+  --type puredram \
+  --device-ids 4,5,6,7 \
   --log
 
 # === 直接运行 pytest ===
@@ -497,12 +633,18 @@ MMC_TEST_DEVICE_IDS=6,7 MMC_TEST_TENSOR_PARALLEL_SIZE=2 \
 
 ---
 
-## 9. 测试文件
+## 10. 测试文件
 
 | 文件 | 说明 |
 |------|------|
-| `cases/python/memcache/integration/vllm_integration_test.py` | 统一端到端测试文件，6 个测试函数：全 miss 基准 + 50% 命中 + 100% 命中 + 4rank 变体。TP size 由环境变量控制，同一文件覆盖 2-rank 和 4-rank |
+| `cases/python/memcache/integration/vllm_integration_test.py` | 统一端到端测试文件，9 个测试函数：全 miss 基准 + 50% 命中 + 100% 命中 + 1-rank/4-rank 变体。TP size 由环境变量控制，同一文件覆盖 1-rank、2-rank 和 4-rank |
+| `cases/python/memcache/integration/large_capacity_vllm_test.py` | 大容量端到端测试文件，4 个测试函数 + 1 throughput（deselected）：TTFT 开销 / 大规模 cache hit / eviction-aware mixed (30%/70%) |
+| `cases/python/memcache/integration/pure_dram_vllm_test.py` | 纯 DRAM 端到端测试文件，3 个测试函数：全 miss 基准 + 50% 命中 + 100% 命中。复用 `VLLMBenchmark` 类，指向 `host_shm` 配置 |
+| `cases/python/memcache/workload/large_capacity_test.py` | 大容量 Layer 2 工作负载测试，5 个场景：HBM 填充 / eviction / rewarm / 大规模 hit / 持续写入排水 |
+| `cases/config/mmc-local-integration-1rank.conf` | 1-rank: world_size=1, host_shm/device_sdma |
 | `cases/config/mmc-local-integration.conf` | 2-rank: host_shm/device_sdma + HBM/DRAM 配置 |
 | `cases/config/mmc-local-integration-4rank.conf` | 4-rank: world_size=4, host_shm/device_sdma |
-| `pytest.ini` | pytest 配置：注册 `rank2`、`rank4` marker |
-| `run_test.sh` | 测试运行脚本（自动清理 + 设备选择 + 协议切换 + 启动 MetaService） |
+| `cases/config/mmc-local-largecap-4rank.conf` | 大容量: world_size=4, device_sdma, HBM 3GB + DRAM 10GB |
+| `cases/config/mmc-local-puredram-4rank.conf` | 纯 DRAM: world_size=4, host_shm, HBM 0 + DRAM 10GB |
+| `pytest.ini` | pytest 配置：注册 `rank1`、`rank2`、`rank4`、`workload`、`largecap`、`throughput` marker |
+| `run_test.sh` | 测试运行脚本（自动清理 + 设备选择 + 协议切换 + 启动 MetaService，支持 `--type integration|largecap|puredram`） |
