@@ -13,7 +13,7 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）2-rank SHM 对称内�
 - **host 零数据面**：仅建池/起 kernel/收结果（`smem_shm_sdma_submit/wait/get_result` 已废止，
   设备侧原语见 `smem_shm_aicore_base_sdma.h`）
 
-全内存通知链（双环邮箱/戳 SQE 对），段尾保留区 48KB 由 memfabric 全托管。
+全内存通知链（双环邮箱/戳 SQE 对），段尾保留区 1.25MB 由 memfabric 全托管。
 
 ## 目标
 
@@ -35,9 +35,10 @@ gva 首参；高频路径 `smem_shm_sdma_reserved(gva)` 预计算 + `_at` 变体
 ## 规模建议
 
 - world_size=2 固定（同卡 die 对映射 dev0/dev1）
-- 单次搬运 ≤ 1MB（AICPU SQE 上限）；len 须 4 字节对齐
-- 请求环深 64（满环 signal 背压自旋）；到达环深 1024（消费须及时，溢出 wait 显式报错）
-- 每 rank 段末尾 48KB 为邮箱保留区（memfabric 托管，勿存放用户数据）
+- 单封长度 ≤ 4GB（SQE length 为 u32 字段；1GB 单封同引擎实测通过）；len 须 4 字节对齐；
+  多封分块是接收侧流水粒度的调优参数，非硬件要求
+- 请求环深 64（满环 signal 背压自旋）；到达子环深 512/队列（消费须及时，溢出 wait 显式报错）
+- 每 rank 段末尾 1.25MB 为邮箱保留区（memfabric 托管，勿存放用户数据）
 
 ## 必要条件
 

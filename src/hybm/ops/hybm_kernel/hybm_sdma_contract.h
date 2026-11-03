@@ -31,7 +31,7 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 版本(wire 变更必须 bump, CP1 按文件名 dlopen 缓存) ---- */
-constexpr uint32_t HYBM_SDMA_ORCH_KVER = 28; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
+constexpr uint32_t HYBM_SDMA_ORCH_KVER = 32; /* 设备侧产物版本号: wire 行为变更时递增(CP1 按文件名 dlopen 缓存刷新) */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
 struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
@@ -74,15 +74,19 @@ struct HybmSdmaOrchParam {
     uint32_t sqId;        /* CP 流 SQ id */
     int32_t streamId;     /* CP 流 id(SQE 的 rt_stream_id) */
     uint32_t epochBudgetS;/* 每轮时长上限(秒); 0=默认 15s; 0xFFFFFFFF=永不退出(跑到停止/错误, 诊断用) */
-    uint64_t reqBase;     /* 本端请求环基址(= ownSeg + phys - RESERVED + RS_REQ_RING) */
-    uint64_t quietBase;   /* 本端完成戳基址(quiet SQE 的目标) */
+    uint64_t resBase;     /* 本端保留区基址(= ownSeg + phys - RESERVED; 请求环/游标/完成戳/暂存定位原点) */
     uint64_t stopAddr;    /* 本端停止标志地址(epoch 退出) */
     uint64_t overflowAddr;/* SQE overflow 目标(工作区) */
     uint64_t resultAddr;  /* 工作区结果区地址(诊断) */
     uint64_t symSize;     /* 对称段大小(对端段基址掩码算术用, 须 2 的幂) */
     uint64_t physSize;    /* 段物理大小(对端保留区定位用) */
+    /* v29 4-rank 化: reqBase/quietBase 合并为 resBase(请求环/完成戳均由保留区基址+布局常量定位),
+     * 尾部追加 rank/rsv/poolBaseGva; 布局锁 80B, wire 变更由 KVER bump 隔离旧设备缓存 */
+    uint32_t rank;        /* 本端 rank 号(请求环下标 = PeerRingIdx(rank, 目的 rank)) */
+    uint32_t rsv;         /* 填充对齐(显式置 0) */
+    uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
 };
-static_assert(sizeof(HybmSdmaOrchParam) == 72, "Param 尺寸漂移"); /* 布局锁 72B(4×u32 头 + 7×u64) */
+static_assert(sizeof(HybmSdmaOrchParam) == 80, "Param 尺寸漂移"); /* 布局锁 80B(4×u32 头 + 6×u64 + 4×u32+u64 尾) */
 
 /* ---- kernel→host 结果(诊断, 工作区) ---- */
 struct HybmSdmaOrchResult {
