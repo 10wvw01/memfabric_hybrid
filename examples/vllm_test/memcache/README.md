@@ -14,7 +14,6 @@ ttft_test/
 ├── pytest.ini               # pytest 配置（注册 marker：throughput / rank1 / rank2 / rank4 / workload / largecap）
 ├── patches/
 │   ├── memcache_modified_files.patch                  # memcache pymmc.cpp pybind11 枚举 static_cast 适配
-│   ├── fix_310p_p2p_huge_fallback_to_hbm_huge.patch   # memfabric_hybrid 207001 P2P_HUGE 回退补丁
 │   └── vllm_ascend_310p_kv_transfer.patch             # vLLM-Ascend 310P3 适配（3 文件）
 ├── cases/                    # 新增测试文件
 │   ├── config/
@@ -169,13 +168,9 @@ bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --
 
 **编译影响：** 无。C++ 编译器允许枚举到 `int32_t` 的隐式转换，不打补丁也能编译通过，问题仅在 `python3 -c "from memcache_hybrid import ..."` 时触发。
 
-### memfabric_hybrid 补丁（1 个文件）
+### memfabric_hybrid 子模块
 
-| 文件 | 修改内容 |
-|------|---------|
-| `3rdparty/memfabric_hybrid/src/hybm/csrc/mm/hybm_vmm_based_segment.cpp` | 207001 P2P_HUGE 回退：`AclrtMallocPhysical` P2P 分区 OOM 时回退 `ACL_HBM_MEM_HUGE` |
-
-**为什么需要：** 310P3 跨卡 die-pair P2P 映射时，`AclrtMallocPhysical` 分配 P2P_HUGE 大页可能返回 207001（OUT_OF_MEMORY），导致 store.init 失败。补丁在 OOM 时自动回退到普通 HBM_HUGE 大页。
+切到 `GDD_ESCC/memfabric_hybrid.git` 的 `dev-v1.2.0` 分支（已合入 IsSameCard 修复、107002 修复、207001 P2P_HUGE 回退），无需额外补丁。
 
 ### vLLM-Ascend 补丁（3 个已有文件）
 

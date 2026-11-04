@@ -42,7 +42,7 @@ Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完
 | Python | 3.12.13 |
 | PyTorch | 2.x + torch_npu |
 | MemCache | 1.2.1 |
-| memfabric_hybrid | dev-v1.2.0（含 SDID WARN fallback + IsSameCard 修复 + 207001 P2P_HUGE 回退补丁） |
+| memfabric_hybrid | dev-v1.2.0（含 SDID WARN fallback + IsSameCard 修复 + 207001 P2P_HUGE 回退） |
 | vLLM | 0.26.0 + vLLM-Ascend |
 | 模型 | Qwen3.6-35B-A3B-w8a8（2-rank/4-rank）/ Qwen3.5-4B-W8A8-310P（1-rank） |
 
@@ -489,7 +489,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | 模型 | `Qwen3.6-35B-A3B-w8a8` |
 | 测试日期 | 2026-11-04 |
 
-> 大容量测试使用 3GB HBM + 10GB DRAM，专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 场景。3GB HBM 配置依赖 `P2P_HUGE→HBM_HUGE` 回退修复（`patches/fix_310p_p2p_huge_fallback_to_hbm_huge.patch`），解决 310P3 跨卡 P2P 分区 ~4088MB 上限（207001 OOM）问题。
+> 大容量测试使用 3GB HBM + 10GB DRAM，专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 场景。3GB HBM 配置依赖 `P2P_HUGE→HBM_HUGE` 回退（dev-v1.2.0 分支已合入），解决 310P3 跨卡 P2P 分区 ~4088MB 上限（207001 OOM）问题。
 
 #### Layer 2 大容量工作负载（5 场景）
 

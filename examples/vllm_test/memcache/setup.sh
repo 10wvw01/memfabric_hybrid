@@ -76,7 +76,6 @@ log_step()  { echo -e "\n\033[36m========== $* ==========\033[0m"; }
 # ============================================================================
 fix_memfabric_hybrid() {
     local mfh_dir="$MEMCACHE_DIR/3rdparty/memfabric_hybrid"
-    local mfh_207001_patch="$SCRIPT_DIR/patches/fix_310p_p2p_huge_fallback_to_hbm_huge.patch"
 
     cd "$mfh_dir"
 
@@ -85,30 +84,15 @@ fix_memfabric_hybrid() {
     git reset --hard 2>/dev/null || true
     git clean -fd 2>/dev/null || true
 
-    # origin 默认指向 Ascend/memfabric_hybrid.git，dev-v1.2.0 分支在 GDD_ESCC 仓库上
-    # 增加 fork remote 而非替换 origin
+    # origin 默认指向 Ascend/memfabric_hybrid.git（master 分支），dev-v1.2.0 分支在 GDD_ESCC 仓库上
+    # 已包含 IsSameCard + 107002 + 207001 P2P_HUGE 回退修复
     if ! git remote get-url fork &>/dev/null; then
         git remote add fork "$MEMFABRIC_HYBRID_FORK_REPO"
     fi
     git fetch fork "$MEMFABRIC_HYBRID_BRANCH" 2>/dev/null
     git checkout -B "$MEMFABRIC_HYBRID_BRANCH" "fork/$MEMFABRIC_HYBRID_BRANCH"
 
-    # 应用 207001 P2P_HUGE 回退补丁（AclrtMallocPhysical P2P 分区 OOM 时回退 ACL_HBM_MEM_HUGE）
-    if [[ -f "$mfh_207001_patch" ]] && ! grep -q 'RT_ERROR_DRV_OUT_MEMORY' src/hybm/csrc/mm/hybm_vmm_based_segment.cpp 2>/dev/null; then
-        if git apply --check "$mfh_207001_patch" 2>/dev/null; then
-            git apply "$mfh_207001_patch"
-            log_info "207001 P2P_HUGE fallback 补丁应用成功 ✓"
-        else
-            log_warn "207001 补丁 apply --check 失败，尝试 --3way..."
-            git apply --3way "$mfh_207001_patch" 2>/dev/null && log_info "207001 补丁通过 --3way 应用成功 ✓" || {
-                log_error "207001 补丁应用失败，请手动:"
-                log_error "  cd $mfh_dir && git apply --reject $mfh_207001_patch"
-                exit 1
-            }
-        fi
-    fi
-
-    log_info "memfabric_hybrid: dev-v1.2.0 + 207001 P2P_HUGE fallback ($(git rev-parse --short HEAD)) ✓"
+    log_info "memfabric_hybrid: dev-v1.2.0 ($(git rev-parse --short HEAD)) ✓"
     cd "$MEMCACHE_DIR"
 }
 
