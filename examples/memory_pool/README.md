@@ -18,7 +18,7 @@
 6. 01_basic/06_single_card_external_stream
 7. 01_basic/07_310p_die_pair_pool（310P 专属：单卡双 die 双池，需 Atlas 300I Duo）
 8. 01_basic/08_310p_aicore_aicpu_sdma（310P 专属：设备发起 SDMA 协同，需 Atlas 300I Duo，上手见[310P 使用指南](../../docs/310p/使用指南.md)）
-9. 01_basic/09_310p_aicore_aicpu_sdma_4rank（310P 专属：双卡四 die 4-rank 交错序号 + 多 AICore AllReduce 协同，需 2×Atlas 300I Duo）
+9. 01_basic/09_310p_aicore_aicpu_sdma_4rank（310P 专属：双卡四 die 4-rank 多 AICore AllReduce 协同，需 2×Atlas 300I Duo）
 10. 02_scale_out/01_single_node_multi_device_dram
 11. 02_scale_out/02_multi_node_multi_device_dram
 12. 03_optimization/01_copy_data_batch

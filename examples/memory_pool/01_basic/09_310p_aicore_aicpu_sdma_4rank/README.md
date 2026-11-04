@@ -1,4 +1,4 @@
-# 09_310p_aicore_aicpu_sdma_4rank：310P 双卡四 die 4-rank 设备发起 SDMA 协同（交错序号 + 多 AICore AllReduce）
+# 09_310p_aicore_aicpu_sdma_4rank：310P 双卡四 die 4-rank 设备发起 SDMA 协同（多 AICore AllReduce）
 
 ## 场景
 
@@ -11,18 +11,13 @@
   **全部经 SDMA SQE 投递**（AICPU 对对端内存零直写——跨卡直写实测不返回，
   设备侧 CPU 核无跨卡 store 通路），邮箱队列**按对端 × AICore block 划分**
   （3 对端 × 16 队列槽位 = 48 队列，对齐 hcomm 规模；block 0..7 在用、8..15 预留，
-  多发送方/多 block/多目的地并发互不干扰、序号无空洞）
+  多发送方/多 block/多目的地并发互不干扰）
 - 接收方 `wait_peer` 显式按对端收件（`m.peer` 标来源）；host 零数据面
   （仅建池/起 kernel/收结果）
 
 ## 验证内容（4-rank 协同协议的核心风险点）
 
-- **① 多目的地交错序号连续性**：每 rank 向 3 对端**交错**发 32 封（4KB），
-  接收方 `wait_peer` 显式按对端逐封收齐。验证点：
-  - **`m.seq` 每发送方环内连续无空洞**（旧单环协议在交错多目的地下序号断档，
-    本阶段即其真机回归用例）
-  - `m.imm` 轮次对账；首封基址+连续增量校验（对前序流量不敏感）
-- **② 多 AICore AllReduce**：`<<<8>>>` 起 8 个 AICore block，每 block 独立流水
+- **多 AICore AllReduce**：`<<<8>>>` 起 8 个 AICore block，每 block 独立流水
   （无块间同步）——填本 block 1MB 分片 → 发 3 对端（走独占队列 (对端, 本 block)，
   算完即发不等其它 block）→ 收 3 对端同列分片（block 列对齐）→ 规约（u32 SUM）
   → 分片自校验。验证点：
@@ -32,16 +27,8 @@
     pattern 含源 rank 可溯源）；规约 op 为 u32 SUM（fp32 引擎内联 reduce 已由
     08 ⑤ 的 SQE opcode 验证，协议同构）
 
-kernel 侧异常（wait 超时/溢出、路由非法、序号断档、拒投）经**状态字**（段内
-12MB 处，编码含阶段/对端/错误码）显式暴露，host D2H 读回解码打印。
-
-## 状态观测线程
-
-host 侧后台线程每 5 秒从设备内存读回三组数据：常驻 kernel 结果区
-（mainRet/consumed/exitReason——判断 kernel 在运行、已退出还是错误循环）、
-kernel 状态字、3 个到达环的游标快照（`N=2E` 表示对端 N 的环已消费 2 封且在
-等下一封，`R` 表示有就绪邮件未消费）。发现就绪未消费时，自动读出最近邮件内容
-（sender/dest/imm 编码）供定位投递错误。全程小于 5 秒的运行不会有任何输出。
+kernel 侧异常（wait 超时/溢出、路由非法、拒投）经**状态字**（段内 60MB 处，
+编码含对端/错误码）显式暴露，host D2H 读回解码打印。
 
 ## 使用能力（设备侧自驱）
 
@@ -64,7 +51,7 @@ kernel 状态字、3 个到达环的游标快照（`N=2E` 表示对端 N 的环�
   背压不影响其他队列）、到达子环深 512；最多 8 个 AICore block 并发（`<<<N>>>` N ≤ 8，
   block 0..7 用对应槽位，8..15 预留冗余）
 - 每 rank 段末尾 2MB 为邮箱保留区（memfabric 托管，勿存放用户数据）
-- 本示例每 rank 物理贡献 64MB（② 数据区 40MB：贡献 8MB + 接收 24MB + 结果 8MB）
+- 本示例每 rank 物理贡献 64MB（数据区 40MB：贡献 8MB + 接收 24MB + 结果 8MB）
 
 ## 必要条件
 
@@ -89,16 +76,14 @@ bash run.sh --run-only    # 仅运行
 
 ## 验收标准
 
-1. ①：4 rank 状态字 PASS（`m.peer` 路由/`m.seq` 环内连续/`m.imm` 对账全过）
-2. ②：4 rank 各 `mismatch=0/2097152`（8 block 分片自校验 + host D2H 逐元素），
+1. 4 rank 各 `mismatch=0/2097152`（8 block 分片自校验 + host D2H 逐元素），
    块数探针 = 8，状态字全 PASS
-3. 4 rank 全部 `=== EX09 rN PASS ===`，退出码 0（任一 rank 失败即整体 FAIL）
-4. 回归：08 示例（2-rank）在新布局下行为不变、全量 PASS
+2. 4 rank 全部 `=== EX09 rN PASS ===`，退出码 0（任一 rank 失败即整体 FAIL）
+3. 回归：08 示例（2-rank）在新布局下行为不变、全量 PASS
 
 ## 已知边界
 
 - 8-rank 全互联不可达（每卡 8 个 P2P 槽位硬约束，全 mesh 8-rank 需 12 槽）——
   建池即被库内拓扑预检拒绝，属预期行为
-- 跨卡带宽（~10–14 GB/s）低于跨 die（~17–19 GB/s），大流量耗时由跨卡路径主导
-  （实测量级：① 交错 96 封/rank < 1ms，② 8MB AllReduce 全链 ≈ 62ms——含 AICore
-  标量填充/规约/校验，非纯通信口径）
+- 跨卡带宽（~10–14 GB/s）低于跨 die（~17–19 GB/s），AllReduce 全链耗时由跨卡路径
+  主导（实测量级 ≈ 62ms——含 AICore 标量填充/规约/校验，非纯通信口径）
