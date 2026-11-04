@@ -19,8 +19,8 @@
 
 - **多 AICore AllReduce**：`<<<8>>>` 起 8 个 AICore block，每 block 独立流水
   （无块间同步）——填本 block 1MB 分片 → 发 3 对端（走独占队列 (对端, 本 block)，
-  算完即发不等其它 block）→ 收 3 对端同列分片（block 列对齐）→ 规约（u32 SUM）
-  → 分片自校验。验证点：
+  算完即发不等其它 block）→ 收 3 对端同列分片（block 列对齐）→ 规约（u32 SUM）。
+  验证点：
   - 8 block 并发 signal/wait 的队列隔离（48 队列编码双射的正确性）
   - 通信与计算在 block 间重叠（各 block 流水独立，无聚合等待）
   - AllReduce 语义：每 rank 结果 = Σ 四 rank 贡献（host D2H 8MB 逐元素校验，
@@ -76,8 +76,7 @@ bash run.sh --run-only    # 仅运行
 
 ## 验收标准
 
-1. 4 rank 各 `mismatch=0/2097152`（8 block 分片自校验 + host D2H 逐元素），
-   块数探针 = 8，状态字全 PASS
+1. 4 rank 各 `mismatch=0/2097152`（host D2H 8MB 逐元素），8 block 状态字全 PASS
 2. 4 rank 全部 `=== EX09 rN PASS ===`，退出码 0（任一 rank 失败即整体 FAIL）
 3. 回归：08 示例（2-rank）在新布局下行为不变、全量 PASS
 
