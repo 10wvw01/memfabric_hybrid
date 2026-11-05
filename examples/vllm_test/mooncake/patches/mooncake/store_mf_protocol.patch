@@ -1,0 +1,13 @@
+diff --git a/mooncake-store/src/client_service.cpp b/mooncake-store/src/client_service.cpp
+index 77291f2..9d75be1 100644
+--- a/mooncake-store/src/client_service.cpp
++++ b/mooncake-store/src/client_service.cpp
+@@ -921,7 +921,7 @@ ErrorCode Client::InitTransferEngine(
+                 return ErrorCode::INTERNAL_ERROR;
+             }
+         } else if (protocol == "ascend" || protocol == "ubshmem" ||
+-                   protocol == "sunrise_link") {
++                   protocol == "sunrise_link" || protocol == "mf") {
+             if (device_names.has_value()) {
+                 LOG(WARNING) << protocol
+                              << " protocol does not use device names, ignoring";

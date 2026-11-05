@@ -1,0 +1,132 @@
+diff --git a/mooncake-store/include/client_service.h b/mooncake-store/include/client_service.h
+index cdb1563..322a430 100644
+--- a/mooncake-store/include/client_service.h
++++ b/mooncake-store/include/client_service.h
+@@ -356,7 +356,8 @@ class Client {
+      */
+     tl::expected<void, ErrorCode> MountSegment(
+         const void* buffer, size_t size, const std::string& protocol = "tcp",
+-        const std::string& location = kWildcardLocation);
++        const std::string& location = kWildcardLocation,
++        bool skip_register = false);
+ 
+     /**
+      * @brief Unregisters a memory segment from master
+@@ -373,7 +374,8 @@ class Client {
+      */
+     tl::expected<UUID, ErrorCode> MountSegmentAndGetId(
+         const void* buffer, size_t size, const std::string& protocol = "tcp",
+-        const std::string& location = kWildcardLocation);
++        const std::string& location = kWildcardLocation,
++        bool skip_register = false);
+ 
+     /**
+      * @brief Unmounts a segment by its UUID.
+diff --git a/mooncake-store/src/client_service.cpp b/mooncake-store/src/client_service.cpp
+index 77291f2..81bc665 100644
+--- a/mooncake-store/src/client_service.cpp
++++ b/mooncake-store/src/client_service.cpp
+@@ -921,7 +921,7 @@ ErrorCode Client::InitTransferEngine(
+                 return ErrorCode::INTERNAL_ERROR;
+             }
+         } else if (protocol == "ascend" || protocol == "ubshmem" ||
+-                   protocol == "sunrise_link") {
++                   protocol == "sunrise_link" || protocol == "mf") {
+             if (device_names.has_value()) {
+                 LOG(WARNING) << protocol
+                              << " protocol does not use device names, ignoring";
+@@ -3434,8 +3434,8 @@ std::vector<int> Client::GetNicNumaNodes() const {
+ 
+ tl::expected<void, ErrorCode> Client::MountSegment(
+     const void* buffer, size_t size, const std::string& protocol,
+-    const std::string& location) {
+-    auto result = MountSegmentAndGetId(buffer, size, protocol, location);
++    const std::string& location, bool skip_register) {
++    auto result = MountSegmentAndGetId(buffer, size, protocol, location, skip_register);
+     if (!result) {
+         return tl::unexpected(result.error());
+     }
+@@ -3492,7 +3492,7 @@ tl::expected<void, ErrorCode> Client::UnmountSegment(const void* buffer,
+ 
+ tl::expected<UUID, ErrorCode> Client::MountSegmentAndGetId(
+     const void* buffer, size_t size, const std::string& protocol,
+-    const std::string& location) {
++    const std::string& location, bool skip_register) {
+     auto check_result = CheckRegisterMemoryParams(buffer, size, protocol);
+     if (!check_result) {
+         return tl::unexpected(check_result.error());
+@@ -3517,8 +3517,11 @@ tl::expected<UUID, ErrorCode> Client::MountSegmentAndGetId(
+             }
+         }
+ 
+-        int rc = transfer_engine_->registerLocalMemory((void*)buffer, size,
+-                                                       location, true, true);
++        int rc = 0;
++        if (!skip_register) {
++            rc = transfer_engine_->registerLocalMemory((void*)buffer, size,
++                                                        location, true, true);
++        }
+         if (rc != 0) {
+             LOG(ERROR) << "register_local_memory_failed base=" << buffer
+                        << " size=" << size << ", error=" << rc;
+diff --git a/mooncake-store/src/real_client.cpp b/mooncake-store/src/real_client.cpp
+index 5a93169..3ae46b5 100644
+--- a/mooncake-store/src/real_client.cpp
++++ b/mooncake-store/src/real_client.cpp
+@@ -60,6 +60,10 @@ DEFINE_int32(http_port, 9300,
+              "Port for client HTTP server "
+              "(only effective when --enable_http_server=true).");
+ 
++#ifdef USE_MF
++#include "transport/mf_transport/memfabric_smem_dl.h"
++#endif
++
+ namespace mooncake {
+ namespace {
+ constexpr std::chrono::seconds kIpcRequestRecvTimeout{5};
+@@ -868,6 +872,35 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
+         }
+     }
+ 
++#ifdef USE_MF
++    // Mount MemFabric pool segment if available; otherwise fall through to
++    // normal local buffer allocation. In SMEM_BM mode, MemFabricInitSmemBm()
++    // allocates a DRAM segment and registers it with HYBM. We mount it to
++    // the store with skip_register=true to avoid double-registration.
++    {
++        std::pair<void *, size_t> segment = MemFabricGetSegment();
++        if (segment.second > 0) {
++            // skip_register=true: HYBM already registered this memory in
++            // MemFabricInitSmemBm(), so skip transfer_engine's
++            // registerLocalMemory to avoid address overlap.
++            auto mountRes = client_->MountSegment(
++                segment.first, segment.second, protocol,
++                kWildcardLocation, /*skip_register=*/true);
++            if (!mountRes.has_value()) {
++                LOG(ERROR) << "Failed to mount MemFabric segment: "
++                           << toString(mountRes.error());
++                return tl::unexpected(mountRes.error());
++            }
++            LOG(INFO) << "Successfully mounted MemFabric segment: dram "
++                      << segment.second << " bytes";
++            return {};
++        }
++        LOG(INFO) << "MemFabric segment size is zero; falling back to local "
++                  << "buffer allocation (global_segment_size="
++                  << global_segment_size << ")";
++    }
++#endif
++
+     // Local_buffer_size is allowed to be 0, but we only register memory when
+     // local_buffer_size > 0. Invoke ibv_reg_mr() with size=0 is UB, and may
+     // fail in some rdma implementations.
+@@ -1246,6 +1279,9 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
+     std::string local_hostname = get_config(config, CONFIG_KEY_LOCAL_HOSTNAME);
+     std::string metadata_server =
+         get_config(config, CONFIG_KEY_METADATA_SERVER);
++#ifdef USE_MF
++    MemFabricSmemDl::SetSmemTypeFlag(mooncake::SMEM_BM);
++#endif
+ 
+     // Validate required parameters
+     if (local_hostname.empty()) {
