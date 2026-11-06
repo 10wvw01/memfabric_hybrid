@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh — 长稳并发丢件挂死（507014） 并发丢件复现器一键编译与运行(封装 bisheng 长命令/环境自检/MPI 探测/双 rank 拉起)
+# run.sh — 长稳并发邮件丢失挂死（507014） 并发邮件丢失复现器一键编译与运行(封装 bisheng 长命令/环境自检/MPI 探测/双 rank 拉起)
 #
 # 用法:
 #   bash run.sh                # 编译复现器并 mpirun -np 2 运行(默认 dev4/dev5, 1s 换轮)

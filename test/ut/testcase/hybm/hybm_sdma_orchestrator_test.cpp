@@ -108,7 +108,7 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
     EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_HEAD, SMEM_SHM_SDMA_RS_PEER_MAIL + 32U * 512U);           // 游标不压邮件
     EXPECT_LE(SMEM_SHM_SDMA_RS_PEER_RINGS + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_PEER_STRIDE,
               SMEM_SHM_SDMA_RESERVED);                                                        // 全落在 1.25MB 内
-    /* v23 缓存行分隔纪律(共行回写竞态=并发丢件挂死类根因; 多 block 并发写同区各槽独占行) */
+    /* v23 缓存行分隔纪律(共行回写竞态=并发邮件丢失挂死类根因; 多 block 并发写同区各槽独占行) */
     for (uint64_t v : {SMEM_SHM_SDMA_RS_REQ_TAIL, SMEM_SHM_SDMA_RS_REQ_HEAD, SMEM_SHM_SDMA_RS_QUIET,
                        SMEM_SHM_SDMA_RS_STAGE, SMEM_SHM_SDMA_RS_PEER_RINGS}) {
         EXPECT_EQ(v & 0x3FU, 0U) << "base 0x" << std::hex << v;

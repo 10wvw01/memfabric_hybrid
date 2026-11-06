@@ -115,7 +115,7 @@ constexpr uint32_t HYBM_SDMA_ORCH_HEARTBEAT_HZ = 10;  /* host 报时频率(每 1
 /* 工作区报时槽偏移(工作区布局: resultAddr 即基址, RESULT 0 / OVF 64 / STOP 128): */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF = 136; /* host 心跳计数 8B(每 100ms +1, kernel 读) */
 /* ---- 诊断逐单日志(工作区, host D2H 可读; 每封搬运记录请求原文/计算地址/SQ 游标) ----
- * 逐单定位丢件类故障: 单条记录即可裁决"读到空请求(写到错误地址)/ SQE 未执行 / doorbell 异常"。
+ * 逐单定位邮件丢失类故障: 单条记录即可裁决"读到空请求(写到错误地址)/ SQE 未执行 / doorbell 异常"。
  * 开销: 每封 ~1 次缓存行维护(微秒级), 常驻。 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF = 144; /* u64: 最近一次 doorbell 尾值 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_DBRET_OFF = 152;    /* u64: 低 32 位=该次 doorbell 返回码 */
