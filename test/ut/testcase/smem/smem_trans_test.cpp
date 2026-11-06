@@ -349,15 +349,42 @@ TEST_F(SmemTransTest, smem_trans_register_mem_duplicate_address)
 
 TEST_F(SmemTransTest, smem_trans_deregister_mem_success)
 {
-    int ret = smem_trans_init(&g_trans_options);
-    EXPECT_EQ(ret, SM_OK);
+    pid_t pid = fork();
+    ASSERT_NE(pid, -1);
 
-    auto handle = reinterpret_cast<smem_trans_t>(0x12345678);
-    int dummy = 42;
+    if (pid == 0) {
+        int *address = new int[REGISTER_MEM_ELEM_COUNT];
+        size_t size = REGISTER_MEM_ELEM_COUNT * sizeof(int);
 
-    EXPECT_EQ(smem_trans_deregister_mem(handle, &dummy), SM_OK);
+        smem_set_conf_store_tls(false, nullptr, 0);
+        smem_create_config_store(STORE_URL, SMEM_STORE_SKIP_RECOVER);
+        int ret = smem_trans_init(&g_trans_options);
+        if (ret != SM_OK) {
+            _exit(1);
+        }
+        auto handle = smem_trans_create(STORE_URL, UNIQUE_ID, &g_trans_options);
+        if (handle == nullptr) {
+            _exit(2);
+        }
+        ret = smem_trans_register_mem(handle, address, size, 0);
+        if (ret != SM_OK) {
+            _exit(3);
+        }
+        /* 反注册已注册的内存应成功 */
+        ret = smem_trans_deregister_mem(handle, address);
+        if (ret != SM_OK) {
+            _exit(4);
+        }
+        smem_trans_destroy(handle, 0);
+        smem_trans_uninit(0);
+        delete[] address;
+        _exit(0);
+    }
 
-    smem_trans_uninit(0);
+    int status;
+    ASSERT_NE(waitpid(pid, &status, 0), -1);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0) << "Child exited with error code: " << WEXITSTATUS(status);
 }
 
 TEST_F(SmemTransTest, smem_trans_deregister_mem_failed_not_initialized)
