@@ -29,3 +29,4 @@ minitest*
 build_ut/
 output_ut/
 !test/
+!test/ut/testcase/

@@ -16,6 +16,9 @@
 - **快速（增量，无覆盖率）**：`bash script/run_ut.sh --fast`
 - **单个测试**：`bash script/run_ut.sh --fast TestName`（传递 `--gtest_filter=*TestName*`）
 - **首次运行前需初始化子模块**：`git submodule update --recursive --init`（获取 `test/3rdparty/googletest` 和 `test/3rdparty/mockcpp`）。
+- **强制要求**：commit 或提交 PR 前，必须跑过完整 UT（`bash script/run_ut.sh`）且全部通过
+  （环境限制导致的 SKIPPED 不算失败）。不允许只跑单个用例通过就直接提交；
+  不得提交任何已知失败的用例。
 
 ## 预提交 / 代码风格
 
