@@ -246,13 +246,20 @@ TEST_F(HybmConnBasedSegmentTest, MmapAndUnmap_RegisterAndClearImportedGva)
     auto options = MakeOptions(3U, 1U);
     HybmConnBasedSegment segment(options, 0);
 
+    /* Mmap 校验远端 gva 须落在预留区间内, 须先 reserve 再把 local/remote 的
+     * gva 构造到各自 rank 槽位内; 未 reserve 时基址为空, 任何 import.gva 都
+     * 过不了校验 */
+    void *address = nullptr;
+    ASSERT_EQ(segment.ReserveMemorySpace(&address), BM_OK);
+    auto gvaBase = reinterpret_cast<uint64_t>(address);
+
     HostExportInfo local{};
-    local.gva = 0x400000000ULL;
+    local.gva = gvaBase + options.maxSize * options.rankId; // 本 rank 槽位(Mmap 跳过本端)
     local.rankId = options.rankId;
     local.size = HYBM_LARGE_PAGE_SIZE;
 
     HostExportInfo remote{};
-    remote.gva = 0x500000000ULL;
+    remote.gva = gvaBase + options.maxSize * 2U; // rank 2 槽位
     remote.rankId = 2U;
     remote.size = HYBM_LARGE_PAGE_SIZE;
 

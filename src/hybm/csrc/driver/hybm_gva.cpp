@@ -110,9 +110,8 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
 static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
 {
     /* MemSetAccess 的 location.id 走系统枚举表: 必须填物理设备号, 填 user 逻辑号在
-     * ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不暴露, 非恒等映射(如 =6,7)时实测
-     * 报 507899(2026-10-28 探针实测, issue #26); 与 MallocPhysical 的 user 号命名空间
-     * 不同, 勿统一。 */
+     * ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不暴露, 非恒等映射(如 =6,7)时
+     * 报 507899; 与 MallocPhysical 的 user 号命名空间不同, 勿统一。 */
     int32_t phyDevId = -1;
     auto convRet = DlAclApi::AclrtGetPhyDevIdByLogicDevId(static_cast<int32_t>(deviceId), &phyDevId);
     if (convRet != BM_OK || phyDevId < 0) {

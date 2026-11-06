@@ -89,15 +89,24 @@ Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
     auto mem_type = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
     Result ret = BM_OK;
     if (Is310PAclPath()) {
-        /* 310P: 预留整个对称窗口(rankCnt×maxSize), 窗口即真实地址(双进程 reserve 起点
-         * 一致, 真机已证): slot_p = base + p×maxSize —— 本端物理映射进本端槽位,
-         * 对端经 shareable handle 导入对端槽位, "第 p 个 rank 显存 = 窗口起点 + p×每份
-         * 大小"的对称算术成立(host/kernel/协同编排器共用该公式)。
-         * 不走 VaManager 记账: gva==lva==槽位地址, TransformVa 恒等直通 */
-        ret = DlAclApi::AclrtReserveMemAddress(&base, totalVirtualSize_, 0, nullptr, 0);
+        /* 310P: 预留整个对称窗口(rankCnt×maxSize), 窗口即真实地址: slot_p = base + p×maxSize
+         * —— 本端物理映射进本端槽位, 对端经 shareable handle 导入对端槽位, host/kernel/
+         * 协同编排器共用该公式。起点用固定地址精确命中(同 meta 区纪律): 自由分配
+         * 起点受设备 VA 占用影响, 两 rank 起点不同时该公式失效。 */
+        auto expectPtr = reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P);
+        ret = DlAclApi::AclrtReserveMemAddress(&base, totalVirtualSize_, 0, expectPtr, 0);
         if (ret != BM_OK || base == nullptr) {
             BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " size:" << totalVirtualSize_
+                                                               << " expectAddr:" << VaToStr(HYBM_GVM_START_ADDR_310P)
                                                                << " rankId:" << options_.rankId);
+            return BM_MALLOC_FAILED;
+        }
+        if (base != expectPtr) {
+            /* 偏移即失败(窗口即真实地址, 契约不容偏移); 被占/未命中均为显性失败 */
+            BM_LOG_ERROR("reserve va base mismatch, got:" << VaToStr(reinterpret_cast<uint64_t>(base))
+                                                          << " expect:" << VaToStr(HYBM_GVM_START_ADDR_310P)
+                                                          << " rankId:" << options_.rankId);
+            (void)DlAclApi::AclrtReleaseMemAddress(base);
             return BM_MALLOC_FAILED;
         }
         BM_LOG_INFO("AclrtReserveMemAddress(window) got addr:" << base << " size:" << totalVirtualSize_
@@ -308,9 +317,8 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
 
 /* 310P3 ACL 路径 SetAccess 授权描述: MemSetAccess 的 location.id 走驱动系统枚举表
  * (物理设备号), 传 user 逻辑号在 ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不
- * 暴露, 非恒等映射(如 =6,7)时实测授权给未打开的设备, 报 507899(2026-10-28 探针
- * 实测, issue #26); 与 MallocPhysical 的 prop.location.id(进程打开表, user 号)
- * 是两个命名空间, 勿统一两侧取值。 */
+ * 暴露, 非恒等映射(如 =6,7)时授权给未打开的设备, 报 507899; 与 MallocPhysical
+ * 的 prop.location.id(进程打开表, user 号)是两个命名空间, 勿统一两侧取值。 */
 
 static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t rankId)
 {
