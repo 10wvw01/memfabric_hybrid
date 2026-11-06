@@ -54,9 +54,7 @@ target_compile_options(hccl_object PRIVATE -fPIC)
 add_library(hccl_shared SHARED $<TARGET_OBJECTS:hccl_object>)
 set_target_properties(hccl_shared PROPERTIES OUTPUT_NAME "hccl")
 
-# mock CANN 需安装到 UT 安装前缀下(run_ut.sh 将 ASCEND_HOME_PATH 指向
-# ${CMAKE_INSTALL_PREFIX}/hybm/lib64/cann)。此前误用 PROJECT_HYBM_OUTPUT(output/)
-# 导致 UT 找不到 mock CANN, hybm_load_library 因 ASCEND_HOME_PATH 校验失败而报错。
+# run_ut.sh 将 ASCEND_HOME_PATH 指向 ${CMAKE_INSTALL_PREFIX}/hybm/lib64/cann, mock CANN 须装到此处
 set(MOCK_CANN_INSTALL_DIR ${CMAKE_INSTALL_PREFIX}/hybm/lib64/cann)
 
 install(

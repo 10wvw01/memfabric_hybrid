@@ -16,9 +16,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-// 探测当前环境 IPv6 loopback 是否可用：socket 创建失败（内核无 IPv6 支持）或
-// bind ::1 失败（容器 disable_ipv6=1 时返回 EADDRNOTAVAIL）均视为不可用。
-// IPv6 相关用例在不可用环境中应自防御 skip，而非报 FAILED。
+// 内核未启用 IPv6 或容器禁用(disable_ipv6=1, bind ::1 报 EADDRNOTAVAIL)时返回 false。
 inline bool IsIpv6LoopbackAvailable()
 {
     int fd = ::socket(AF_INET6, SOCK_STREAM, 0);

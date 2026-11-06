@@ -374,7 +374,6 @@ TEST_F(SmemTransTest, smem_trans_deregister_mem_success)
         if (ret != SM_OK) {
             _exit(3);
         }
-        /* 反注册已注册的内存应成功 */
         ret = smem_trans_deregister_mem(handle, address);
         if (ret != SM_OK) {
             _exit(4);
