@@ -538,6 +538,12 @@ TEST_F(HybmMemSegmentTest, ConnBasedSegment_Import_AddsRemoteVaInfo)
     ock::mf::HybmVaManager::GetInstance().AllocReserveGva(opt.rankId, opt.maxSize * opt.rankCnt,
                                                           opt.maxSize * opt.rankCnt, HYBM_MEM_TYPE_HOST);
 
+    /* Mmap 会校验远端 gva 必须落在保留的 GVA 窗口内
+     * (防止恶意对端借 MAP_FIXED 覆写本端任意映射)。
+     * 本用例未走 ReserveMemorySpace, 手工建立覆盖 info.gva 的窗口 */
+    seg.globalVirtualAddress_ = nullptr;
+    seg.totalVirtualSize_ = opt.maxSize * opt.rankCnt;
+
     // 构造一个来自 rank1 的 HostExportInfo，并序列化
     ock::mf::HostExportInfo info{};
     info.rankId = 1;
@@ -582,6 +588,12 @@ TEST_F(HybmMemSegmentTest, ConnBasedSegment_MmapAndUnmap_IntegratesWithVaManager
     opt.rankId = 0;
 
     ock::mf::HybmConnBasedSegment seg(opt, 0);
+
+    /* Mmap 会校验远端 gva 必须落在保留的 GVA 窗口内
+     * (防止恶意对端借 MAP_FIXED 覆写本端任意映射)。
+     * 本用例未走 ReserveMemorySpace, 手工建立覆盖 local/remote gva 的窗口 */
+    seg.globalVirtualAddress_ = nullptr;
+    seg.totalVirtualSize_ = opt.maxSize * opt.rankCnt;
 
     ock::mf::HostExportInfo local{};
     local.gva = 0x1000;
