@@ -14,7 +14,7 @@ Subject: [PATCH] mockcpp patch
  src/JmpCodeX86.h          |  4 ++-
  src/JmpOnlyApiHook.cpp    |  1 +
  src/UnixCodeModifier.cpp  |  2 ++
- 10 files changed, 154 insertions(+), 5 deletions(-)
+ 10 files changed, 157 insertions(+), 5 deletions(-)
  create mode 100644 src/JmpCodeAARCH64.h
  create mode 100644 src/JmpCodeARM32.h
 
@@ -92,7 +92,7 @@ new file mode 100644
 index 0000000..4f5e90b
 --- /dev/null
 +++ b/src/JmpCodeAARCH64.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,72 @@
 +/***
 +   mockcpp is a C/C++ mock framework.
 +   Copyright [2008] [Darwin Yuan <darwin.yuan@gmail.com>]
@@ -140,8 +140,11 @@ index 0000000..4f5e90b
 +#define L1_INV_I_CACHE _IOWR('S', 0x03, struct l2cache_addr_range)
 +#define D_TO_I_CACHE_FLUSH_RANGE _IOWR('S', 0x04, struct l2cache_addr_range)
 +
++// ldr x16, [pc+8]; br x16  →  跳转桩必须使用 x16(IP0) 这类 scratch 寄存器:
++// 若 clobber callee-saved 寄存器(如 x23), 会破坏 ASAN 插桩代码跨调用保存的
++// 帧指针/参数指针, 产生虚假的 stack-use-after-return 误报(issue #19 同类问题)
 +const unsigned char jmpCodeTemplate[] =
-+   { 0x57, 0x00, 0x00, 0x58, 0xe0, 0x02, 0x1f, 0xd6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
++   { 0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1f, 0xd6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 +
 +#define SET_SJMP_CODE(base, from, to) do { \
 +      using instruct_t = signed int; \
