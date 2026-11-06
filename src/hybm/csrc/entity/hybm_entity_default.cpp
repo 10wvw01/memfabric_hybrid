@@ -255,10 +255,18 @@ Result MemEntityDefault::ConfigureOrchOnce(hybm_mem_slice_t slice)
     if (!orchAcquired_ || orchConfigured_) { // 非协同 entity 或已配置
         return BM_OK;                        // 幂等返回
     }
+    if (options_.rankCount > SMEM_SHM_SDMA_MAX_RANKS) { // 到达环布局按 MAX_RANKS-1 设计
+        BM_LOG_ERROR("orch rankCount exceeds layout limit, rankCount: " << options_.rankCount
+                     << " maxRanks: " << SMEM_SHM_SDMA_MAX_RANKS << " entityId: " << id_
+                     << " rankId: " << options_.rankId); // 根因: 布局上限/实体/rank
+        return BM_INVALID_PARAM;
+    }
     const uint64_t ownSeg = reinterpret_cast<uint64_t>(hbmGva_) + options_.maxHBMSize * options_.rankId; // 本端段基址
+    const uint64_t poolBase = reinterpret_cast<uint64_t>(hbmGva_); // 池窗口基址(固定起点, 各 rank 一致)
     auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace,
-                                                              options_.maxHBMSize); // 保留区+常驻 kernel
-    if (ret != BM_OK) { // 配置失败(单池约束/非 2 幂 symm/清零失败)
+                                                              options_.maxHBMSize, options_.rankId,
+                                                              poolBase); // 保留区+常驻 kernel(含对端环路由)
+    if (ret != BM_OK) { // 配置失败(单池约束/非 2 幂 symm/清零失败/rank 越限)
         BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: "
                      << options_.rankId << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段
         return ret;
