@@ -19,6 +19,7 @@
 #include "smem_shm.h"
 #include "smem_types.h"
 #include "ut_barrier_util.h"
+#include "ut_ipv6_check.h"
 #include "smem_net_common.h"
 
 #define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
@@ -50,6 +51,9 @@ void SmemNetTest::TearDown()
 
 TEST_F(SmemNetTest, GetLocalIpWithTarget)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     std::string target{};
     auto ret = GetLocalIpWithTarget("::1", target);
     EXPECT_EQ(ret, 0);

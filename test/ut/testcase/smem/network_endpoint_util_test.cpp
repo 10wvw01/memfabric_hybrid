@@ -22,6 +22,7 @@
 
 #include <gtest/gtest.h>
 #include "network_endpoint_util.h"
+#include "ut_ipv6_check.h"
 
 using namespace ock::smem;
 
@@ -446,6 +447,9 @@ TEST_F(NetworkEndpointUtilTest, CheckConnectivity_connect_to_listening_port_ipv4
 
 TEST_F(NetworkEndpointUtilTest, CheckConnectivity_connect_to_listening_port_ipv6)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     pid_t pid = fork();
     ASSERT_NE(pid, -1);
 

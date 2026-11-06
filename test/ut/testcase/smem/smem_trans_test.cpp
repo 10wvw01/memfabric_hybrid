@@ -26,6 +26,7 @@
 #include "smem_trans/smem_trans_entry.h"
 #include "smem_trans/smem_trans_entry_manager.h"
 #include "hybm_va_manager.h"
+#include "ut_ipv6_check.h"
 
 #define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
 
@@ -115,6 +116,9 @@ TEST_F(SmemTransTest, smem_trans_create_success)
 
 TEST_F(SmemTransTest, smem_trans_create_success_ipv6)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     pid_t pid = fork();
     EXPECT_NE(pid, -1);
 
@@ -1151,6 +1155,9 @@ TEST_F(SmemTransTest, smem_trans_read_write)
 
 TEST_F(SmemTransTest, smem_trans_write_ipv6)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     uint32_t rankSize = 2;
     int *sender_buffer = new int[500];
     int *recv_buffer = new int[500];
@@ -1471,6 +1478,9 @@ TEST_F(SmemTransTest, smem_trans_batch_read_write)
 
 TEST_F(SmemTransTest, smem_trans_batch_write_ipv6)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     uint32_t rankSize = 2;
     int *sender_buffer = new int[500];
     int *recv_buffer = new int[500];
@@ -1814,6 +1824,9 @@ TEST_F(SmemTransTest, smem_trans_register_mems_success_receiver)
 
 TEST_F(SmemTransTest, smem_trans_register_mems_success_receiver_ipv6)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     smem_trans_config_t trans_options = g_trans_options;
     trans_options.role = SMEM_TRANS_RECEIVER;
 
