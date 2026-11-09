@@ -27,6 +27,12 @@
 - **Python**：ruff 目标 `py310`，行长度 120。配置位于 `pre-commit/pyproject.toml`。
 - **C++**：clang-format v18.1.8，基于 Google，IndentWidth=4，ColumnLimit=120，Allman 大括号。配置位于 `.clang-format`。
 
+## PR / Issue 操作
+
+- **优先用 GitCode CLI（`gc`）**：获取/创建/修改 PR、issue 等操作，先确认 `gc auth status` 已登录；
+  已登录则用 `gc pr`、`gc issue`、`gc api` 等命令完成，不手写裸 API 调用
+- **回退**：`gc` 未安装或未登录时，再考虑 SSH / HTTPS 方式（`git push` 推分支 + 网页建 PR）
+
 ## 代码规范（强制要求）
 
 以下规范必须遵守，违反将导致代码被拒绝：

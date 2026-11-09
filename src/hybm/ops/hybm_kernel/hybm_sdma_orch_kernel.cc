@@ -190,7 +190,7 @@ int32_t cp1QueryProp(uint32_t devId, uint32_t sqId, uint32_t prop, uint32_t *v0,
 
 // SQE 入环: 只写环 + 推进 shadow tail, 不敲铃(调用方统一 doorbell)。
 // 满环检查活查询 head 重算(hcomm LaunchTask 同款): shadow 回绕后对 epoch 入口 head 快照
-// 的模减会失明(used 恒小), 覆写固件未消费 SQE 造成邮件无声丢失(并发丢件挂死（507014） 根因);
+// 的模减会失明(used 恒小), 覆写固件未消费 SQE 造成邮件无声丢失(并发邮件丢失挂死（507014） 根因);
 // 活查询保证 used 始终以固件真实消费位置为基准。返回 0 成功; 1363=活查询超时环满。
 int32_t submitSqe(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, const uint8_t sqe[kSqeSize])
 {
@@ -343,7 +343,7 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
 
 // SQE 四连入环(不敲铃): ① 数据(src→dst, 可带 reduce opcode) ⓪ 邮件像(暂存 32B→对端邮件槽)
 // ② 到达戳(暂存槽首 8B→对端戳槽) ③ 完成戳(同源→本端戳槽); 同队列 FIFO 保证 ⓪②③ 晚于 ① 落地。
-// v25: ②③ 拷贝数据源=本端暂存(原为对端邮件内容首字段——跨芯片写在途时 SDMA 读回旧值, 并发丢件挂死（507014）)。
+// v25: ②③ 拷贝数据源=本端暂存(原为对端邮件内容首字段——跨芯片写在途时 SDMA 读回旧值, 并发邮件丢失挂死（507014）)。
 // v29: 戳值=环序号+1(请求环按对端划分后序号即对端连续序号); 邮件像同样经暂存由 ⓪ 投递
 // ——AICPU 跨卡直写实测不返回(设备侧 CPU 核的跨卡 store 无通路), 对端内存全部经 SDMA。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
@@ -352,8 +352,8 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
-    /* 尾值防 0(v21, 并发丢件挂死（507014） 修复): 本封四连若恰好使 shadow 尾落到 0, 该批 doorbell
-     * 值为 0——固件将其当"空环"哨兵静默丢弃, SQE 完好在环但永不执行(实测确定性丢件)。
+    /* 尾值防 0(v21, 并发邮件丢失挂死（507014） 修复): 本封四连若恰好使 shadow 尾落到 0, 该批 doorbell
+     * 值为 0——固件将其当"空环"哨兵静默丢弃, SQE 完好在环但永不执行(实测确定性丢失邮件)。
      * 先插入一条无害占位 SQE(工作区 8B 自拷贝), 尾值落到 1; 小正值回绕形态实测安全。 */
     if ((ctx->sqTail + 4) % ctx->sqDepth == 0) {
         const uint64_t scratch = p->resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF;
@@ -392,7 +392,7 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
 
 /* 批末敲铃: 统一屏障 + doorbell(环内积压时 N 封一铃, 降 HAL 调用开销)。
  * 尾值永不为 0 由 issueMailSqes 的占位 SQE 保证(0 会被固件当"空环"哨兵丢弃,
- * 并发丢件挂死（507014） 根因)。尾值与返回码落诊断区(v15 逐单日志)。 */
+ * 并发邮件丢失挂死（507014） 根因)。尾值与返回码落诊断区(v15 逐单日志)。 */
 int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 {
     memBarrier();                                                // SQE 写序后(批内唯一 dsb)
