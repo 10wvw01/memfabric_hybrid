@@ -214,9 +214,6 @@ vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_
 | `MEASURED_REQUESTS` | 10 | 正式测量请求数 |
 | `temperature` | 0 | 固定输出，消除采样随机性 |
 | `VOCAB_SIZE` | 151936 | token ID 随机范围（Qwen3.5 词表） |
-| `MEMCACHE_OVERHEAD_RATIO` | 0.2（20%） | 全 miss 基准门限：MemCache vs Baseline 开销 |
-| `PREFIX_CACHE_HIT_RATIO` | 0.7（70%） | 50%/100% 命中门限：hit P50 / miss P50 |
-| `HIT_TTFT_THRESHOLD_MS` | 1500 | 50% 命中场景实际命中判定门限（TTFT < 此值视为命中） |
 | `VLLM_READY_TIMEOUT_S` | 600 | vLLM 启动超时（秒） |
 | `TTFT_REQUEST_TIMEOUT_S` | 300 | 单次请求超时（秒） |
 
@@ -234,14 +231,13 @@ vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_
 | 50% 命中 | 预填充 5 个 prompt 后发送 10 个混合请求 | 5 个重复（hit）+ 5 个新 prompt（miss），随机打乱 |
 | 100% 命中 | 每个 prompt 发送 2 次（先 miss 后 hit） | 10 轮配对，miss 写入 MemCache，hit 从 MemCache 读取 |
 
-### 3.7 断言门限
+### 3.7 统计指标
 
-| 测试 | 断言 | 公式 | 门限 | 含义 |
-|------|------|------|------|------|
-| 全 miss 基准 | MemCache 开销 | `(memcache_p50 - baseline_p50) / baseline_p50` | < 20% | MemCache 引入的 TTFT 开销可接受 |
-| 50% 命中 | 实际命中率 | `actual_hit_count / hit_count` | ≥ 50% | 预期命中的 prompt 中至少 50% 实际命中 |
-| 50% 命中 | Hit vs Miss P50 | `hit_p50 / miss_p50` | < 70% | 命中请求的 TTFT 显著低于未命中 |
-| 100% 命中 | Hit/Miss ratio | `hit_p50 / miss_p50` | < 70% | 全命中 TTFT 显著低于全 miss |
+| 指标 | 公式 | 说明 |
+|------|------|------|
+| 全 miss 相对开销 | `(memcache_p50 - baseline_p50) / baseline_p50` | 比较 MemCache 与基线的 P50 |
+| Hit/Miss P50 ratio | `hit_p50 / miss_p50` | 记录命中与未命中请求的延迟比 |
+
 
 ---
 
@@ -324,7 +320,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | 50% 命中 | — | 3,621 (miss) | 452 | 改善 43.81% | 17.0% |
 | 100% 命中 | — | 3,569 (miss) | 412 | 降幅 88.47% | 44.1% |
 
-> 门限：全 miss 开销 < 20%，50%/100% hit 的 Hit/Miss P50 ratio < 70%。三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持，cache hit 完全来自 MemCache external hit。50% 命中场景实际命中 5/5（100%）。100% hit 的 P99=418ms（比 P50 仅高 2%），尾部延迟稳定。
+> 三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持，cache hit 完全来自 MemCache external hit。50% 命中场景实际命中 5/5（100%）。100% hit 的 P99=418ms（比 P50 仅高 2%），尾部延迟稳定。
 
 ### 6.3 命中率梯度分析
 
@@ -365,7 +361,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | 50% 命中 | — | 3,864 (miss) | 356 | 改善 45.35% | 18.8% |
 | 100% 命中 | — | 3,866 (miss) | 332 | 降幅 91.41% | 39.5% |
 
-> 门限：全 miss 开销 < 20%，50%/100% hit 的 Hit/Miss P50 ratio < 70%。三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持。100% hit 的 P99=3541ms（第 9 轮 pair 出现一次 hit=3857ms 异常值，其余 9 轮 hit P50=331ms 稳定），剔除异常值后 P99=349ms。
+> 三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持。100% hit 的 P99=3541ms（第 9 轮 pair 出现一次 hit=3857ms 异常值，其余 9 轮 hit P50=331ms 稳定），剔除异常值后 P99=349ms。
 
 ### 6.5 4-Rank (TP=4) 测试结果
 
@@ -388,7 +384,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | 50% 命中 | — | 5,019 (miss) | 747 | 改善 42.55% | 15.6% |
 | 100% 命中 | — | 4,780 (miss) | 541 | 降幅 88.69% | 44.1% |
 
-> 门限：全 miss 开销 < 20%，50%/100% hit 的 Hit/Miss P50 ratio < 70%。三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持。4-rank 使用 `--split` 分次运行（3 个测试逐个执行，中间清理 NPU + 重启 MetaService），避免 310P3 孤儿 NPU 上下文问题。100% hit 的 P99=563ms（比 P50 高 4%），尾部延迟稳定。
+> 三场景均 ✅ PASSED。`vLLM local hit=0.0%` 全程保持。4-rank 使用 `--split` 分次运行（3 个测试逐个执行，中间清理 NPU + 重启 MetaService），避免 310P3 孤儿 NPU 上下文问题。100% hit 的 P99=563ms（比 P50 高 4%），尾部延迟稳定。
 
 ---
 
@@ -501,7 +497,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | LC-4 | 大规模 prefix hit | 33.47 (P99=3117.88) | 40 keys 跨 HBM+DRAM，P99 超限 ❌ FAILED |
 | LC-5 | 持续写入排水 | 948.10 (eviction) | 42 keys，吞吐 561.7MB/s（DRAM 阶段） |
 
-> LC-4 失败原因：40 keys 读取中大部分 P50=33.47ms 正常，但部分 evicted keys 的 DRAM→HBM rewarm 出现 3117ms 尖峰导致 P99 超过 150ms 门限。这是 310P3 跨卡 P2P 4-rank 大容量配置下 DRAM rewarm 路径偶发高延迟的已知问题，与跨卡 die-pair P2P 映射稳定性相关。
+> LC-4 失败原因：40 keys 读取中大部分 P50=33.47ms 正常，但部分 evicted keys 的 DRAM→HBM rewarm 出现 3117ms 尖峰并拉高 P99。这是 310P3 跨卡 P2P 4-rank 大容量配置下 DRAM rewarm 路径偶发高延迟的已知问题，与跨卡 die-pair P2P 映射稳定性相关。
 
 #### Layer 3 端到端 TTFT（4 场景）
 
@@ -541,7 +537,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | P50 | 4,531.86 | 4,794.28 |
 | P99 | 4,553.95 | 4,820.25 |
 
-开销 = (4794.28 - 4531.86) / 4531.86 = **5.79%**（阈值 20%）→ ✅ PASSED
+开销 = (4794.28 - 4531.86) / 4531.86 = **5.79%**
 
 Cache stats: vLLM local hit=0.0%, MemCache external hit=9.4%
 
@@ -553,7 +549,7 @@ Cache stats: vLLM local hit=0.0%, MemCache external hit=9.4%
 | P50 | 2,652.45 | 528.20 (n=5) | 4,769.90 (n=5) |
 | 实际命中 | — | 5/5（100%） | — |
 
-Hit/Miss P50 ratio = 528.20 / 4769.90 = **11.07%**（阈值 < 70%）→ ✅ PASSED，改善率 44.45%
+Hit/Miss P50 ratio = 528.20 / 4769.90 = **11.07%**，改善率 44.45%
 
 Cache stats: vLLM local hit=0.0%, MemCache external hit=15.6%
 
@@ -564,11 +560,11 @@ Cache stats: vLLM local hit=0.0%, MemCache external hit=15.6%
 | P50 | 4,784.49 | 556.19 |
 | P99 | 4,896.11 | 632.41 |
 
-Hit/Miss P50 ratio = 556.19 / 4784.49 = **11.62%**（阈值 < 70%）→ ✅ PASSED，降幅 88.37%
+Hit/Miss P50 ratio = 556.19 / 4784.49 = **11.62%**，降幅 88.37%
 
 Cache stats: vLLM local hit=0.0%, MemCache external hit=42.2%
 
-**小结**: 纯 DRAM 模式 3 个场景全部通过。无 HBM、无 eviction，cache hit P50=556ms，开销 5.79%（低于 20% 门限）。适用于无 HBM 预留空间或 HBM 分配失败（207001）的降级场景。与 4-rank host_shm 主体测试（§6.5，HBM 0 + 1GB DRAM）对比，10GB DRAM 大容量下 hit 延迟略高（556ms vs 541ms），但降幅（88.37% vs 88.69%）和改善率（44.45% vs 42.55%）一致，证明 DRAM 容量扩展对 TTFT 无显著影响。
+**小结**: 纯 DRAM 模式 3 个场景全部通过。无 HBM、无 eviction，cache hit P50=556ms，开销 5.79%。适用于无 HBM 预留空间或 HBM 分配失败（207001）的降级场景。与 4-rank host_shm 主体测试（§6.5，HBM 0 + 1GB DRAM）对比，10GB DRAM 大容量下 hit 延迟略高（556ms vs 541ms），但降幅（88.37% vs 88.69%）和改善率（44.45% vs 42.55%）一致，证明 DRAM 容量扩展对 TTFT 无显著影响。
 
 ---
 

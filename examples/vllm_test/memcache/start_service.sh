@@ -11,9 +11,9 @@
 #   --tp <N>                    tensor parallel size (default: 2)
 #   --port <PORT>               vLLM server port (default: 4077)
 #   --gpu-mem-util <float>      GPU memory utilization (default: 0.80)
-#   --model <PATH>              model path (default: /home/models/Qwen3.6-35B-A3B-w8a8)
+#   --model <PATH>              model path (default: /workspace/models/Qwen3.6-35B-A3B-w8a8)
 #   --served-model-name <NAME>  served model name (default: Qwen3.6-35B-A3B)
-#   --memcache-dir <DIR>        memcache repo dir (default: /home/l30023043/memcache)
+#   --memcache-dir <DIR>        memcache repo dir (default: /workspace/memcache-v121-test)
 #   --config <PATH>             MMC_LOCAL_CONFIG_PATH (default: cases/config/mmc-local-integration.conf)
 #   --detach                    run services detached with setsid (survives shell exit)
 #   --meta-only                 start only MetaService (skip vLLM)
@@ -40,9 +40,9 @@ DEVICE_IDS="6,7"
 TP_SIZE="2"
 VLLM_PORT="4077"
 GPU_MEM_UTIL="0.80"
-MODEL_PATH="/home/models/Qwen3.6-35B-A3B-w8a8"
+MODEL_PATH="/workspace/models/Qwen3.6-35B-A3B-w8a8"
 SERVED_MODEL_NAME="Qwen3.6-35B-A3B"
-MEMCACHE_DIR="/home/l30023043/memcache"
+MEMCACHE_DIR="/workspace/memcache-v121-test"
 LOCAL_CONFIG="$PKG_DIR/cases/config/mmc-local-integration.conf"
 DETACH=0
 META_ONLY=0
@@ -79,13 +79,30 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export ASCEND_RT_VISIBLE_DEVICES="$DEVICE_IDS"
 
 # ============================================================================
-# Kill old processes
+# Check service ports before starting; never stop unrelated processes.
 # ============================================================================
-echo "[INFO] Stopping stale processes..."
-pkill -9 -f mmc_meta_service 2>/dev/null || true
-pkill -9 -f "vllm serve" 2>/dev/null || true
-pkill -9 -f "VLLM::" 2>/dev/null || true
-sleep 3
+python3 - "$VLLM_PORT" <<'CHECK_PORTS'
+import os
+import socket
+import sys
+from urllib.parse import urlparse
+
+ports = {int(sys.argv[1])}
+with open(os.environ["MMC_META_CONFIG_PATH"], encoding="utf-8") as config:
+    for line in config:
+        if line.lstrip().startswith("#") or "=" not in line:
+            continue
+        value = line.split("=", 1)[1].strip()
+        if "://" in value:
+            parsed = urlparse(value)
+            if parsed.port:
+                ports.add(parsed.port)
+for port in sorted(ports):
+    with socket.socket() as connection:
+        connection.settimeout(0.2)
+        if connection.connect_ex(("127.0.0.1", port)) == 0:
+            raise SystemExit(f"Service port {port} is in use; choose isolated ports before starting")
+CHECK_PORTS
 
 # ============================================================================
 # Start MetaService
@@ -125,8 +142,7 @@ VLLM_CMD="vllm serve $MODEL_PATH \
   --enforce-eager --enable-chunked-prefill \
   --mamba-ssm-cache-dtype float16 --mamba-cache-mode align \
   --additional-config '{\"enable_flashcomm1\":false,\"enable_flashcomm2_parallel_size\":0,\"enable_prefill_mc2\":false,\"enable_fused_mc2\":0,\"ascend_compilation_config\":{\"fuse_norm_quant\":false,\"enable_npugraph_ex\":false}}' \
-  --no-enable-prefix-caching \
-  --prefix-match-unit 128 \
+  --enable-prefix-caching \
   --kv-transfer-config '{\"kv_connector\":\"AscendStoreConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"backend\":\"memcache\"}}'"
 
 if [[ "$DETACH" -eq 1 ]]; then

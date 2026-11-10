@@ -8,11 +8,12 @@
 #
 # 选项:
 #   --memcache-dir <DIR>        memcache 工作目录（不存在则 clone 到此路径）
-#   --memcache-repo <URL>       memcache 远程仓库地址（默认 gitcode.com/Ascend/memcache.git）
+#   --memcache-repo <URL>       memcache 远程仓库地址（默认 GDD_ESCC/memcache）
+#   --vllm-dir <DIR>            vLLM 0.24 源码目录（集成测试必选）
 #   --vllm-ascend-dir <DIR>     vLLM-Ascend 目录（默认自动探测）
 #   --skip-build                跳过构建
 #   --skip-patch-vllm           跳过 vLLM-Ascend 补丁
-#   --skip-install-libs         跳过库替换
+#   --skip-install-libs         跳过 wheel 安装
 #   --yes|-y                    非交互模式，自动确认
 #   --help                      显示帮助
 
@@ -21,11 +22,11 @@ set -euo pipefail
 # ============================================================================
 # 常量
 # ============================================================================
-MEMCACHE_BASE_TAG="v1.2.1"
-MEMCACHE_DEFAULT_REPO="https://gitcode.com/Ascend/memcache.git"
-MEMFABRIC_HYBRID_BRANCH="dev-v1.2.0"
+MEMCACHE_DEFAULT_REPO="https://gitcode.com/GDD_ESCC/memcache.git"
+MEMCACHE_BASE_BRANCH="trunk_for_escc_v1.2.1"
+MEMFABRIC_HYBRID_BRANCH="trunk_for_escc_v1.2.0"
 MEMFABRIC_HYBRID_FORK_REPO="https://gitcode.com/GDD_ESCC/memfabric_hybrid.git"
-VLLM_ASCEND_BASE_COMMIT="f2f74a16c3c50a76f4349d807918e83edec1e35c"
+VLLM_ASCEND_BASE_COMMIT="b19127c7e855af6a1ee6a67d3825205086a87a8e"
 CANN_DEFAULT_PATH="/usr/local/Ascend/cann-9.1.0"
 
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -36,6 +37,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MEMCACHE_DIR=""
 MEMCACHE_REPO="$MEMCACHE_DEFAULT_REPO"
 VLLM_ASCEND_DIR=""
+VLLM_DIR=""
 SKIP_BUILD=0
 SKIP_PATCH_VLLM=0
 SKIP_INSTALL_LIBS=0
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --memcache-dir)       MEMCACHE_DIR="$2"; shift 2 ;;
         --memcache-repo)      MEMCACHE_REPO="$2"; shift 2 ;;
         --vllm-ascend-dir)    VLLM_ASCEND_DIR="$2"; shift 2 ;;
+        --vllm-dir)           VLLM_DIR="$2"; shift 2 ;;
         --skip-build)         SKIP_BUILD=1; shift ;;
         --skip-patch-vllm)    SKIP_PATCH_VLLM=1; shift ;;
         --skip-install-libs)  SKIP_INSTALL_LIBS=1; shift ;;
@@ -66,33 +69,31 @@ log_error() { echo -e "\033[31m[ERROR]\033[0m $*"; }
 log_step()  { echo -e "\n\033[36m========== $* ==========\033[0m"; }
 
 # ============================================================================
-# fix_memfabric_hybrid — 将子模块切到 dev-v1.2.0 分支并应用补丁
-#
-# .gitmodules 指向 Ascend/memfabric_hybrid.git（master 分支），dev-v1.2.0 分支在
-# GDD_ESCC/memfabric_hybrid.git 上，已包含 IsSameCard + 107002 修复。
-# 207001 P2P_HUGE 回退补丁尚未合入，需本地应用。
-# git submodule update 会把子模块 reset 回父仓库记录的 commit，所以每次
-# submodule update 后都需要重新执行此函数。
-# ============================================================================
+# Select the requested MemFabric revision without discarding local changes.
 fix_memfabric_hybrid() {
     local mfh_dir="$MEMCACHE_DIR/3rdparty/memfabric_hybrid"
-
     cd "$mfh_dir"
-
-    # 清除工作区残留（上次应用的补丁未 commit，submodule update 后残留）
-    git stash 2>/dev/null || true
-    git reset --hard 2>/dev/null || true
-    git clean -fd 2>/dev/null || true
-
-    # origin 默认指向 Ascend/memfabric_hybrid.git（master 分支），dev-v1.2.0 分支在 GDD_ESCC 仓库上
-    # 已包含 IsSameCard + 107002 + 207001 P2P_HUGE 回退修复
     if ! git remote get-url fork &>/dev/null; then
         git remote add fork "$MEMFABRIC_HYBRID_FORK_REPO"
     fi
-    git fetch fork "$MEMFABRIC_HYBRID_BRANCH" 2>/dev/null
-    git checkout -B "$MEMFABRIC_HYBRID_BRANCH" "fork/$MEMFABRIC_HYBRID_BRANCH"
-
-    log_info "memfabric_hybrid: dev-v1.2.0 ($(git rev-parse --short HEAD)) ✓"
+    git fetch fork "$MEMFABRIC_HYBRID_BRANCH"
+    local mf_patch="$SCRIPT_DIR/patches/memfabric_310p_vmm_context.patch"
+    if git merge-base --is-ancestor FETCH_HEAD HEAD && git apply --reverse --check "$mf_patch" 2>/dev/null; then
+        log_info "保留基于 $MEMFABRIC_HYBRID_BRANCH 的已修复 MemFabric 提交"
+    elif [[ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]]; then
+        if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+            log_error "memfabric_hybrid 有未提交的修改，不能切换版本: $mfh_dir"
+            return 1
+        fi
+        git checkout --detach FETCH_HEAD
+    fi
+    if git apply --reverse --check "$mf_patch" 2>/dev/null; then
+        log_info "MemFabric 310P 地址窗口和上下文补丁已应用"
+    else
+        git apply --check "$mf_patch"
+        git apply "$mf_patch"
+    fi
+    log_info "memfabric_hybrid: $MEMFABRIC_HYBRID_BRANCH ($(git rev-parse --short HEAD))"
     cd "$MEMCACHE_DIR"
 }
 
@@ -104,20 +105,14 @@ log_step "Step 1: 准备 memcache 仓库"
 if [[ -d "$MEMCACHE_DIR/.git" ]]; then
     log_info "目录已存在且为 git 仓库: $MEMCACHE_DIR"
     cd "$MEMCACHE_DIR"
-    CURRENT_TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
-
-    if [[ "$CURRENT_TAG" == "$MEMCACHE_BASE_TAG" ]]; then
-        log_info "当前在 tag $MEMCACHE_BASE_TAG ✓"
-    else
-        CURRENT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-        log_warn "当前 tag/commit: ${CURRENT_TAG:-$CURRENT_COMMIT}（期望: $MEMCACHE_BASE_TAG）"
-        log_warn "如果补丁应用失败，请先: git checkout $MEMCACHE_BASE_TAG"
-        if [[ "$ASSUME_YES" -ne 1 ]]; then
-            echo -n "  是否继续? [y/N] "
-            read -r response
-            [[ "$response" != "y" && "$response" != "Y" ]] && { log_info "用户取消"; exit 0; }
-        fi
+    CURRENT_BRANCH=$(git branch --show-current)
+    if ! git rev-parse --verify "$MEMCACHE_BASE_BRANCH^{commit}" >/dev/null 2>&1 ||
+        ! git merge-base --is-ancestor "$MEMCACHE_BASE_BRANCH" HEAD; then
+        log_error "MemCache 当前提交不基于 $MEMCACHE_BASE_BRANCH；请准备正确分支后重试"
+        exit 1
     fi
+    log_info "MemCache 分支: ${CURRENT_BRANCH:-detached HEAD} ($(git rev-parse --short HEAD))，基线 $MEMCACHE_BASE_BRANCH"
+
 else
     log_info "目录不存在，从远程拉取: $MEMCACHE_REPO"
     log_info "  目标路径: $MEMCACHE_DIR"
@@ -130,7 +125,7 @@ else
 
     mkdir -p "$(dirname "$MEMCACHE_DIR")"
 
-    if git clone "$MEMCACHE_REPO" "$MEMCACHE_DIR"; then
+    if git clone --branch "$MEMCACHE_BASE_BRANCH" "$MEMCACHE_REPO" "$MEMCACHE_DIR"; then
         log_info "clone 完成 ✓"
     else
         log_error "clone 失败，请检查仓库地址和网络: $MEMCACHE_REPO"
@@ -138,9 +133,9 @@ else
     fi
 
     cd "$MEMCACHE_DIR"
-    log_info "checkout 到 tag $MEMCACHE_BASE_TAG..."
-    git checkout "$MEMCACHE_BASE_TAG"
-    log_info "已切换到 tag $MEMCACHE_BASE_TAG ✓"
+    log_info "checkout 到分支 $MEMCACHE_BASE_BRANCH..."
+    git checkout "$MEMCACHE_BASE_BRANCH"
+    log_info "已切换到分支 $MEMCACHE_BASE_BRANCH ✓"
 fi
 
 # ============================================================================
@@ -175,7 +170,7 @@ else
 fi
 
 # ============================================================================
-# Step 3: 初始化 memfabric_hybrid 子模块并切到 dev-v1.2.0 + 应用 207001 补丁
+# Step 3: 初始化 memfabric_hybrid 子模块并应用 310P 补丁
 # ============================================================================
 log_step "Step 3: 初始化 memfabric_hybrid 子模块"
 
@@ -183,7 +178,10 @@ MFH_DIR="$MEMCACHE_DIR/3rdparty/memfabric_hybrid"
 
 if [[ ! -e "$MFH_DIR/.git" ]] || [[ -z "$(ls -A "$MFH_DIR" 2>/dev/null | grep -v '^\.git$')" ]]; then
     cd "$MEMCACHE_DIR"
-    git submodule update --init 3rdparty/memfabric_hybrid
+    git submodule init 3rdparty/memfabric_hybrid
+    git config submodule.3rdparty/memfabric_hybrid.url "$MEMFABRIC_HYBRID_FORK_REPO"
+    git config submodule.3rdparty/memfabric_hybrid.branch "$MEMFABRIC_HYBRID_BRANCH"
+    git submodule update --init --remote 3rdparty/memfabric_hybrid
 fi
 
 fix_memfabric_hybrid
@@ -222,9 +220,7 @@ print(os.path.dirname(os.path.dirname(vllm_ascend.__file__)))
     else
         cd "$VLLM_ASCEND_DIR"
         VLLM_PATCH_ALREADY=0
-        if git diff --name-only HEAD 2>/dev/null | grep "model_runner_310p.py" >/dev/null 2>&1; then
-            VLLM_PATCH_ALREADY=1
-        elif ! grep -q 'KV cache transfer is not supported' vllm_ascend/_310p/model_runner_310p.py 2>/dev/null; then
+        if git apply --reverse --check "$VLLM_PATCH" 2>/dev/null; then
             VLLM_PATCH_ALREADY=1
         fi
 
@@ -246,6 +242,19 @@ print(os.path.dirname(os.path.dirname(vllm_ascend.__file__)))
     fi
 fi
 
+# vLLM stays on the unmodified 0.24 baseline; hardware adaptations live in vLLM-Ascend.
+if [[ "$SKIP_PATCH_VLLM" -ne 1 ]]; then
+    if [[ -z "$VLLM_DIR" || ! -e "$VLLM_DIR/.git" ]]; then
+        log_error "请通过 --vllm-dir 指定原版 vLLM 0.24 源码目录"
+        exit 1
+    fi
+    if ! git -C "$VLLM_DIR" diff --quiet HEAD -- vllm; then
+        log_error "vLLM 源码存在本地修改，请使用原版 v0.24.0 工作区"
+        exit 1
+    fi
+    log_info "使用原版 vLLM，不应用核心源码补丁"
+fi
+
 # ============================================================================
 # Step 5: 构建 + 安装（可选）
 # ============================================================================
@@ -256,9 +265,7 @@ else
 
     cd "$MEMCACHE_DIR"
     log_info "初始化构建所需子模块（跳过 test/ 子模块，BUILD_TEST=OFF 不需要）..."
-    # git submodule update 会把 memfabric_hybrid reset 回父仓库记录的 commit，
-    # 需要先清理工作区（Step 3 应用的补丁未 commit），再 update 后重新切回 dev-v1.2.0 + 应用补丁
-    cd "$MEMCACHE_DIR/3rdparty/memfabric_hybrid" 2>/dev/null && git stash 2>/dev/null || true
+    # 只更新其余依赖，保留已选择的 MemFabric 版本和补丁。
     cd "$MEMCACHE_DIR"
 
     # github.com 子模块在受限网络下不可达，替换为 gitcode.com 镜像
@@ -279,7 +286,7 @@ else
     fix_memfabric_hybrid
 
     log_info "构建 (RELEASE, no test)..."
-    bash script/build_and_pack_run.sh --build_mode RELEASE --build_test OFF
+    bash script/build_and_pack_run.sh --build_mode RELEASE --build_test OFF --build_ubsio OFF
     log_info "构建完成 ✓"
 
     if [[ "$SKIP_INSTALL_LIBS" -eq 0 ]]; then
@@ -292,19 +299,30 @@ else
             log_warn "未找到 wheel，跳过"
         fi
 
-        log_info "替换 memfabric_hybrid 库..."
-        HYBRID_LIB_DIR=$(python3 -c "import memfabric_hybrid, os; print(os.path.dirname(memfabric_hybrid.__file__)+'/lib')" 2>/dev/null || echo "")
-        if [[ -n "$HYBRID_LIB_DIR" && -d "$HYBRID_LIB_DIR" ]]; then
-            [[ -f "$MFH_DIR/output/hybm/lib64/libmf_hybm_core.so" ]] && cp "$MFH_DIR/output/hybm/lib64/libmf_hybm_core.so" "$HYBRID_LIB_DIR/"
-            [[ -f "$MFH_DIR/output/smem/lib64/libmf_smem.so" ]] && cp "$MFH_DIR/output/smem/lib64/libmf_smem.so" "$HYBRID_LIB_DIR/"
-            if strings "$HYBRID_LIB_DIR/libmf_hybm_core.so" 2>/dev/null | grep "using 0, may affect" >/dev/null 2>&1; then
-                log_info "SDID fallback 验证通过 ✓"
-            else
-                log_warn "SDID fallback 未检测到"
-            fi
-        else
-            log_warn "未找到 memfabric_hybrid 库目录，跳过"
-        fi
+        log_info "安装由指定 MemFabric 分支构建的 Python 包..."
+        MF_PY_ROOT="$MFH_DIR/src/smem/python/memfabric_hybrid"
+        MF_PKG="$MF_PY_ROOT/memfabric_hybrid"
+        MF_BUILD="$MEMCACHE_DIR/build/3rdparty/memfabric_hybrid/src"
+        mkdir -p "$MF_PKG/lib"
+        cp "$MFH_DIR/output/hybm/lib64/libmf_hybm_core.so" \
+           "$MFH_DIR/output/smem/lib64/libmf_smem.so" \
+           "$MFH_DIR/output/acc_offload/lib64/libmf_acc_offload.so" "$MF_PKG/lib/"
+        cp "$MF_BUILD"/smem/csrc/python_wrapper/mk_transfer_adapter/_pymf_transfer*.so \
+           "$MF_BUILD"/smem/csrc/python_wrapper/memfabric_hybrid/_pymf_hybrid*.so \
+           "$MF_BUILD"/acc_offload/csrc/python_wrapper/_pymf_acc_offload*.so "$MF_PKG/"
+        (
+            cd "$MF_PY_ROOT"
+            export MEMFABRIC_VERSION
+            MEMFABRIC_VERSION=$(tr -d '[:space:]' < "$MFH_DIR/VERSION")
+            python3 setup.py build --force bdist_wheel
+            pip install --force-reinstall --no-deps dist/memfabric_hybrid-"$MEMFABRIC_VERSION"-*.whl
+            installed_lib=$(python3 -c 'import memfabric_hybrid, pathlib; print(pathlib.Path(memfabric_hybrid.__file__).parent / "lib" / "libmf_hybm_core.so")')
+            cmp "$MFH_DIR/output/hybm/lib64/libmf_hybm_core.so" "$installed_lib" || {
+                log_error "安装的 MemFabric 库与本次构建产物不一致"
+                exit 1
+            }
+        )
+
     fi
 fi
 
@@ -335,9 +353,6 @@ echo "      --type workload"
 echo ""
 echo "    bash $SCRIPT_DIR/run_test.sh \\"
 echo "      --memcache-dir $MEMCACHE_DIR \\"
-echo "      --type integration"
-echo ""
-echo "  测试前清理环境:"
-echo "    bash $DEBUG_DIR/clean_stale_env.sh"
+echo "      --type integration --rank 2 --protocol device_sdma --device-ids 6,7"
 echo ""
 echo "  详细说明: $SCRIPT_DIR/README.md"

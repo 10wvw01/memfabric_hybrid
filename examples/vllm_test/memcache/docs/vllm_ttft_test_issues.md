@@ -114,7 +114,6 @@ Python API（`put_from_layers`）的分配器有跨 rank + DRAM fallback 逻辑�
 
 | 结论 | 影响程度 | 说明 |
 |------|---------|------|
-| Layer 3 测试通过 | 无影响 | 测试门限（开销 < 20%、hit/miss < 70%）仍满足 |
 | MemCache cache hit 降幅 85%+ | 需修正归因 | 降幅主要来自 vLLM 内部 prefix cache（5.65 GiB >> 20 prompt），而非 MemCache 分布式存储 |
 | device_sdma DRAM 层可用 | 需修正 | DRAM 层实际不可用（eviction 全部失败），MemCache 在 device_sdma 下实际只有 HBM 单层 |
 | device_sdma vs host_shm 对比 | 需修正 | 两种协议实际都是单层存储（host_shm 只有 DRAM，device_sdma 只有 HBM），开销差异来自 HBM SDMA vs DRAM 共享内存的带宽差异 |

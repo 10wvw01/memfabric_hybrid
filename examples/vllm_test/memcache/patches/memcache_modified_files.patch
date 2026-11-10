@@ -1,105 +1,109 @@
-diff --git a/src/memcache/csrc/python_wrapper/CMakeLists.txt b/src/memcache/csrc/python_wrapper/CMakeLists.txt
-index b85ba043..92a51520 100644
---- a/src/memcache/csrc/python_wrapper/CMakeLists.txt
-+++ b/src/memcache/csrc/python_wrapper/CMakeLists.txt
-@@ -1,5 +1,5 @@
- file(GLOB SOURCES "*.cpp")
--set(PYTHON_EXECUTABLE "python3")
-+find_program(PYTHON_EXECUTABLE NAMES python3 python)
- execute_process(
-         COMMAND ${PYTHON_EXECUTABLE} -c "import sys; print([s for s in sys.path if 'packages' in s][0])"
-         OUTPUT_VARIABLE PYTHON_SYS_PATH
 diff --git a/src/memcache/csrc/python_wrapper/pymmc.cpp b/src/memcache/csrc/python_wrapper/pymmc.cpp
-index 9702969a..e75cdbe7 100644
+index 9702969a..1025d058 100644
 --- a/src/memcache/csrc/python_wrapper/pymmc.cpp
 +++ b/src/memcache/csrc/python_wrapper/pymmc.cpp
-@@ -731,7 +731,7 @@ PYBIND11_MODULE(_pymmc, m)
+@@ -731,7 +731,8 @@ PYBIND11_MODULE(_pymmc, m)
                  py::gil_scoped_release release;
                  return self.GetInto(key, reinterpret_cast<void *>(buffer_ptr), size, direct);
              },
 -            py::arg("key"), py::arg("buffer_ptr"), py::arg("size"), py::arg("direct") = SMEMB_COPY_G2H,
-+            py::arg("key"), py::arg("buffer_ptr"), py::arg("size"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H),
++            py::arg("key"), py::arg("buffer_ptr"), py::arg("size"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H),
              "Get object data directly into a pre-allocated buffer")
          .def(
              "batch_get_into",
-@@ -745,7 +745,7 @@ PYBIND11_MODULE(_pymmc, m)
+@@ -745,7 +746,8 @@ PYBIND11_MODULE(_pymmc, m)
                  py::gil_scoped_release release;
                  return self.BatchGetInto(keys, buffers, sizes, direct);
              },
 -            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_G2H,
-+            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H),
++            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H),
              "Get object data directly into pre-allocated buffers for multiple "
              "keys")
          .def(
-@@ -763,7 +763,7 @@ PYBIND11_MODULE(_pymmc, m)
+@@ -763,7 +765,8 @@ PYBIND11_MODULE(_pymmc, m)
                  TP_TRACE_END(TP_MMC_PYBIND_GET_LAYERS, 0);
                  return ret;
              },
 -            py::arg("key"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_G2H)
-+            py::arg("key"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H))
++            py::arg("key"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H))
          .def(
              "batch_get_into_layers",
              [](MmcacheStore &self, const std::vector<std::string> &keys,
-@@ -784,7 +784,7 @@ PYBIND11_MODULE(_pymmc, m)
+@@ -784,7 +787,8 @@ PYBIND11_MODULE(_pymmc, m)
                  TP_TRACE_END(TP_MMC_PYBIND_BATCH_GET_LAYERS, 0);
                  return ret;
              },
 -            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_G2H)
-+            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H))
++            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2H))
          .def(
              "get_local_service_id",
              [](MmcacheStore &self) {
-@@ -801,7 +801,7 @@ PYBIND11_MODULE(_pymmc, m)
+@@ -801,8 +805,9 @@ PYBIND11_MODULE(_pymmc, m)
                  py::gil_scoped_release release;
                  return self.PutFrom(key, reinterpret_cast<void *>(buffer_ptr), size, direct, replicateConfig);
              },
 -            py::arg("key"), py::arg("buffer_ptr"), py::arg("size"), py::arg("direct") = SMEMB_COPY_H2G,
-+            py::arg("key"), py::arg("buffer_ptr"), py::arg("size"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G),
-             py::arg("replicateConfig") = defaultConfig, "Put object data directly from a pre-allocated buffer")
+-            py::arg("replicateConfig") = defaultConfig, "Put object data directly from a pre-allocated buffer")
++            py::arg("key"), py::arg("buffer_ptr"), py::arg("size"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G), py::arg("replicateConfig") = defaultConfig,
++            "Put object data directly from a pre-allocated buffer")
          .def(
              "batch_put_from",
-@@ -815,7 +815,7 @@ PYBIND11_MODULE(_pymmc, m)
+             [](MmcacheStore &self, const std::vector<std::string> &keys, const std::vector<uintptr_t> &buffer_ptrs,
+@@ -815,8 +820,8 @@ PYBIND11_MODULE(_pymmc, m)
                  py::gil_scoped_release release;
                  return self.BatchPutFrom(keys, buffers, sizes, direct, replicateConfig);
              },
 -            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_H2G,
-+            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G),
-             py::arg("replicateConfig") = defaultConfig,
+-            py::arg("replicateConfig") = defaultConfig,
++            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G), py::arg("replicateConfig") = defaultConfig,
              "Put object data directly from pre-allocated buffers for multiple "
              "keys")
-@@ -834,7 +834,7 @@ PYBIND11_MODULE(_pymmc, m)
+         .def(
+@@ -834,8 +839,8 @@ PYBIND11_MODULE(_pymmc, m)
                  TP_TRACE_END(TP_MMC_PYBIND_PUT_LAYERS, 0);
                  return ret;
              },
 -            py::arg("key"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_H2G,
-+            py::arg("key"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G),
-             py::arg("replicateConfig") = defaultConfig)
+-            py::arg("replicateConfig") = defaultConfig)
++            py::arg("key"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G), py::arg("replicateConfig") = defaultConfig)
          .def(
              "batch_put_from_layers",
-@@ -856,7 +856,7 @@ PYBIND11_MODULE(_pymmc, m)
+             [](MmcacheStore &self, const std::vector<std::string> &keys,
+@@ -856,8 +861,8 @@ PYBIND11_MODULE(_pymmc, m)
                  TP_TRACE_END(TP_MMC_PYBIND_BATCH_PUT_LAYERS, 0);
                  return ret;
              },
 -            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_H2G,
-+            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G),
-             py::arg("replicateConfig") = defaultConfig)
+-            py::arg("replicateConfig") = defaultConfig)
++            py::arg("keys"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_H2G), py::arg("replicateConfig") = defaultConfig)
          .def(
              "batch_alloc",
-@@ -883,7 +883,7 @@ PYBIND11_MODULE(_pymmc, m)
+             [](MmcacheStore &self, const std::vector<std::string> &keys, const std::vector<size_t> &sizes,
+@@ -883,7 +888,8 @@ PYBIND11_MODULE(_pymmc, m)
                  py::gil_scoped_release release;
                  return self.BatchCopy(gvaVec, bufVec, sizes, direct);
              },
 -            py::arg("gva_ptrs"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_G2L)
-+            py::arg("gva_ptrs"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2L))
++            py::arg("gva_ptrs"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2L))
          .def(
              "batch_copy_layers",
              [](MmcacheStore &self, const std::vector<uintptr_t> &gva_ptrs,
-@@ -911,7 +911,7 @@ PYBIND11_MODULE(_pymmc, m)
+@@ -911,7 +917,8 @@ PYBIND11_MODULE(_pymmc, m)
                  py::gil_scoped_release release;
                  return self.BatchCopy(gvaVec, bufVec, sizeVec, direct);
              },
 -            py::arg("gva_ptrs"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = SMEMB_COPY_G2L)
-+            py::arg("gva_ptrs"), py::arg("buffer_ptrs"), py::arg("sizes"), py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2L))
++            py::arg("gva_ptrs"), py::arg("buffer_ptrs"), py::arg("sizes"),
++            py::arg("direct") = static_cast<int32_t>(SMEMB_COPY_G2L))
          .def(
              "batch_write_finish",
              [](MmcacheStore &self, const std::vector<std::string> &keys, const std::vector<int32_t> &writeResults) {

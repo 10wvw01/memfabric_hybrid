@@ -186,6 +186,11 @@ for mod in memcache_hybrid memfabric_hybrid; do
     [[ -n "$libdir" && -d "$libdir" ]] && export LD_LIBRARY_PATH="$libdir:${LD_LIBRARY_PATH}"
 done
 
+MF_OUTPUT="$MEMCACHE_DIR/3rdparty/memfabric_hybrid/output"
+for dir in "$MF_OUTPUT/acc_offload/lib64" "$MF_OUTPUT/hybm/lib64" "$MF_OUTPUT/smem/lib64"; do
+    [[ -d "$dir" ]] && export LD_LIBRARY_PATH="$dir:$LD_LIBRARY_PATH"
+done
+
 export MMC_MEMCACHE_DIR="$MEMCACHE_DIR"
 export MMC_META_CONFIG_PATH="$MEMCACHE_DIR/config/mmc-meta.conf"
 
@@ -225,10 +230,15 @@ case "$TEST_TYPE" in
         export MMC_TEST_GPU_MEM_UTIL="$GPU_MEM_UTIL"
         if [[ -n "$PROTOCOL" ]]; then
             TEMP_CONF="$PKG_DIR/cases/config/.mmc-local-integration-${PROTOCOL}.conf"
-            sed -e "s/^ock\.mmc\.local_service\.protocol.*/ock.mmc.local_service.protocol = ${PROTOCOL}/" \
-                -e "s/^ock\.mmc\.local_service\.hbm\.size.*/ock.mmc.local_service.hbm.size = $([[ "$PROTOCOL" == "host_shm" ]] && echo 0 || echo 1GB)/" \
-                -e "s/^ock\.mmc\.local_service\.dram\.size.*/ock.mmc.local_service.dram.size = $([[ "$PROTOCOL" == "host_shm" ]] && echo 2GB || echo 1GB)/" \
-                "$BASE_CONFIG" > "$TEMP_CONF"
+            if [[ "$PROTOCOL" == "host_shm" ]]; then
+                sed -e "s/^ock\.mmc\.local_service\.protocol.*/ock.mmc.local_service.protocol = host_shm/" \
+                    -e "s/^ock\.mmc\.local_service\.hbm\.size.*/ock.mmc.local_service.hbm.size = 0/" \
+                    -e "s/^ock\.mmc\.local_service\.dram\.size.*/ock.mmc.local_service.dram.size = 2GB/" \
+                    "$BASE_CONFIG" > "$TEMP_CONF"
+            else
+                sed -e "s/^ock\.mmc\.local_service\.protocol.*/ock.mmc.local_service.protocol = device_sdma/" \
+                    "$BASE_CONFIG" > "$TEMP_CONF"
+            fi
             export MMC_LOCAL_CONFIG_PATH="$TEMP_CONF"
         else
             export MMC_LOCAL_CONFIG_PATH="$BASE_CONFIG"
@@ -294,8 +304,8 @@ log "[INFO] NPU detected"
 # Clean stale environment
 # ============================================================================
 CLEAN_SCRIPT="$MEMCACHE_DIR/debug/test/clean_stale_env.sh"
-if [[ "$SKIP_CLEAN" -eq 1 ]]; then
-    log "[INFO] 跳过环境清理（--skip-clean）"
+if [[ "$SKIP_CLEAN" -eq 1 || "$TEST_TYPE" == "integration" ]]; then
+    log "[INFO] 跳过全局环境清理"
 elif [[ -f "$CLEAN_SCRIPT" ]]; then
     log "[INFO] 清理残留进程和 IPC 资源..."
     if [[ -n "$LOG_FILE" ]]; then
@@ -360,7 +370,9 @@ stop_meta_service() {
 
 cleanup_meta() {
     stop_meta_service
-    pkill -9 -f 'VLLM::' 2>/dev/null || true
+    if [[ "$TEST_TYPE" != "integration" ]]; then
+        pkill -9 -f 'VLLM::' 2>/dev/null || true
+    fi
 }
 trap cleanup_meta EXIT
 
@@ -396,6 +408,9 @@ run_pytest() {
 
 # Shared cleanup between split tests: kill stale processes + restart MetaService.
 cleanup_between_tests() {
+    if [[ "$TEST_TYPE" == "integration" ]]; then
+        return
+    fi
     if [[ -f "$CLEAN_SCRIPT" ]]; then
         log "[INFO] Cleaning NPU between split tests..."
         if [[ -n "$LOG_FILE" ]]; then
@@ -441,7 +456,6 @@ run_integration() {
         log "[SKIP] vLLM not available, skipping integration tests"
         exit 0
     fi
-    ensure_meta_service
     local test_file="$PKG_DIR/cases/python/memcache/integration/vllm_integration_test.py"
     if [[ -n "$TEST_FILTER" ]]; then
         run_pytest "$test_file" -v -s -m "$TEST_FILTER"
@@ -450,14 +464,16 @@ run_integration() {
         run_pytest_split "$test_file" \
             "test_full_miss_baseline_1rank" \
             "test_50pct_hit_1rank" \
-            "test_100pct_hit_1rank"
+            "test_100pct_hit_1rank" \
+            "test_cache_source_correctness"
     elif [[ "$RANK" == "4" && "$SPLIT_TESTS" -eq 1 ]]; then
         # 4-rank: run each test separately with NPU cleanup between,
         # because 310P3 vLLM exit leaves orphan NPU context (HBM not released).
         run_pytest_split "$test_file" \
             "test_full_miss_baseline_4rank" \
             "test_50pct_hit_4rank" \
-            "test_100pct_hit_4rank"
+            "test_100pct_hit_4rank" \
+            "test_cache_source_correctness"
     else
         local marker="rank2"
         case "$RANK" in
@@ -603,10 +619,6 @@ case "$TEST_TYPE" in
         ;;
     integration)
         run_integration || OVERALL_EXIT=$?
-        # Cleanup vLLM processes after integration
-        pkill -9 -f "vllm serve" 2>/dev/null || true
-        sleep 3
-        pkill -9 -f "VLLM::" 2>/dev/null || true
         ;;
     bench)
         run_bench || OVERALL_EXIT=$?
