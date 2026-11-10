@@ -1765,3 +1765,62 @@ TEST_F(HybmEntityDefaultTest, ImportForTransport_ConnectWithOptionsFail)
     EXPECT_NE(ret, BM_OK);
     EXPECT_EQ(fake->connectWithOptionsCalled, 1);
 }
+
+namespace {
+constexpr int ACL_CONTEXT_NULL_FOR_TEST = 107002;
+int aclSetCalls = 0;
+int32_t aclTestDevice = 0;
+bool aclTestHasContext = false;
+
+int FakeGetDeviceForContextTest(int32_t *device)
+{
+    *device = aclTestDevice;
+    return 0;
+}
+
+int FakeGetContextForContextTest(void **context)
+{
+    *context = aclTestHasContext ? reinterpret_cast<void *>(1) : nullptr;
+    return aclTestHasContext ? 0 : ACL_CONTEXT_NULL_FOR_TEST;
+}
+
+int FakeSetDeviceForContextTest(int32_t device)
+{
+    ++aclSetCalls;
+    aclTestDevice = device;
+    aclTestHasContext = true;
+    return 0;
+}
+} // namespace
+
+TEST_F(HybmEntityDefaultTest, SetThreadDeviceRestoresMissingContext)
+{
+    using ock::mf::DlAclApi;
+    using ock::mf::MemEntityDefault;
+    const auto oldGetDevice = DlAclApi::pAclrtGetDevice;
+    const auto oldGetContext = DlAclApi::pAclrtGetCurrentContext;
+    const auto oldSetDevice = DlAclApi::pAclrtSetDevice;
+    DlAclApi::pAclrtGetDevice = FakeGetDeviceForContextTest;
+    DlAclApi::pAclrtGetCurrentContext = FakeGetContextForContextTest;
+    DlAclApi::pAclrtSetDevice = FakeSetDeviceForContextTest;
+    aclSetCalls = 0;
+    aclTestDevice = 0;
+    aclTestHasContext = false;
+    MemEntityDefault::isSetDevice_ = -1;
+    MemEntityDefault entity(0);
+    entity.options_.devId = 0;
+    EXPECT_EQ(entity.SetThreadAclDevice(), BM_OK);
+    EXPECT_EQ(aclSetCalls, 1);
+    EXPECT_EQ(entity.SetThreadAclDevice(), BM_OK);
+    EXPECT_EQ(aclSetCalls, 1);
+    aclTestHasContext = false;
+    EXPECT_EQ(entity.SetThreadAclDevice(), BM_OK);
+    EXPECT_EQ(aclSetCalls, 2);
+    aclTestDevice = 1;
+    EXPECT_EQ(entity.SetThreadAclDevice(), BM_OK);
+    EXPECT_EQ(aclSetCalls, 3);
+    MemEntityDefault::isSetDevice_ = -1;
+    DlAclApi::pAclrtGetDevice = oldGetDevice;
+    DlAclApi::pAclrtGetCurrentContext = oldGetContext;
+    DlAclApi::pAclrtSetDevice = oldSetDevice;
+}

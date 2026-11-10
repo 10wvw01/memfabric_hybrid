@@ -1431,7 +1431,10 @@ int32_t MemEntityDefault::SetThreadAclDevice()
     return BM_OK;
 #endif
     auto devId = static_cast<int32_t>(options_.devId);
-    if (isSetDevice_ == devId) {
+    void *context = nullptr;
+    int32_t currentDevId = -1;
+    if (isSetDevice_ == devId && DlAclApi::AclrtGetCurrentContext(&context) == BM_OK && context != nullptr &&
+        DlAclApi::AclrtGetDevice(&currentDevId) == BM_OK && currentDevId == devId) {
         return BM_OK;
     }
     auto ret = DlAclApi::AclrtSetDevice(devId);
