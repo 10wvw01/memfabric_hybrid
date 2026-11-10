@@ -2,20 +2,22 @@
 
 ## 结论
 
-Qwen3.5-4B-W8A8-310P、Qwen3.6-35B-A3B-w8a8 的 TP=1 / TP=2，均完成全 miss、50% 命中、重复输入命中、聊天缓存来源正确性四项验证，合计16项通过。TP=4 按用户要求暂停。变更按下表拆分为 PR 分支并提交；尚未推送，未创建远程 PR。
+Qwen3.5-4B-W8A8-310P、Qwen3.6-35B-A3B-w8a8 的 TP=1 / TP=2，均完成全 miss、50% 命中、重复输入命中、聊天缓存来源正确性四项验证，合计16项通过。TP=4 按用户要求暂停。变更已推送，远程 PR 见下表。
 
 vLLM 核心恢复原版0.24；适配位于 vLLM-Ascend、MemCache、MemFabric。保留共同固定地址机制，撤销独立动态选址、版本2元数据及 vLLM 核心校验例外。
 
 ## PR 分支与提交
 
-| 内容 | 分支 | 提交 |
-|---|---|---|
-| MemFabric运行库 | `fix/310p-fixed-vmm-context` | `6abf1066` ACL上下文；`4f0ca5f4` 固定窗口及测试 |
-| MemCache绑定和依赖 | `fix/python-copy-direction-defaults` | `3b12bb96` 绑定；`54d347c9` 子模块指向`4f0ca5f4` |
-| vLLM-Ascend适配 | `fix/310p-memcache-v024` | `a97b7320` |
-| 测试工具与文档 | `test/vllm024-memcache-310p` | 本目录内容独立提交，具体提交号见分支日志 |
+| 内容 | 分支 | 提交 | PR |
+|---|---|---|---|
+| MemFabric运行库 | `fix/310p-fixed-vmm-context` | `6abf1066`、`4f0ca5f4` | [#31](https://gitcode.com/GDD_ESCC/memfabric_hybrid/merge_requests/31) |
+| MemCache绑定和依赖 | `fix/python-copy-direction-defaults` | `3b12bb96`、`54d347c9` | [#1](https://gitcode.com/GDD_ESCC/memcache/merge_requests/1) |
+| vLLM-Ascend适配 | `fix/310p-memcache-v024-pr` | `ca290920` | [#10](https://gitcode.com/GDD_ESCC/vllm-ascend/merge_requests/10) |
+| 测试工具与文档 | `test/vllm024-memcache-310p` | 具体提交号见分支日志 | [#32](https://gitcode.com/GDD_ESCC/memfabric_hybrid/merge_requests/32) |
 
-MemCache依赖MemFabric的修复提交，后续发布时应先推送MemFabric分支。测试工具PR只修改`examples/vllm_test/memcache/`，与运行库源码提交分开。原`vllm-0.24-test`分支保留两部分修改的集成状态。
+MemCache PR #1依赖MemFabric PR #31的修复提交。测试工具PR只修改`examples/vllm_test/memcache/`，与运行库源码提交分开。原`vllm-0.24-test`分支保留两部分修改的集成状态。
+
+Ascend目标分支发布时已前进到`02d2a51d`。PR #10在独立worktree中适配最新目标，保留上游DFlash公共前缀最终校验，相关单测275 passed、10 skipped；该最新组合尚未重跑NPU端到端测试。下面的NPU结果仍对应原测试基线`b19127c7`加集成提交`a97b7320`。随附部署补丁对应已测版本，并通过PR #10源码的反向应用检查。
 
 ## 仓库基线
 
