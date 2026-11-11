@@ -1,5 +1,9 @@
 # Mooncake MF Transport vLLM TTFT 性能测试报告
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
+本文记录 Mooncake 的历史环境与适配方案。当前目录的测试脚本缺失情况见[入口说明](../README.md#当前目录状态)。
+
 ## 1. 概述
 
 本报告记录 Mooncake `protocol="mf"`（底层 MemFabric SDMA）在 Ascend 310P3 NPU 上的 vLLM TTFT（Time To First Token）性能测试结果。测试通过 vLLM streaming completions API 度量请求发送到首 token 的端到端延迟，验证 MooncakeStoreConnector KV offloading 对 TTFT 的实际收益。
@@ -12,7 +16,7 @@
 - **测试结果**: **3/3 passed**（baseline / store_hit / offload）
 - **缓存隔离验证**: 所有 hit 测试中 `vLLM local hit=0.0%`，确认 cache hit 来自 Mooncake store 而非 vLLM 内置缓存
 
-测试设计参考 `/home/l30023043/ttft_test` 的 Layer 3 全链路 TTFT 测试，适配 Mooncake `protocol="mf"` 传输栈。
+测试设计参考 `/home/l30023043/ttft_test` 的 vLLM 端到端 TTFT 测试，适配 Mooncake `protocol="mf"` 传输栈。
 
 ---
 
@@ -79,7 +83,7 @@
 
 ### 2.6 TTFT 度量方法
 
-使用 vLLM streaming completions API（`POST /v1/completions` + `stream: true`），从请求发送到收到第一个 `data: ` SSE 事件的时间差作为 TTFT：
+使用 vLLM streaming completions API（`POST /v1/completions` + `stream: true`），历史计时口径是从请求发送到收到第一个 `data: ` SSE 事件的时间差：
 
 ```
 TTFT = time.perf_counter(收到首个 token) - time.perf_counter(发送请求)
@@ -89,8 +93,8 @@ TTFT = time.perf_counter(收到首个 token) - time.perf_counter(发送请求)
           (~1ms)     (~340ms, 768 tokens)  (~8ms)      (~1ms)
 ```
 
-- `max_tokens=1`（只生成 1 个 token，度量纯 prefill TTFT）
-- `temperature=0`（确定性输出）
+- `max_tokens=1`（只生成 1 个 token，观察首 token 的端到端响应）
+- `temperature=0`（使用贪心解码，输出一致性仍由具体请求结果检查）
 - `ignore_eos=True`（不提前终止）
 - prompt 使用随机 token IDs（`random.Random(seed)`，避免 tokenizer 缓存）
 
@@ -118,14 +122,14 @@ TTFT = time.perf_counter(收到首个 token) - time.perf_counter(发送请求)
 
 ### 3.2 场景区别
 
-- **ttft_store_hit**（精确命中）：Phase 2 发送与 Phase 1 **完全相同**的 prompt，100% prefix 重叠，整个 prompt 的 KV 从 store 加载，**无 prefill 计算**。度量纯 store 读取延迟。
-- **ttft_offload**（前缀扩展）：Phase 2 发送 base prompt + **不同的 64-token suffix**，base 前缀从 store 加载（跳过 768-token prefill），suffix 需要 prefill 计算。度量**实际 KV offloading 场景的收益**（共享长前缀 + 每请求短后缀）。
+- **ttft_store_hit**（精确命中）：Phase 2 发送与 Phase 1 **完全相同**的 prompt，100% prefix 重叠，读取已保存且可复用的前缀；剩余输入处理及首 token 计算仍计入 TTFT。实际外部复用量由缓存指标记录。
+- **ttft_offload**（前缀扩展）：Phase 2 发送 base prompt + **不同的 64-token suffix**，base 中已保存的对齐前缀可以从 store 加载，剩余部分和新增 suffix 仍需要计算。度量**实际 KV offloading 场景的收益**（共享长前缀 + 每请求短后缀）。
 
 ### 3.3 缓存隔离方法
 
 vLLM 开启 `--enable-prefix-caching` 后有 GPU 驻留的 block-level prefix cache（`block_hash → block` 映射字典）。读取时 vLLM **优先查本地**，本地命中则直接用 GPU block，跳过 MooncakeStoreConnector。若不排除本地缓存，hit 测试的 TTFT 降幅无法区分是 vLLM 本地缓存还是 Mooncake store 的贡献。
 
-**隔离手段**：`VLLM_SERVER_DEV_MODE=1` 启用 `POST /reset_prefix_cache` dev API。在 Phase 2 每个 hit 请求前调用 `reset_local_prefix_cache()`，**只清除 vLLM 本地 hash→block 映射字典，不碰 Mooncake store 数据**。清除是同步内存操作（直接赋空字典），HTTP 响应返回时即已完成。
+**隔离手段**：`VLLM_SERVER_DEV_MODE=1` 启用 `POST /reset_prefix_cache` dev API。在 Phase 2 每个 hit 请求前调用 `reset_local_prefix_cache()`，**只清除 vLLM 本地 hash→block 映射字典，不碰 Mooncake store 数据**。底层重置受缓存块是否仍被占用影响，应结合引擎成功日志和命中计数判断。当前 MemCache 主测试同时检查 HTTP 状态与成功日志，步骤见通用测试说明。
 
 ```
 清除前：vLLM 本地命中 → 跳过 connector → 无法验证 Mooncake store 效果
@@ -134,7 +138,7 @@ vLLM 开启 `--enable-prefix-caching` 后有 GPU 驻留的 block-level prefix ca
 
 ### 3.4 显式缓存隔离验证
 
-测试不仅依赖 TTFT 降幅作为间接证据，还通过三条独立证据链显式确认隔离有效：
+测试不仅依赖 TTFT 降幅作为间接证据，还通过缓存指标、接口计数和日志记录显式确认隔离有效：
 
 | 证据来源 | 判定条件 | 获取方式 |
 |---------|---------|---------|
@@ -356,27 +360,31 @@ load_get_total_bytes / load_get_count = 45,957,120 / 10 = 4,595,712 bytes ≈ 4.
 
 ```
 save_put 带宽 = 4.4 MB / 8.5 ms ≈ 518 MB/s  (写入，含去重检查开销)
-load_get 带宽 = 4.4 MB / 6.3 ms ≈ 698 MB/s  (读取，纯 SDMA 搬运)
+load_get 带宽 = 4.4 MB / 6.3 ms ≈ 698 MB/s  (读取接口耗时)
 ```
 
 SDMA 读取带宽 ~700 MB/s，写入带宽 ~520 MB/s（含 `lookup_exists` 去重开销）。
 
-### 6.3 offload 收益模型
+上述 518/698 MB/s 是原报告按 4.4 MB 近似值计算的接口有效吞吐。
+按原始 4,595,712 bytes 和 8.5/6.3 ms 换算，十进制单位约为 541/729 MB/s。
+接口计时包含调用、管理和同步等开销，这些数值用于描述该工作负载，不能作为 SDMA 硬件峰值带宽。
+
+### 6.3 前缀复用后的端到端耗时
 
 ```
 无 offloading:
-  TTFT = T_prefill(768 tokens) ≈ 310-415 ms
+  历史请求 TTFT ≈ 310-415 ms
 
 有 offloading (prefix extension):
-  TTFT = T_load_get(768 tokens from store) + T_prefill(64 tokens suffix)
-       ≈ 6.3 ms + 140 ms
-       ≈ 170 ms
+  TTFT = 缓存查询与读取 + 剩余输入计算 + 调度和首 token 返回
+  历史实测请求 P50 ≈ 170 ms
 
 收益 = (310-170) / 310 ≈ 45%  (vs baseline)
 收益 = (415-170) / 415 ≈ 59%  (vs offload miss)
 ```
 
-关键：`T_load_get` (6.3ms) 远小于 `T_prefill` (310ms)，store 读取开销仅为 prefill 计算的 2%。
+`load_get_avg=6.3ms` 是接口平均值，约为 310ms 请求耗时的 2%；170ms 是命中请求的端到端 P50。
+平均值和 P50 采用不同统计口径，报告用它们说明操作量级，没有逐阶段相加的实测结果。
 
 ---
 
@@ -446,10 +454,10 @@ AddVaInfo success: AllocatedGvaInfo{gva: 0x...}         # 虚拟地址映射
 
 MooncakeStoreConnector（`protocol="mf"`）在 Ascend 310P3 上成功实现 KV cache offloading：
 
-- **精确命中场景**（ttft_store_hit）：TTFT 降低 **77.6%**（812ms → 175ms），整个 prompt KV 从 store 加载
-- **前缀扩展场景**（ttft_offload）：TTFT 降低 **57.4%**（415ms → 170ms），92% prefix 从 store 加载 + 8% suffix prefill
+- **精确命中场景**（ttft_store_hit）：TTFT 降低 **77.6%**（812ms → 175ms），输入完全重叠，加载其中已保存的可复用前缀
+- **前缀扩展场景**（ttft_offload）：TTFT 降低 **57.4%**（415ms → 170ms），输入前缀重叠约 92%，实际缓存复用量由保存的块及状态决定
 
-### 9.2 SDMA 传输高效
+### 9.2 存储读写接口的观测耗时
 
 - store 读取延迟 `load_get_avg=6.3ms`（4.4 MB/prompt），仅为 prefill 计算时间（310-415ms）的 **1.5-2%**
 - SDMA 读取带宽 ~700 MB/s，写入带宽 ~520 MB/s（含去重开销）
@@ -457,7 +465,7 @@ MooncakeStoreConnector（`protocol="mf"`）在 Ascend 310P3 上成功实现 KV c
 
 ### 9.3 缓存隔离验证完整
 
-三条独立证据链确认 TTFT 降幅来自 Mooncake store：
+缓存指标、接口计数和日志记录确认 TTFT 降幅来自 Mooncake store：
 1. `vLLM local hit rate = 0.0%` — 本地缓存已清空
 2. `External hit rate = 36-38%` — store 命中
 3. `/metrics external_prefix_cache_queries = 16896-17536` — store 被查询
@@ -465,7 +473,7 @@ MooncakeStoreConnector（`protocol="mf"`）在 Ascend 310P3 上成功实现 KV c
 ### 9.4 实际业务价值
 
 `ttft_offload` 场景模拟了实际 KV offloading 业务（长系统提示/文档 + 短用户查询）：
-- 共享 768-token 前缀的 KV 被 offload 到 store，后续请求只需 prefill 64-token 独有后缀
+- 共享 768-token 前缀的 KV 被 offload 到 store，后续请求可复用已保存的前缀，并计算新增的 64-token 后缀及其他未复用部分
 - TTFT 从 415ms 降至 170ms（降低 57.4%），显著改善用户体验
 
 ---

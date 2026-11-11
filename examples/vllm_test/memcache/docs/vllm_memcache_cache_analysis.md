@@ -1,6 +1,10 @@
 # vLLM + MemCache 缓存协作机制分析（源码核实版）
 
-> 本文档基于 vLLM-Ascend 源码（`/vllm-workspace/vllm-ascend`）、vLLM v1 源码（`/vllm-workspace/vllm/vllm`）、MemCache 源码（`/home/l30023043/memcache/src/memcache/csrc`）核实整理，所有结论附 `file:line` 引用。
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
+> 本文保留历史环境的源码笔记，原记录未固定全部提交号。下文旧路径及行号对应原环境；当前 vLLM 0.24 的测试方式见 3.8、4.7—4.9 和迁移报告。
+
+> 原分析基于 vLLM-Ascend 源码（`/vllm-workspace/vllm-ascend`）、vLLM v1 源码（`/vllm-workspace/vllm/vllm`）、MemCache 源码（`/home/l30023043/memcache/src/memcache/csrc`）核实整理，所有结论附 `file:line` 引用。
 
 ---
 
@@ -19,17 +23,18 @@
 
 ## 1. 进程模型
 
-vLLM v1 采用「API 前端 + EngineCore 后台进程 + N 个 TP worker 子进程」三层结构：
+以单节点、DP=1 为例：API 服务接收请求，EngineCore 负责调度与缓存索引。
+本轮 TP=1 在 EngineCore 内执行模型，TP=2 另启动两个 worker 执行模型计算。
 
-### 1.1 三层进程
+### 1.1 各进程的职责
 
-| 层 | 类 | 职责 | 持有缓存 |
+| 进程 | 类 | 职责 | 持有缓存 |
 |----|----|----|---------|
 | API 前端 | `AsyncLLM` / `SyncMPClient`（`core_client.py:467`） | 接收 HTTP 请求，ZMQ 转发给 EngineCore | 无 |
 | EngineCore | `EngineCoreProc`（`core.py:995`） | 单进程，内含 Scheduler + BlockPool + KVCacheManager | **唯一一份 BlockPool** |
-| TP worker | `VLLM::Worker_TPrank`（`worker.py`） | 每进程绑一张 NPU，跑前向 | 仅 KV tensor + block_table |
+| TP worker | `VLLM::Worker_TPrank`（`worker.py`） | 每进程绑定一个 NPU 逻辑设备，跑前向 | 仅 KV tensor + block_table |
 
-### 1.2 进程 spawn 链
+### 1.2 多 worker 配置的进程启动关系
 
 ```
 API 前端进程
@@ -48,15 +53,15 @@ API 前端进程
                            └─ kv_caches: dict[str, Tensor]  （物理 KV tensor，无 BlockPool）
 ```
 
-### 1.3 EngineCore 是单进程
+### 1.3 调度与缓存索引属于 EngineCore 实例
 
-`EngineCoreProc` 由 `context.Process` spawn（`utils.py:164`），全局只有一份 `Scheduler`（`core.py:153`）→ 一份 `KVCacheManager`（`scheduler.py:269`）→ 一份 `BlockPool`（`kv_cache_coordinator.py:90`）。
+`EngineCoreProc` 由 `context.Process` spawn（`utils.py:164`），同一 EngineCore 实例中有一份 `Scheduler`（`core.py:153`）→ 一份 `KVCacheManager`（`scheduler.py:269`）→ 一份 `BlockPool`（`kv_cache_coordinator.py:90`）。
 
 **关键**：worker 进程**不持有** BlockPool / `cached_block_hash_to_block` 字典（grep `/vllm-workspace/vllm/vllm/v1/worker/` 确认无任何 `BlockPool` 引用）。worker 只按 scheduler 下发的 `block_ids` 列表操作本地 KV tensor。
 
-### 1.4 单进程多卡
+### 1.4 TP worker 与设备的对应关系
 
-vLLM 的 TP 模型是**多进程**而非单进程多卡。`NPUWorker._init_device`（`worker.py:385-434`）：每个 worker 进程按 `local_rank` 绑定**单个** NPU：
+TP=2 的配置使用两个 worker，各自执行对应分片。`NPUWorker._init_device`（`worker.py:385-434`）：每个 worker 进程按 `local_rank` 绑定**单个** NPU：
 
 ```python
 # worker.py:431-434
@@ -75,11 +80,11 @@ torch.npu.set_device(device)
 
 | 维度 | vLLM 本地 prefix cache | MemCache (AscendStoreConnector) |
 |------|------------------------|--------------------------------|
-| 进程位置 | EngineCore 进程内（`block_pool.py:184`） | 每 worker 进程内一份（`memcache_backend.py:74`） |
+| 进程位置 | EngineCore 进程内（`block_pool.py:184`） | 每模型执行 worker 一份（`memcache_backend.py:74`） |
 | 存储介质 | NPU HBM 内的 KV block 池（`gpu_memory_utilization` 预留） | 独立 HBM pool + DRAM pool（memfabric_hybrid） |
 | 索引 | `Dict[block_hash, block_id]`（`block_pool.py:184`） | 跨进程分布式 key→blob（MetaService LRU） |
 | 读写时机 | 同步（prefill 完成立即更新字典） | 异步（后台线程 `KVCacheStoreSendingThread`） |
-| 生命周期 | 进程级，进程退出即丢 | 进程级，MetaService 重启才清空 |
+| 生命周期 | 进程级，进程退出即丢 | 由 worker 存储池与 MetaService 元数据共同管理 |
 | TP 共享 | **全局唯一字典**，所有 rank 共用 | **按 rank 隔离**，每 worker 独立 store |
 
 ### 2.2 查询（Lookup 阶段）：vLLM 本地优先，本地未命中才查 connector
@@ -458,22 +463,16 @@ self.m_store.put(keys, addrs, sizes)
 
 **关键**：Lookup 阶段被跳过 ≠ Save 阶段被跳过。Save 阶段有独立的跳过条件（`config_data.py:1052`，`num_tokens_to_save < chunk_boundary`），与 Lookup 是否被跳过无关。
 
-### 3.8 对测试的影响：双写导致的隔离难题
+### 3.8 测试如何区分本地缓存与外部缓存
 
-由于「MemCache hit → vLLM 本地也被更新」（场景一），如果 vLLM 本地缓存开启且不在 hit 请求前清除：
+一次外部命中后，恢复的数据也可以被 vLLM 本地缓存。继续发送相同输入时，请求可能直接复用本地数据。
+当前 vLLM 0.24 测试保留本地 prefix cache 和 Mamba `align` 模式；三项延迟用例在每次请求完成后，
+调用 `POST /reset_prefix_cache?reset_external=false` 清理本地索引，保留外部数据。
+测试检查 HTTP 响应及引擎新增的成功重置日志，重置在 TTFT 计时之外执行。
 
-```
-第 1 次请求（miss）  → prefill + 双写（vLLM + MemCache）
-第 2 次请求（同一 prompt）→ vLLM 本地命中 → Lookup 跳过 → 无法验证 MemCache 贡献
-```
-
-**当前测试方案**：使用 `--no-enable-prefix-caching` + `--kv-transfer-config` 启动 vLLM。vLLM 的 block hasher 仍然创建（`engine/core.py:214`：`enable_prefix_caching or kv_connector is not None`），`request.block_hashes` 照常生成，MemCache connector 的 lookup/save 正常工作。但 vLLM 本地 prefix cache 被永久关闭：
-
-```
-vLLM 本地始终 miss → 每条请求走 MemCache connector → hit/miss 完全由 MemCache 决定
-```
-
-> **注意**：关闭 prefix caching 后，hybrid 模型的 attention block_size=640、mamba block_size=8192，需传 `--prefix-match-unit 128`（GCD(640,8192)）解决 connector 的 `hash_block_size` 整除性断言。
+缓存来源正确性用例有意保留本地数据，分别构造本地、外部和混合命中，核对计数与生成 token。
+这些步骤见[测试用例说明](../../TEST_GUIDE.md#memcache-tests)。早期使用关闭本地缓存的方案，
+其配置和结果保留在历史性能报告中。
 
 ### 3.9 MemCache 侧的额外跳过逻辑
 
@@ -542,40 +541,22 @@ BlockPool 自带 LRU eviction：
 - 新请求分配时若空闲块不足，从 eviction 候选尾部淘汰（LRU）。
 - 与 MemCache 不同，vLLM 本地缓存**无 watermark**，按需淘汰。
 
-### 4.7 reset_prefix_cache（旧方案，已弃用）
+### 4.7 reset_prefix_cache 的当前用途
 
-> **注意**：当前测试方案使用 `--no-enable-prefix-caching` + `--kv-transfer-config` 永久关闭 vLLM 本地缓存，不再需要 `reset_prefix_cache`。以下内容仅作为历史参考保留。
+vLLM 0.24 的 `vllm/v1/core/block_pool.py` 中，`reset_prefix_cache` 清除缓存 hash 映射，
+并重置 block 上的 hash。物理缓冲区仍由模型执行进程管理。
+当前集成测试用这个接口让下一次请求重新查询外部缓存。
 
-`block_pool.py:761` `reset_prefix_cache` 只在 EngineCore 进程内执行：
+### 4.8 什么时候重置会失败
 
-```python
-# block_pool.py:770-778
-num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-if num_used_blocks != 1:  # null block 始终占一个
-    logger.warning("Failed to reset ... some blocks not freed yet")
-    return False
-# block_pool.py:780-785
-self.cached_block_hash_to_block = BlockHashToBlockMap()
-self.cached_block_hashes_by_block.clear()
-for block in self.blocks:
-    block.reset_hash()
-```
+`BlockPool.reset_prefix_cache` 检查是否还有请求占用缓存块。除内部保留的空块外还有已用块时，
+函数返回 `False`；成功时记录 `Successfully reset prefix cache`。
+因此测试要等待请求结束，并确认引擎记录了本次重置成功。HTTP 200 本身无法说明底层检查的结果。
 
-**只清 EngineCore 进程的字典**，不通知 worker 进程。worker NPU 上的 KV tensor 数据仍在，但下次该 `block_id` 被新请求复用时直接覆盖写入。
+### 4.9 本地重置与外部数据的生命周期
 
-### 4.8 reset 失败的根因（旧方案问题）
-
-`block_pool.py:770-777` 的前置条件：所有 block 必须 `ref_cnt == 0`（除 null block）。如果有 in-flight 请求占用 block，`num_used_blocks != 1` 直接返回 `False`。
-
-`scheduler.py:2336` `reset_running_requests=True` 会先把所有 running 请求 preempt 到 waiting 队列把 ref_cnt 降到 0，再 reset。`scheduler.py:2363` 进一步断言：如果 preempt 后仍失败，是"running requests waiting for remote KV transfer"（`scheduler.py:2367-2368`）——即有请求卡在等 MemCache 异步加载。
-
-> 这是旧方案（`reset_prefix_cache`）的核心缺陷：TP=4 下并发请求更多，in-flight 占用 block 概率更高，reset 更容易失败。新方案（`--no-enable-prefix-caching`）从根本上避免了此问题。
-
-### 4.9 reset_external 对 MemCache 无效（旧方案参考）
-
-`AscendStoreConnector` 未覆写 `reset_cache()`，继承基类空实现。`scheduler.py:2389` 调 `self.connector.reset_cache()` 实际是 no-op。如需清 MemCache 数据，需重启 vLLM + MetaService。
-
-> 新方案下 vLLM 本地缓存始终为空，无需 reset；MemCache 数据清除仍需重启 vLLM + MetaService。
+当前测试明确传入 `reset_external=false`。只重置本地缓存后，MemCache 中的数据仍可被后续请求查询。
+外部缓存由存储池及 MetaService 元数据共同管理；重启、清理池和条目淘汰应与本地索引重置分别理解。
 
 ---
 
@@ -607,7 +588,7 @@ ock.mmc.local_service.dram.size = 1GB      # 每 rank DRAM pool（/dev/shm）
 
 `MmcMetaManager::GetByRank`（`mmc_meta_manager.cpp:273`）：
 
-1. `CheckAndEvict(MEDIA_DRAM, 0)`（`mmc_meta_manager.cpp:286`）先检查 DRAM 水位。
+1. `CheckAndEvict(MEDIA_DRAM, 0)`（`mmc_meta_manager.cpp:286`）先检查 DRAM 容量使用比例。
 2. `ClassifyAndGroupKeys`（`mmc_meta_manager.cpp:321`）对每个 key 分类（`mmc_meta_manager.cpp:347-367`）：
    - 上层有 `READABLE` blob（HBM）→ `selectedBlob`，加入 `deferredLockList` 直接加读锁返回。
    - 有 `ALLOCATED` 状态的 pending blob（rewarm 进行中）→ `pendingWaitList`。
@@ -677,12 +658,12 @@ const size_t numEvictObjs =
 - **scheduler 侧**：单一全局 `block_hash → block_id` 字典（`block_pool.py:184`），所有 TP rank 共用，**不隔离**。
 - **worker 侧**：每 rank 独立 KV tensor pool（`gpu_worker.py:722`），物理隔离，互不可见。
 - **契约**：block_id 全局编号，所有 rank 同步持有同一 block_id 的不同 head 分片。
-- **reset**：只清 scheduler 字典（`block_pool.py:780`），不碰 worker NPU 数据。
+- **reset**：只清 scheduler 字典（`block_pool.py:780`），保留 worker NPU 缓冲区。
 
 ### 7.2 MemCache：按 rank 隔离
 
 - 每 worker 进程一份 `MemcacheBackend`（`memcache_backend.py:74`），`local_rank = get_world_group().local_rank`。
-- `_setup_store`（`memcache_backend.py:113`）`acl.rt.set_device(self.local_rank)` + `store.init(self.local_rank)`，每 worker 绑一张卡，注册到 MetaService 拿到自己的 `bmRankId_`（`mmc_bm_proxy.cpp:60`）。
+- `_setup_store`（`memcache_backend.py:113`）`acl.rt.set_device(self.local_rank)` + `store.init(self.local_rank)`，每 worker 绑定一个逻辑设备，注册到 MetaService 拿到自己的 `bmRankId_`（`mmc_bm_proxy.cpp:60`）。
 - HBM/DRAM pool 按 rank 划分（`mmc_bm_proxy.cpp:80-81`）。
 
 ### 7.3 跨 rank 协作
@@ -705,19 +686,16 @@ const size_t numEvictObjs =
 
 **源码核实**：grep `/vllm-workspace/vllm/vllm/v1/worker/` 确认无任何 `BlockPool`/`cached_block_hash_to_block`/`BlockHashToBlockMap` 引用。BlockPool / `cached_block_hash_to_block` 字典只在 EngineCore（scheduler）进程**唯一一份**（`block_pool.py:184`，`kv_cache_coordinator.py:90`），worker 进程完全没有副本。
 
-### 8.2 修正二：TP=4 reset 效果弱的原因（旧方案，已弃用）
+### 8.2 TP 数量与重置条件
 
-> **注意**：当前测试方案使用 `--no-enable-prefix-caching` 永久关闭 vLLM 本地缓存，以下 reset 相关问题不再存在。
+同一个 EngineCore 管理调度和缓存索引。TP worker 数量增加不会自动增加并发请求数。
+重置能否成功取决于是否仍有请求占用 block，应按请求状态和引擎日志排查。
+本轮只验证 TP=1/TP=2；历史 TP=4 的记录属于当时的环境。
 
-**错误说法**：TP=4 下 `reset_prefix_cache` 清除效果弱于 TP=2 是因为「vLLM 本地缓存按 TP rank 各自维护，更多 rank 的本地 BlockPool 副本状态需要同步」。
+### 8.3 重置成功的检查方式
 
-**源码核实**：BlockPool 只有一份，不存在「多 rank 副本同步」问题。`reset_prefix_cache` 清除效果弱的真正原因是 `block_pool.py:770-777` 的前置条件：所有 block 必须 `ref_cnt == 0`（除 null block）。如果有 in-flight 请求占用 block，`num_used_blocks != 1` 直接返回 `False`。TP=4 下并发请求更多，in-flight 占用 block 的概率更高，导致 reset 更容易失败。
-
-### 8.3 修正三：reset_prefix_cache 的前置条件（旧方案，已弃用）
-
-> **注意**：当前测试方案使用 `--no-enable-prefix-caching` 永久关闭 vLLM 本地缓存，以下 reset 相关问题不再存在。
-
-**注意**：`POST /reset_prefix_cache` 是同步操作（直接赋空字典，`block_pool.py:780`），但有前置条件检查：`num_used_blocks != 1` 时返回 `False`（`block_pool.py:770-778`）。若 reset 失败，HTTP 仍返回 200，但实际字典未清空。测试代码应检查返回体中的 `reset_successful` 字段，不能仅依赖 HTTP status code。
+当前测试检查 HTTP 状态，再确认引擎新增了本次 `Successfully reset prefix cache` 日志。
+重置结果以该版本接口及引擎的成功记录为准。
 
 ---
 
@@ -748,7 +726,7 @@ const size_t numEvictObjs =
 | `v1/core/block_pool.py` | `:143` `BlockPool` | 唯一一份 block_hash→block 字典 |
 | `v1/core/block_pool.py` | `:225` `cache_full_blocks` | prefill 后缓存 block（插入字典） |
 | `v1/core/block_pool.py` | `:607` `_insert_block_hash` | 实际插入字典操作 |
-| `v1/core/block_pool.py` | `:761` `reset_prefix_cache` | 清空本地缓存字典（旧方案，已弃用） |
+| `v1/core/block_pool.py` | `:761` `reset_prefix_cache` | 清空本地缓存索引（当前测试使用） |
 | `v1/core/kv_cache_coordinator.py` | `:90` `BlockPool(...)` | 创建 BlockPool |
 | `v1/core/kv_cache_coordinator.py` | `:192` `allocate_new_computed_blocks` | 分配 ext_comp block |
 | `v1/core/single_type_kv_cache_manager.py` | `:282` `allocate_external_computed_blocks` | 为外部 token 分配新 block |
@@ -759,7 +737,7 @@ const size_t numEvictObjs =
 | `v1/core/sched/scheduler.py` | `:269` `KVCacheManager(...)` | 创建 KVCacheManager |
 | `v1/core/sched/scheduler.py` | `:753-790` | 本地 + 外部命中查询流程 |
 | `v1/core/sched/scheduler.py` | `:935-947` | allocate_slots 调用 |
-| `v1/core/sched/scheduler.py` | `:2326` `reset_prefix_cache` | scheduler 侧 reset 入口（旧方案，已弃用） |
+| `v1/core/sched/scheduler.py` | `:2326` `reset_prefix_cache` | scheduler 侧重置入口 |
 | `v1/core/sched/scheduler.py` | `:2543` `_update_waiting_for_remote_kv` | 异步加载完成后补 cache |
 | `v1/engine/core.py` | `:214` `request_block_hasher` | connector 存在时创建 hasher（`enable_prefix_caching or kv_connector`） |
 | `v1/engine/core.py` | `:153` `Scheduler(...)` | EngineCore 创建 Scheduler |
@@ -767,8 +745,8 @@ const size_t numEvictObjs =
 | `v1/engine/core_client.py` | `:467` `MPClient` | 多进程客户端 |
 | `v1/engine/utils.py` | `:164` `context.Process(...)` | spawn EngineCore 进程 |
 | `v1/worker/worker.py` | `:434` `torch.npu.set_device` | worker 绑定单卡 |
-| `model_executor/models/config.py` | `:557-559` `MambaModelConfig` | mamba_cache_mode 设置（已适配 connector） |
-| `config/vllm.py` | `:2300-2303` `validate_mamba_block_size` | mamba_block_size 校验（已适配 connector） |
+| `model_executor/models/config.py` | `:557-559` `MambaModelConfig` | 历史 Mamba 配置修改；当前使用原版 0.24 与本地 prefix cache |
+| `config/vllm.py` | `:2300-2303` `validate_mamba_block_size` | 历史校验修改；当前 vLLM 核心未修改 |
 
 ### MemCache 侧
 
@@ -789,4 +767,4 @@ const size_t numEvictObjs =
 
 ---
 
-*本文档基于源码核实整理，所有结论附 `file:line` 引用。*
+原环境的源码索引保留如上，当前部署版本及实测条件见迁移报告。

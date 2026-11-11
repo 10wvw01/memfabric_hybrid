@@ -1,6 +1,23 @@
 # MemFabric + Mooncake MF Transport 测试套件
 
-一键拉取源码、打补丁、编译、运行 10 个 PD 传输测试场景 + 4 个 vLLM 集成测试场景 + 3 个 TTFT 基准测试场景，验证 Mooncake `protocol="mf"` 底层调用 MemFabric SDMA 能力。
+测试用例、TTFT/P50 和常用术语见[测试说明](../TEST_GUIDE.md)。
+
+## 当前目录状态
+
+本目录保存 Mooncake 接入方案及历史测试记录。当前提交包含构建脚本、补丁和文档，
+尚未包含以下三个被 `scripts/run.sh` 引用的文件：
+
+- `tests/demo_pd_transfer.py`
+- `tests/demo_vllm_pd.py`
+- `tests/demo_vllm_ttft.py`
+
+`run.sh` 从本目录下的 `tests/` 查找它们，缺失时返回错误。下面的测试场景说明和输出示例属于历史方案；
+要从本仓库完整复现这些场景，需要先补齐原始测试文件。本次 vLLM 0.24 / MemCache 的实测结果见
+[迁移报告](../memcache/docs/vllm_024_migration_results.md)。
+
+## 历史方案简介
+
+该方案设计为拉取源码、打补丁、编译、运行 10 个 PD 传输测试场景 + 4 个 vLLM 集成测试场景 + 3 个 TTFT 基准测试场景，验证 Mooncake `protocol="mf"` 底层调用 MemFabric SDMA 能力。
 
 ## 目录结构
 
@@ -11,10 +28,10 @@ mooncake_test/
 ├── scripts/
 │   ├── run.sh                      # 一键入口脚本
 │   └── patch_vllm_store_worker.py  # vLLM store/worker.py 按组段分配+重试补丁
-└── tests/
+└── tests/                          # 历史测试文件，当前提交未包含
     ├── demo_pd_transfer.py         # 10 个 PD 传输测试场景 (565行)
     ├── demo_vllm_pd.py             # 4 个 vLLM 集成测试场景
-    └── demo_vllm_ttft.py           # 2 个 TTFT 基准测试场景
+    └── demo_vllm_ttft.py           # 3 个 TTFT 基准测试场景
 ```
 
 ## 快速开始
@@ -57,11 +74,11 @@ bash scripts/run.sh <工作目录> [选项]
 # 全流程（PD 传输测试 + vLLM 集成测试）
 bash scripts/run.sh /tmp/test_workdir
 
-# 跳过 MemFabric 编译（复用 /home/l30023043/memfabric_hybrid/output 产物）
+# 跳过 MemFabric 编译，复用工作目录 memfabric_hybrid/output 中的产物
 bash scripts/run.sh /tmp/test_workdir --skip_build_mf
 
 # 只跑单个 PD 传输测试
-bash scripts/run.sh /tmp/test_workdir --skip_build_mf --single single_write
+bash scripts/run.sh /tmp/test_workdir --only_test --single single_write
 
 # 只跑 PD 传输测试（需已编译完成）
 bash scripts/run.sh /tmp/test_workdir --only_test
@@ -70,10 +87,10 @@ bash scripts/run.sh /tmp/test_workdir --only_test
 bash scripts/run.sh /tmp/test_workdir --only_vllm_test
 
 # 只编译不测试
-bash scripts/run.sh /tmp/test_workdir --skip_test --skip_vllm_test
+bash scripts/run.sh /tmp/test_workdir --skip_test --skip_vllm_test --skip_ttft_test
 
 # 跳过 vLLM 集成测试（只跑 PD 传输测试）
-bash scripts/run.sh /tmp/test_workdir --skip_build_mf --skip_vllm_test
+bash scripts/run.sh /tmp/test_workdir --only_test
 
 # 只跑 TTFT 基准测试（需已编译完成）
 bash scripts/run.sh /tmp/test_workdir --only_ttft_test
@@ -139,17 +156,16 @@ bash scripts/run.sh /tmp/test_workdir --only_vllm_test \
 | 3 | `vllm_pd_disagg_mf` | 完整 PD 分离：prefiller (`kv_producer`) + decoder (`kv_consumer`) + proxy，验证端到端 KV transfer via MF |
 | 4 | `vllm_kv_offload_mf` | KV offloading：MooncakeStoreConnector (`kv_both`, `protocol=mf`) + mooncake_master，验证 KV cache offload 到分布式存储 + 前缀缓存命中 |
 
-每个测试：
-- 启动一个 `vllm serve` 子进程
+除 PD 分离场景外，每组历史集成测试启动一个 `vllm serve` 服务。PD 分离使用 prefill 服务、decode 服务和代理三个进程。其余步骤为：
 - 轮询 `/v1/models` 直到就绪（超时 360s）
 - 发送 chat completion 请求验证推理
 - 对 MF 测试，额外检查日志确认 MemFabric 初始化标记
 - 自动清理 vLLM 进程和 EngineCore 子进程
 
 `vllm_pd_disagg_mf` 特殊说明：
-- 310P3 不支持跨芯片 PeerAccess，prefiller 和 decoder 共用同一设备
+- 历史记录中的 prefiller 和 decoder 共用同一逻辑设备
 - 使用 `gpu_memory_utilization=0.5` 对称分配设备内存
-- 同时启动两个进程以确保 MemFabric topology preflight 成功
+- 同时启动两个进程以完成 MemFabric 的两端初始化和拓扑信息交换
 - 启动 proxy server (来自 vLLM examples) 协调 PD 请求路由
 
 `vllm_kv_offload_mf` 特殊说明：
@@ -160,11 +176,11 @@ bash scripts/run.sh /tmp/test_workdir --only_vllm_test \
 - 发送两次相同前缀的请求验证前缀缓存命中
 - 需要修复 `client_service.cpp` 添加 `mf` 协议支持（run.sh 自动完成）
 
-## 2 个 TTFT 基准测试场景
+## 3 个 TTFT 基准测试场景
 
 使用 vLLM streaming completions API（`POST /v1/completions` + `stream: true`）度量请求发送到首 token 的时间（TTFT）。规模刻意控制为小规模（2 warmup + 10 measured，768-token prompts），保证整套测试 ~15-20 分钟内完成。
 
-测试设计参考 `/home/l30023043/ttft_test` 的 Layer 3 全链路 TTFT 测试，适配 Mooncake `protocol="mf"` 传输栈，使用 MooncakeStoreConnector + `mooncake_master`。
+测试设计参考 `/home/l30023043/ttft_test` 的 vLLM 端到端 TTFT 测试，适配 Mooncake `protocol="mf"` 传输栈，使用 MooncakeStoreConnector + `mooncake_master`。
 
 | # | 测试 ID | 度量目标 | 方法 |
 |---|---------|---------|------|
@@ -173,8 +189,8 @@ bash scripts/run.sh /tmp/test_workdir --only_vllm_test \
 | 3 | `ttft_offload` | KV offloading 前缀扩展 TTFT | MooncakeStoreConnector + prefix caching：Phase 1 miss（768-token base prompt → KV offload 到 store）→ Phase 2 offload hit（reset local cache → base + 64-token suffix，base 前缀从 store 加载，仅 suffix 需要 prefill），模拟实际 KV offloading 场景 |
 
 `ttft_store_hit` vs `ttft_offload` 区别：
-- `ttft_store_hit`：**精确命中**（100% prefix 重叠），整个 prompt 的 KV 从 store 加载，无 prefill 计算。度量纯 store 读取延迟。
-- `ttft_offload`：**前缀扩展**（部分重叠），长 base 前缀从 store 加载 + 短 suffix 需要 prefill。度量实际 KV offloading 场景的收益（共享长前缀 + 每请求短后缀）。
+- `ttft_store_hit`：**精确命中**（100% prefix 重叠），查询并加载已保存、可复用的输入前缀；实际复用长度取决于缓存块和保存状态。端到端 TTFT 还包含调度、剩余计算和首 token 返回。
+- `ttft_offload`：**前缀扩展**（部分重叠），加载 base 中可复用的前缀，并计算剩余部分及新增 suffix。度量实际 KV offloading 场景的收益（共享长前缀 + 每请求短后缀）。
 
 缓存隔离方法（三个场景一致）：
 - `VLLM_SERVER_DEV_MODE=1` 启用 `POST /reset_prefix_cache` dev API
@@ -191,7 +207,7 @@ bash scripts/run.sh /tmp/test_workdir --only_vllm_test \
 | `TTFT_WARMUP` | warmup 请求数 | 2 |
 | `TTFT_MEASURED` | 度量请求数 | 10 |
 
-## 预期输出
+## 历史环境的输出示例
 
 ```
 ======================================================================

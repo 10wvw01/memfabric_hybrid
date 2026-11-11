@@ -1,20 +1,22 @@
 # MemCache vLLM TTFT 复测错误分析报告
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
 本文保留历史环境的测试数据和问题记录。当前指定分支的部署流程见[部署说明](vllm_deployment_flow.md)，最新验证条件与结果见[迁移报告](vllm_024_migration_results.md)。
 
 **复测日期**: 2026-09-29  
 **复测设备**: dev6, dev7 (Bus AB:00.0, 同卡 die-pair)  
-**复测范围**: Layer 2 (workload) + Layer 3 (integration: host_shm + device_sdma)
+**复测范围**: MemCache 工作负载测试 (workload) + vLLM 集成测试 (integration: host_shm + device_sdma)
 
 ---
 
 ## 1. 复测结果总览
 
-| 层级 | 协议 | 结果 | 耗时 | 日志 |
+| 测试类型 | 协议 | 结果 | 耗时 | 日志 |
 |------|------|------|------|------|
-| Layer 2 | device_sdma | 7 passed, 1 skipped | 70.47s | `layer2_workload_dev67_*.log` |
-| Layer 3 | host_shm | 4 passed | 23:57 | `layer3_host_shm_dev6_7_*.log` |
-| Layer 3 | device_sdma | 4 passed | 23:57 | `layer3_device_sdma_dev6_7_*.log` |
+| MemCache 工作负载测试 | device_sdma | 7 passed, 1 skipped | 70.47s | `layer2_workload_dev67_*.log` |
+| vLLM 集成测试 | host_shm | 4 passed | 23:57 | `layer3_host_shm_dev6_7_*.log` |
+| vLLM 集成测试 | device_sdma | 4 passed | 23:57 | `layer3_device_sdma_dev6_7_*.log` |
 | **总计** | | **15 passed, 1 skipped** | | |
 
 所有测试均通过，无测试失败。
@@ -75,7 +77,7 @@ WARN [HYBM hybm_mem_segment.cpp:227 InitDeviceInfo] get server id failed: 207000
 WARN [HYBM hybm_mem_segment.cpp:236 InitDeviceInfo] get super pod id failed: 207000 deviceId: 0 — using invalid fallback
 ```
 
-**根因**: 310P3 硬件不支持 SDID 查询，返回 207000。
+**观测**: 该环境的 SDID 查询返回 207000，实现随后使用 boot id 等替代标识。
 
 **修复状态**: 已知行为，使用 boot id fallback，报告记载为 "SDID WARN fallback"。
 
@@ -217,15 +219,15 @@ error [AccLink acc_tcp_listener.cpp:195 ProcessNewConnection] Failed to read hea
 
 | 测试 | 原报告 | 复测 | 差异 |
 |------|--------|------|------|
-| Layer 2 | 5 passed, 1 skipped | 7 passed, 1 skipped | +2 eviction repro tests |
-| Layer 3 host_shm Test 3.7 开销 | 6.14% | 10.95% | +4.81pp |
-| Layer 3 host_shm Test 3.8 降幅 | 85.9% | 86.89% | +0.99pp |
-| Layer 3 host_shm Test 3.9[30%] 改善 | 26.29% | 25.61% | -0.68pp |
-| Layer 3 host_shm Test 3.9[50%] 改善 | 43.11% | 42.86% | -0.25pp |
-| Layer 3 device_sdma Test 3.7 开销 | 5.74% | 9.47% | +3.73pp |
-| Layer 3 device_sdma Test 3.8 降幅 | 85.4% | 86.41% | +1.01pp |
-| Layer 3 device_sdma Test 3.9[30%] 改善 | 25.65% | 25.43% | -0.22pp |
-| Layer 3 device_sdma Test 3.9[50%] 改善 | 43.94% | 44.15% | +0.21pp |
+| MemCache 工作负载测试 | 5 passed, 1 skipped | 7 passed, 1 skipped | +2 eviction repro tests |
+| vLLM 集成测试 host_shm Test 3.7 开销 | 6.14% | 10.95% | +4.81pp |
+| vLLM 集成测试 host_shm Test 3.8 降幅 | 85.9% | 86.89% | +0.99pp |
+| vLLM 集成测试 host_shm Test 3.9[30%] 改善 | 26.29% | 25.61% | -0.68pp |
+| vLLM 集成测试 host_shm Test 3.9[50%] 改善 | 43.11% | 42.86% | -0.25pp |
+| vLLM 集成测试 device_sdma Test 3.7 开销 | 5.74% | 9.47% | +3.73pp |
+| vLLM 集成测试 device_sdma Test 3.8 降幅 | 85.4% | 86.41% | +1.01pp |
+| vLLM 集成测试 device_sdma Test 3.9[30%] 改善 | 25.65% | 25.43% | -0.22pp |
+| vLLM 集成测试 device_sdma Test 3.9[50%] 改善 | 43.94% | 44.15% | +0.21pp |
 
 ### 4.2 错误对比
 
@@ -235,16 +237,16 @@ error [AccLink acc_tcp_listener.cpp:195 ProcessNewConnection] Failed to read hea
 | 107002 sync 失败 | 0 | 0 | 一致 |
 | bm put failed | 0 | 0 | 一致 |
 | 207000 SDID | 存在 | 存在 | 一致 |
-| EngineDeadError | 未记录 | 2 次 | 新发现（良性） |
-| KV cache 2MB 对齐 | 未记录 | 60 次/测试 | 新发现（良性） |
-| BmUnregister -3000 | 未记录 | 2 次 | 新发现（良性） |
+| EngineDeadError | 未记录 | 2 次 | 新记录，发生时机见对应小节 |
+| KV cache 2MB 对齐 | 未记录 | 60 次/测试 | 新记录，发生时机见对应小节 |
+| BmUnregister -3000 | 未记录 | 2 次 | 新记录，发生时机见对应小节 |
 
 ### 4.3 性能差异分析
 
 Test 3.7 开销较原报告偏高（host_shm: 10.95% vs 6.14%, device_sdma: 9.47% vs 5.74%），可能原因：
 1. 原报告使用不同设备对（host_shm: dev0,1; device_sdma: dev6,7），复测统一使用 dev6,7
 2. dev6,7 可能有其他系统负载影响
-3. vLLM 内部 prefix caching 命中模式差异（复测中 MemCache 阶段出现 2 个低延迟请求 ~500ms，说明 vLLM 内部缓存命中）
+3. vLLM 内部 prefix caching 命中模式差异（复测中 MemCache 阶段出现 2 个约 500ms 的请求；其缓存来源需结合本地/外部命中计数判断）
 
 ---
 
@@ -252,8 +254,8 @@ Test 3.7 开销较原报告偏高（host_shm: 10.95% vs 6.14%, device_sdma: 9.47
 
 1. **所有测试通过**: 15 passed, 1 skipped，无测试失败
 2. **107002 已修复**: async 失败后 sync fallback 全部成功，与原报告修复后状态一致
-3. **无新增功能性错误**: 所有错误均为已知的良性警告或关闭时的竞态条件
-4. **性能数据一致**: 各项指标与原报告偏差 < 5pp，在正常波动范围内
+3. **该次记录**: 用例均通过；日志中仍记录了清理和连接关闭相关错误，发生时机与请求是否成功应一起核对
+4. **性能对比**: 表中记录了各项差值；两次测试的设备和缓存条件不同，未做统计显著性分析
 5. **建议关注项**:
    - BmUnregister -3000 清理竞态条件（建议优化清理顺序）
    - KV cache 2MB 对齐警告（可能影响 SDMA 传输效率，建议优化 AscendStoreConnector 对齐逻辑）

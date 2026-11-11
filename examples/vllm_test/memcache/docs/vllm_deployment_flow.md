@@ -1,5 +1,7 @@
 # vLLM 0.24 / MemCache 部署流程
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
 部署从指定上游仓库获取代码，使用仓库中的实现构建运行环境。
 
 ## 1. 准备环境
@@ -32,7 +34,7 @@ bash setup.sh --memcache-dir /workspace/memcache \
 脚本初始化构建依赖，构建 MemCache 及其 MemFabric 依赖，安装本次生成的 wheel 和运行库，
 并安装指定源码目录中的 vLLM-Ascend。构建前清理已有算子生成物，确保分支更新后的头文件重新参与编译。
 vLLM 0.24 在部署前准备。
-仅运行 Layer 2 时可使用 `--layer2-only`；`--skip-build` 仅获取源码并记录版本。
+仅运行 MemCache 工作负载测试时可使用 `--memcache-only`；`--skip-build` 仅获取源码并记录版本。
 
 ## 4. 验证部署
 

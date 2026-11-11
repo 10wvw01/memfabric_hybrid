@@ -12,7 +12,7 @@
 
 """Minimal repro for 107002 (ACL_ERROR_RT_CONTEXT_NULL) on HBM→DRAM eviction.
 
-This test isolates the HBM→DRAM eviction path observed in Layer 3 vLLM tests:
+This test isolates the HBM→DRAM eviction path observed in vLLM integration tests:
   - Writes enough KV cache data to fill HBM (1GB per rank)
   - Continues writing to trigger LRU eviction (HBM→DRAM CopyBlob)
   - Checks whether eviction succeeds or fails with 107002
@@ -217,7 +217,7 @@ def store_and_buffers(meta_service):
 
 
 # ---------------------------------------------------------------------------
-# Test A: Eviction on init thread (should work, same as Layer 2)
+# Test A: Eviction on init thread (should work, same as MemCache workload tests)
 # ---------------------------------------------------------------------------
 def test_eviction_on_init_thread(store_and_buffers):
     store, layer_ptrs, layer_sizes = store_and_buffers

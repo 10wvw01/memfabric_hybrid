@@ -1,24 +1,27 @@
 # MemCache vLLM TTFT 性能测试报告
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
 本文保留历史环境的测试数据和问题记录。当前指定分支的部署流程见[部署说明](vllm_deployment_flow.md)，最新验证条件与结果见[迁移报告](vllm_024_migration_results.md)。
 
 ## 1. 概述
 
-本报告记录 MemCache v1.2.1 在 Ascend 310P3 NPU 上的 vLLM TTFT（Time To First Token）性能测试结果。测试采用三层分层架构，从底向上逐步验证 KV Cache 存储性能对 LLM 推理 TTFT 的影响：
+本报告记录 MemCache v1.2.1 在 Ascend 310P3 NPU 上的 vLLM TTFT（Time To First Token）性能测试结果。
+测试采用存储 API 基准、MemCache 工作负载和 vLLM 集成测试，分别验证 KV Cache 存储性能对 LLM 推理 TTFT 的影响：
 
 ```
-Layer 1: 存储层微基准 (example/benchmark/mutil_process.py)   — 已有，裸 API 吞吐
-Layer 2: 模拟推理工作负载 (cases/python/memcache/workload/)    — ✅ 已完成 (2026-11-04 复测)
-Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完成 (2026-11-04 复测)
+存储 API 吞吐基准 (example/benchmark/mutil_process.py)   — 已有，直接调用存储接口的吞吐
+MemCache 模拟推理工作负载 (cases/python/memcache/workload/)    — ✅ 已完成 (2026-11-04 复测)
+vLLM 端到端 TTFT 测试 (cases/python/memcache/integration/) — ✅ 已完成 (2026-11-04 复测)
 ```
 
-- **测试日期**: 2026-11-04（Layer 2 + Layer 3 全流程复测，脚本拉取全新空目录源码验证）
+- **测试日期**: 2026-11-04（MemCache 工作负载测试 + vLLM 集成测试全流程复测，脚本拉取全新空目录源码验证）
 - **MemCache 版本**: 1.2.1 / memfabric_hybrid dev-v1.2.0
 - **2-rank (TP=2) 测试结果**: **3 passed**（host_shm 协议，Qwen3.6-35B-A3B-w8a8，全 miss / 50% 命中 / 100% 命中）
 - **1-rank (TP=1) 测试结果**: **3 passed**（device_sdma 协议，Qwen3.5-4B-W8A8-310P，全 miss / 50% 命中 / 100% 命中，详见 6.4 节）
 - **4-rank (TP=4) 测试结果**: **3 passed**（host_shm 协议，Qwen3.6-35B-A3B-w8a8，全 miss / 50% 命中 / 100% 命中，详见 6.5 节）
-- **大容量 Layer 2 测试结果**: **4 passed, 1 failed**（3GB HBM + 10GB DRAM, device_sdma, TP=4，LC-4 P99 超限，详见 8.1 节）
-- **大容量 Layer 3 测试结果**: **4 failed**（store.init assert 失败，跨卡 P2P 4-rank 大容量配置已知限制，详见 8.1 节）
+- **MemCache 大容量工作负载测试结果**: **4 passed, 1 failed**（3GB HBM + 10GB DRAM, device_sdma, TP=4，LC-4 P99 超限，详见 8.1 节）
+- **vLLM 大容量集成测试结果**: **4 failed**（store.init assert 失败，跨卡 P2P 4-rank 大容量配置已知限制，详见 8.1 节）
 - **纯 DRAM 测试结果**: **3 passed**（0 HBM + 10GB DRAM, host_shm, TP=4，全 miss / 50% 命中 / 100% 命中，详见 8.2 节）
 - **缓存隔离验证**: 所有通过的测试中 `vLLM local hit=0.0%`，确认 cache hit 来自 MemCache 而非 vLLM 内置缓存（通过 `--no-enable-prefix-caching` 永久关闭 vLLM 本地缓存实现隔离）
 
@@ -67,8 +70,8 @@ Layer 3: vLLM 端到端 TTFT (cases/python/memcache/integration/) — ✅ 已完
 全链路 TTFT = T_network + T_prefill_compute + T_kv_cache + T_output
    (~1-5ms)    (~3394ms, 310P3)     (~4.2ms)      (~1-5ms)
 
-Layer 2 度量: T_kv_cache（MemCache 存储延迟，不含模型前向计算）
-Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
+MemCache 工作负载测试度量: T_kv_cache（MemCache 存储延迟，不含模型前向计算）
+vLLM 集成测试度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 ```
 
 ### 2.5 2-Rank 同卡 Die-Pair 拓扑
@@ -99,15 +102,15 @@ Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 
 ## 3. 测试方案
 
-### 3.1 三层架构
+### 3.1 测试类型与测量范围
 
-| 层级 | 度量目标 | 含模型前向 | 含 vLLM 调度 | 含网络传输 |
+| 测试类型 | 度量目标 | 含模型前向 | 含 vLLM 调度 | 含网络传输 |
 |------|---------|-----------|-------------|-----------|
-| Layer 1 | 裸 API 吞吐 | 否 | 否 | 否 |
-| Layer 2 | T_kv_cache 存储延迟 | 否 | 否 | 否 |
-| Layer 3 | 全链路 TTFT | 是 | 是 | 是 |
+| 存储 API 基准 | 直接调用存储接口的吞吐 | 否 | 否 | 否 |
+| MemCache 工作负载测试 | T_kv_cache 存储延迟 | 否 | 否 | 否 |
+| vLLM 集成测试 | 全链路 TTFT | 是 | 是 | 是 |
 
-### 3.2 Layer 3 设计原则
+### 3.2 历史环境的启动配置
 
 - 启动真实 vLLM serve 进程（TP=1/2/4），通过 HTTP streaming API 度量请求发送到首 token 的时间
 - baseline: `--no-enable-prefix-caching`，无 `--kv-transfer-config`
@@ -117,7 +120,7 @@ Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 - 1-rank (TP=1) 使用单设备（dev4），4B 模型（35B 权重占满单卡显存，无 KV cache 空间）
 - 4-rank (TP=4) 使用 2 组同卡 die-pair（dev4,5 + dev6,7），35B 模型，`--split` 分次运行
 
-### 3.3 三种测试场景
+### 3.3 三种历史延迟场景
 
 | # | 测试场景 | 测试函数 | max_tokens | 说明 |
 |---|---------|---------|-----------|------|
@@ -125,7 +128,7 @@ Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 | 2 | 50% 命中 | `test_50pct_hit` | 1 | 预填充一半 prompt，混合 hit/miss 请求 |
 | 3 | 100% 命中 | `test_100pct_hit` | 1 | miss→hit 配对，度量全命中 TTFT 降幅 |
 
-### 3.4 缓存隔离方法与 `--no-enable-prefix-caching` 适配
+### 3.4 历史缓存隔离方法与 `--no-enable-prefix-caching` 适配
 
 #### 3.4.1 隔离背景：双写问题
 
@@ -235,6 +238,9 @@ vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_
 
 ### 3.7 统计指标
 
+P50 为耗时中位数，P99 表示较慢样本附近的耗时。全 miss、50% 请求命中、配对命中的
+步骤及计算示例见[测试说明](../../TEST_GUIDE.md#metrics)。本报告表格保留历史环境的数据。
+
 | 指标 | 公式 | 说明 |
 |------|------|------|
 | 全 miss 相对开销 | `(memcache_p50 - baseline_p50) / baseline_p50` | 比较 MemCache 与基线的 P50 |
@@ -268,7 +274,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 ---
 
-## 5. Layer 2: 模拟推理工作负载 TTFT 测试
+## 5. MemCache 工作负载测试
 
 ### 5.1 测试条件
 
@@ -295,7 +301,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 ---
 
-## 6. Layer 3: vLLM 端到端 TTFT 测试
+## 6. vLLM 集成测试：端到端 TTFT
 
 ### 6.1 测试条件
 
@@ -440,16 +446,16 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | 50% 命中 | ~2,034ms | -40.0% | <1% | ~50% prefill + ~50% 跳过 |
 | MemCache cache hit (100% hit) | ~412ms | **-87.8%** | ~1.0% (~4.2ms) | ~0ms (跳过 prefill) |
 
-### 7.3 Layer 2 → Layer 3 对照
+### 7.3 MemCache 工作负载测试 → vLLM 集成测试对照
 
-| 场景 | Layer 2 T_kv_cache (ms) | Layer 3 E2E TTFT (ms) | T_kv_cache 占比 |
+| 场景 | MemCache 工作负载测试 T_kv_cache (ms) | vLLM 集成测试 E2E TTFT (ms) | T_kv_cache 占比 |
 |------|------------------------|----------------------|----------------|
 | Prefill (4K, miss) | 4.20 | 3,568 | 0.12% |
 | Prefix cache hit (4K) | 4.16 | 412 | 1.0% |
 
-- Layer 2 度量的纯存储延迟（~4.2ms）在 Layer 3 全链路 TTFT 中占比 < 1%
-- Layer 3 cache hit TTFT（412ms）远高于 Layer 2 G2L read（4.2ms），差额来自 vLLM 调度 + decode 首 token 前向
-- Layer 2 的 "hit ≈ miss"（L2G/G2L 对称）在 Layer 3 表现为 "hit << miss"（88% 降幅），因 miss 包含完整 prefill 计算
+- MemCache 工作负载测试度量的纯存储延迟（~4.2ms）在 vLLM 集成测试全链路 TTFT 中占比 < 1%
+- vLLM 集成测试 cache hit TTFT（412ms）远高于 MemCache 工作负载测试 G2L read（4.2ms），差额来自 vLLM 调度 + decode 首 token 前向
+- MemCache 工作负载测试的 "hit ≈ miss"（L2G/G2L 对称）在 vLLM 集成测试表现为 "hit << miss"（88% 降幅），因 miss 包含完整 prefill 计算
 
 ### 7.4 结论
 
@@ -461,7 +467,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 4. **投入产出比**: 一次 cache miss 多花 ~174ms 写入存储，后续每次 cache hit 省掉 ~3157ms prefill 计算 — 一次投入换来 18 倍以上回报
 
-5. **存储延迟不是瓶颈**: Layer 2 的 T_kv_cache（~4.2ms）在 Layer 3 全链路 TTFT 中占比 < 1%，无论 cache miss 还是 cache hit，MemCache 存储操作都不是性能瓶颈
+5. **存储延迟不是瓶颈**: MemCache 工作负载测试的 T_kv_cache（~4.2ms）在 vLLM 集成测试全链路 TTFT 中占比 < 1%，无论 cache miss 还是 cache hit，MemCache 存储操作都不是性能瓶颈
 
 6. **缓存隔离验证通过**: 所有测试中 `vLLM local hit=0.0%`，证明 `--no-enable-prefix-caching` 成功关闭了 vLLM 本地 block cache，hit 的 TTFT 降幅完全来自 MemCache 分布式存储（external hit 11.7%/17.0%/44.1%）
 
@@ -471,7 +477,8 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 ## 8. 补充测试
 
-主体测试（§5 Layer 2、§6 Layer 3）使用 1GB~2GB HBM + 1GB~4GB DRAM 的小容量配置，覆盖 ~6 requests/rank。补充测试扩展到大容量（3GB HBM + 10GB DRAM）和纯 DRAM（0 HBM + 10GB DRAM）配置，验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 以及无 HBM 降级场景。
+主体测试（§5 MemCache 工作负载测试、§6 vLLM 集成测试）使用 1GB~2GB HBM + 1GB~4GB DRAM 的小容量配置，覆盖 ~6 requests/rank。
+补充测试扩展到大容量（3GB HBM + 10GB DRAM）和纯 DRAM（0 HBM + 10GB DRAM）配置，验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 以及无 HBM 降级场景。
 
 ### 8.1 大容量混合存储测试（3GB HBM + 10GB DRAM, TP=4）
 
@@ -489,7 +496,7 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 > 大容量测试使用 3GB HBM + 10GB DRAM，专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 场景。3GB HBM 配置依赖 `P2P_HUGE→HBM_HUGE` 回退（dev-v1.2.0 分支已合入），解决 310P3 跨卡 P2P 分区 ~4088MB 上限（207001 OOM）问题。
 
-#### Layer 2 大容量工作负载（5 场景）
+#### MemCache 大容量工作负载测试（5 场景）
 
 | # | 场景 | P50 (ms) | 说明 |
 |---|------|----------|------|
@@ -497,11 +504,11 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 | LC-2 | HBM→DRAM eviction | 393.95 | eviction 延迟是 HBM 写入的 13.1× |
 | LC-3 | DRAM rewarm (G2L) | 29.83 | 与 HBM 写入接近，占 prefill 1.1% |
 | LC-4 | 大规模 prefix hit | 33.47 (P99=3117.88) | 40 keys 跨 HBM+DRAM，P99 超限 ❌ FAILED |
-| LC-5 | 持续写入排水 | 948.10 (eviction) | 42 keys，吞吐 561.7MB/s（DRAM 阶段） |
+| LC-5 | 持续写入完成情况 | 948.10 (eviction) | 42 keys，吞吐 561.7MB/s（DRAM 阶段） |
 
 > LC-4 失败原因：40 keys 读取中大部分 P50=33.47ms 正常，但部分 evicted keys 的 DRAM→HBM rewarm 出现 3117ms 尖峰并拉高 P99。这是 310P3 跨卡 P2P 4-rank 大容量配置下 DRAM rewarm 路径偶发高延迟的已知问题，与跨卡 die-pair P2P 映射稳定性相关。
 
-#### Layer 3 端到端 TTFT（4 场景）
+#### vLLM 集成测试端到端 TTFT（4 场景）
 
 **LC-L3-1 ~ LC-L3-4: ❌ 4 failed（store.init assert 失败）**
 
@@ -514,7 +521,9 @@ bash setup.sh --memcache-dir /path/to/memcache --yes
 
 > **失败根因**: `memcache_backend.py:130 assert res == 0` — store.init 返回非 0。4-rank 跨卡 P2P（dev4+5 + dev6+7 两组 die-pair）在 3GB HBM + 10GB DRAM 大容量配置下，`AclrtMallocPhysical` P2P 分区分配不稳定，导致 store 初始化失败。此为 310P3 跨卡 P2P 4-rank 大容量配置的已知限制，非 MemCache 代码缺陷。建议在 2 组同卡 die-pair 且设备完全空闲时重试，或降低 HBM size 到 1GB 规避。
 
-**小结**: Layer 2 大容量工作负载 4/5 通过（LC-4 P99 超限），Layer 3 端到端 4 场景全部失败（store.init assert）。eviction 延迟（393.95ms）和 DRAM rewarm（29.83ms）等存储层指标正常，证明 MemCache 存储机制本身在大容量下可用；Layer 3 失败集中在 vLLM + MemCache connector 在 4-rank 跨卡大容量配置下的初始化阶段。
+**小结**: MemCache 大容量工作负载测试 4/5 通过（LC-4 P99 超限），vLLM 集成测试端到端 4 场景全部失败（store.init assert）。
+eviction 延迟（393.95ms）和 DRAM rewarm（29.83ms）等存储层指标正常，证明 MemCache 存储机制本身在大容量下可用；
+vLLM 集成测试失败集中在 vLLM + MemCache connector 在 4-rank 跨卡大容量配置下的初始化阶段。
 
 ### 8.2 纯 DRAM 模式测试（0 HBM + 10GB DRAM, TP=4）
 
@@ -638,7 +647,7 @@ MMC_TEST_DEVICE_IDS=6,7 MMC_TEST_TENSOR_PARALLEL_SIZE=2 \
 | `cases/python/memcache/integration/vllm_integration_test.py` | 统一端到端测试文件，9 个测试函数：全 miss 基准 + 50% 命中 + 100% 命中 + 1-rank/4-rank 变体。TP size 由环境变量控制，同一文件覆盖 1-rank、2-rank 和 4-rank |
 | `cases/python/memcache/integration/large_capacity_vllm_test.py` | 大容量端到端测试文件，4 个测试函数 + 1 throughput（deselected）：TTFT 开销 / 大规模 cache hit / eviction-aware mixed (30%/70%) |
 | `cases/python/memcache/integration/pure_dram_vllm_test.py` | 纯 DRAM 端到端测试文件，3 个测试函数：全 miss 基准 + 50% 命中 + 100% 命中。复用 `VLLMBenchmark` 类，指向 `host_shm` 配置 |
-| `cases/python/memcache/workload/large_capacity_test.py` | 大容量 Layer 2 工作负载测试，5 个场景：HBM 填充 / eviction / rewarm / 大规模 hit / 持续写入排水 |
+| `cases/python/memcache/largecap/large_capacity_test.py` | MemCache 大容量工作负载测试，5 个场景：HBM 填充 / eviction / rewarm / 大规模 hit / 持续写入完成情况 |
 | `cases/config/mmc-local-integration-1rank.conf` | 1-rank: world_size=1, host_shm/device_sdma |
 | `cases/config/mmc-local-integration.conf` | 2-rank: host_shm/device_sdma + HBM/DRAM 配置 |
 | `cases/config/mmc-local-integration-4rank.conf` | 4-rank: world_size=4, host_shm/device_sdma |

@@ -1,5 +1,9 @@
 # mooncake 路线：MemFabric + Mooncake MF Transport 测试部署流程
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
+本文记录 Mooncake 的历史环境与适配方案。当前目录的测试脚本缺失情况见[入口说明](../README.md#当前目录状态)。
+
 本文档整理 mooncake 路线 vLLM 测试部署的完整流程，按执行顺序拆解每一步的具体命令、命令作用与关键参数含义。
 
 入口是 `scripts/run.sh` 一键全流程，内部按 7 个 step 串联；vLLM 启动逻辑在 `tests/demo_vllm_pd.py` 和 `tests/demo_vllm_ttft.py` 里。
@@ -306,7 +310,7 @@ python3 -u tests/demo_vllm_ttft.py ttft_offload
 |------|--------------|-----------|
 | `ttft_baseline` | 无 KV transfer、无 prefix caching | 10 次 unique prompt，统计 P50/P90/P99 |
 | `ttft_store_hit` | MooncakeStoreConnector + prefix caching + mooncake_master | Phase 1 miss（unique prompt 写 store）-> sleep 10s -> reset 本地 -> Phase 2 同 prompt 从 store 读，100% 重叠 |
-| `ttft_offload` | 同 store_hit 配置 | Phase 1 miss（768-token base）-> Phase 2 base+64-token suffix，base 从 store 加载，suffix prefill |
+| `ttft_offload` | 同 store_hit 配置 | Phase 1 miss（768-token base）-> Phase 2 base+64-token suffix，复用 base 中已保存的前缀，计算其余部分与新增 suffix |
 
 - 用 `POST /v1/completions` + `stream: true`，度量请求发送到首 token 的时间。
 - 规模刻意小（`TTFT_WARMUP=2` + `TTFT_MEASURED=10`，`TTFT_PROMPT_TOKENS=768`），整套 ~15-20 分钟。

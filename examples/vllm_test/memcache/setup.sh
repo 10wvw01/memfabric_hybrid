@@ -8,7 +8,7 @@ VLLM_ASCEND_DIR=""
 VLLM_DIR=""
 SKIP_BUILD=0
 SKIP_INSTALL_LIBS=0
-LAYER2_ONLY=0
+MEMCACHE_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --memcache-dir) MEMCACHE_DIR="$2"; shift 2 ;;
@@ -16,11 +16,11 @@ while [[ $# -gt 0 ]]; do
         --vllm-dir) VLLM_DIR="$2"; shift 2 ;;
         --skip-build) SKIP_BUILD=1; shift ;;
         --skip-install-libs) SKIP_INSTALL_LIBS=1; shift ;;
-        --layer2-only) LAYER2_ONLY=1; shift ;;
+        --memcache-only|--layer2-only) MEMCACHE_ONLY=1; shift ;;
         --yes|-y) shift ;;
         --help|-h)
             echo "Usage: bash setup.sh --memcache-dir DIR --vllm-dir DIR --vllm-ascend-dir DIR"
-            echo "Options: --layer2-only --skip-build --skip-install-libs --yes"
+            echo "Options: --memcache-only --skip-build --skip-install-libs --yes"
             exit 0 ;;
         *) echo "[ERROR] Unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -43,7 +43,7 @@ git -C "$MEMCACHE_DIR" config submodule.3rdparty/memfabric_hybrid.url "$MEMFABRI
 git -C "$MEMCACHE_DIR" config submodule.3rdparty/memfabric_hybrid.branch "$MEMFABRIC_BRANCH"
 sync_source_repo "$MFH_DIR" "$MEMFABRIC_REPO" "$MEMFABRIC_BRANCH"
 git -C "$MEMCACHE_DIR" submodule absorbgitdirs 3rdparty/memfabric_hybrid
-if [[ "$LAYER2_ONLY" -eq 0 ]]; then
+if [[ "$MEMCACHE_ONLY" -eq 0 ]]; then
     [[ -n "$VLLM_ASCEND_DIR" ]] || VLLM_ASCEND_DIR="$(dirname "$MEMCACHE_DIR")/vllm-ascend"
     VLLM_ASCEND_DIR=$(realpath -m "$VLLM_ASCEND_DIR")
     sync_source_repo "$VLLM_ASCEND_DIR" "$VLLM_ASCEND_REPO" "$VLLM_ASCEND_BRANCH"
@@ -116,7 +116,7 @@ else
 fi
 
 
-if [[ "$SKIP_BUILD" -eq 0 && "$SKIP_INSTALL_LIBS" -eq 0 && "$LAYER2_ONLY" -eq 0 ]]; then
+if [[ "$SKIP_BUILD" -eq 0 && "$SKIP_INSTALL_LIBS" -eq 0 && "$MEMCACHE_ONLY" -eq 0 ]]; then
     # CANN source-copy stamps can otherwise retain headers from the previous revision.
     if [[ -d "$VLLM_ASCEND_DIR/csrc/build/binary" ]]; then
         find "$VLLM_ASCEND_DIR/csrc/build/binary" -mindepth 2 -maxdepth 2 \

@@ -1,5 +1,7 @@
 # vLLM TTFT 测试环境部署包
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../TEST_GUIDE.md)。
+
 从指定上游仓库获取分支、构建安装，然后在**打包目录内**运行测试。集成测试保留在本目录。
 
 ## 目录结构
@@ -11,17 +13,17 @@ ttft_test/
 ├── verify.sh                # 验证部署结果
 ├── run_test.sh              # 统一测试运行脚本（workload / integration / largecap / bench）
 ├── start_service.sh         # 启动 MetaService + vLLM（支持 --detach 后台模式）
-├── pytest.ini               # pytest 配置（注册 marker：throughput / rank1 / rank2 / rank4 / workload / largecap）
+├── pytest.ini               # pytest 配置（注册 marker：rank1 / rank2 / rank4 / workload / largecap）
 ├── source_repos.sh          # 上游仓库与分支同步
 ├── source_manifest.py       # 提交版本、构建产物和加载路径核对
 ├── cases/                    # 新增测试文件
 │   ├── config/
-│   │   ├── mmc-local-workload.conf          # Layer 2 配置
-│   │   ├── mmc-local-integration.conf       # Layer 3 2-rank 配置
-│   │   ├── mmc-local-integration-4rank.conf # Layer 3 4-rank 配置 (world_size=4)
+│   │   ├── mmc-local-workload.conf          # MemCache 工作负载测试配置
+│   │   ├── mmc-local-integration.conf       # vLLM 集成测试 2-rank 配置
+│   │   ├── mmc-local-integration-4rank.conf # vLLM 集成测试 4-rank 配置 (world_size=4)
 │   │   └── mmc-local-eviction-repro.conf    # Eviction 复现配置
 │   └── python/memcache/
-│       ├── workload/                        # Layer 2: prefill TTFT（6 个核心场景）
+│       ├── workload/                        # MemCache 工作负载测试: prefill TTFT（6 个核心场景）
 │       ├── largecap/                        # 大容量测试: HBM→DRAM eviction + rewarm（5 场景）+ eviction repro（2 场景）
 │       └── integration/                      # 统一测试文件 vllm_integration_test.py
 │           └── vllm_integration_test.py     # TP=1/2/4 延迟用例及缓存来源正确性
@@ -57,9 +59,11 @@ MemFabric 使用远端 VA 管理区，通过 HAL 远端模式预留窗口，再�
 
 1. **memcache 仓库**（setup.sh 可自动 clone 指定分支）
 2. **memfabric_hybrid** 子模块 remote 可 fetch `trunk_for_escc_v1.2.0` 分支
-3. **vLLM-Ascend** 已安装（Layer 3 需要，Layer 2 不需要）
+3. **vLLM-Ascend** 已安装（vLLM 集成测试需要，MemCache 工作负载测试不需要）
 4. **CANN** 已安装（使用当前 CANN 环境脚本设置的路径）
-5. **W8A8 量化模型**已部署（示例模型 `/workspace/models/Qwen3.5-4B-W8A8-310P` 和 `/workspace/models/Qwen3.6-35B-A3B-w8a8`，Layer 3 需要，Layer 2 不需要；可通过环境变量 `MMC_TEST_VLLM_MODEL_PATH` 覆盖）
+5. **W8A8 量化模型**已部署（vLLM 集成测试需要，MemCache 工作负载测试不需要）。
+   示例模型为 `/workspace/models/Qwen3.5-4B-W8A8-310P` 和 `/workspace/models/Qwen3.6-35B-A3B-w8a8`，
+   可通过环境变量 `MMC_TEST_VLLM_MODEL_PATH` 覆盖。
 
 ## 快速部署
 
@@ -67,8 +71,8 @@ MemFabric 使用远端 VA 管理区，通过 HAL 远端模式预留窗口，再�
 # 部署（需在独立 Python 环境执行，并准备 vLLM 0.24 和 vLLM-Ascend 源码）
 bash setup.sh --memcache-dir /path/to/memcache --vllm-dir /path/to/vllm --vllm-ascend-dir /path/to/vllm-ascend --yes
 
-# 仅 Layer 2（不碰 vLLM-Ascend）
-bash setup.sh --memcache-dir /path/to/memcache --yes --layer2-only
+# 仅 MemCache 工作负载测试环境（无需 vLLM-Ascend）
+bash setup.sh --memcache-dir /path/to/memcache --yes --memcache-only
 
 # 仅同步源码和记录版本，不构建
 bash setup.sh --memcache-dir /path/to/memcache --vllm-dir /path/to/vllm --vllm-ascend-dir /path/to/vllm-ascend --yes --skip-build
@@ -114,16 +118,16 @@ npu-smi info
 ### 基本用法
 
 ```bash
-# 1. 准备环境：拉取源码 + 补丁 + 编译安装
+# 1. 准备环境：获取指定上游分支 + 编译安装
 bash setup.sh --memcache-dir /path/to/memcache --vllm-dir /path/to/vllm --vllm-ascend-dir /path/to/vllm-ascend --yes
 
-# 2. Layer 2 workload 测试（2-rank, device 6,7, ~1 分钟）
+# 2. MemCache 工作负载测试（2-rank, device 6,7, ~1 分钟）
 bash run_test.sh --memcache-dir /path/to/memcache --type workload --device-ids 6,7 --log
 
-# 3. Layer 3 集成测试（2-rank, device 6,7, ~25 分钟，含 vLLM 启动）
+# 3. vLLM 集成测试（2-rank, device 6,7, ~25 分钟，含 vLLM 启动）
 bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --protocol host_shm --device-ids 6,7 --log
 
-# 4. Layer 3 集成测试（4-rank, device 4,5,6,7, ~16 分钟）
+# 4. vLLM 集成测试（4-rank, device 4,5,6,7, ~16 分钟）
 bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 4 --protocol device_sdma --device-ids 4,5,6,7 --gpu-mem-util 0.60 --log
 
 # 4b. 4-rank 分次运行（推荐，避免 310P3 孤儿 NPU 上下文问题）
@@ -141,23 +145,23 @@ bash run_test.sh --memcache-dir /path/to/memcache --type puredram --device-ids 4
 
 ### 测试过滤（`--filter`）
 
-`--filter` 透传给 `pytest -m`（marker 过滤），值为单个单词，无空格。不传 `--filter` 时按 `--type` 和 `--rank` 自动选择默认 marker。
+`--filter` 透传给 `pytest -m`。组合表达式需加引号，例如 `--filter "rank1 and rank2"`。不传 `--filter` 时按 `--type` 和 `--rank` 自动选择默认 marker。
 
 | `--type` | `--rank` | 默认 marker | 说明 |
 |----------|----------|-------------|------|
-| workload | — | `workload` | Layer 2 全部 6 个场景 |
-| integration | 1 | `rank1` | L3 单 rank 变体（TP=1） |
-| integration | 2 | `rank2` | L3-1/L3-2/L3-3（含 30%/50% 参数化） |
-| integration | 4 | `rank4` | L3-4/L3-5（4-rank 变体） |
-| largecap | — | `largecap`（L2）/ `rank4`（L3） | 大容量测试 |
+| workload | — | `workload` | MemCache 工作负载的全部 6 个场景 |
+| integration | 1 | `rank1` | TP=1 的四项集成测试 |
+| integration | 2 | `rank2` | TP=2 的四项集成测试 |
+| integration | 4 | `rank4` | TP=4 的四项集成测试 |
+| largecap | — | `largecap`（MemCache 工作负载）/ `rank4`（vLLM 集成） | 大容量测试 |
 | puredram | — | `rank4` | 纯 DRAM（host_shm, 0 HBM, 10GB DRAM）4-rank |
 | bench | 1/2/4 | — | 吞吐基准，无 marker 过滤 |
 
-可用 marker：`workload`、`largecap`、`rank1`、`rank2`、`rank4`、`throughput`
+主集成测试使用 `rank1`、`rank2`、`rank4`；存储工作负载使用 `workload`，大容量工作负载使用 `largecap`。
 
 ```bash
 # 只跑 throughput bench
-bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --device-ids 6,7 --filter throughput
+bash run_test.sh --memcache-dir /path/to/memcache --type bench --rank 2 --device-ids 6,7
 ```
 
 ### `run_test.sh` 完整参数
@@ -166,7 +170,8 @@ bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --
 |------|------|--------|
 | `--memcache-dir <DIR>` | memcache 仓库目录（必选） | — |
 | `--type <TYPE>` | 测试类型：workload / integration / largecap / bench / puredram | workload |
-| `--rank <N>` | rank 数：2 或 4（integration/bench 必选） | — |
+| `--rank <N>` | rank 数：1、2 或 4（integration/bench 必选） | — |
+| `--suite <SUITE>` | 大容量测试选择：workload / integration / all | all |
 | `--protocol <PROTO>` | 协议：host_shm 或 device_sdma（integration） | 配置默认 |
 | `--device-ids <a,b,...>` | NPU 设备 ID（逗号分隔） | 2-rank: 6,7 / 4-rank: 0,1,2,3 / largecap,puredram: 4,5,6,7 |
 | `--filter <name>` | pytest `-m` marker 过滤 | 按 type/rank 自动 |
@@ -212,40 +217,42 @@ MemFabric 从 `GDD_ESCC/memfabric_hybrid.git` 获取 `trunk_for_escc_v1.2.0`，�
 
 ## 测试设计
 
-测试采用三层分层架构，从底向上逐步验证 KV Cache 存储对 LLM 推理 TTFT 的影响：
+测试采用存储 API 基准、MemCache 工作负载和 vLLM 集成测试，分别验证 KV Cache 存储对 LLM 推理 TTFT 的影响：
 
-| 层级 | 度量目标 | 含模型前向 | 测试目录 | --type | marker |
+| 测试类型 | 度量目标 | 含模型前向 | 测试目录 | --type | marker |
 |------|---------|-----------|---------|--------|--------|
-| Layer 2 | T_kv_cache 存储延迟 | 否 | `workload/` | workload | `workload` |
-| Layer 3 | 全链路 TTFT | 是 | `integration/` | integration | `rank2` / `rank4` |
-| 大容量 L2 | 大容量存储延迟 | 否 | `largecap/` | largecap | `largecap` |
-| 大容量 L3 | 大容量全链路 TTFT | 是 | `integration/` | largecap | `rank4` |
-| 吞吐基准 | throughput/TTFT/ITL | 是 | `integration/` | bench | — |
+| MemCache 工作负载测试 | T_kv_cache 存储延迟 | 否 | `workload/` | workload | `workload` |
+| vLLM 集成测试 | 全链路 TTFT | 是 | `integration/` | integration | `rank2` / `rank4` |
+| 大容量 MemCache 工作负载 | 大容量存储延迟 | 否 | `largecap/` | largecap | `largecap` |
+| 大容量 vLLM 集成 | 大容量全链路 TTFT | 是 | `integration/` | largecap | `rank4` |
+| 吞吐基准 | 请求与 token 吞吐、完整响应耗时 | 是 | `integration/` | bench | — |
 
 ### 全链路 TTFT 分解
+
+下例保留历史报告中的耗时示意；本轮两模型的实测值见迁移报告。存储接口计时与请求计时分别统计。
 
 ```
 全链路 TTFT = T_network + T_prefill_compute + T_kv_cache + T_output
    (~1-5ms)    (~3400ms, 96%+)   (~4.3ms)     (~1-5ms)
 
-Layer 2 度量: T_kv_cache（MemCache 存储延迟，不含模型前向计算）
-Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
+MemCache 工作负载测试度量: T_kv_cache（MemCache 存储延迟，不含模型前向计算）
+vLLM 集成测试度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 ```
 
-### Layer 2：存储延迟微基准
+### MemCache 工作负载测试：存储延迟
 
-`LLMWorkloadSimulator` 直连 `DistributedObjectStore` API（`put_from_layers`/`get_into_layers`），不经 vLLM，使用 `time.perf_counter()` + `torch_npu.npu.current_stream().synchronize()` 精确度量 NPU 异步操作完成时间。6 个场景覆盖 KV Cache 全生命周期：
+`LLMWorkloadSimulator` 直连 `DistributedObjectStore` API（`put_from_layers`/`get_into_layers`），不经 vLLM，使用 `time.perf_counter()` + `torch_npu.npu.current_stream().synchronize()` 精确度量 NPU 异步操作完成时间。共列出 6 类用例，其中并发项当前固定跳过，其余用例覆盖 KV 缓存写入、更新、读取和恢复：
 
 | # | 测试场景 | 方法 |
 |---|---------|------|
 | L2-1 | 单请求 prefill TTFT | 100 次 L2G write（seq_len=4096），统计 P99 |
 | L2-2 | 变长序列 prefill TTFT | seq_len 512~16384，验证线性扩展 |
-| L2-3 | 并发 prefill TTFT | 多 rank 并行（需多卡环境）；同卡共享 SDMA 场景跳过 |
+| L2-3 | 并发 prefill TTFT | 设计为多 rank 并行；当前函数固定跳过，未实现并发测量 |
 | L2-4 | prefill→decode 生命周期 | 1 次 prefill + 256 步 decode |
 | L2-5 | prefix cache hit vs miss | 20 轮 miss(写) vs hit(读) 配对 |
 | L2-6 | DRAM→HBM rewarm TTFT | 50 次 G2L 跨层级读取 |
 
-### Layer 3：vLLM 端到端 TTFT
+### vLLM 集成测试：端到端 TTFT
 
 启动真实 vLLM serve 进程（TP=1、TP=2 或 TP=4），通过 HTTP streaming API 度量请求发送到首 token 的时间。三种运行模式对比：
 
@@ -255,24 +262,22 @@ Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 | Cache miss | 开启 | memcache | 请求后重置本地缓存，prefill + KV 写入 |
 | Cache hit | 开启 | memcache | 本地缓存已重置，从 MemCache 读 KV |
 
-| # | 测试场景 | 方法 | marker |
+| 测试 | 目的 | 方法 | marker |
 |---|---------|------|--------|
-| L3-1 | MemCache vs Baseline 开销 | 全 miss，MemCache P50 vs Baseline P50 | `rank2` |
-| L3-2 | Prefix cache hit 降幅 | 10 轮 miss→hit 配对 | `rank2` |
-| L3-3 | 部分命中率 TTFT | 5 个预热请求与 5 个新请求混合 | `rank2` |
-| L3-4 | 4-rank MemCache vs Baseline | 同 L3-1，TP=4 | `rank4` |
-| L3-5 | 4-rank Prefix cache hit | 同 L3-2，TP=4 | `rank4` |
-| L3-1r | 1-rank MemCache vs Baseline | 同 L3-1，TP=1 | `rank1` |
-| L3-2r | 1-rank Prefix cache hit | 同 L3-2，TP=1 | `rank1` |
-| L3-3r | 1-rank 部分命中率 TTFT | 同 L3-3，TP=1 | `rank1` |
-| L3-source | 缓存来源及正确性 | 对照独立基线生成；验证本地/外部/混合命中指标 | `rank1` / `rank2` / `rank4` |
-| L3-6 | Throughput bench（可选） | `vllm bench serve` | `throughput` |
+| 全 miss 基准 | 比较不接入 MemCache 与接入后未命中的 TTFT | 全新输入；分别记录两组 P50 | `rank1` / `rank2` / `rank4` |
+| 50% 请求命中 | 观察混合流量 | 预写 5 个输入，再混合 5 个重复输入和 5 个新输入，逐次核对命中计数 | `rank1` / `rank2` / `rank4` |
+| 配对 miss/hit | 比较同一输入写入前后的耗时 | 10 组先写后读，分别统计 miss 和 hit，并比较生成 token | `rank1` / `rank2` / `rank4` |
+| 缓存来源与正确性 | 检查本地、外部及混合读取 | 核对计数增量，逐 token 对照独立基线 | `rank1` / `rank2` / `rank4` |
 
 ### 大容量测试
 
 以下为历史测试模式，尚未完成本次 0.24 迁移回归。`large_capacity_vllm_test.py` 仍使用旧参数 `--prefix-match-unit` 和关闭本地 prefix cache 的配置，当前请使用 `--type integration` 验证。
 
-大容量测试（`--type largecap`）使用 3GB HBM + 10GB DRAM（4-rank, TP=4），专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 等大容量场景，与 Layer 2/3 使用不同的配置文件（`mmc-local-largecap-4rank.conf`）。
+大容量测试（`--type largecap`）使用 3GB HBM + 10GB DRAM（4-rank, TP=4），
+专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 等大容量场景，
+与 MemCache 工作负载测试和 vLLM 集成测试使用不同的配置文件（`mmc-local-largecap-4rank.conf`）。
+
+大容量测试可用 `--suite workload` 选择 MemCache 工作负载，或用 `--suite integration` 选择 vLLM 集成测试；默认 `--suite all` 依次执行两组测试。
 
 ### 缓存隔离与正确性
 
@@ -306,7 +311,7 @@ TTFT 以首个实际 token 的 SSE 响应计时，支持仅有 token ID 的特�
 5. **孤儿 NPU 上下文**: VLLM::Worker_TP 异常退出后 HBM 可能不释放，需改选其他设备
 6. **4-rank 分次运行**: `--split` 分别运行用例。性能会受其他设备任务影响，应在空闲设备上测试。
 7. **/dev/shm**: host_shm 协议下 dram.size 不超过 1GB；4-rank 时 4 × 1GB = 4GB（/dev/shm 8GB 充足）；largecap 模式自动 resize 到 100GB
-8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；可用 marker：`workload`、`largecap`、`rank1`、`rank2`、`rank4`
+8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；主集成测试 marker 为 `rank1`、`rank2`、`rank4`；其他文件的 marker 按对应测试文件选择。历史用例还使用：`workload`、`largecap`、`rank1`、`rank2`、`rank4`
 9. **文件日志**: 加 `--log` 参数将输出 tee 到 `retest_logs/` 目录
 
 
