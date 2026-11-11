@@ -60,11 +60,8 @@ constexpr uint64_t HYBM_GVM_END_ADDR = HYBM_GVM_START_ADDR + HYBM_GVM_MAX_POOL_S
 constexpr uint64_t HYBM_GVM_START_ADDR_A5 = 0x340000000000UL; // 不同HDK版本差异有点大
 constexpr uint64_t HYBM_GVM_END_ADDR_A5 = HYBM_GVM_START_ADDR_A5 + HYBM_GVM_MAX_POOL_SIZE; // 0xB40000000000UL
 
-/* 310P 池窗口固定起点: AclrtReserveMemAddress 指定地址并要求精确命中(同 meta 区做法)。
- * 自由分配(nullptr)的起点受设备 VA 占用状态影响, 两 rank 起点不同时对称算术失效、
- * 导入登记地址冲突。固定窗口避开本环境 PyTorch 模型加载时使用的低位 VA 区间。
- * 该地址仍须在所有 rank 精确预留，区间被占时建池失败。 */
-constexpr uint64_t HYBM_GVM_START_ADDR_310P = 0x12da80000000UL;
+// Raw multi-rank HYBM callers without a coordinator retain a deterministic starting address.
+constexpr uint64_t HYBM_GVM_START_ADDR_310P = 0x12c200000000UL;
 
 constexpr uint64_t HYBM_56BITS_GVA_START_ADDR = 64ULL << 50; // 64P
 constexpr uint64_t HYBM_56BITS_GVA_END_ADDR = 128ULL << 50;  // 128P

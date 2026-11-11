@@ -58,6 +58,18 @@ HYBM_API int32_t hybm_reserve_mem_space(hybm_entity_t e, uint32_t flags)
     return entity->ReserveMemorySpace();
 }
 
+HYBM_API int32_t hybm_reserve_mem_space_coordinated(hybm_entity_t e, hybm_va_coordinator coordinator,
+                                                    void *context, uint32_t flags)
+{
+    BM_ASSERT_LOG_AND_RETURN(e != nullptr && coordinator != nullptr, "invalid entity or coordinator", BM_INVALID_PARAM);
+    auto entity = MemEntityFactory::Instance().FindEngineByPtr(e);
+    BM_ASSERT_LOG_AND_RETURN(entity != nullptr, "entity is nullptr", BM_INVALID_PARAM);
+    entity->SetVaCoordinator(coordinator, context);
+    auto ret = entity->ReserveMemorySpace();
+    entity->SetVaCoordinator(nullptr, nullptr);
+    return ret;
+}
+
 HYBM_API int32_t hybm_unreserve_mem_space(hybm_entity_t e, uint32_t flags)
 {
     BM_ASSERT_LOG_AND_RETURN(e != nullptr, "e is nullptr", BM_INVALID_PARAM);

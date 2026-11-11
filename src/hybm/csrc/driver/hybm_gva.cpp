@@ -98,7 +98,7 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
     return BM_OK;
 }
 
-/* 310P meta 区创建: AclVmm 路径 —— halMem* 语义在 310P 不可用(F16), 改用
+/* 310P meta 区通过 ACL API 创建，与池段使用相同的内存后端。
  * 共用段(HybmVmmBasedSegment) 310P 路径同款 API 配方(ReserveMemAddress + MallocPhysical + MapMem)。
  * meta 区地址 HYBM_DEVICE_META_ADDR 是设备侧头文件(smem_shm_aicore_base_meta.h)
  * 硬编码的约定地址, 必须 expectPtr 精确命中, 偏移即失败。 */
@@ -109,25 +109,15 @@ int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **
  * 读零(smem_shm_get_global_rank 等失效)。 */
 static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
 {
-    /* MemSetAccess 的 location.id 走系统枚举表: 必须填物理设备号, 填 user 逻辑号在
-     * ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不暴露, 非恒等映射(如 =6,7)时
-     * 报 507899; 与 MallocPhysical 的 user 号命名空间不同, 勿统一。 */
-    int32_t phyDevId = -1;
-    auto convRet = DlAclApi::AclrtGetPhyDevIdByLogicDevId(static_cast<int32_t>(deviceId), &phyDevId);
-    if (convRet != BM_OK || phyDevId < 0) {
-        BM_LOG_ERROR("get phyDevId failed, ret: " << convRet << " deviceId: " << deviceId);
-        return BM_ERROR;
-    }
     aclrtMemAccessDesc acc{};
     acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    acc.location.id = static_cast<uint32_t>(phyDevId); // 授权设备号(物理号)
+    acc.location.id = deviceId;
     acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
     auto ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, &acc, 1);
     if (ret != BM_OK) { // 授权失败
         BM_LOG_ERROR("set meta device access failed, ret: " << ret << " addr: 0x" << std::hex
                                                             << HYBM_DEVICE_META_ADDR << " size: 0x" << allocSize
-                                                            << " deviceId: " << deviceId
-                                                            << " phyDevId: " << phyDevId);
+                                                            << " deviceId: " << deviceId);
         return BM_ERROR;
     }
     return BM_OK;

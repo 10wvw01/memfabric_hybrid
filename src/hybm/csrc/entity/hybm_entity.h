@@ -28,6 +28,12 @@ public:
     virtual int32_t Initialize(const hybm_options *options) noexcept = 0;
     virtual void UnInitialize() noexcept = 0;
 
+    void SetVaCoordinator(hybm_va_coordinator coordinator, void *context) noexcept
+    {
+        vaCoordinator_ = coordinator;
+        vaCoordinatorContext_ = context;
+    }
+
     virtual int32_t ReserveMemorySpace() noexcept = 0;
     virtual int32_t UnReserveMemorySpace() noexcept = 0;
     virtual void *GetReservedMemoryPtr(hybm_mem_type memType) noexcept = 0;
@@ -63,6 +69,10 @@ public:
     virtual int32_t Wait() noexcept = 0;
 
     virtual ~MemEntity() noexcept = default;
+
+protected:
+    hybm_va_coordinator vaCoordinator_{nullptr};
+    void *vaCoordinatorContext_{nullptr};
 
 private:
     HybmEntityTagInfo tagInfo_;

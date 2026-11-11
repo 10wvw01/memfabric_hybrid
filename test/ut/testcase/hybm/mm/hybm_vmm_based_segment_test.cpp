@@ -43,6 +43,31 @@ ock::mf::Result ReleaseAddressForTest(void *address)
     return BM_OK;
 }
 
+uint32_t exactReservations = 0;
+uint32_t peerFailures = 0;
+uint32_t transportFailures = 0;
+
+ock::mf::Result ReserveDynamicAddress(void **base, size_t, size_t, void *expected, uint64_t)
+{
+    *base = expected == nullptr ? reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P) : expected;
+    exactReservations += expected != nullptr;
+    reserveExpected = expected;
+    return BM_OK;
+}
+
+int32_t CoordinateForTest(hybm_va_reservation *proposal, void *)
+{
+    if (proposal->phase == 1 && transportFailures > 0) {
+        --transportFailures;
+        return BM_ERROR;
+    }
+    if (proposal->phase == 1 && peerFailures > 0) {
+        --peerFailures;
+        proposal->result = BM_ERROR;
+    }
+    return BM_OK;
+}
+
 int HalMemImportOk(drv_mem_handle_type, MemShareHandle *, uint32_t, drv_mem_handle_t **handle)
 {
     *handle = reinterpret_cast<drv_mem_handle_t *>(0x1234);
@@ -348,4 +373,75 @@ TEST_F(HybmVmmBasedSegmentTest, ReserveRejectsAndReleasesDifferentAddress)
     EXPECT_EQ(seg.ReserveMemorySpace(&address), BM_MALLOC_FAILED);
     EXPECT_EQ(releasedAddress, reserveResult);
     EXPECT_EQ(address, nullptr);
+}
+
+
+TEST_F(HybmVmmBasedSegmentTest, PeerConflictRollsBackAndRetriesCommonAddress)
+{
+    MemSegmentOptions opt{};
+    opt.segType = HYBM_MST_HBM;
+    opt.rankCnt = 2;
+    opt.maxSize = HYBM_LARGE_PAGE_SIZE;
+    exactReservations = 0;
+    peerFailures = 1;
+    transportFailures = 0;
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
+        .stubs().will(invoke(ReserveDynamicAddress));
+    MOCKER_CPP(&DlAclApi::AclrtReleaseMemAddress, ock::mf::Result(*)(void *))
+        .stubs().will(invoke(ReleaseAddressForTest));
+    HybmVmmBasedSegment seg(opt, 0);
+    seg.SetVaCoordinator(CoordinateForTest, nullptr);
+    void *address = nullptr;
+    ASSERT_EQ(seg.ReserveMemorySpace(&address), BM_OK);
+    EXPECT_EQ(exactReservations, 2U);
+    EXPECT_EQ(address, reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P + GB));
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 1U);
+    EXPECT_EQ(seg.UnReserveMemorySpace(), BM_OK);
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 0U);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, CollectiveFailureReleasesLocalReservation)
+{
+    MemSegmentOptions opt{};
+    opt.segType = HYBM_MST_HBM;
+    opt.rankCnt = 2;
+    opt.maxSize = HYBM_LARGE_PAGE_SIZE;
+    exactReservations = 0;
+    peerFailures = 0;
+    transportFailures = 1;
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
+        .stubs().will(invoke(ReserveDynamicAddress));
+    MOCKER_CPP(&DlAclApi::AclrtReleaseMemAddress, ock::mf::Result(*)(void *))
+        .stubs().will(invoke(ReleaseAddressForTest));
+    HybmVmmBasedSegment seg(opt, 0);
+    seg.SetVaCoordinator(CoordinateForTest, nullptr);
+    void *address = nullptr;
+    EXPECT_EQ(seg.ReserveMemorySpace(&address), BM_ERROR);
+    EXPECT_EQ(address, nullptr);
+    EXPECT_EQ(releasedAddress, reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P));
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 0U);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, MultipleAclPoolsReserveDistinctManagedWindows)
+{
+    MemSegmentOptions opt{};
+    opt.segType = HYBM_MST_HBM;
+    opt.rankCnt = 1;
+    opt.maxSize = HYBM_LARGE_PAGE_SIZE;
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
+        .stubs().will(invoke(ReserveDynamicAddress));
+    MOCKER_CPP(&DlAclApi::AclrtReleaseMemAddress, ock::mf::Result(*)(void *))
+        .stubs().will(invoke(ReleaseAddressForTest));
+    HybmVmmBasedSegment first(opt, 0), second(opt, 1);
+    void *a = nullptr, *b = nullptr;
+    ASSERT_EQ(first.ReserveMemorySpace(&a), BM_OK);
+    ASSERT_EQ(second.ReserveMemorySpace(&b), BM_OK);
+    EXPECT_NE(a, b);
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 2U);
+    EXPECT_EQ(first.UnReserveMemorySpace(), BM_OK);
+    EXPECT_EQ(second.UnReserveMemorySpace(), BM_OK);
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 0U);
 }

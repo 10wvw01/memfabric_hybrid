@@ -434,6 +434,26 @@ uint64_t HybmVaManager::AllocReserveLvaInner(uint32_t localRankId, uint64_t size
     return freeAddr;
 }
 
+ReservedGvaInfo HybmVaManager::AllocReserveGvaInRange(uint32_t rank, uint64_t size, hybm_mem_type memType,
+                                                     uint64_t start, uint64_t end)
+{
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    ReservedGvaInfo info;
+    auto [address, found] = FindFreeSpace(start, end, size, HVM_DVA);
+    if (!found) {
+        BM_LOG_ERROR("No free VA window, rank:" << rank << " size:" << size << " start:" << VaToStr(start));
+        return info;
+    }
+    info.va[HVM_GVA] = address;
+    info.va[HVM_DVA] = address;
+    info.size = size;
+    info.memType = memType;
+    info.localRankId = rank;
+    reservedMap_[HVM_GVA][address] = info;
+    reservedMap_[HVM_DVA][address] = info;
+    return info;
+}
+
 void HybmVaManager::FreeReserveGva(uint64_t addr)
 {
     if (addr == 0) {

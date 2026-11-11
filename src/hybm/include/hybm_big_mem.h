@@ -47,6 +47,24 @@ void hybm_destroy_entity(hybm_entity_t e, uint32_t flags);
  */
 int32_t hybm_reserve_mem_space(hybm_entity_t e, uint32_t flags);
 
+/** One collective exchanges a proposal or the result of an exact address reservation.
+ * The coordinator must return the same address and result on every rank.
+ * phase is 0 for proposals, 1 for reservation results, 2 for discovery and 3 for rollback results.\n * No memory is mapped during coordination.
+ */
+typedef struct {
+    uint64_t address;
+    uint64_t size;
+    int32_t result;
+    uint32_t phase;
+} hybm_va_reservation;
+typedef int32_t (*hybm_va_coordinator)(hybm_va_reservation *reservation, void *context);
+
+/** Reserve with a synchronous rank coordinator. The callback/context are used only during this call.
+ * Existing HAL backends retain their address allocation path.
+ */
+int32_t hybm_reserve_mem_space_coordinated(hybm_entity_t e, hybm_va_coordinator coordinator,
+                                         void *context, uint32_t flags);
+
 /**
  * @brief Un-reserve virtual memory space at local side
  *

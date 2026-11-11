@@ -75,6 +75,118 @@ Result HybmVmmBasedSegment::ValidateOptions() noexcept
     return BM_OK;
 }
 
+Result HybmVmmBasedSegment::CoordinateReservation(hybm_va_reservation &proposal) noexcept
+{
+    if (vaCoordinator_ == nullptr) {
+        return BM_OK;
+    }
+    auto ret = vaCoordinator_(&proposal, vaCoordinatorContext_);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("VA coordination failed, rank:" << options_.rankId << " phase:" << proposal.phase
+                                                    << " ret:" << ret);
+    }
+    return ret;
+}
+
+Result HybmVmmBasedSegment::TryReserveAclWindow(hybm_va_reservation &proposal, void **base) noexcept
+{
+    auto &manager = HybmVaManager::GetInstance();
+    auto memType = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
+    auto info = manager.AllocReserveGvaInRange(options_.rankId, proposal.size, memType,
+                                               proposal.address, proposal.address + proposal.size);
+    if (info.va[HVM_GVA] == 0) {
+        return BM_MALLOC_FAILED;
+    }
+    *base = nullptr;
+    auto expected = reinterpret_cast<void *>(proposal.address);
+    auto ret = DlAclApi::AclrtReserveMemAddress(base, proposal.size, 0, expected, 0);
+    if (ret == BM_OK && *base == expected) {
+        return BM_OK;
+    }
+    BM_LOG_WARN("ACL window unavailable, rank:" << options_.rankId << " address:" << VaToStr(expected)
+                                              << " size:" << proposal.size << " ret:" << ret);
+    if (ret == BM_OK && *base != nullptr) {
+        auto releaseRet = DlAclApi::AclrtReleaseMemAddress(*base);
+        if (releaseRet != BM_OK) {
+            BM_LOG_ERROR("Release mismatched ACL window failed, rank:" << options_.rankId << " ret:" << releaseRet);
+        }
+    }
+    manager.FreeReserveGva(proposal.address);
+    *base = nullptr;
+    return BM_MALLOC_FAILED;
+}
+
+Result HybmVmmBasedSegment::ReserveAclWindow(void **base) noexcept
+{
+    BM_ASSERT_LOG_AND_RETURN(totalVirtualSize_ <= UINT64_MAX - GB + 1, "ACL window size overflows", BM_INVALID_PARAM);
+    const uint64_t windowSize = ((totalVirtualSize_ + GB - 1) / GB) * GB;
+    uint64_t start = HYBM_GVM_START_ADDR_310P;
+    if (vaCoordinator_ != nullptr || options_.rankCnt == 1) {
+        void *probe = nullptr;
+        auto ret = DlAclApi::AclrtReserveMemAddress(&probe, windowSize, 0, nullptr, 0);
+        hybm_va_reservation initial{reinterpret_cast<uint64_t>(probe), windowSize, ret, 2};
+        if (ret == BM_OK) {
+            initial.result = DlAclApi::AclrtReleaseMemAddress(probe);
+        }
+        auto collectiveRet = CoordinateReservation(initial);
+        BM_ASSERT_LOG_AND_RETURN(collectiveRet == BM_OK && initial.result == BM_OK && initial.address != 0,
+                                 "ACL address discovery failed, rank:" << options_.rankId
+                                                                       << " ret:" << initial.result, BM_MALLOC_FAILED);
+        start = initial.address;
+    }
+    return ReserveAclWindowFrom(start, windowSize, base);
+}
+
+Result HybmVmmBasedSegment::RollbackAclWindow(void *base, uint64_t address) noexcept
+{
+    auto ret = DlAclApi::AclrtReleaseMemAddress(base);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("ACL rollback failed, rank:" << options_.rankId << " address:" << VaToStr(base) << " ret:" << ret);
+        reservedLva_.push_back(static_cast<uint8_t *>(base));
+        return ret;
+    }
+    HybmVaManager::GetInstance().FreeReserveGva(address);
+    return BM_OK;
+}
+
+Result HybmVmmBasedSegment::ReserveAclWindowFrom(uint64_t start, uint64_t windowSize, void **base) noexcept
+{
+    auto &manager = HybmVaManager::GetInstance();
+    auto memType = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
+    const uint32_t attempts = vaCoordinator_ == nullptr && options_.rankCnt > 1 ? 1 : 64;
+    for (uint32_t attempt = 0; attempt < attempts && start <= UINT64_MAX - windowSize; ++attempt) {
+        auto info = manager.AllocReserveGvaInRange(options_.rankId, windowSize, memType, start, UINT64_MAX);
+        hybm_va_reservation proposal{info.va[HVM_GVA], windowSize, info.va[HVM_GVA] ? BM_OK : BM_ERROR, 0};
+        if (info.va[HVM_GVA] != 0) {
+            manager.FreeReserveGva(info.va[HVM_GVA]);
+        }
+        auto ret = CoordinateReservation(proposal);
+        BM_ASSERT_LOG_AND_RETURN(ret == BM_OK && proposal.result == BM_OK, "No common VA candidate", BM_MALLOC_FAILED);
+        auto localRet = TryReserveAclWindow(proposal, base);
+        proposal.result = localRet;
+        proposal.phase = 1;
+        ret = CoordinateReservation(proposal);
+        if (ret == BM_OK && proposal.result == BM_OK) {
+            BM_LOG_INFO("ACL common window reserved, rank:" << options_.rankId << " address:" << VaToStr(*base)
+                                                           << " size:" << windowSize << " attempt:" << attempt);
+            return BM_OK;
+        }
+        auto cleanupRet = localRet == BM_OK ? RollbackAclWindow(*base, proposal.address) : BM_OK;
+        *base = nullptr;
+        if (ret != BM_OK) {
+            return ret;
+        }
+        proposal.phase = 3;
+        proposal.result = cleanupRet;
+        ret = CoordinateReservation(proposal);
+        BM_ASSERT_LOG_AND_RETURN(ret == BM_OK && proposal.result == BM_OK,
+                                 "ACL window rollback failed, rank:" << options_.rankId, BM_ERROR);
+        start = proposal.address + windowSize;
+    }
+    BM_LOG_ERROR("No common ACL window, rank:" << options_.rankId << " size:" << windowSize);
+    return BM_MALLOC_FAILED;
+}
+
 Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
 {
     BM_ASSERT_LOG_AND_RETURN(ValidateOptions() == BM_OK, "Failed to validate options.", BM_INVALID_PARAM);
@@ -89,28 +201,10 @@ Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
     auto mem_type = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
     Result ret = BM_OK;
     if (Is310PAclPath()) {
-        /* 310P: 预留整个对称窗口(rankCnt×maxSize), 窗口即真实地址: slot_p = base + p×maxSize
-         * —— 本端物理映射进本端槽位, 对端经 shareable handle 导入对端槽位, host/kernel/
-         * 协同编排器共用该公式。起点用固定地址精确命中(同 meta 区纪律): 自由分配
-         * 起点受设备 VA 占用影响, 两 rank 起点不同时该公式失效。 */
-        auto expectPtr = reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P);
-        ret = DlAclApi::AclrtReserveMemAddress(&base, totalVirtualSize_, 0, expectPtr, 0);
-        if (ret != BM_OK || base == nullptr) {
-            BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " size:" << totalVirtualSize_
-                                                               << " expectAddr:" << VaToStr(HYBM_GVM_START_ADDR_310P)
-                                                               << " rankId:" << options_.rankId);
-            return BM_MALLOC_FAILED;
+        ret = ReserveAclWindow(&base);
+        if (ret != BM_OK) {
+            return ret;
         }
-        if (base != expectPtr) {
-            /* 偏移即失败(窗口即真实地址, 契约不容偏移); 被占/未命中均为显性失败 */
-            BM_LOG_ERROR("reserve va base mismatch, got:" << VaToStr(reinterpret_cast<uint64_t>(base))
-                                                          << " expect:" << VaToStr(HYBM_GVM_START_ADDR_310P)
-                                                          << " rankId:" << options_.rankId);
-            (void)DlAclApi::AclrtReleaseMemAddress(base);
-            return BM_MALLOC_FAILED;
-        }
-        BM_LOG_INFO("AclrtReserveMemAddress(window) got addr:" << base << " size:" << totalVirtualSize_
-                                                               << " rankId:" << options_.rankId);
         globalVirtualAddress_ = static_cast<uint8_t *>(base);
     } else {
         auto gvaInfo = HybmVaManager::GetInstance().AllocReserveGva(options_.rankId, totalVirtualSize_, totalLvaSize,
@@ -153,12 +247,14 @@ Result HybmVmmBasedSegment::UnReserveMemorySpace() noexcept
 
     for (auto lva : reservedLva_) {
         if (!Is310PAclPath()) {
-            /* 310P: lva 为 ACL reserve 的窗口地址, 非 VaManager 记账, 不走 FreeReserveLva */
             HybmVaManager::GetInstance().FreeReserveLva((uintptr_t)lva, HVM_DVA);
         }
         Result freeRet = BM_OK;
         if (Is310PAclPath()) {
             freeRet = DlAclApi::AclrtReleaseMemAddress(lva);
+            if (freeRet == BM_OK) {
+                HybmVaManager::GetInstance().FreeReserveGva(reinterpret_cast<uint64_t>(lva));
+            }
         } else {
             freeRet = DlHalApi::HalMemAddressFree(lva);
         }
@@ -169,7 +265,6 @@ Result HybmVmmBasedSegment::UnReserveMemorySpace() noexcept
         }
     }
     if (globalVirtualAddress_ != nullptr && !Is310PAclPath()) {
-        /* 310P: gva 即窗口地址本身(账实合一), 无 VaManager GVA 记账, 不走 FreeReserveGva */
         HybmVaManager::GetInstance().FreeReserveGva((uintptr_t)globalVirtualAddress_);
     }
     localVirtualAddress_ = nullptr;
@@ -246,8 +341,7 @@ Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_me
         aclrtPhysicalMemProp prop{};
         prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
         prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
-        /* MallocPhysical 的 location.id 走进程打开表: 填 user 逻辑号(传物理号实测 107001),
-         * 与 SetAccess 的物理号命名空间不同, 见 FillAclAccessDesc */
+        // ACL allocation and access descriptors use the process-visible device id.
         prop.location.id = static_cast<uint32_t>(deviceId_);
         prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
         prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
@@ -320,18 +414,11 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
  * 暴露, 非恒等映射(如 =6,7)时授权给未打开的设备, 报 507899; 与 MallocPhysical
  * 的 prop.location.id(进程打开表, user 号)是两个命名空间, 勿统一两侧取值。 */
 
-static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t rankId)
+static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t /* rankId */)
 {
-    int32_t phyDevId = -1;
-    auto ret = DlAclApi::AclrtGetPhyDevIdByLogicDevId(static_cast<int32_t>(userDevId), &phyDevId);
-    if (ret != BM_OK || phyDevId < 0) {
-        BM_LOG_ERROR("AclrtGetPhyDevIdByLogicDevId failed, ret:" << ret << " userDevId:" << userDevId
-                                                                 << " rankId:" << rankId);
-        return (ret != BM_OK) ? ret : BM_DL_FUNCTION_FAILED;
-    }
     desc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     desc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-    desc.location.id = static_cast<uint32_t>(phyDevId);
+    desc.location.id = userDevId;
     return BM_OK;
 }
 
