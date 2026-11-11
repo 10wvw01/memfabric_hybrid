@@ -54,7 +54,10 @@
 #include <mpi.h>
 #include "acl/acl.h"
 
-#define N               8
+#ifndef MATRIX_N
+#define MATRIX_N 8
+#endif
+#define N MATRIX_N
 #define IPC_KEY_LEN     65
 #define SLAB_SIZE       (16u * 1024u * 1024u)   /* 16 MB 每 rank slab */
 #define SCRATCH_SIZE    (16u * 1024u * 1024u)   /* 16 MB 本地暂存(写 pattern 源 / 带宽落点) */
@@ -133,7 +136,7 @@ int main(int argc, char *argv[])
 
     int32_t dev = rank;   /* 恒等映射: rank k = dev k */
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("[07] === 07_d2d_matrix: 8 NPU IPC pool, rank%d = dev%d ===\n", rank, dev);
+    printf("[07] === 07_d2d_matrix: NPU IPC pool, rank%d = dev%d ===\n", rank, dev);
     printf("[07] r%d: 16MB slab, key len %dB, pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)\n",
            rank, IPC_KEY_LEN);
 
@@ -296,7 +299,7 @@ int main(int argc, char *argv[])
                 printf("\n");
             }
             printf("[07] VA consistency: %s\n",
-                   va_ok ? "CONSISTENT (all 8 rows identical)" : "INCONSISTENT");
+                   va_ok ? "CONSISTENT (all rows identical)" : "INCONSISTENT");
         }
         if (!va_ok)
             g_fail = 1;

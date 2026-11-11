@@ -1,6 +1,10 @@
 #!/bin/bash
+set -uo pipefail
 cd "$(dirname "$0")"
-make >/dev/null 2>&1
-echo "[run] 8 NPU IPC pool (timeout 120s)"
-timeout 120 mpirun --allow-run-as-root -np 8 ./test
-echo "[run] exit=$? (124=timeout/hang)"
+case "${MATRIX_N:-8}" in 4|8) ;; *) echo "MATRIX_N must be 4 or 8" >&2; exit 2 ;; esac
+make -B MATRIX_N="${MATRIX_N:-8}" || exit $?
+echo "[run] ${MATRIX_N:-8} NPU IPC pool (timeout --kill-after=10 120s)"
+timeout --kill-after=10 120 mpirun --allow-run-as-root --stdin none -np "${MATRIX_N:-8}" ./test
+status=$?
+echo "[run] exit=$status (124=timeout/hang)"
+exit "$status"

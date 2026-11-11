@@ -79,6 +79,13 @@ int main(int argc, char *argv[])
     const char *mode = getenv("MODE");
     if (!mode || !*mode)
         mode = "DEFAULT";
+    if (strcmp(mode, "DEFAULT") != 0 && strcmp(mode, "ENABLE") != 0 &&
+        strcmp(mode, "ENABLE_R0") != 0 && strcmp(mode, "ENABLE_BOTH") != 0 && strcmp(mode, "PEER") != 0) {
+        fprintf(stderr, "[15] FAIL invalid MODE=%s\n", mode);
+        MPI_Finalize();
+        return 2;
+    }
+
 
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("[15] === 15_peer_needed: MODE=%s, rank%d %s dev%d ===\n", mode, rank, role, dev);
@@ -90,6 +97,7 @@ int main(int argc, char *argv[])
     int32_t ret = 0;
     int init_ok = 0, dev_ok = 0, exp_ok = 0, imp_ok = 0, d2d_ok = 0, peer_en = 0, peer_en0 = 0;
     int fatal = 0;
+    int import_ret = 0;
     size_t words = MEM_SIZE / sizeof(uint32_t);
 
     ret = aclInit(NULL);
@@ -152,13 +160,13 @@ int main(int argc, char *argv[])
                                               ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
             if (ret == ACL_ERROR_NONE) {
                 exp_ok = 1;
-                if (MPI_Send(key1, IPC_KEY_LEN, MPI_CHAR, 1, 100, MPI_COMM_WORLD) == MPI_SUCCESS)
-                    ok = 1;
+                ok = 1;
             }
             printf("[15] step 1 (r0): malloc P2P 16MB + H2D pattern + export key + MPI-send %s (ret=%d)\n",
                    ok ? "OK" : "FAIL", ret);
             if (!ok)
                 fatal = 1;
+            MPI_Send(key1, IPC_KEY_LEN, MPI_CHAR, 1, 100, MPI_COMM_WORLD);
         } else {
             MPI_Recv(key1, IPC_KEY_LEN, MPI_CHAR, 0, 100, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
@@ -204,6 +212,7 @@ int main(int argc, char *argv[])
                 peer_en = 1;
         }
         int32_t ir = aclrtIpcMemImportByKey(&p, key1, flag);
+        import_ret = ir;
         printf("[15] step 2 (r1): import MODE=%s flag=0x%lx ret=%d\n",
                mode, (unsigned long)flag, ir);
         if (ir == ACL_ERROR_NONE) {
@@ -267,48 +276,17 @@ int main(int argc, char *argv[])
     if (init_ok)
         aclFinalize();
 
-    /* RESULT */
-    {
-        int pass = 0;
-        const char *verdict = "";
-        if (strcmp(mode, "DEFAULT") == 0) {
-            pass = !imp_ok;
-            verdict = pass ? "符合预期: 裸 DEFAULT 跨卡 507899(需 PEER flag)"
-                           : "★推翻: 裸 DEFAULT 跨卡可用";
-        } else if (strcmp(mode, "ENABLE") == 0) {
-            pass = !imp_ok;
-            if (pass)
-                verdict = peer_en
-                    ? "符合预期: 显式 EnablePeerAccess 不够, DEFAULT flag 跨卡仍 507899"
-                    : "符合预期(弱): EnablePeerAccess 本身失败, DEFAULT 跨卡 507899, 无法证明 enable 够不够";
-            else
-                verdict = "★推翻: 显式 enable 让 DEFAULT import 可用";
-        } else if (strcmp(mode, "ENABLE_R0") == 0) {
-            pass = imp_ok && d2d_ok;
-            if (pass)
-                verdict = "★方向确认: 仅 exporter 端 enable(dev0 调 EnablePeerAccess(2)) 即可让 DEFAULT import 成功";
-            else
-                verdict = "仅 exporter 端 enable 不够, 需要双向(或 importer 端方向)";
-        } else if (strcmp(mode, "ENABLE_BOTH") == 0) {
-            pass = imp_ok && d2d_ok;
-            if (!imp_ok && !peer_en0 && !peer_en)
-                verdict = "无法判定: 双向 EnablePeerAccess 均失败";
-            else if (pass)
-                verdict = "★重要发现: 双向 EnablePeerAccess + DEFAULT flag 跨卡可用, 说明 PEER flag 内部核心就是双向 P2P";
-            else
-                verdict = "符合预期: 双向 EnablePeerAccess 仍不够, PEER flag 还做了更多";
-        } else { /* PEER */
-            pass = imp_ok && d2d_ok;
-            verdict = pass ? "符合预期: PEER flag import 是跨卡唯一可行方式"
-                           : "不符合预期: PEER flag 不可用";
-        }
-        printf("[15] RESULT: MODE=%-7s import=%-10s d2d=%-5s -> %s\n",
-               mode, imp_ok ? "OK" : "FAIL", d2d_ok ? "OK" : "-", verdict);
-        fflush(stdout);
-        if (fatal || !pass)
-            fatal = 1;
-    }
-
+    /* Negative modes must reject import; successful modes must verify the data. */
+    MPI_Allreduce(MPI_IN_PLACE, &import_ret, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    int negative = strcmp(mode, "DEFAULT") == 0 || strcmp(mode, "ENABLE") == 0 ||
+                   strcmp(mode, "ENABLE_R0") == 0;
+    int pass = !fatal && (negative ? (!imp_ok && import_ret == 507899) : (imp_ok && d2d_ok));
+    if (strcmp(mode, "ENABLE") == 0 || strcmp(mode, "ENABLE_BOTH") == 0)
+        pass = pass && peer_en;
+    if (strcmp(mode, "ENABLE_R0") == 0 || strcmp(mode, "ENABLE_BOTH") == 0)
+        pass = pass && peer_en0;
+    printf("[15] RESULT: MODE=%s import_ret=%d import=%s d2d=%s %s\n",
+           mode, import_ret, imp_ok ? "OK" : "REJECTED", d2d_ok ? "OK" : "-", pass ? "PASS" : "FAIL");
     MPI_Finalize();
-    return fatal ? 1 : 0;
+    return pass ? 0 : 1;
 }

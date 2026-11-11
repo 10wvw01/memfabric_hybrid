@@ -68,7 +68,10 @@
 #include <mpi.h>
 #include "acl/acl.h"
 
-#define N               8
+#ifndef MATRIX_N
+#define MATRIX_N 8
+#endif
+#define N MATRIX_N
 #define SLAB_SIZE       (16u * 1024u * 1024u)   /* 16 MB 每 rank slab(默认, SLAB_MB 可调) */
 #define SCRATCH_SIZE    (16u * 1024u * 1024u)   /* 16 MB 本地暂存 */
 #define BW_SIZE         (4u  * 1024u * 1024u)    /* 4 MB 带宽块(clamp 到 slab 大小) */
@@ -223,7 +226,7 @@ int main(int argc, char *argv[])
         }
     }
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("[16] === 16_vmm_matrix: 8 NPU VMM pool (NO EnablePeerAccess), rank%d = dev%d ===\n",
+    printf("[16] === 16_vmm_matrix: NPU VMM pool (NO EnablePeerAccess), rank%d = dev%d ===\n",
            rank, dev);
     printf("[16] r%d: %zuMB slab x8 slot window(%zuMB), 7-attr chain, "
            "pattern=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)\n",
@@ -470,7 +473,7 @@ int main(int argc, char *argv[])
                 printf("\n");
             }
             printf("[16] VA consistency: %s %s\n",
-                   va_ok ? "CONSISTENT (all 8 rows identical)" : "INCONSISTENT",
+                   va_ok ? "CONSISTENT (all rows identical)" : "INCONSISTENT",
                    va_ok ? "" : "(OBS: NULL-hint reserve base differs per process)");
         }
     }

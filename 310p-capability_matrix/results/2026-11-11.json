@@ -1,0 +1,527 @@
+{
+  "date": "2026-11-11",
+  "environment": {
+    "soc": "Ascend310P3",
+    "board": "Atlas 300I Duo",
+    "architecture": "aarch64",
+    "cann": "9.2.1",
+    "driver": "26.1.0"
+  },
+  "source_base": "af6b9f3ddb72cbcf38c47c6bcf80f2b802260a4d",
+  "source_sha256": {
+    "01_base_memcpy/test.c": "d26befdcfaf2881e97123985ef0645b4859d42e0997d78899d463e6b0c386479",
+    "02_ipc_die/test.c": "7d9738ca9171d9f5e619465af1f589389bb71797a40460360964b3a51d91a458",
+    "03_ipc_cross/test.c": "36b5b59ba8ad1666ac8e10c84e82aba2b414ae6accfb5c8c5ab360a070e79ac6",
+    "04_vmm_cross/test.c": "e3bcf0c326b9fb22791fa2228b8df8cc597bd4074c1926cd79d1c14213e1308d",
+    "05_vmm_die/test.c": "ab8474bc0e05268c5c738705b5a553a097f19fce5a0aa425b0ad14ca536cd705",
+    "06_host_pool/test.c": "7cd0850e8903c56d09907fc75949c697593d4de46574cb309f1bd13f4f4ecaec",
+    "07_d2d_matrix/test.c": "5304eb36200e397322c3e660d9428314535f437e0e1979c3aeb87aa0aff3bffc",
+    "08_host_swap/test.c": "bb527d755675b6fbf6c2868c8f4a88a0027e75cd9a6e2334b6fc38578e3e3883",
+    "09_vmm_samedev/test.c": "d15377604cc45ccf38feed75ec2fd4968c4bf126e101e4f2ebc869f70d3f9862",
+    "10_vmm_hardcell/test.c": "d9ce1aac72dfae1a1e7dea590ed5f3b248f2fc217fb949cf41069915fd5daf48",
+    "11_ipc_va_determinism/test.c": "21550dac3d01be7bad0c1ea6a6c6ed1579b55c5319445070e3b0d1cb489f6b23",
+    "12_topo_probe/test.c": "53efed1741403c1c37818d68e439feb99d774ef8af43f9e9def424ee84ac92cb",
+    "13_bw_compare/test.c": "90f0d5c8f332b48e97248a503256d948303a5c1b1316a2fa9eeaaa880784c2b3",
+    "14_transfer_remote/test.c": "2dd8c174b91b4240a541f6e808fdb908832eda1d672b1772d86ca97644b94496",
+    "15_peer_needed/test.c": "453c15940a803374c646b03f87edffe9b3926b10dc304c70bde3192aff4c3530",
+    "16_vmm_matrix/test.c": "3b568e802d404ee7c963fd3a13a61c1b7ac2e076b00f7c2a85a94dc0adf7e58d",
+    "17_va_reservation/test.c": "38106a915f1faebaebd96fbef2ae2b40c5844a81c725edbe239ff6899154c236",
+    "04_vmm_cross/test_memattr.c": "c16eab6d082f42158a48b6194f4cae7021798fbcc86d479c76a769f2921b79b6"
+  },
+  "coverage": {
+    "executed_directories": "01-17",
+    "matrix_runtime_device_count": 4,
+    "matrix_default_8_device_build": "PASS",
+    "eight_device_runtime": "NOT RUN: devices 0/1 reported Alarm; device 5 had a concurrent workload."
+  },
+  "cases": [
+    {
+      "case": "01_base_memcpy",
+      "command": "DEV=2 bash 310p-capability_matrix/01_base_memcpy/run.sh",
+      "physical_devices": [
+        2
+      ],
+      "exit_code": 0,
+      "log": "01_base_memcpy-final.log",
+      "observations": [
+        "[01] bw   H2D-pin-sync:   28.06 GB/s   (30 sync aclrtMemcpy H2D, pinned, total 0.144 s)",
+        "[01] bw   H2D-pin-async:   22.99 GB/s   (30 MemcpyAsync H2D pinned + 1 StreamSync, total 0.175 s)",
+        "[01] bw   D2H-pin-sync:   25.24 GB/s   (30 sync aclrtMemcpy D2H, pinned, total 0.160 s)",
+        "[01] bw   D2H-pin-async:   20.96 GB/s   (30 MemcpyAsync D2H pinned + 1 StreamSync, total 0.192 s)",
+        "[01] bw   H2D-pg-sync:   19.32 GB/s   (30 sync aclrtMemcpy H2D, pageable, total 0.208 s)",
+        "[01] bw   H2D-pg-async:   19.27 GB/s   (30 MemcpyAsync H2D pageable + 1 StreamSync, total 0.209 s)",
+        "[01] bw   D2H-pg-sync:   13.29 GB/s   (30 sync aclrtMemcpy D2H, pageable, total 0.303 s)",
+        "[01] bw   D2H-pg-async:   16.31 GB/s   (30 MemcpyAsync D2H pageable + 1 StreamSync, total 0.247 s)",
+        "[01] bw   D2D-sync :    5.24 GB/s   (30 sync aclrtMemcpy D2D, same dev, total 0.769 s)",
+        "[01] bw   D2D-async:   88.66 GB/s   (30 MemcpyAsync submits + 1 final StreamSync, total 0.045 s)",
+        "[01] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "02_ipc_die",
+      "command": "A_DEV=2 B_DEV=3 bash 310p-capability_matrix/02_ipc_die/run.sh",
+      "physical_devices": [
+        2,
+        3
+      ],
+      "exit_code": 0,
+      "log": "02_ipc_die-final.log",
+      "observations": [
+        "[02] bw   D2D-read  (p->local) :   19.03 GB/s (30x16MB async + 1 Sync, total 0.026 s)",
+        "[02] bw   D2D-write (local->p) :   17.05 GB/s (30x16MB async + 1 Sync, total 0.030 s)",
+        "[02] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "03_ipc_cross",
+      "command": "A_DEV=2 B_DEV=4 bash 310p-capability_matrix/03_ipc_cross/run.sh",
+      "physical_devices": [
+        2,
+        4
+      ],
+      "exit_code": 0,
+      "log": "03_ipc_cross.log",
+      "observations": [
+        "[03] bw   D2D-read  (p->local) :   11.94 GB/s (30x16MB async + 1 Sync, total 0.042 s)",
+        "[03] bw   D2D-write (local->p) :   13.11 GB/s (30x16MB async + 1 Sync, total 0.038 s)",
+        "[03] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "04_vmm_cross",
+      "command": "A_DEV=2 B_DEV=4 bash 310p-capability_matrix/04_vmm_cross/run.sh",
+      "physical_devices": [
+        2,
+        4
+      ],
+      "exit_code": 0,
+      "log": "04_vmm_cross.log",
+      "observations": [
+        "[04] bw   D2D-read  (VMM->local) :   12.43 GB/s (30x16MB async + 1 Sync, total 0.040 s)",
+        "[04] bw   D2D-write (local->VMM) :   13.10 GB/s (30x16MB async + 1 Sync, total 0.038 s)",
+        "[04] RESULT: PASS  ★step16: 无 EnablePeerAccess 直接 Import 成功(310P3 已验证), EnablePeerAccess 不是必须的  ★step3: ctx 技巧(同卡 die 对方案)跨卡也能用(310P3 已验证, ret=0), 但跨卡非必须"
+      ]
+    },
+    {
+      "case": "05_vmm_die",
+      "command": "A_DEV=2 B_DEV=3 bash 310p-capability_matrix/05_vmm_die/run.sh",
+      "physical_devices": [
+        2,
+        3
+      ],
+      "exit_code": 0,
+      "log": "05_vmm_die-final.log",
+      "observations": [
+        "[05] bw   D2D-read  (VMM->local) :   19.05 GB/s (30x16MB async + 1 Sync, total 0.026 s)",
+        "[05] bw   D2D-write (local->VMM) :   17.96 GB/s (30x16MB async + 1 Sync, total 0.028 s)",
+        "[05] RESULT: PASS  ★step3: 本进程 ctx import EXPECTED-FAIL ret=507899(符合预期)  ★step6: EnablePeerAccess+own-ctx import FAIL ret=507899(EnablePeerAccess 无法替代 ctx 技巧)"
+      ]
+    },
+    {
+      "case": "06_host_pool",
+      "command": "A_DEV=2 B_DEV=2 bash 310p-capability_matrix/06_host_pool/run.sh",
+      "physical_devices": [
+        2
+      ],
+      "exit_code": 0,
+      "log": "06_host_pool-final.log",
+      "observations": [
+        "[06] bw   H2D      :   26.99 GB/s   (30 sync aclrtMemcpy H2D, pinned host, total 0.019 s)",
+        "[06] bw   D2H      :   24.36 GB/s   (30 sync aclrtMemcpy D2H, pinned host, total 0.021 s)",
+        "[06] OBSERVE step=4 rank=r0 api=4b: aclrtHostRegister on mmap shm ret=207000",
+        "[06] OBSERVE step=4 rank=r0 api=4c: aclrtHostRegisterV2 MAPPED on mmap shm ret=207000",
+        "[06] OBSERVE step=4 rank=r0 api=4d: aclrtHostRegisterV2 PINNED on mmap shm ret=0",
+        "[06] OBSERVE step=4 rank=r0 api=4e: aclrtHostRegisterV2 MAPPED|PINNED on mmap shm ret=207000",
+        "[06] OBSERVE step=4 rank=r0 api=4f: aclrtHostRegister on aclrtMallocHost hp ret=207000",
+        "[06] OBSERVE step=4 rank=r0 api=4g: aclrtHostRegisterV2 PINNED on malloc ret=0",
+        "[06] RESULT: PASS host_register_success_observed=1"
+      ]
+    },
+    {
+      "case": "07_d2d_matrix",
+      "command": "ASCEND_RT_VISIBLE_DEVICES=2,3,6,7 MATRIX_N=4 bash 310p-capability_matrix/07_d2d_matrix/run.sh",
+      "physical_devices": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "exit_code": 1,
+      "log": "07_d2d_matrix-final.log",
+      "observations": [
+        "[07] VA consistency: INCONSISTENT",
+        "[07] r0 RESULT: FAIL (join:OK write:OK VA:INCONSISTENT)",
+        "[07] r2 RESULT: FAIL (join:OK write:OK VA:INCONSISTENT)",
+        "[07] r3 RESULT: FAIL (join:OK write:OK VA:INCONSISTENT)",
+        "[07] r1 RESULT: FAIL (join:OK write:OK VA:INCONSISTENT)"
+      ],
+      "interpretation": "IPC imports and data checks pass; symmetric VA requirement fails. Exit 1 is retained.",
+      "device_count": 4
+    },
+    {
+      "case": "08_host_swap",
+      "command": "A_DEV=2 B_DEV=3 bash 310p-capability_matrix/08_host_swap/run.sh",
+      "physical_devices": [
+        2,
+        3
+      ],
+      "exit_code": 0,
+      "log": "08_host_swap-final.log",
+      "observations": [
+        "[08] bw   direct     D2D-read (p->local)     :   19.03 GB/s (30x16MB async + 1 Sync, total 0.026 s)",
+        "[08] bw   host-swap read (p->host->local)   :    3.50 GB/s (30x16MB eff, 60 async + 1 Sync, total 0.144 s)",
+        "[08] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "09_vmm_samedev",
+      "command": "DEV=2 bash 310p-capability_matrix/09_vmm_samedev/run.sh",
+      "physical_devices": [
+        2
+      ],
+      "exit_code": 0,
+      "log": "09_vmm_samedev-final.log",
+      "observations": [
+        "[09] bw   D2D-read  (VMM->local) :   88.86 GB/s (30x16MB async + 1 Sync, total 0.006 s)",
+        "[09] bw   D2D-write (local->VMM) :   89.17 GB/s (30x16MB async + 1 Sync, total 0.006 s)",
+        "[09] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "10_vmm_hardcell",
+      "command": "A_DEV=2 B_DEV=4 bash 310p-capability_matrix/10_vmm_hardcell/run.sh",
+      "physical_devices": [
+        2,
+        4
+      ],
+      "exit_code": 0,
+      "log": "10_vmm_hardcell.log",
+      "observations": [
+        "[10] RESULT: PASS  方式一本进程ctx: OK ret=0; 方式二ctx技巧: OK ret=0; 方式三CreateCtx替代: OK ret=0"
+      ]
+    },
+    {
+      "case": "11_ipc_va_determinism",
+      "command": "DEV_LIST=2,4,2 bash 310p-capability_matrix/11_ipc_va_determinism/run.sh",
+      "physical_devices": [
+        2,
+        4
+      ],
+      "exit_code": 0,
+      "log": "11_ipc_va_determinism-final.log",
+      "observations": [
+        "[11] step 3: VA MISMATCH — 需查表(VA 不一致, 功能仍可用, 降级查表模式)",
+        "[11] bw   VA[0] (tag=0x2):   11.95 GB/s (30x16MB async + 1 Sync, total 0.042 s)",
+        "[11] bw   VA[1] (tag=0x3):   11.94 GB/s (30x16MB async + 1 Sync, total 0.042 s)",
+        "[11] bw   VA[2] (tag=0x4):   11.92 GB/s (30x16MB async + 1 Sync, total 0.042 s)",
+        "[11] bw   VA[3] (tag=0x5):   11.96 GB/s (30x16MB async + 1 Sync, total 0.042 s)",
+        "[11] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "12_topo_probe",
+      "command": "ASCEND_RT_VISIBLE_DEVICES=2,3,6,7 MATRIX_N=4 bash 310p-capability_matrix/12_topo_probe/run.sh",
+      "physical_devices": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "exit_code": 0,
+      "log": "12_topo_probe-final.log",
+      "observations": [
+        "[12]   cross-card pairs (i<j): total 4, can=1 both dir: 4, can=0 both dir: 0, mixed: 0, api-err: 0",
+        "[12]   cross-card enable (ordered): ret=0: 8, ret=507899 (drv internal): 0, other: 0",
+        "[12] RESULT: PASS"
+      ],
+      "device_count": 4
+    },
+    {
+      "case": "13_bw_compare",
+      "command": "A_DEV=2 B_DEV=3 bash 310p-capability_matrix/13_bw_compare/run.sh",
+      "physical_devices": [
+        2,
+        3
+      ],
+      "exit_code": 0,
+      "log": "13_bw_compare-final.log",
+      "observations": [
+        "[13] bw   IPC DEFAULT :   19.04 GB/s (30x16MB async + 1 Sync, total 0.026 s)",
+        "[13] bw   VMM ctx     :   19.05 GB/s (30x16MB async + 1 Sync, total 0.026 s)",
+        "[13] bw   host-swap   :    3.32 GB/s (30x[D2H+H2D async]+1 Sync, total 0.152 s)",
+        "[13] step 5: bw compare (A_DEV=2 -> B_DEV=3, 16MB, 30x async + 1 Sync):",
+        "[13] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "14_transfer_remote",
+      "command": "A_DEV=2 B_DEV=3 bash 310p-capability_matrix/14_transfer_remote/run.sh",
+      "physical_devices": [
+        2,
+        3
+      ],
+      "exit_code": 0,
+      "log": "14_transfer_remote-final.log",
+      "observations": [
+        "[14] bw   async D2H-read (remote->host) :    5.52 GB/s (30x16MB async + 1 Sync, total 0.091 s)",
+        "[14] bw   sync  D2H-read (remote->host) :    5.53 GB/s (30x16MB sync calls, total 0.091 s) [对照, 已知可用链路]",
+        "[14] bw   sync D2H pinned (remote->host):   24.15 GB/s (30x16MB sync calls, total 0.021 s) [pinned host, DMA 直达]",
+        "[14] bw   sync D2H local  (local->host) :   17.93 GB/s (30x16MB sync calls, total 0.028 s) [本地 dev, pinned host, 对照基线]",
+        "[14] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "15_peer_needed",
+      "command": "A_DEV=2 B_DEV=4 bash 310p-capability_matrix/15_peer_needed/run.sh",
+      "physical_devices": [
+        2,
+        4
+      ],
+      "exit_code": 0,
+      "log": "15_peer_needed-final.log",
+      "observations": [
+        "[15] RESULT: MODE=DEFAULT import_ret=507899 import=REJECTED d2d=- PASS",
+        "[15] RESULT: MODE=ENABLE import_ret=507899 import=REJECTED d2d=- PASS",
+        "[15] RESULT: MODE=ENABLE_R0 import_ret=507899 import=REJECTED d2d=- PASS",
+        "[15] RESULT: MODE=ENABLE_BOTH import_ret=0 import=OK d2d=OK PASS",
+        "[15] RESULT: MODE=PEER import_ret=0 import=OK d2d=OK PASS"
+      ]
+    },
+    {
+      "case": "16_vmm_matrix",
+      "command": "ASCEND_RT_VISIBLE_DEVICES=2,3,6,7 MATRIX_N=4 bash 310p-capability_matrix/16_vmm_matrix/run.sh",
+      "physical_devices": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "exit_code": 0,
+      "log": "16_vmm_matrix-final.log",
+      "observations": [
+        "[16] VA consistency: CONSISTENT (all rows identical) ",
+        "[16] r0 bw die  p1->scratch:   18.58 GB/s (30x4MB async + 1Sync, 0.007s)",
+        "[16] r0 bw cross p2->scratch:    7.50 GB/s (30x4MB async + 1Sync, 0.017s)",
+        "[16] r1 bw die  p0->scratch:   18.51 GB/s (30x4MB async + 1Sync, 0.007s)",
+        "[16] r1 bw cross p3->scratch:    1.23 GB/s (30x4MB async + 1Sync, 0.102s)",
+        "[16] r2 bw die  p3->scratch:   18.23 GB/s (30x4MB async + 1Sync, 0.007s)",
+        "[16] r2 bw cross p0->scratch:    5.27 GB/s (30x4MB async + 1Sync, 0.024s)",
+        "[16] r3 bw die  p2->scratch:   18.62 GB/s (30x4MB async + 1Sync, 0.007s)",
+        "[16] r3 bw cross p1->scratch:    1.23 GB/s (30x4MB async + 1Sync, 0.102s)",
+        "[16] r2 RESULT: PASS (join:OK write:OK VA:CONSISTENT)",
+        "[16] r3 RESULT: PASS (join:OK write:OK VA:CONSISTENT)",
+        "[16] r0 RESULT: PASS (join:OK write:OK VA:CONSISTENT)",
+        "[16] r1 RESULT: PASS (join:OK write:OK VA:CONSISTENT)"
+      ],
+      "device_count": 4
+    },
+    {
+      "case": "17_va_reservation",
+      "command": "A_DEV=2 B_DEV=3 bash 310p-capability_matrix/17_va_reservation/run.sh",
+      "physical_devices": [
+        2,
+        3
+      ],
+      "exit_code": 0,
+      "log": "17_va_reservation-final.log",
+      "observations": [
+        "OBSERVE api=ACL address=0x0 size=33554432 flags=0 ret=0 returned=0x12c140000000",
+        "OBSERVE api=ACL address=0x0 size=1073741824 flags=0 ret=0 returned=0x12c180000000",
+        "OBSERVE api=ACL address=0x0 size=4294967296 flags=0 ret=0 returned=0x12c180000000",
+        "OBSERVE api=ACL address=0x12c200000000 size=33554432 flags=0 ret=0 returned=0x12c200000000",
+        "OBSERVE api=ACL address=0x12c200000000 size=1073741824 flags=0 ret=0 returned=0x12c200000000",
+        "OBSERVE api=ACL address=0x12c200000000 size=4294967296 flags=0 ret=0 returned=0x12c200000000",
+        "OBSERVE api=ACL address=0x12da80000000 size=33554432 flags=0 ret=0 returned=0x12da80000000",
+        "OBSERVE api=ACL address=0x12da80000000 size=1073741824 flags=0 ret=0 returned=0x12da80000000",
+        "OBSERVE api=ACL address=0x12da80000000 size=4294967296 flags=0 ret=0 returned=0x12da80000000",
+        "OBSERVE api=ACL address=0x280040000000 size=33554432 flags=0 ret=507899 returned=0x280040000000",
+        "OBSERVE api=ACL address=0x280040000000 size=1073741824 flags=0 ret=507899 returned=0x280040000000",
+        "OBSERVE api=ACL address=0x280040000000 size=4294967296 flags=0 ret=507899 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=1073741824 flags=0 ret=13 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=2097152 flags=512 ret=3 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=33554432 flags=512 ret=3 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=67108864 flags=512 ret=3 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=1073741824 flags=512 ret=0 returned=0x280040000000",
+        "CHECK duplicate reserve ret=6",
+        "CHECK release_and_reuse=PASS",
+        "RESULT 17_va_reservation mode=probe PASS",
+        "[rank 1] pool=0 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] pool=0 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] pool=1 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 1] pool=1 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 1] pool=2 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] pool=2 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] first_window_reused=PASS",
+        "[rank 1] first_window_reused=PASS",
+        "RESULT 17_va_reservation mode=pools PASS"
+      ]
+    },
+    {
+      "case": "13_bw_compare-cross",
+      "command": "A_DEV=2 B_DEV=4 bash 310p-capability_matrix/13_bw_compare/run.sh",
+      "physical_devices": [
+        2,
+        4
+      ],
+      "exit_code": 0,
+      "log": "13_bw_compare.log",
+      "observations": [
+        "[13] bw   IPC PEER   :   11.88 GB/s (30x16MB async + 1 Sync, total 0.042 s)",
+        "[13] bw   VMM P2P     :   12.11 GB/s (30x16MB async + 1 Sync, total 0.042 s)",
+        "[13] bw   host-swap   :    3.82 GB/s (30x[D2H+H2D async]+1 Sync, total 0.132 s)",
+        "[13] step 5: bw compare (A_DEV=2 -> B_DEV=4, 16MB, 30x async + 1 Sync):",
+        "[13] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "14_transfer_remote-cross",
+      "command": "A_DEV=2 B_DEV=4 bash 310p-capability_matrix/14_transfer_remote/run.sh",
+      "physical_devices": [
+        2,
+        4
+      ],
+      "exit_code": 0,
+      "log": "14_transfer_remote.log",
+      "observations": [
+        "[14] bw   async D2H-read (remote->host) :    4.82 GB/s (30x16MB async + 1 Sync, total 0.104 s)",
+        "[14] bw   sync  D2H-read (remote->host) :    5.02 GB/s (30x16MB sync calls, total 0.100 s) [对照, 已知可用链路]",
+        "[14] bw   sync D2H pinned (remote->host):   21.87 GB/s (30x16MB sync calls, total 0.023 s) [pinned host, DMA 直达]",
+        "[14] bw   sync D2H local  (local->host) :   12.07 GB/s (30x16MB sync calls, total 0.042 s) [本地 dev, pinned host, 对照基线]",
+        "[14] RESULT: PASS"
+      ]
+    },
+    {
+      "case": "17-renumbered",
+      "command": "ASCEND_RT_VISIBLE_DEVICES=2,3 A_DEV=0 B_DEV=1 bash 310p-capability_matrix/17_va_reservation/run.sh pools",
+      "exit_code": 0,
+      "log": "17-renumbered.log",
+      "observations": [
+        "[rank 1] pool=0 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] pool=0 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 1] pool=1 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] pool=1 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] pool=2 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 1] pool=2 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 1] first_window_reused=PASS",
+        "[rank 0] first_window_reused=PASS",
+        "RESULT 17_va_reservation mode=pools PASS"
+      ]
+    },
+    {
+      "case": "17-acl-control",
+      "command": "A_DEV=2 B_DEV=3 bash 310p-capability_matrix/17_va_reservation/run.sh acl-pools",
+      "exit_code": 1,
+      "log": "17-acl-control.log",
+      "observations": [
+        "[rank 1] pool=0 2MiB peer_read=PASS peer_writeback=PASS",
+        "[rank 0] pool=0 2MiB peer_read=PASS peer_writeback=PASS",
+        "RESULT 17_va_reservation mode=acl-pools FAIL",
+        "[rank 1] reserve api=ACL address=0x12c200000000 size=1073741824 flags=0 ret=0",
+        "[rank 0] reserve api=ACL address=0x12c200000000 size=1073741824 flags=0 ret=0",
+        "[rank 1 device 3] FAIL exact window reservation ret=507899",
+        "[rank 1] reserve api=ACL address=0x12c240000000 size=1073741824 flags=0 ret=507899",
+        "[rank 0] reserve api=ACL address=0x12c240000000 size=1073741824 flags=0 ret=507899",
+        "[rank 0 device 2] FAIL exact window reservation ret=507899",
+        "[FAIL] phase=exact window reservation"
+      ],
+      "interpretation": "Negative control: pool 0 data checks pass; reserve of pool 1 at 0x12c240000000 returns 507899."
+    },
+    {
+      "case": "17-runtime",
+      "command": "ASCEND_GLOBAL_LOG_LEVEL=0 ASCEND_SLOG_PRINT_TO_STDOUT=1 A_DEV=2 bash 310p-capability_matrix/17_va_reservation/run.sh probe",
+      "exit_code": 0,
+      "log": "17-runtime.log",
+      "observations": [
+        "OBSERVE api=ACL address=0x0 size=33554432 flags=0 ret=0 returned=0x12c140000000",
+        "OBSERVE api=ACL address=0x0 size=1073741824 flags=0 ret=0 returned=0x12c180000000",
+        "OBSERVE api=ACL address=0x0 size=4294967296 flags=0 ret=0 returned=0x12c180000000",
+        "OBSERVE api=ACL address=0x12c200000000 size=33554432 flags=0 ret=0 returned=0x12c200000000",
+        "OBSERVE api=ACL address=0x12c200000000 size=1073741824 flags=0 ret=0 returned=0x12c200000000",
+        "OBSERVE api=ACL address=0x12c200000000 size=4294967296 flags=0 ret=0 returned=0x12c200000000",
+        "OBSERVE api=ACL address=0x12da80000000 size=33554432 flags=0 ret=0 returned=0x12da80000000",
+        "OBSERVE api=ACL address=0x12da80000000 size=1073741824 flags=0 ret=0 returned=0x12da80000000",
+        "OBSERVE api=ACL address=0x12da80000000 size=4294967296 flags=0 ret=0 returned=0x12da80000000",
+        "OBSERVE api=ACL address=0x280040000000 size=33554432 flags=0 ret=507899 returned=0x280040000000",
+        "OBSERVE api=ACL address=0x280040000000 size=1073741824 flags=0 ret=507899 returned=0x280040000000",
+        "OBSERVE api=ACL address=0x280040000000 size=4294967296 flags=0 ret=507899 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=1073741824 flags=0 ret=13 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=2097152 flags=512 ret=3 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=33554432 flags=512 ret=3 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=67108864 flags=512 ret=3 returned=0x280040000000",
+        "OBSERVE api=HAL address=0x280040000000 size=1073741824 flags=512 ret=0 returned=0x280040000000",
+        "CHECK duplicate reserve ret=6",
+        "CHECK release_and_reuse=PASS",
+        "RESULT 17_va_reservation mode=probe PASS"
+      ],
+      "driver_calls": [
+        "[DEBUG] DRV(1895121,test):2026-11-11-07:08:03.470.375 [devmm_svm.c:5198][ascend][curpid:1895121,1895121][drv][devmm][halMemAddressReserve]Reserve. (ptr=0x280040000000; size=33554432; real_size=33554432; addr=0x280040000000; flag=0x0; ret=13)",
+        "[DEBUG] DRV(1895121,test):2026-11-11-07:08:03.470.471 [devmm_svm.c:5198][ascend][curpid:1895121,1895121][drv][devmm][halMemAddressReserve]Reserve. (ptr=0x280040000000; size=1073741824; real_size=1073741824; addr=0x280040000000; flag=0x0; ret=13)",
+        "[DEBUG] DRV(1895121,test):2026-11-11-07:08:03.470.553 [devmm_svm.c:5198][ascend][curpid:1895121,1895121][drv][devmm][halMemAddressReserve]Reserve. (ptr=0x280040000000; size=4294967296; real_size=4294967296; addr=0x280040000000; flag=0x0; ret=13)",
+        "[DEBUG] DRV(1895121,test):2026-11-11-07:08:03.470.610 [devmm_svm.c:5198][ascend][curpid:1895121,1895121][drv][devmm][halMemAddressReserve]Reserve. (ptr=0x280040000000; size=1073741824; real_size=1073741824; addr=0x280040000000; flag=0x0; ret=13)"
+      ]
+    },
+    {
+      "case": "04-memattr",
+      "command": "make -C 310p-capability_matrix/04_vmm_cross test_memattr && 310p-capability_matrix/04_vmm_cross/test_memattr 2",
+      "physical_devices": [
+        2
+      ],
+      "exit_code": 0,
+      "observations": [
+        "OBSERVE memAttr=ACL_MEM_NORMAL gran_ret=0 gran=2097152 malloc_ret=0",
+        "OBSERVE memAttr=ACL_MEM_HUGE gran_ret=0 gran=2097152 malloc_ret=0",
+        "OBSERVE memAttr=ACL_MEM_HUGE1G gran_ret=207000 gran=0 malloc_ret=207000",
+        "OBSERVE memAttr=ACL_MEM_P2P_NORMAL gran_ret=0 gran=2097152 malloc_ret=0",
+        "OBSERVE memAttr=ACL_MEM_P2P_HUGE gran_ret=0 gran=2097152 malloc_ret=0",
+        "OBSERVE memAttr=ACL_MEM_P2P_HUGE1G gran_ret=207000 gran=0 malloc_ret=207000",
+        "OBSERVE memAttr=ACL_HBM_MEM_HUGE gran_ret=0 gran=2097152 malloc_ret=0",
+        "OBSERVE memAttr=ACL_HBM_MEM_NORMAL gran_ret=0 gran=2097152 malloc_ret=0",
+        "OBSERVE memAttr=ACL_HBM_MEM_P2P_HUGE gran_ret=100000 gran=0 malloc_ret=100000",
+        "OBSERVE memAttr=ACL_HBM_MEM_P2P_NORMAL gran_ret=100000 gran=0 malloc_ret=100000",
+        "OBSERVE memAttr=ACL_DDR_MEM_HUGE gran_ret=100000 gran=0 malloc_ret=100000",
+        "OBSERVE memAttr=ACL_DDR_MEM_NORMAL gran_ret=100000 gran=0 malloc_ret=100000",
+        "OBSERVE memAttr=ACL_DDR_MEM_P2P_HUGE gran_ret=100000 gran=0 malloc_ret=100000",
+        "OBSERVE memAttr=ACL_DDR_MEM_P2P_NORMAL gran_ret=100000 gran=0 malloc_ret=100000",
+        "RESULT memattr_probe PASS"
+      ]
+    },
+    {
+      "case": "IPC-export-failure-regression",
+      "method": "Temporary LD_PRELOAD shim returns 100000 from aclrtIpcMemGetExportKey. First export is injected for six tests; the second export is also injected for 02. Each injected MPI run has a 30-second timeout.",
+      "results": [
+        "02_ipc_die positive_exit=0",
+        "02_ipc_die injected_exit=1",
+        "03_ipc_cross positive_exit=0",
+        "03_ipc_cross injected_exit=1",
+        "11_ipc_va_determinism positive_exit=0",
+        "11_ipc_va_determinism injected_exit=1",
+        "13_bw_compare positive_exit=0",
+        "13_bw_compare injected_exit=1",
+        "14_transfer_remote positive_exit=0",
+        "14_transfer_remote injected_exit=1",
+        "15_peer_needed positive_exit=0",
+        "15_peer_needed injected_exit=1",
+        "02_second_export injected_exit=1"
+      ],
+      "interpretation": "Positive runs exit 0; injected failures exit 1, not timeout. The temporary shim is not a production change."
+    },
+    {
+      "case": "15-invalid-mode",
+      "command": "MODE=INVALID mpirun --allow-run-as-root --stdin none -np 2 310p-capability_matrix/15_peer_needed/test",
+      "exit_code": 2,
+      "observations": [
+        "FAIL invalid MODE=INVALID"
+      ]
+    }
+  ],
+  "full_ut": {
+    "command": "bash script/run_ut.sh",
+    "tests": 2070,
+    "passed": 2060,
+    "skipped": 10,
+    "failed": 0,
+    "line_coverage_percent": 70.0,
+    "branch_coverage_percent": 46.4,
+    "environment": "Separate build worktree; same production source base; test matrix probes are independent executables."
+  }
+}

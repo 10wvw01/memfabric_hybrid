@@ -20,7 +20,10 @@
 #include <stdio.h>
 #include "acl/acl.h"
 
-#define NDEV 8
+#ifndef MATRIX_N
+#define MATRIX_N 8
+#endif
+#define NDEV MATRIX_N
 
 /* 507899 = ACL_ERROR_RT_DRV_INTERNAL_ERROR (drv internal error), die 对 enable 常见返回 */
 #define ERR_DRV_INTERNAL 507899
@@ -53,7 +56,7 @@ int main(void)
     char cell[32];
 
     printf("[12] === 12_topo_probe: topology probe (CanAccessPeer / EnablePeerAccess) ===\n");
-    printf("[12] 8 dev = 4 card x 2 die, die pairs: (0,1)(2,3)(4,5)(6,7)\n");
+    printf("[12] visible device pairs must be consecutive Duo die pairs\n");
 
     /* ---- init ---- */
     ret = aclInit(NULL);
@@ -65,7 +68,7 @@ int main(void)
     printf("[12] init: aclInit OK\n");
 
     /* ---- step 1: SetDevice on all 8 devices ---- */
-    printf("[12] step 1: aclrtSetDevice on all 8 devices\n");
+    printf("[12] step 1: aclrtSetDevice on selected devices\n");
     for (i = 0; i < NDEV; i++) {
         ret = aclrtSetDevice(i);
         setdev[i] = (ret == ACL_ERROR_NONE) ? 1 : 0;
@@ -76,7 +79,7 @@ int main(void)
 
     /* ---- step 2: CanAccessPeer 8x8 matrix ---- */
     /* 先全部查完 can, 再做 enable 试探, 减少 sticky enable 状态对 can 查询的污染 */
-    printf("[12] step 2: aclrtDeviceCanAccessPeer 8x8 matrix (row=i accessor, col=j peer)\n");
+    printf("[12] step 2: aclrtDeviceCanAccessPeer NxN matrix (row=i accessor, col=j peer)\n");
     printf("[12]   cell = can value (0/1); 'E<code>' = API error code; '-' = diagonal\n");
     for (i = 0; i < NDEV; i++) {
         if (setdev[i])
