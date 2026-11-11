@@ -295,10 +295,9 @@ int main(int argc, char *argv[])
             ret = aclrtIpcMemGetExportKey(ipc_da, BLOCK_SIZE, ipc_key, IPC_KEY_LEN,
                                           ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
         if (ret == ACL_ERROR_NONE) {
-            ok = 1;
+            if (MPI_Send(ipc_key, IPC_KEY_LEN, MPI_CHAR, 1, 100, MPI_COMM_WORLD) == MPI_SUCCESS)
+                ok = 1;
         }
-        if (MPI_Send(ipc_key, IPC_KEY_LEN, MPI_CHAR, 1, 100, MPI_COMM_WORLD) != MPI_SUCCESS)
-            ok = 0;
         step_line(1, who, "IPC: malloc P2P 16MB + H2D pattern + export key + send", ok, ret);
         if (!ok)
             BAIL(fatal);

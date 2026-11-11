@@ -1,20 +1,4 @@
-# 本轮硬件与 host 池验证范围
-
-2026-11-11 的主验证环境为 Ascend310P3 / Atlas 300I Duo，CANN 9.2.1，驱动 26.1.0。
-同卡组合为 2、3，跨卡组合为 2、4；四设备组合为 2、3、6、7。
-
-Host 池验证使用两个进程和设备 2，POSIX shm 写入可见性及 H2D/D2H 校验通过。
-V2 PINNED 注册成功，MAPPED 路径返回 207000；见[完整步骤与结论](README.md)。
-
-带宽按实际数据和计时给出，不再由单次带宽反推 NUMA、PCIe 通道数或驱动内部硬件限额。
-跨路径对比见[第 13 项](../13_bw_compare/README.md)，实际返回值见[结果记录](../results/2026-11-11.json)。
-
-## 原有分析与历史依据
-
-以下保留原有分析、数据及代码定位；本轮直接验证的内容见上文和对应 README。
-硬件机制推断与实际 API 返回值分别记录。
-
-### Atlas 300I Duo 硬件拓扑与 PCIe 带宽分析
+# Atlas 300I Duo 硬件拓扑与 PCIe 带宽分析
 
 ## 1. 机器配置概览
 
@@ -51,7 +35,7 @@ lspci -t
 
 **分析方法：**
 ```bash
-### 查看每个 Root Port 的链路能力和状态
+# 查看每个 Root Port 的链路能力和状态
 for port in 16:04.0 40:00.0 95:00.0 aa:00.0; do
   echo "=== $port ==="
   lspci -s $port -vvv 2>&1 | grep -E "LnkCap:|LnkSta:"
@@ -110,16 +94,16 @@ CPU Socket 1 (NUMA 2,3)
 
 **运行命令：**
 ```bash
-### 卡0 (PCIe 4.0 x8)
+# 卡0 (PCIe 4.0 x8)
 A_DEV=0 B_DEV=0 ./run.sh
 
-### 卡1 (PCIe 4.0 x16)
+# 卡1 (PCIe 4.0 x16)
 A_DEV=2 B_DEV=2 ./run.sh
 
-### 卡2 (PCIe 4.0 x8)
+# 卡2 (PCIe 4.0 x8)
 A_DEV=4 B_DEV=4 ./run.sh
 
-### 卡3 (PCIe 4.0 x16)
+# 卡3 (PCIe 4.0 x16)
 A_DEV=6 B_DEV=6 ./run.sh
 ```
 
@@ -174,16 +158,16 @@ PCIe 5.0: 32 GT/s, 128b/130b 编码 (效率 98.5%)
 ### 4.1 PCIe 拓扑分析命令
 
 ```bash
-### 1. 查看完整 PCIe 拓扑树
+# 1. 查看完整 PCIe 拓扑树
 lspci -t
 
-### 2. 查看设备详细信息
+# 2. 查看设备详细信息
 lspci -s <BDF> -vvv
 
-### 3. 查看链路能力和状态
+# 3. 查看链路能力和状态
 lspci -s <BDF> -vvv | grep -E "LnkCap:|LnkSta:"
 
-### 4. 批量查看所有 Root Port
+# 4. 批量查看所有 Root Port
 for dev in $(lspci | grep "Root Port" | awk '{print $1}'); do
   echo "=== $dev ==="
   lspci -s $dev -vvv 2>&1 | grep -E "LnkCap:|LnkSta:"
@@ -193,27 +177,27 @@ done
 ### 4.2 NPU 设备查询命令
 
 ```bash
-### 查看 NPU 设备信息
+# 查看 NPU 设备信息
 npu-smi info
 
-### 查看 NPU 拓扑
+# 查看 NPU 拓扑
 npu-smi info -t topo
 
-### 查看 HCCS 连接
+# 查看 HCCS 连接
 npu-smi info -t hccs -i <card_id> -c <chip_id>
 ```
 
 ### 4.3 带宽测试命令
 
 ```bash
-### 编译测试程序
+# 编译测试程序
 cd 06_host_pool
 make
 
-### 运行测试（指定设备）
+# 运行测试（指定设备）
 A_DEV=<device_id> B_DEV=<device_id> ./run.sh
 
-### 提取带宽数据
+# 提取带宽数据
 ./run.sh 2>&1 | grep "bw"
 ```
 

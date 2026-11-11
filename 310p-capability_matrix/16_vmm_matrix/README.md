@@ -1,42 +1,4 @@
-# 16_vmm_matrix：多设备 VMM 池
-
-
-## 测试内容
-
-各 rank 预留 VA 窗口，将本地页和导入页映射到固定编号的槽位，再校验 join、环形写入和窗口地址一致性。
-
-## 本轮条件与结果
-
-2026-11-11，Ascend310P3 / Atlas 300I Duo，aarch64，CANN 9.2.1，驱动 26.1.0。
-
-4 个 MPI rank；物理设备 2、3、6、7 映射为 0～3；每 rank 16 MiB 物理 slab，每个窗口 64 MiB，带宽段为 4 MiB。
-
-**通过，退出码 0；join/write 均成功，VA CONSISTENT。**
-
-本轮没有显式调用 EnablePeerAccess；同卡导入使用导出方上下文路径。四设备 VMM 池成立，不能从中推出八设备全连接成立或不存在 P2P 资源限制。
-
-## 运行
-
-在仓库根目录执行，设备号以当前进程可见的编号为准：
-
-```bash
-source /usr/local/Ascend/cann/set_env.sh
-ASCEND_RT_VISIBLE_DEVICES=2,3,6,7 MATRIX_N=4 bash 310p-capability_matrix/16_vmm_matrix/run.sh
-```
-
-脚本先编译，传递编译和运行的退出码；超时返回 124，超时后强制结束可能返回 137。
-本轮条件、退出码与关键输出收录在[结果记录](../results/2026-11-11.json)。
-
-`MATRIX_N` 支持 4 或 8，默认 8；切换规模时脚本强制重新编译。
-可见设备列表必须按完整 Duo 卡的两个 die 相邻排列，使逻辑 (0,1)、(2,3) 等仍对应同卡。
-本轮执行了四设备模式，八设备模式仅编译，未运行。
-
-## 详细测试步骤、API 调用链与历史性能数据
-
-以下保留原文的详细流程、结果和性能数据，环境及设备组合以各段原始记录为准。
-本轮结果见上文；涉及不同环境或未复测拓扑时，分别阅读，不合并为一次测试结果。
-
-### 16_vmm_matrix — 8 NPU VMM 内存池全连接
+# 16_vmm_matrix — 8 NPU VMM 内存池全连接
 
 Atlas 300I Duo(310P3,4 卡 × 2 die = 8 dev)/ CANN 9.1.0 / aarch64,MPI 8 进程,
 rank k = dev k(恒等映射)。die 对 = (0,1)(2,3)(4,5)(6,7)。
@@ -70,7 +32,7 @@ rank k = dev k(恒等映射)。die 对 = (0,1)(2,3)(4,5)(6,7)。
 
 ## API 链
 
-- **create**:`aclrtMallocPhysical(16MB, 七级回退, 本用例回退链在 P2P_HUGE 首次成功；独立属性探测另有六种属性可分配,
+- **create**:`aclrtMallocPhysical(16MB, 七级回退, 310P3 仅 ACL_MEM_P2P_HUGE 成功,
   gran=2MB)` → `aclrtReserveMemAddress(128MB, NULL)` → `aclrtMapMem(own@slot r)` →
   `aclrtMemSetAccess(RW, dev)` → H2D pattern(rank, tag=0x16) →
   `aclrtMemExportToShareableHandle(DISABLE_PID_VALIDATION)`

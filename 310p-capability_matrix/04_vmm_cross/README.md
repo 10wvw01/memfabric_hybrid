@@ -1,54 +1,6 @@
-# 04_vmm_cross：跨卡 VMM
+# 简单版本——04_vmm_cross — VMM shareable 链路跨卡(PCIe)
 
-
-## 测试内容
-
-验证 ACL 物理页分配、共享句柄导出/导入、VA 预留和映射、访问权限设置，以及双向读写。
-
-## 本轮条件与结果
-
-2026-11-11，Ascend310P3 / Atlas 300I Duo，aarch64，CANN 9.2.1，驱动 26.1.0。
-
-设备 2→4，两个 MPI 进程；32 MiB 物理分配、16 MiB 传输段。
-
-**通过，退出码 0。**
-
-不显式 EnablePeerAccess 的导入成功；切到导出方上下文后导入也成功。异步读 12.43 GB/s、写 13.10 GB/s。普通跨卡导入可以成功，不能据此推出同卡双 die 无需上下文切换。
-
-## 运行
-
-在仓库根目录执行，设备号以当前进程可见的编号为准：
-
-```bash
-source /usr/local/Ascend/cann/set_env.sh
-A_DEV=2 B_DEV=4 bash 310p-capability_matrix/04_vmm_cross/run.sh
-```
-
-脚本先编译，传递编译和运行的退出码；超时返回 124，超时后强制结束可能返回 137。
-本轮条件、退出码与关键输出收录在[结果记录](../results/2026-11-11.json)。
-
-独立属性探测 `test_memattr.c` 不在默认 runner 内：
-
-```bash
-make -C 310p-capability_matrix/04_vmm_cross test_memattr
-310p-capability_matrix/04_vmm_cross/test_memattr 2
-```
-
-各属性的分配与粒度返回值分别记录；主用例回退链命中 P2P_HUGE 不代表它是唯一可分配属性。
-
-本轮独立探测 14 种属性，4 MiB 分配成功的有 MEM_NORMAL、MEM_HUGE、MEM_P2P_NORMAL、
-MEM_P2P_HUGE、HBM_MEM_HUGE、HBM_MEM_NORMAL，推荐粒度均为 2 MiB。
-两个 HUGE1G 属性返回 207000，HBM_P2P 与 DDR 属性返回 100000。
-这里只验证粒度查询及分配释放，未将所有成功属性都用于跨设备共享。
-
-## 详细测试步骤、API 调用链与历史性能数据
-
-以下保留原文的详细流程、结果和性能数据，环境及设备组合以各段原始记录为准。
-本轮结果见上文；涉及不同环境或未复测拓扑时，分别阅读，不合并为一次测试结果。
-
-### 简单版本——04_vmm_cross — VMM shareable 链路跨卡(PCIe)
-
-Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64
+Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64  
 MPI 双进程: rank0=exporter(dev A, `A_DEV` 默认 0), rank1=importer(dev B, `B_DEV` 默认 2)
 
 ## 310P3 内存属性支持
@@ -124,9 +76,9 @@ A_DEV=1 B_DEV=4 ./run.sh    # 其他设备组合
 
 ## D 态挂死修复
 
-**问题**: 旧版退出时残留 D 状态进程(SIGKILL 不可回收)
-**根因**: EnablePeerAccess 建立的 P2P 状态 + mmu notifier 释放 = 驱动 SRCU 死锁
-**修复**: cleanup 在 ResetDevice 前调用 `aclrtDeviceDisablePeerAccess(peer)`
+**问题**: 旧版退出时残留 D 状态进程(SIGKILL 不可回收)  
+**根因**: EnablePeerAccess 建立的 P2P 状态 + mmu notifier 释放 = 驱动 SRCU 死锁  
+**修复**: cleanup 在 ResetDevice 前调用 `aclrtDeviceDisablePeerAccess(peer)`  
 **验证**: exit=0，无 D 态残留
 
 ## 310P3 所属系列与内存属性支持
@@ -177,7 +129,7 @@ A_DEV=1 B_DEV=4 ./run.sh    # 其他设备组合
 │ 1. aclrtMallocPhysical(32MB, prop)                                          │
 │    → 分配 32MB 物理内存(handle=h_own)                                       │
 │    → prop.memAttr 七级回退: HBM_P2P_HUGE → ... → MEM_P2P_HUGE → ...        │
-│    → 本用例回退链在 P2P_HUGE 首次成功；独立属性探测另有六种属性可分配,granularity=2MB                         │
+│    → 310P3 实测仅 MEM_P2P_HUGE 成功,granularity=2MB                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ 2. aclrtReserveMemAddress(32MB, hint=NULL)                                  │
 │    → 在虚拟地址空间预留 32MB 区间(返回 VA=ownVA)                            │

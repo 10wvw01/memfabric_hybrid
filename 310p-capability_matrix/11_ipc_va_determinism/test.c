@@ -215,7 +215,6 @@ int main(int argc, char *argv[])
                 BAIL(fatal);
         }
     }
-    sync_state(&fatal);
     if (!fatal) {
 /* Bcast keys */
         MPI_Bcast(keys, NR_BLOCKS * IPC_KEY_LEN, MPI_CHAR, 0, MPI_COMM_WORLD);

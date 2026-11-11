@@ -220,10 +220,9 @@ int main(int argc, char *argv[])
                                               ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
             if (ret == ACL_ERROR_NONE) {
                 exp1_ok = 1;
-                ok = 1;
+                if (MPI_Send(key1, IPC_KEY_LEN, MPI_CHAR, 1, 100, MPI_COMM_WORLD) == MPI_SUCCESS)
+                    ok = 1;
             }
-            if (MPI_Send(key1, IPC_KEY_LEN, MPI_CHAR, 1, 100, MPI_COMM_WORLD) != MPI_SUCCESS)
-                ok = 0;
             step_line(1, who, "malloc P2P 32MB + H2D pattern + export key1 + MPI-send",
                       ok, ret);
             if (!ok)
@@ -307,10 +306,9 @@ int main(int argc, char *argv[])
                                               ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION);
             if (ret == ACL_ERROR_NONE) {
                 exp2_ok = 1;
-                ok = 1;
+                if (MPI_Send(key2, IPC_KEY_LEN, MPI_CHAR, 1, 101, MPI_COMM_WORLD) == MPI_SUCCESS)
+                    ok = 1;
             }
-            if (MPI_Send(key2, IPC_KEY_LEN, MPI_CHAR, 1, 101, MPI_COMM_WORLD) != MPI_SUCCESS)
-                ok = 0;
             step_line(3, who, "malloc P2P 16MB #2 + export key2 + MPI-send (ctrlA setup)",
                       ok, ret);
             if (!ok)

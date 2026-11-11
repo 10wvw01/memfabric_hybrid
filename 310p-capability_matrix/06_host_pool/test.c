@@ -10,7 +10,8 @@
  *   - POSIX shm 跨进程 host DRAM 共享 ✓(MAP_SHARED, 两进程同物理页, host 侧直接可见)
  *   - 共享 host 内存 + H2D 链路 ✓(rank1 从共享池 H2D 到本 rank dev + D2H 校验;
  *     rank0 改共享区后 rank1 再 H2D 读新数据, 验证跨进程更新可见)
- *   - 分别观测 aclrtHostRegister / V2 的 MAPPED、PINNED 和组合标志; 返回值见运行日志
+ *   - aclrtHostRegister 边界(预期 207000): 310P3 不支持对任意 mmap 内存做 host register
+ *     (pinned host 必须来自 aclrtMallocHost; 用户 mmap 区不可 page-lock) —— 文档化此边界
  *   - aclrtHostRegisterV2 边界: V2 接口支持更多 flag 组合(MAPPED/PINNED 位或)
  *   - aclrtHostMemMapCapabilities: 查询设备是否支持 host register 能力
  *
@@ -143,12 +144,21 @@ static void step_line(int n, const char *who, const char *desc, int ok, int32_t 
         g_fail = 1;
 }
 
-/* Record each host registration mode independently; successful registrations need cleanup. */
+/* step4 边界行(预期 207000; 意外成功也如实记录, 不影响判定)
+ * 返回 1 = 意外成功(调用方需 HostUnregister); 0 = 预期失败(无需 unregister) */
 static int boundary_line(int n, const char *who, const char *desc, int32_t ret)
 {
-    printf("[06] OBSERVE step=%d rank=%s api=%s ret=%d\n", n, who, desc, ret);
+    if (ret != 0) {
+        printf("[06] step %d (%s): %-58s EXPECTED-FAIL ret=%d%s\n", n, who, desc, ret,
+               (ret == EXPECTED_ERR) ? " (207000 FEATURE_NOT_SUPPORT)" :
+                "  [注意: 错误码非预期 207000]");
+        fflush(stdout);
+        return 0;
+    }
+    printf("[06] step %d (%s): %-58s 意外成功 ret=0 <- host register 可用?(310P3 文档为不可用)\n",
+           n, who, desc);
     fflush(stdout);
-    return ret == 0;
+    return 1;
 }
 
 static void bw_line(const char *name, double sec, const char *note)
@@ -432,44 +442,44 @@ int main(int argc, char *argv[])
             if (shm_mapped) {
                 void *reg_dev_ptr = NULL;
                 ret = aclrtHostRegister(shm_ptr, (uint64_t)POOL_SIZE, ACL_HOST_REGISTER_MAPPED, &reg_dev_ptr);
-                int succ = boundary_line(4, who, "4b: aclrtHostRegister on mmap shm", ret);
+                int succ = boundary_line(4, who, "4b: aclrtHostRegister on mmap shm (expect 207000)", ret);
                 if (succ) {
                     reg_ok = 1;
                     aclError ur = aclrtHostUnregister(shm_ptr);
-                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4b successful registration)\n", (int)ur);
+                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4b unexpected-success)\n", (int)ur);
                 }
             }
 
             /* 4c: aclrtHostRegisterV2 on mmap shm (MAPPED flag) -> 预期 207000 */
             if (shm_mapped) {
                 ret = aclrtHostRegisterV2(shm_ptr, (uint64_t)POOL_SIZE, ACL_HOST_REG_MAPPED);
-                int succ = boundary_line(4, who, "4c: aclrtHostRegisterV2 MAPPED on mmap shm", ret);
+                int succ = boundary_line(4, who, "4c: aclrtHostRegisterV2 MAPPED on mmap shm (expect 207000)", ret);
                 if (succ) {
                     reg_ok = 1;
                     aclError ur = aclrtHostUnregister(shm_ptr);
-                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4c successful registration)\n", (int)ur);
+                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4c unexpected-success)\n", (int)ur);
                 }
             }
 
             /* 4d: aclrtHostRegisterV2 on mmap shm (PINNED flag) -> 预期 207000 */
             if (shm_mapped) {
                 ret = aclrtHostRegisterV2(shm_ptr, (uint64_t)POOL_SIZE, ACL_HOST_REG_PINNED);
-                int succ = boundary_line(4, who, "4d: aclrtHostRegisterV2 PINNED on mmap shm", ret);
+                int succ = boundary_line(4, who, "4d: aclrtHostRegisterV2 PINNED on mmap shm (expect 207000)", ret);
                 if (succ) {
                     reg_ok = 1;
                     aclError ur = aclrtHostUnregister(shm_ptr);
-                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4d successful registration)\n", (int)ur);
+                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4d unexpected-success)\n", (int)ur);
                 }
             }
 
             /* 4e: aclrtHostRegisterV2 on mmap shm (MAPPED|PINNED) -> 预期 207000 */
             if (shm_mapped) {
                 ret = aclrtHostRegisterV2(shm_ptr, (uint64_t)POOL_SIZE, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED);
-                int succ = boundary_line(4, who, "4e: aclrtHostRegisterV2 MAPPED|PINNED on mmap shm", ret);
+                int succ = boundary_line(4, who, "4e: aclrtHostRegisterV2 MAPPED|PINNED on mmap shm (expect 207000)", ret);
                 if (succ) {
                     reg_ok = 1;
                     aclError ur = aclrtHostUnregister(shm_ptr);
-                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4e successful registration)\n", (int)ur);
+                    printf("[06] cleanup (r0): aclrtHostUnregister(shm) ret=%d (4e unexpected-success)\n", (int)ur);
                 }
             }
 
@@ -477,22 +487,22 @@ int main(int argc, char *argv[])
             if (hp) {
                 void *reg_dev_ptr = NULL;
                 ret = aclrtHostRegister(hp, (uint64_t)POOL_SIZE, ACL_HOST_REGISTER_MAPPED, &reg_dev_ptr);
-                int succ = boundary_line(4, who, "4f: aclrtHostRegister on aclrtMallocHost hp", ret);
+                int succ = boundary_line(4, who, "4f: aclrtHostRegister on aclrtMallocHost hp (expect 207000)", ret);
                 if (succ) {
                     reg_ok = 1;
                     aclError ur = aclrtHostUnregister(hp);
-                    printf("[06] cleanup (r0): aclrtHostUnregister(hp) ret=%d (4f successful registration)\n", (int)ur);
+                    printf("[06] cleanup (r0): aclrtHostUnregister(hp) ret=%d (4f unexpected-success)\n", (int)ur);
                 }
             }
 
             /* 4g: aclrtHostRegisterV2 on malloc non-pinned (PINNED flag) -> 预期 207000 */
             if (malloc_ptr) {
                 ret = aclrtHostRegisterV2(malloc_ptr, (uint64_t)POOL_SIZE, ACL_HOST_REG_PINNED);
-                int succ = boundary_line(4, who, "4g: aclrtHostRegisterV2 PINNED on malloc", ret);
+                int succ = boundary_line(4, who, "4g: aclrtHostRegisterV2 PINNED on malloc (expect 207000)", ret);
                 if (succ) {
                     reg_ok = 1;
                     aclError ur = aclrtHostUnregister(malloc_ptr);
-                    printf("[06] cleanup (r0): aclrtHostUnregister(malloc) ret=%d (4g successful registration)\n", (int)ur);
+                    printf("[06] cleanup (r0): aclrtHostUnregister(malloc) ret=%d (4g unexpected-success)\n", (int)ur);
                 }
             }
 
@@ -722,7 +732,7 @@ int main(int argc, char *argv[])
 
         printf("[06] RESULT: %s", g_fail ? "FAIL" : "PASS");
         if (!g_fail && reg_ok)
-            printf(" host_register_success_observed=1");
+            printf("  ★观测: host register 系列接口意外成功(310P3 文档为不可用, 实测可用?)");
         printf("\n");
         fflush(stdout);
     }
