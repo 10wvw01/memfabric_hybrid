@@ -1,5 +1,7 @@
 # MemCache vLLM TTFT 复测错误分析报告
 
+本文保留历史环境的测试数据和问题记录。当前指定分支的部署流程见[部署说明](vllm_deployment_flow.md)，最新验证条件与结果见[迁移报告](vllm_024_migration_results.md)。
+
 **复测日期**: 2026-09-29  
 **复测设备**: dev6, dev7 (Bus AB:00.0, 同卡 die-pair)  
 **复测范围**: Layer 2 (workload) + Layer 3 (integration: host_shm + device_sdma)
@@ -216,11 +218,11 @@ error [AccLink acc_tcp_listener.cpp:195 ProcessNewConnection] Failed to read hea
 | 测试 | 原报告 | 复测 | 差异 |
 |------|--------|------|------|
 | Layer 2 | 5 passed, 1 skipped | 7 passed, 1 skipped | +2 eviction repro tests |
-| Layer 3 host_shm Test 3.7 开销 | 6.14% | 10.95% | +4.81pp（均在 20% 阈值内） |
+| Layer 3 host_shm Test 3.7 开销 | 6.14% | 10.95% | +4.81pp |
 | Layer 3 host_shm Test 3.8 降幅 | 85.9% | 86.89% | +0.99pp |
 | Layer 3 host_shm Test 3.9[30%] 改善 | 26.29% | 25.61% | -0.68pp |
 | Layer 3 host_shm Test 3.9[50%] 改善 | 43.11% | 42.86% | -0.25pp |
-| Layer 3 device_sdma Test 3.7 开销 | 5.74% | 9.47% | +3.73pp（均在 20% 阈值内） |
+| Layer 3 device_sdma Test 3.7 开销 | 5.74% | 9.47% | +3.73pp |
 | Layer 3 device_sdma Test 3.8 降幅 | 85.4% | 86.41% | +1.01pp |
 | Layer 3 device_sdma Test 3.9[30%] 改善 | 25.65% | 25.43% | -0.22pp |
 | Layer 3 device_sdma Test 3.9[50%] 改善 | 43.94% | 44.15% | +0.21pp |

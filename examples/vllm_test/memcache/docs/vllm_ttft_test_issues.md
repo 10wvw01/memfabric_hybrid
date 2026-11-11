@@ -1,5 +1,7 @@
 # MemCache vLLM TTFT 测试问题记录
 
+本文保留历史环境的测试数据和问题记录。当前指定分支的部署流程见[部署说明](vllm_deployment_flow.md)，最新验证条件与结果见[迁移报告](vllm_024_migration_results.md)。
+
 ## 1. device_sdma HBM→DRAM Eviction 107002 错误
 
 ### 1.1 问题概述
@@ -114,7 +116,6 @@ Python API（`put_from_layers`）的分配器有跨 rank + DRAM fallback 逻辑�
 
 | 结论 | 影响程度 | 说明 |
 |------|---------|------|
-| Layer 3 测试通过 | 无影响 | 测试门限（开销 < 20%、hit/miss < 70%）仍满足 |
 | MemCache cache hit 降幅 85%+ | 需修正归因 | 降幅主要来自 vLLM 内部 prefix cache（5.65 GiB >> 20 prompt），而非 MemCache 分布式存储 |
 | device_sdma DRAM 层可用 | 需修正 | DRAM 层实际不可用（eviction 全部失败），MemCache 在 device_sdma 下实际只有 HBM 单层 |
 | device_sdma vs host_shm 对比 | 需修正 | 两种协议实际都是单层存储（host_shm 只有 DRAM，device_sdma 只有 HBM），开销差异来自 HBM SDMA vs DRAM 共享内存的带宽差异 |
@@ -284,7 +285,7 @@ WARNING kv cache tensor ptr 0x12d2885c8000 not 2MB-aligned (storage_key=0x12d288
 
 **根因**: vLLM KV cache tensor 指针由 vLLM 显存分配器决定，未保证 2MB 物理对齐。`AscendStoreConnector` 的 `KVPoolWorker._align_kv_ptrs`（`pool_worker.py:758`）将 tensor 起始地址向下 2MB 对齐（memfabric_hybrid 大页要求），当 `new_start < storage_key`（对齐后地址越过 raw tensor 边界）时，原代码 `assert new_start >= storage_key` 崩溃，vLLM 启动失败。
 
-**适配改动**: 通过 `patches/vllm_ascend_310p_kv_transfer.patch` 将 `pool_worker.py:758` 的 assert 改为 `logger.warning` + `continue`，跳过该 region 的对齐调整，不再阻断启动：
+**适配改动**: 通过 vLLM-Ascend 指定分支中的适配实现 将 `pool_worker.py:758` 的 assert 改为 `logger.warning` + `continue`，跳过该 region 的对齐调整，不再阻断启动：
 
 ```python
 # patch 前
