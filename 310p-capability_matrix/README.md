@@ -48,6 +48,7 @@ exit_mmap → __mmu_notifier_release → mn_hlist_release → synchronize_srcu
 | 14 | 14_transfer_remote | 远端 slab 直达 H2D/D2H(pinned vs pageable) | 2 NPU | ✅ PASS |
 | 15 | 15_peer_needed | 跨卡 IPC 是否需要 enable peer(5 MODE 干净对照) | 2 NPU | ✅ PASS |
 | 16 | 16_vmm_matrix | 8 NPU VMM 池全连接(对照 07 IPC 版) | 8 NPU | ⚠️ FAIL(VMM import 隐式 enable P2P,同一配额墙,失败矩阵与 07 全同;VA 槽位窗口 CONSISTENT) |
+| 17 | [17_va_reservation](17_va_reservation/README.md) | ACL/HAL 地址预留、粒度与复用、三池共享映射和双向读写 | 1 / 2 NPU | ✅ 正向通过；ACL 低地址逐池对照失败，见详情 |
 
 ## 运行方法
 
@@ -162,3 +163,27 @@ npu-smi info | grep Hugepages
 7. **507899 = `ACL_ERROR_RT_DRV_INTERNAL_ERROR`**(rt_error_codes.h:148):驱动对
    不支持路径的确定性回复而非随机错误——die 对 PEER import、跨卡 DEFAULT import
    (无双向 P2P)、共享内存 sync D2D、同卡跨 die EnablePeerAccess、超槽位 enable 均返回它。
+
+
+## 17：地址预留与共享映射能力验证
+
+环境：Ascend310P3 / Atlas 300I Duo，aarch64，CANN 9.2.1，驱动 26.1.0，同卡设备 2、3。
+
+- `probe`：比较 ACL flags=0 的自动与指定地址预留，以及 HAL flags=0/512 的指定地址预留；验证粒度、重复预留拒绝和释放后复用。
+- `pools`：从 `0x280040000000` 开始预留三个 1 GiB HAL 远端窗口，使用 ACL 分配物理页、导出/导入共享句柄和映射，逐池完成双向 2 MiB 全量数据校验。
+- `acl-pools`：从 `0x12c200000000` 开始使用 ACL 普通预留，逐池映射和读写，作为独立对照。
+
+本轮 HAL flags=512 的 1 GiB 精确预留、三个池的共享读写、窗口释放复用及可见设备重新编号均通过。
+同一高地址的 ACL flags=0 返回 507899，直接 HAL flags=0 返回 13；HAL flags=512 的 2/32/64 MiB 请求返回 3。
+ACL 低地址逐池对照中，第一个池读写通过，第二个窗口 `0x12c240000000` 返回 507899，程序清理后退出 1。
+`507899` 为驱动内部错误的 ACL 返回码，具体原因需要结合该次调用的底层日志，不能单凭此码判定。
+
+在能力验证目录下执行：
+
+```bash
+A_DEV=2 B_DEV=3 bash 17_va_reservation/run.sh
+ASCEND_RT_VISIBLE_DEVICES=2,3 A_DEV=0 B_DEV=1 bash 17_va_reservation/run.sh pools
+A_DEV=2 B_DEV=3 bash 17_va_reservation/run.sh acl-pools
+```
+
+完整 API 步骤、测试条件及返回值见[第 17 项 README](17_va_reservation/README.md)。
