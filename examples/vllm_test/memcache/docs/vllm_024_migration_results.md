@@ -175,46 +175,6 @@ P50为本轮样本中位数。下表记录共享服务器上的首token延迟实
 3. 设备曾多次被其他容器的新任务占用，产生显存不足及一次HCCL分配失败；对应失败日志保留。按用户授权清理6/7，并临时监控本次窗口。初版监控误判环境变量缺失的自身子进程，已修正为完整进程树排除；该次失败单独归档。监控不属于产品补丁，测试结束已撤销。
 4. TP=4按用户要求未执行；未完成多并发吞吐、长时间稳定性、HBM→DRAM eviction/rewarm大容量测试。历史largecap和可选多token辅助方法仍需单独迁移，具体见下文。
 
-## 历史迁移修改清单
-
-### MemFabric
-
-| 文件 | 修改 |
-|---|---|
-| `src/hybm/csrc/common/hybm_define.h` | 固定窗口改为本机验证地址 `0x12da80000000`，保留所有 rank 相同地址的要求 |
-| `src/hybm/csrc/under_api/dl_acl_api.h` | 判断线程是否已有正确设备和 ACL 上下文，缺少上下文时执行初始化 |
-| `src/hybm/csrc/entity/hybm_entity_default.cpp` | 校验线程当前设备及非空 ACL 上下文，缺失或设备不符时调用 SetDevice 初始化 |
-| `test/ut/testcase/hybm/hybm_entity_default_test.cpp` | 补充线程上下文回归 |
-| `test/ut/testcase/hybm/mm/hybm_vmm_based_segment_test.cpp` | 固定地址精确预留及地址不符释放回归 |
-| `examples/vllm_test/memcache/` | 配置、部署补丁、启动保护、测试用例、HTTP 流校验、迁移报告，清除 vLLM 核心补丁依赖；部署检查指定的 MemCache 分支 |
-
-上述固定基址调整为历史迁移阶段方案。当前 MemFabric 使用 HAL 远端窗口预留配合 ACL 物理页映射，见能力验证第 17 项。
-
-### MemCache
-
-| 文件 | 修改 |
-|---|---|
-| `src/memcache/csrc/python_wrapper/pymmc.cpp` | 10 处 Python 参数默认值把未注册复制方向枚举显式转为 `int32_t`，解决模块导入问题 |
-| `3rdparty/memfabric_hybrid` | 本地同步上面的 MemFabric 运行时代码；发布时应引用审核合入后的 MemFabric 提交 |
-
-`debug/` 为本地实验材料，不属于拟提交产品补丁。
-
-### vLLM-Ascend
-
-| 文件 | 修改 |
-|---|---|
-| `csrc/moe/chunk_fwd_o/op_kernel/arch20/compat_310p.h` | CANN 兼容编译 |
-| `csrc/moe/chunk_gated_delta_rule_fwd_h/op_kernel/arch20/compat_310p.h` | 相同的 CANN 兼容编译修正 |
-| `vllm_ascend/_310p/model_runner_310p.py` | 310P 开放 AscendStoreConnector + MemCache 组合 |
-| `vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/memcache_backend.py` | 初始化 ACL 设备，调整协议读取和缓存区域注册日志 |
-| `vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py` | 与 0.24 的 hash block size 解析一致；处理未满足 2 MiB 起始对齐的缓存区域 |
-| `vllm_ascend/patch/platform/patch_kv_cache_coordinator.py` | 复用包含 Mamba 状态的共同有效前缀匹配，返回每缓存组命中 token 数 |
-| `tests/ut/patch/platform/test_prefix_cache_cp_patches.py` | 增加 4 组混合缓存匹配回归 |
-
-### vLLM
-
-无源码修改，工作区保持 `ee0da84` 原版。Mamba align 使用原版支持的本地 prefix cache 开启配置。
-
 ## 测试用例与目的
 
 | 测试 | 条件和目的 |
