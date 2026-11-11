@@ -80,11 +80,6 @@ private:
     uint64_t ReserveLva(const HostSdmaExportInfo &im);
     Result MmapImport310P(const HostSdmaExportInfo &im, uint64_t lva, void *&mapHandle) noexcept;
     void ReleaseP2PLeases(const std::set<uint32_t> &removedRanks = {}) noexcept;
-    Result ReserveAclWindow(void **base) noexcept;
-    Result RollbackAclWindow(void *base, uint64_t address) noexcept;
-    Result ReserveAclWindowFrom(uint64_t start, uint64_t windowSize, void **base) noexcept;
-    Result TryReserveAclWindow(hybm_va_reservation &proposal, void **base) noexcept;
-    Result CoordinateReservation(hybm_va_reservation &proposal) noexcept;
     bool Is310PAclPath() const noexcept;
     void ReleaseHandle(drv_mem_handle_t *handle) noexcept;
 

@@ -15,7 +15,6 @@
 #include <memory>
 #include <vector>
 
-#include "hybm_big_mem.h"
 #include "hybm_common_include.h"
 #include "hybm_mem_common.h"
 #include "hybm_mem_slice.h"
@@ -52,12 +51,6 @@ public:
      * @return 0 if ok
      */
     virtual Result ValidateOptions() noexcept = 0;
-
-    void SetVaCoordinator(hybm_va_coordinator coordinator, void *context) noexcept
-    {
-        vaCoordinator_ = coordinator;
-        vaCoordinatorContext_ = context;
-    }
 
     virtual Result ReserveMemorySpace(void **address) noexcept = 0;
 
@@ -161,8 +154,6 @@ protected:
     static bool IsSameCard(uint32_t peerId) noexcept;
 
 protected:
-    hybm_va_coordinator vaCoordinator_{nullptr};
-    void *vaCoordinatorContext_{nullptr};
     const MemSegmentOptions options_;
     const int entityId_;
 

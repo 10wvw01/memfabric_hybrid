@@ -16,7 +16,6 @@
 
 #include "hybm_def.h"
 #include "hybm_big_mem.h"
-#include "smem_va_reservation.h"
 #include "hybm_data_op.h"
 #include "hybm.h"
 #include "topology_preflight.h"
@@ -158,7 +157,7 @@ int32_t SmemBmEntry::Initialize(const hybm_options &options)
             break;
         }
 
-        ret = ReserveDynamicMemory(entity, _configStore, options.rankCount, flags);
+        ret = hybm_reserve_mem_space(entity, flags);
         if (ret != 0) {
             SM_LOG_ERROR("hybm_reserve_mem_space failed, entityId: " << entityId << " ret: " << ret);
             hybm_destroy_entity(entity, flags);

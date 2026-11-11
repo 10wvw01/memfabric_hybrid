@@ -14,7 +14,6 @@
 #include "smem_common_includes.h"
 #include "smem_shm_entry_manager.h"
 #include "hybm_big_mem.h"
-#include "smem_va_reservation.h"
 #include "smem_store_factory.h"
 #include "smem_shm_entry.h"
 
@@ -171,7 +170,7 @@ void SmemShmEntry::InitStepDestroyEntity()
 
 int32_t SmemShmEntry::InitStepReserveMemory()
 {
-    auto ret = ReserveCoordinatedMemory(entity_, globalGroup_, options_.rankCount, 0);
+    auto ret = hybm_reserve_mem_space(entity_, 0);
     if (ret != 0) {
         SM_LOG_ERROR("reserve mem failed, result: " << ret);
         return SM_ERROR;

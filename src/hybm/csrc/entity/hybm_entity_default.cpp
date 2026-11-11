@@ -146,9 +146,7 @@ int32_t MemEntityDefault::ReserveMemorySpace() noexcept
     }
 
     if (hbmSegment_ != nullptr) {
-        hbmSegment_->SetVaCoordinator(vaCoordinator_, vaCoordinatorContext_);
         auto ret = hbmSegment_->ReserveMemorySpace(&hbmGva_);
-        hbmSegment_->SetVaCoordinator(nullptr, nullptr);
         if (ret != BM_OK) {
             BM_LOG_ERROR("Failed to reserver HBM memory space ret: " << ret);
             return ret;
@@ -160,9 +158,7 @@ int32_t MemEntityDefault::ReserveMemorySpace() noexcept
     }
 
     if (dramSegment_ != nullptr) {
-        dramSegment_->SetVaCoordinator(vaCoordinator_, vaCoordinatorContext_);
         auto ret = dramSegment_->ReserveMemorySpace(&dramGva_);
-        dramSegment_->SetVaCoordinator(nullptr, nullptr);
         if (ret != BM_OK) {
             UnReserveMemorySpace();
             BM_LOG_ERROR("Failed to reserver DRAM memory space ret: " << ret);

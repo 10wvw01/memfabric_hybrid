@@ -23,7 +23,6 @@
 #include "hybm_big_mem.h"
 #include "hybm_data_op.h"
 #include "smem_config_store.h"
-#include "smem_va_reservation.h"
 
 using namespace ock::smem;
 
@@ -1182,63 +1181,3 @@ TEST_F(SmemBmEntryTest, ExtendLocalMem_ExportFail_NoSizeUpdate)
 }
 
 // ======================== Leave Validation ========================
-
-
-namespace {
-class VaConfigStore : public TestConfigStoreManager {
-public:
-    std::map<std::string, std::vector<uint8_t>> values;
-    int32_t Cas(const std::string &key, const std::vector<uint8_t> &expected, const std::vector<uint8_t> &desired,
-               std::vector<uint8_t> &previous) noexcept override
-    {
-        previous = values[key];
-        if (previous != expected) {
-            return RESTORE;
-        }
-        values[key] = desired;
-        return SUCCESS;
-    }
-};
-}
-
-TEST(SmemVaReservationTest, DynamicJoinUsesPublishedWindowWithoutWaitingForOtherRanks)
-{
-    auto *rawStore = new VaConfigStore();
-    StorePtr store(rawStore);
-    SmemDynamicVaContext first{store}, later{store};
-    hybm_va_reservation a{0x12c200000000UL, 1UL << 30, SM_OK, 0};
-    hybm_va_reservation b{0x12da80000000UL, 1UL << 30, SM_OK, 0};
-    ASSERT_EQ(CoordinateDynamicVa(&a, &first), SM_OK);
-    ASSERT_EQ(CoordinateDynamicVa(&b, &later), SM_OK);
-    EXPECT_EQ(a.address, b.address);
-    a.phase = 1;
-    ASSERT_EQ(CoordinateDynamicVa(&a, &first), SM_OK);
-    EXPECT_EQ(first.windowIndex, 1U);
-    EXPECT_EQ(later.windowIndex, 0U);
-}
-
-TEST(SmemVaReservationTest, DynamicJoinRejectsDifferentWindowSize)
-{
-    auto *rawStore = new VaConfigStore();
-    StorePtr store(rawStore);
-    SmemDynamicVaContext first{store}, later{store};
-    hybm_va_reservation a{0x12c200000000UL, 1UL << 30, SM_OK, 0};
-    hybm_va_reservation b{0x12da80000000UL, 2UL << 30, SM_OK, 0};
-    ASSERT_EQ(CoordinateDynamicVa(&a, &first), SM_OK);
-    EXPECT_EQ(CoordinateDynamicVa(&b, &later), SM_ERROR);
-    EXPECT_EQ(later.windowIndex, 0U);
-}
-
-TEST(SmemVaReservationTest, FailedDynamicJoinPreservesPublishedAddress)
-{
-    auto *rawStore = new VaConfigStore();
-    StorePtr store(rawStore);
-    SmemDynamicVaContext first{store}, later{store};
-    hybm_va_reservation a{0x12c200000000UL, 1UL << 30, SM_OK, 0};
-    ASSERT_EQ(CoordinateDynamicVa(&a, &first), SM_OK);
-    auto before = rawStore->values;
-    hybm_va_reservation failed{a.address, a.size, SM_ERROR, 1};
-    EXPECT_EQ(CoordinateDynamicVa(&failed, &later), SM_ERROR);
-    EXPECT_EQ(rawStore->values, before);
-    EXPECT_EQ(later.windowIndex, 0U);
-}

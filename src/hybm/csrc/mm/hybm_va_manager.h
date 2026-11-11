@@ -298,9 +298,6 @@ public:
     ReservedGvaInfo AllocReserveGva(uint32_t localRankId, uint64_t size, uint64_t localSize, hybm_mem_type memType,
                                     bool enable56BitsGva = false, bool isTrans = false);
     ReservedGvaInfo AllocReserveLva(uint32_t localRankId, uint64_t size, uint32_t type, hybm_mem_type memType);
-    // The range is supplied by the device backend; both address maps own the same window.
-    ReservedGvaInfo AllocReserveGvaInRange(uint32_t rank, uint64_t size, hybm_mem_type memType,
-                                          uint64_t start, uint64_t end);
     void FreeReserveGva(uint64_t addr);
     void FreeReserveLva(uint64_t addr, uint32_t type);
 
