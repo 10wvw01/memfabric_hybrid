@@ -29,12 +29,17 @@ namespace {
 void *reserveExpected = nullptr;
 void *reserveResult = nullptr;
 void *releasedAddress = nullptr;
+size_t reservedWindowSize = 0;
+uint64_t reservedWindowFlags = 0;
+int reserveReturnCode = BM_OK;
 
-ock::mf::Result ReserveAddressForTest(void **base, size_t, size_t, void *expected, uint64_t)
+ock::mf::Result ReserveAddressForTest(void **base, size_t size, size_t, void *expected, uint64_t flags)
 {
     reserveExpected = expected;
-    *base = reserveResult;
-    return BM_OK;
+    reservedWindowSize = size;
+    reservedWindowFlags = flags;
+    *base = reserveResult == nullptr ? expected : reserveResult;
+    return reserveReturnCode;
 }
 
 ock::mf::Result ReleaseAddressForTest(void *address)
@@ -76,6 +81,10 @@ protected:
     {
         GlobalMockObject::reset();
         HybmVaManager::GetInstance().ClearAll();
+        reserveResult = nullptr;
+        reserveExpected = nullptr;
+        releasedAddress = nullptr;
+        reserveReturnCode = BM_OK;
     }
 
     void TearDown() override
@@ -297,55 +306,80 @@ TEST_F(HybmVmmBasedSegmentTest, CreateDispatchesToVmmBasedFor310P)
     ASSERT_NE(std::dynamic_pointer_cast<HybmVmmBasedSegment>(seg), nullptr);
 }
 
-TEST_F(HybmVmmBasedSegmentTest, ReserveRequiresExactFixedAddress)
+namespace {
+void MockRemoteWindowReservation()
 {
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs()
+        .will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER_CPP(&DlHalApi::HalMemAddressReserve, int(*)(void **, size_t, size_t, void *, uint64_t))
+        .stubs().will(invoke(ReserveAddressForTest));
+    MOCKER_CPP(&DlHalApi::HalMemAddressFree, int(*)(void *))
+        .stubs().will(invoke(ReleaseAddressForTest));
+}
+MemSegmentOptions SmallHbmPool(uint32_t ranks)
+{
+    MemSegmentOptions options{};
+    options.segType = HYBM_MST_HBM;
+    options.rankCnt = ranks;
+    options.maxSize = HYBM_LARGE_PAGE_SIZE;
+    options.size = HYBM_LARGE_PAGE_SIZE;
+    return options;
+}
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReserveUsesHalRemoteWindowAndGiBAlignmentOn310P)
+{
+    MockRemoteWindowReservation();
     for (uint32_t ranks : {1U, 2U}) {
-        GlobalMockObject::verify();
-        MemSegmentOptions opt{};
-        opt.segType = HYBM_MST_HBM;
-        opt.rankCnt = ranks;
-        opt.maxSize = HYBM_LARGE_PAGE_SIZE;
-        opt.size = HYBM_LARGE_PAGE_SIZE;
-        reserveResult = reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P);
-        reserveExpected = nullptr;
-        releasedAddress = nullptr;
-        MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)())
-            .stubs()
-            .will(returnValue(AscendSocType::ASCEND_310P));
-        MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
-            .stubs()
-            .will(invoke(ReserveAddressForTest));
-        MOCKER_CPP(&DlAclApi::AclrtReleaseMemAddress, ock::mf::Result(*)(void *))
-            .stubs()
-            .will(invoke(ReleaseAddressForTest));
-        HybmVmmBasedSegment seg(opt, 0);
+        HybmVmmBasedSegment segment(SmallHbmPool(ranks), 0);
         void *address = nullptr;
-        ASSERT_EQ(seg.ReserveMemorySpace(&address), BM_OK);
-        EXPECT_EQ(reserveExpected, reserveResult);
-        EXPECT_EQ(address, reserveResult);
-        EXPECT_EQ(seg.UnReserveMemorySpace(), BM_OK);
-        EXPECT_EQ(releasedAddress, reserveResult);
+        ASSERT_EQ(segment.ReserveMemorySpace(&address), BM_OK);
+        EXPECT_EQ(address, reinterpret_cast<void *>(HYBM_GVM_START_ADDR));
+        EXPECT_EQ(reserveExpected, address);
+        EXPECT_EQ(reservedWindowFlags, MEM_RSV_TYPE_REMOTE_MAP);
+        EXPECT_EQ(reservedWindowSize, GB);
+        EXPECT_EQ(segment.UnReserveMemorySpace(), BM_OK);
+        EXPECT_EQ(releasedAddress, address);
+        EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 0U);
     }
 }
 
-TEST_F(HybmVmmBasedSegmentTest, ReserveRejectsAndReleasesDifferentAddress)
+TEST_F(HybmVmmBasedSegmentTest, RemoteWindowFailureClearsManagerWithoutFreeingUnownedAddress)
 {
-    MemSegmentOptions opt{};
-    opt.segType = HYBM_MST_HBM;
-    opt.rankCnt = 2;
-    opt.maxSize = HYBM_LARGE_PAGE_SIZE;
-    reserveResult = reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P + HYBM_LARGE_PAGE_SIZE);
-    releasedAddress = nullptr;
-    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(AscendSocType::ASCEND_310P));
-    MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
-        .stubs()
-        .will(invoke(ReserveAddressForTest));
-    MOCKER_CPP(&DlAclApi::AclrtReleaseMemAddress, ock::mf::Result(*)(void *))
-        .stubs()
-        .will(invoke(ReleaseAddressForTest));
-    HybmVmmBasedSegment seg(opt, 0);
+    MockRemoteWindowReservation();
+    reserveReturnCode = BM_MALLOC_FAILED;
+    HybmVmmBasedSegment segment(SmallHbmPool(2), 0);
     void *address = nullptr;
-    EXPECT_EQ(seg.ReserveMemorySpace(&address), BM_MALLOC_FAILED);
-    EXPECT_EQ(releasedAddress, reserveResult);
+    EXPECT_EQ(segment.ReserveMemorySpace(&address), BM_MALLOC_FAILED);
     EXPECT_EQ(address, nullptr);
+    EXPECT_EQ(releasedAddress, nullptr);
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 0U);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, RemoteWindowMismatchReleasesReturnedAddressAndClearsManager)
+{
+    MockRemoteWindowReservation();
+    reserveResult = reinterpret_cast<void *>(HYBM_GVM_START_ADDR + GB);
+    HybmVmmBasedSegment segment(SmallHbmPool(2), 0);
+    void *address = nullptr;
+    EXPECT_EQ(segment.ReserveMemorySpace(&address), BM_MALLOC_FAILED);
+    EXPECT_EQ(address, nullptr);
+    EXPECT_EQ(releasedAddress, reserveResult);
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 0U);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, RemotePoolsUseDistinctWindowsAndReuseReleasedWindow)
+{
+    MockRemoteWindowReservation();
+    HybmVmmBasedSegment first(SmallHbmPool(2), 0), second(SmallHbmPool(2), 1), reused(SmallHbmPool(2), 2);
+    void *a = nullptr, *b = nullptr, *c = nullptr;
+    ASSERT_EQ(first.ReserveMemorySpace(&a), BM_OK);
+    ASSERT_EQ(second.ReserveMemorySpace(&b), BM_OK);
+    EXPECT_EQ(reinterpret_cast<uint64_t>(b), reinterpret_cast<uint64_t>(a) + GB);
+    EXPECT_EQ(first.UnReserveMemorySpace(), BM_OK);
+    ASSERT_EQ(reused.ReserveMemorySpace(&c), BM_OK);
+    EXPECT_EQ(c, a);
+    EXPECT_EQ(second.UnReserveMemorySpace(), BM_OK);
+    EXPECT_EQ(reused.UnReserveMemorySpace(), BM_OK);
+    EXPECT_EQ(HybmVaManager::GetInstance().GetReservedCount(), 0U);
 }

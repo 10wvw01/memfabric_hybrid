@@ -87,44 +87,29 @@ Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
     totalVirtualSize_ = options_.rankCnt * options_.maxSize;
     auto totalLvaSize = options_.enable56BitsGva ? options_.maxSize : totalVirtualSize_;
     auto mem_type = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
-    Result ret = BM_OK;
     if (Is310PAclPath()) {
-        /* 310P: 预留整个对称窗口(rankCnt×maxSize), 窗口即真实地址: slot_p = base + p×maxSize
-         * —— 本端物理映射进本端槽位, 对端经 shareable handle 导入对端槽位, host/kernel/
-         * 协同编排器共用该公式。起点用固定地址精确命中(同 meta 区纪律): 自由分配
-         * 起点受设备 VA 占用影响, 两 rank 起点不同时该公式失效。 */
-        auto expectPtr = reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P);
-        ret = DlAclApi::AclrtReserveMemAddress(&base, totalVirtualSize_, 0, expectPtr, 0);
-        if (ret != BM_OK || base == nullptr) {
-            BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " size:" << totalVirtualSize_
-                                                               << " expectAddr:" << VaToStr(HYBM_GVM_START_ADDR_310P)
-                                                               << " rankId:" << options_.rankId);
-            return BM_MALLOC_FAILED;
-        }
-        if (base != expectPtr) {
-            /* 偏移即失败(窗口即真实地址, 契约不容偏移); 被占/未命中均为显性失败 */
-            BM_LOG_ERROR("reserve va base mismatch, got:" << VaToStr(reinterpret_cast<uint64_t>(base))
-                                                          << " expect:" << VaToStr(HYBM_GVM_START_ADDR_310P)
-                                                          << " rankId:" << options_.rankId);
-            (void)DlAclApi::AclrtReleaseMemAddress(base);
-            return BM_MALLOC_FAILED;
-        }
-        BM_LOG_INFO("AclrtReserveMemAddress(window) got addr:" << base << " size:" << totalVirtualSize_
-                                                               << " rankId:" << options_.rankId);
-        globalVirtualAddress_ = static_cast<uint8_t *>(base);
-    } else {
-        auto gvaInfo = HybmVaManager::GetInstance().AllocReserveGva(options_.rankId, totalVirtualSize_, totalLvaSize,
-                                                                    mem_type, options_.enable56BitsGva);
-        BM_ASSERT_LOG_AND_RETURN(gvaInfo.va[HVM_GVA] > 0, "gvaInfo.va[HVM_GVA] = " << gvaInfo.va[HVM_GVA], BM_ERROR);
-        globalVirtualAddress_ = (uint8_t *)reinterpret_cast<void *>(gvaInfo.va[HVM_GVA]);
-        uint64_t flag = MEM_RSV_TYPE_REMOTE_MAP;
-        ret = DlHalApi::HalMemAddressReserve(&base, totalLvaSize, 0, reinterpret_cast<void *>(gvaInfo.va[HVM_DVA]),
-                                             flag);
-        if (ret != 0 || base != reinterpret_cast<void *>(gvaInfo.va[HVM_DVA])) {
-            BM_LOG_ERROR("prepare virtual memory size(" << totalVirtualSize_ << ") failed. ret: " << ret);
-            return BM_MALLOC_FAILED;
-        }
+        // Keep small logical pools usable with the driver's GiB remote reservation granularity.
+        totalLvaSize = ((totalLvaSize + GB - 1) / GB) * GB;
     }
+    auto reserveGvaSize = options_.enable56BitsGva ? totalVirtualSize_ : totalLvaSize;
+    auto &manager = HybmVaManager::GetInstance();
+    auto gvaInfo = manager.AllocReserveGva(options_.rankId, reserveGvaSize, totalLvaSize,
+                                          mem_type, options_.enable56BitsGva);
+    BM_ASSERT_LOG_AND_RETURN(gvaInfo.va[HVM_GVA] > 0, "No free VA window, rank:" << options_.rankId, BM_ERROR);
+    auto expected = reinterpret_cast<void *>(gvaInfo.va[HVM_DVA]);
+    auto ret = DlHalApi::HalMemAddressReserve(&base, totalLvaSize, 0, expected, MEM_RSV_TYPE_REMOTE_MAP);
+    if (ret != BM_OK || base != expected) {
+        BM_LOG_ERROR("Reserve VA failed, rank:" << options_.rankId << " expected:" << expected
+                                               << " returned:" << base << " size:" << totalLvaSize << " ret:" << ret);
+        if (ret == BM_OK && base != nullptr) {
+            (void)DlHalApi::HalMemAddressFree(base);
+        }
+        manager.FreeReserveGva(gvaInfo.va[HVM_GVA]);
+        return BM_MALLOC_FAILED;
+    }
+    BM_LOG_INFO("VMM remote window reserved, rank:" << options_.rankId << " gva:" << VaToStr(gvaInfo.va[HVM_GVA])
+                                                    << " dva:" << VaToStr(base) << " size:" << totalLvaSize);
+    globalVirtualAddress_ = reinterpret_cast<uint8_t *>(gvaInfo.va[HVM_GVA]);
     localVirtualAddress_ = (uint8_t *)base;
     allocatedSize_ = 0UL;
     sliceCount_ = 0;
@@ -152,24 +137,15 @@ Result HybmVmmBasedSegment::UnReserveMemorySpace() noexcept
     }
 
     for (auto lva : reservedLva_) {
-        if (!Is310PAclPath()) {
-            /* 310P: lva 为 ACL reserve 的窗口地址, 非 VaManager 记账, 不走 FreeReserveLva */
-            HybmVaManager::GetInstance().FreeReserveLva((uintptr_t)lva, HVM_DVA);
-        }
-        Result freeRet = BM_OK;
-        if (Is310PAclPath()) {
-            freeRet = DlAclApi::AclrtReleaseMemAddress(lva);
-        } else {
-            freeRet = DlHalApi::HalMemAddressFree(lva);
-        }
+        HybmVaManager::GetInstance().FreeReserveLva((uintptr_t)lva, HVM_DVA);
+        auto freeRet = DlHalApi::HalMemAddressFree(lva);
         BM_LOG_INFO("free reserved address va:" << lva << " return:" << freeRet);
         if (freeRet != BM_OK) {
             BM_LOG_WARN("Unable to free reserved VA, ret:" << freeRet << " gva:" << globalVirtualAddress_
                                                            << " va:" << lva);
         }
     }
-    if (globalVirtualAddress_ != nullptr && !Is310PAclPath()) {
-        /* 310P: gva 即窗口地址本身(账实合一), 无 VaManager GVA 记账, 不走 FreeReserveGva */
+    if (globalVirtualAddress_ != nullptr) {
         HybmVaManager::GetInstance().FreeReserveGva((uintptr_t)globalVirtualAddress_);
     }
     localVirtualAddress_ = nullptr;
@@ -246,8 +222,7 @@ Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_me
         aclrtPhysicalMemProp prop{};
         prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
         prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
-        /* MallocPhysical 的 location.id 走进程打开表: 填 user 逻辑号(传物理号实测 107001),
-         * 与 SetAccess 的物理号命名空间不同, 见 FillAclAccessDesc */
+        // ACL allocation and access descriptors use the process-visible device id.
         prop.location.id = static_cast<uint32_t>(deviceId_);
         prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
         prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
@@ -315,23 +290,16 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
     return BM_OK;
 }
 
-/* 310P3 ACL 路径 SetAccess 授权描述: MemSetAccess 的 location.id 走驱动系统枚举表
- * (物理设备号), 传 user 逻辑号在 ASCEND_RT_VISIBLE_DEVICES 恒等映射时恰好相等不
- * 暴露, 非恒等映射(如 =6,7)时授权给未打开的设备, 报 507899; 与 MallocPhysical
- * 的 prop.location.id(进程打开表, user 号)是两个命名空间, 勿统一两侧取值。 */
+/* ACL access descriptors use process-visible device ids.
+ * ASCEND_RT_VISIBLE_DEVICES can renumber physical devices.
+ * Use the same device-id namespace as aclrtMallocPhysical.
+ */
 
-static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t rankId)
+static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t /* rankId */)
 {
-    int32_t phyDevId = -1;
-    auto ret = DlAclApi::AclrtGetPhyDevIdByLogicDevId(static_cast<int32_t>(userDevId), &phyDevId);
-    if (ret != BM_OK || phyDevId < 0) {
-        BM_LOG_ERROR("AclrtGetPhyDevIdByLogicDevId failed, ret:" << ret << " userDevId:" << userDevId
-                                                                 << " rankId:" << rankId);
-        return (ret != BM_OK) ? ret : BM_DL_FUNCTION_FAILED;
-    }
     desc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     desc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-    desc.location.id = static_cast<uint32_t>(phyDevId);
+    desc.location.id = userDevId;
     return BM_OK;
 }
 
@@ -738,12 +706,9 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
 uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
 {
     if (Is310PAclPath()) {
-        /* 310P: 窗口为固定基址整体预留(两卡窗口起点一致, 4-rank 实测四卡同基址)。
-         * 对端切片(同卡/跨卡)一律映射到其槽位地址——对称算术全局成立: 设备侧原语
-         * (AICore 掩码算术/epoch kernel 代投 SDMA SQE)直接以池 GVA 寻址, 不经
-         * host 拷贝的 gva→lva 翻译层; 跨卡若映射到独立 reserve 的 lva, 设备侧
-         * 访问该 GVA 必页错误(EX09 4-rank 实机: devmm "Reserve addr is invalid")。
-         * 窗口起点一致性由固定基址显性失败保障(被占/未命中建池即报错) */
+        /* Device-side access uses GVA directly. All ranks of a pool must reserve the same
+         * window and map a peer slice at its exported address. Fixed-range allocation
+         * therefore requires the same pool creation order on all ranks. */
         const uint64_t windowBase = reinterpret_cast<uint64_t>(localVirtualAddress_);
         const uint64_t windowEnd = windowBase + totalVirtualSize_;
         if (im.gva < windowBase || im.gva + im.size > windowEnd) {
