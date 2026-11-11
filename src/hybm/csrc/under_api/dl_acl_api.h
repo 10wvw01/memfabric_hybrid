@@ -280,11 +280,12 @@ public:
             return pAclrtSetDevice(deviceId);
         }
         int32_t nowDeviceId = -1;
-        if (AclrtGetDevice(&nowDeviceId) == 0 && nowDeviceId == deviceId) {
+        void *context = nullptr;
+        if (AclrtGetDevice(&nowDeviceId) == 0 && nowDeviceId == deviceId && AclrtGetCurrentContext(&context) == 0 &&
+            context != nullptr) {
             return BM_OK;
-        } else {
-            return pAclrtSetDevice(deviceId);
         }
+        return pAclrtSetDevice(deviceId);
     }
 
     static inline Result AclrtGetDevice(int32_t *deviceId)

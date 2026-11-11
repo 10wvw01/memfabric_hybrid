@@ -19,12 +19,30 @@
 #undef protected
 
 #include "hybm_va_manager.h"
+#include "dl_acl_api.h"
 
 #define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
 
 using namespace ock::mf;
 
 namespace {
+void *reserveExpected = nullptr;
+void *reserveResult = nullptr;
+void *releasedAddress = nullptr;
+
+ock::mf::Result ReserveAddressForTest(void **base, size_t, size_t, void *expected, uint64_t)
+{
+    reserveExpected = expected;
+    *base = reserveResult;
+    return BM_OK;
+}
+
+ock::mf::Result ReleaseAddressForTest(void *address)
+{
+    releasedAddress = address;
+    return BM_OK;
+}
+
 int HalMemImportOk(drv_mem_handle_type, MemShareHandle *, uint32_t, drv_mem_handle_t **handle)
 {
     *handle = reinterpret_cast<drv_mem_handle_t *>(0x1234);
@@ -277,4 +295,57 @@ TEST_F(HybmVmmBasedSegmentTest, CreateDispatchesToVmmBasedFor310P)
     GlobalMockObject::verify();
     ASSERT_NE(seg, nullptr);
     ASSERT_NE(std::dynamic_pointer_cast<HybmVmmBasedSegment>(seg), nullptr);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReserveRequiresExactFixedAddress)
+{
+    for (uint32_t ranks : {1U, 2U}) {
+        GlobalMockObject::verify();
+        MemSegmentOptions opt{};
+        opt.segType = HYBM_MST_HBM;
+        opt.rankCnt = ranks;
+        opt.maxSize = HYBM_LARGE_PAGE_SIZE;
+        opt.size = HYBM_LARGE_PAGE_SIZE;
+        reserveResult = reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P);
+        reserveExpected = nullptr;
+        releasedAddress = nullptr;
+        MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)())
+            .stubs()
+            .will(returnValue(AscendSocType::ASCEND_310P));
+        MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
+            .stubs()
+            .will(invoke(ReserveAddressForTest));
+        MOCKER_CPP(&DlAclApi::AclrtReleaseMemAddress, ock::mf::Result(*)(void *))
+            .stubs()
+            .will(invoke(ReleaseAddressForTest));
+        HybmVmmBasedSegment seg(opt, 0);
+        void *address = nullptr;
+        ASSERT_EQ(seg.ReserveMemorySpace(&address), BM_OK);
+        EXPECT_EQ(reserveExpected, reserveResult);
+        EXPECT_EQ(address, reserveResult);
+        EXPECT_EQ(seg.UnReserveMemorySpace(), BM_OK);
+        EXPECT_EQ(releasedAddress, reserveResult);
+    }
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReserveRejectsAndReleasesDifferentAddress)
+{
+    MemSegmentOptions opt{};
+    opt.segType = HYBM_MST_HBM;
+    opt.rankCnt = 2;
+    opt.maxSize = HYBM_LARGE_PAGE_SIZE;
+    reserveResult = reinterpret_cast<void *>(HYBM_GVM_START_ADDR_310P + HYBM_LARGE_PAGE_SIZE);
+    releasedAddress = nullptr;
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
+        .stubs()
+        .will(invoke(ReserveAddressForTest));
+    MOCKER_CPP(&DlAclApi::AclrtReleaseMemAddress, ock::mf::Result(*)(void *))
+        .stubs()
+        .will(invoke(ReleaseAddressForTest));
+    HybmVmmBasedSegment seg(opt, 0);
+    void *address = nullptr;
+    EXPECT_EQ(seg.ReserveMemorySpace(&address), BM_MALLOC_FAILED);
+    EXPECT_EQ(releasedAddress, reserveResult);
+    EXPECT_EQ(address, nullptr);
 }
