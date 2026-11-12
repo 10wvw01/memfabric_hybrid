@@ -1,6 +1,34 @@
-# 310P 单卡双 die 2-rank VMM 内存池开发计划（V1，纯 aclrt* 路径）
+# 310P 单卡双 die 2-rank VMM 内存池开发计划与实现说明
 
-> **状态：已完成并实机验收通过（3/3 轮稳定复跑全绿）**
+## 当前实现（trunk_for_escc_v1.2.0，1f41b8a6）
+
+310P HBM 池使用 `HybmVmmBasedSegment`。提交 `3a56de8f` 已删除原专用类
+`hybm_acl_vmm_segment.cpp/.h` 及其测试文件，并将工厂分派改为共用类。
+当前 `src/`、`test/` 中没有 `HybmAclVmmSegment` 的定义或引用。
+
+| 环节 | 当前代码位置与行为 |
+|---|---|
+| 创建内存段 | `src/hybm/csrc/mm/hybm_mem_segment.cpp`：HBM 且 SoC 为 310P 时创建 `HybmVmmBasedSegment` |
+| 选择与预留虚拟地址 | `HybmVaManager::AllocReserveGva` 选择管理区间内的可用窗口；`ReserveMemorySpace` 调用 `HalMemAddressReserve`，使用 `MEM_RSV_TYPE_REMOTE_MAP`，检查返回地址与预期一致 |
+| 申请物理内存 | `MallocFromDevice` 的 310P 分支调用 `AclrtMallocPhysical`；P2P_HUGE 返回 `RT_ERROR_DRV_OUT_MEMORY` 时回退 HBM_MEM_HUGE |
+| 映射、导入与释放 | 共用类通过 310P 分支使用 `AclrtMapMem`、`MmapImport310P`、`AclrtUnmapMem`、`AclrtFreePhysical`；虚拟地址预留由 `HalMemAddressFree` 释放 |
+| 当前测试位置 | `test/ut/testcase/hybm/mm/hybm_vmm_based_segment_test.cpp` 和 `hybm_mem_segment_test.cpp`；原专用类测试已删除 |
+
+当前实现结合 HAL 窗口预留与 ACL 物理内存管理。下文 V1 的“纯 aclrt*”、专用类、
+`AclVmmExportInfo`、不经过地址管理器等描述属于历史方案。当前交换结构为共用类中的
+`HostSdmaExportInfo`。完整地址预留能力验证见
+[310P 能力验证第 17 项](310p-capability_matrix/17_va_reservation/README.md)。
+
+当前没有两套内存段实现并存的功能冗余。是否进一步拆分类或提取 API 适配层，应结合共用类中
+硬件分支的维护成本决定；恢复旧专用类需要同步后续窗口和映射修复。
+本节为源码核查结果，没有新增硬件测试或 UT 结果。
+
+## V1 历史实施记录
+
+以下保留当时的探测、步骤、问题和测试数据；旧类名与旧接口选择用于说明历史过程。
+其中测试数量及通过记录对应当时版本，当前实现和测试入口按上节及第八节说明使用。
+
+> **历史状态：已完成并实机验收通过（3/3 轮稳定复跑全绿）**
 > - P0-P6 全部完成；实机裁决补充见下表 F16-F20
 > - 实机验收凭证：`examples/memory_pool/01_basic/07_310p_die_pair_pool/07_310p_die_pair_pool.cpp`
 >   （双 rank 双池三阶段 8MB 逐字校验 mismatch=0，干净销毁）
@@ -91,7 +119,7 @@ HybmAclVmmSegmentTest 6/6（UAF 修复后）、ExInfoTransferTest 16/16（含 EE
 3. `dl_acl_api.h/.cpp`：新增本地类型（`aclrtPhysicalMemProp`/`aclrtMemAccessDesc`/枚举）+ 12 符号的 typedef/静态指针/DL_LOAD_SYM_OPTIONAL/inline wrapper/Cleanup 置空，全部沿用现有模式（参照 `dl_acl_api.cpp:114` aclrtMemcpyBatch 的 OPTIONAL 先例）
 4. UT：`test/ut/testcase/hybm/under_api/dl_acl_api_vmm_test.cpp`（加载+nullptr 判定）+ GetAscendSocType 匹配（改 stub aclrtGetSocName 返回值）
 
-### P2 HybmAclVmmSegment（~600 行 + UT，核心）
+### P2 历史专用类方案 HybmAclVmmSegment（已由共用类替代）
 
 1. 新文件 `src/hybm/csrc/mm/hybm_acl_vmm_segment.h/.cpp`，接口对齐 MemSegment 纯虚：
    - `ReserveMemorySpace`：`aclrtReserveMemAddress(totalSize, NULL)` 整窗 → 记录 base/totalSize → `*address = base`（GVA==DVA==HVA 同值，对齐 D5）
@@ -161,24 +189,22 @@ M4 = M3 + P5 + P6   → 实机 example 验收（最终目标）
 
 ## 八、验证执行命令（UT / Example，仓库根目录直接运行）
 
-> 前置条件：主构建已完成（`build/` 下三个静态库存在、`output/bin/ut/test_memfabric` 为最新）。
-> 封装脚本等价物位于 `/home/t00842504/memfabfric_tmp/run_310p_ut.sh`、`run_310p_example.sh`。
+当前测试通过仓库脚本执行，UT 构建和产物分别位于 `build_ut/`、`output_ut/`。
+以下命令为操作说明，本次文档更新未执行。
 
-### 8.1 UT：新增套件 + 改动覆盖路径回归（177 用例，~1 分钟）
+### 8.1 UT：当前实现的完整回归与定向检查
 
 ```bash
-cd /home/t00842504/memfabric_hybrid/output/bin/ut && \
-export LD_LIBRARY_PATH=/home/t00842504/memfabric_hybrid/output/smem/lib64:/home/t00842504/memfabric_hybrid/output/hybm/lib64:/home/t00842504/memfabric_hybrid/output/hybm/lib64/cann/driver/lib64 && \
-export ASCEND_HOME_PATH=/home/t00842504/memfabric_hybrid/output/hybm/lib64/cann && \
-export ASAN_OPTIONS="detect_stack_use_after_return=1:allow_user_poisoning=1" && \
-./test_memfabric --gtest_filter="*DlAclApiVmmTest.*:*HybmAclVmmSegmentTest.*:*HybmDataOpAclMemcpyTest.*:*HybmVaManagerTest.*:*HybmMemSegmentTest.*:*HybmComposeDataOpTest.*" 2>&1 | grep -E "\[==========\] Running|\[  PASSED  \]|\[  FAILED  \]|ERROR: Address"
+# 完整 UT，包含覆盖率检查
+bash script/run_ut.sh
+
+# 定向检查；不替代提交前要求的完整 UT
+bash script/run_ut.sh --fast HybmVmmBasedSegmentTest
+bash script/run_ut.sh --fast HybmMemSegmentTest
 ```
 
-预期输出：
-```
-[==========] Running 177 tests from 6 test suites.
-[  PASSED  ] 177 tests.
-```
+原 `HybmAclVmmSegmentTest` 已删除，不能继续用它筛选当前测试。
+V1 的 177 用例记录为历史结果，当前用例数量以实际运行输出为准。
 
 ### 8.2 UT：全量 90 套件逐套件扫描（规避存量 mockcpp+ASAN 崩溃，~10 分钟）
 
@@ -245,7 +271,8 @@ PID 隔离语义，多租户场景存在越权访问风险。
 
 **时序设计**：export 发生在建池（AllocLocalMemory→ExportInner），peer pid 在 join 才可得——
 `SetPidToShareableHandle` 是对 shareableHandle 的独立授权操作，可在 export 之后补调；
-挂接点建议放在 `HybmAclVmmSegment::Import`（解析到 peer 的 pid 时对本段 exportMap_ 全部 handle 补授权）。
+V1 当时建议在 `HybmAclVmmSegment::Import` 补授权；该类现已删除。若继续此项工作，
+需重新评估共用类的 `ExportInner`、`Import`、`MmapImport310P` 与当前交换结构，重新验证授权时序。
 
 **前置探测（P0 补充）**：V3 复测——export(默认 flag) → SetPidToShareableHandle(peerPid) →
 peer import 的完整时序在 310P 是否放行（确认 export 后补调授权生效）。
