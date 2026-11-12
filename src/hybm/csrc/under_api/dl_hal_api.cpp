@@ -78,6 +78,8 @@ halMemReleaseFunc DlHalApi::pHalMemRelease = nullptr;
 halMemMapFunc DlHalApi::pHalMemMap = nullptr;
 halMemUnmapFunc DlHalApi::pHalMemUnmap = nullptr;
 halMemSetAccessFunc DlHalApi::pHalMemSetAccess = nullptr;
+halMemExportToShareableHandleFunc DlHalApi::pHalMemExportToShareableHandle = nullptr;
+halMemImportFromShareableHandleFunc DlHalApi::pHalMemImportFromShareableHandle = nullptr;
 halMemExportFunc DlHalApi::pHalMemExport = nullptr;
 halMemImportFunc DlHalApi::pHalMemImport = nullptr;
 halMemShareHandleSetAttributeFunc DlHalApi::pHalMemShareHandleSetAttribute = nullptr;
@@ -152,6 +154,12 @@ Result DlHalApi::LoadHybmVmmLibrary(uint32_t gvaVersion)
     DL_LOAD_SYM(pHalMemMap, halMemMapFunc, halHandle, "halMemMap");
     DL_LOAD_SYM(pHalMemUnmap, halMemUnmapFunc, halHandle, "halMemUnmap");
     DL_LOAD_SYM(pHalMemSetAccess, halMemSetAccessFunc, halHandle, "halMemSetAccess");
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+        DL_LOAD_SYM(pHalMemExportToShareableHandle, halMemExportToShareableHandleFunc, halHandle,
+                    "halMemExportToShareableHandle");
+        DL_LOAD_SYM(pHalMemImportFromShareableHandle, halMemImportFromShareableHandleFunc, halHandle,
+                    "halMemImportFromShareableHandle");
+    }
     DL_LOAD_SYM(pHalMemExport, halMemExportFunc, halHandle, "halMemExportToShareableHandleV2");
     DL_LOAD_SYM(pHalMemImport, halMemImportFunc, halHandle, "halMemImportFromShareableHandleV2");
     DL_LOAD_SYM_OPTIONAL(pHalMemShareHandleSetAttribute, halMemShareHandleSetAttributeFunc, halHandle,
@@ -302,6 +310,8 @@ void DlHalApi::CleanupHalApi()
     pHalMemMap = nullptr;
     pHalMemUnmap = nullptr;
     pHalMemSetAccess = nullptr;
+    pHalMemExportToShareableHandle = nullptr;
+    pHalMemImportFromShareableHandle = nullptr;
     pHalMemExport = nullptr;
     pHalMemImport = nullptr;
     pHalMemGetAllocationGranularity = nullptr;

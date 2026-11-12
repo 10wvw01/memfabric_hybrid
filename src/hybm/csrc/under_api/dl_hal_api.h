@@ -67,6 +67,8 @@ using halMemUnmapFunc = int (*)(void *);
 using halMemSetAccessFunc = int (*)(void *, size_t, struct drv_mem_access_desc *, size_t);
 using halMemExportFunc = int (*)(drv_mem_handle_t *, drv_mem_handle_type, uint64_t, struct MemShareHandle *);
 using halMemImportFunc = int (*)(drv_mem_handle_type, struct MemShareHandle *, uint32_t, drv_mem_handle_t **);
+using halMemExportToShareableHandleFunc = int (*)(drv_mem_handle_t *, drv_mem_handle_type, uint64_t, uint64_t *);
+using halMemImportFromShareableHandleFunc = int (*)(uint64_t, uint32_t, drv_mem_handle_t **);
 using halMemShareHandleSetAttributeFunc = int (*)(uint64_t, enum ShareHandleAttrType, struct ShareHandleAttr);
 using halMemTransShareableHandleFunc = int (*)(drv_mem_handle_type, struct MemShareHandle *, uint32_t *, uint64_t *);
 using halMemGetAllocationGranularityFunc = int (*)(const struct drv_mem_prop *, drv_mem_granularity_options, size_t *);
@@ -422,6 +424,22 @@ public:
         return pHalMemSetAccess(ptr, size, desc, count);
     }
 
+    static inline int HalMemExportToShareableHandle(drv_mem_handle_t *handle, uint64_t *shareable)
+    {
+        if (pHalMemExportToShareableHandle == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pHalMemExportToShareableHandle(handle, MEM_HANDLE_TYPE_NONE, 0, shareable);
+    }
+
+    static inline int HalMemImportFromShareableHandle(uint64_t shareable, uint32_t devid, drv_mem_handle_t **handle)
+    {
+        if (pHalMemImportFromShareableHandle == nullptr) {
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pHalMemImportFromShareableHandle(shareable, devid, handle);
+    }
+
     static inline int HalMemExport(drv_mem_handle_t *handle, drv_mem_handle_type type, uint64_t flags,
                                    struct MemShareHandle *sHandle)
     {
@@ -551,6 +569,8 @@ private:
     static halMemMapFunc pHalMemMap;
     static halMemUnmapFunc pHalMemUnmap;
     static halMemSetAccessFunc pHalMemSetAccess;
+    static halMemExportToShareableHandleFunc pHalMemExportToShareableHandle;
+    static halMemImportFromShareableHandleFunc pHalMemImportFromShareableHandle;
     static halMemExportFunc pHalMemExport;
     static halMemImportFunc pHalMemImport;
     static halMemShareHandleSetAttributeFunc pHalMemShareHandleSetAttribute;

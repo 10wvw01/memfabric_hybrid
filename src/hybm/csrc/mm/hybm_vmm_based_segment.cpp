@@ -23,9 +23,6 @@
 
 using namespace ock::mf;
 
-/* 310P 驱动错误码: P2P 物理分区耗尽(hcomm 同义, 见 PR12 实测) */
-constexpr int32_t RT_ERROR_DRV_OUT_MEMORY = 207001;
-
 HybmVmmBasedSegment::~HybmVmmBasedSegment()
 {
     if (globalVirtualAddress_ == nullptr && localVirtualAddress_ == nullptr && slices_.empty()) {
@@ -55,7 +52,7 @@ Result HybmVmmBasedSegment::ValidateOptions() noexcept
         return BM_INVALID_PARAM;
     }
     /* 310P ACL 路径不走 A5 fabric GVA 的 GB 粒度路由, 物理分配粒度即 2MB 大页 */
-    const uint64_t maxAlign = Is310PAclPath() ? HYBM_LARGE_PAGE_SIZE : GB;
+    const uint64_t maxAlign = Is310PPath() ? HYBM_LARGE_PAGE_SIZE : GB;
     if (!checkAlignment(options_.maxSize, maxAlign)) {
         BM_LOG_ERROR("Invalid options segType:" << options_.segType << " max size:" << options_.maxSize
                                                 << " must align:" << maxAlign);
@@ -87,7 +84,7 @@ Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
     totalVirtualSize_ = options_.rankCnt * options_.maxSize;
     auto totalLvaSize = options_.enable56BitsGva ? options_.maxSize : totalVirtualSize_;
     auto mem_type = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
-    if (Is310PAclPath()) {
+    if (Is310PPath()) {
         // Keep small logical pools usable with the driver's GiB remote reservation granularity.
         totalLvaSize = ((totalLvaSize + GB - 1) / GB) * GB;
     }
@@ -218,37 +215,20 @@ Result HybmVmmBasedSegment::MallocFromHost(size_t size, uint32_t devId, drv_mem_
 
 Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept
 {
-    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
-        aclrtPhysicalMemProp prop{};
-        prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-        prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
-        // ACL allocation and access descriptors use the process-visible device id.
-        prop.location.id = static_cast<uint32_t>(deviceId_);
-        prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-        prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
-        aclrtDrvMemHandle aclHandle = nullptr;
-        auto ret = DlAclApi::AclrtMallocPhysical(&aclHandle, size, &prop, 0);
-        if (ret == RT_ERROR_DRV_OUT_MEMORY) {
-            /* 310P: P2P_HUGE 物理分区上限 ~4088MB(动态波动), 超限返 207001;
-             * 回退 ACL_HBM_MEM_HUGE 从 AI 主池(~42GB)分配, 带宽无差异 */
-            BM_LOG_WARN("AclrtMallocPhysical(P2P_HUGE) partition exhausted, fallback to HBM_MEM_HUGE, ret:" << ret
-                                                                                                            << " devId:"
-                                                                                                            << devId
-                                                                                                            << " size:"
-                                                                                                            << size);
-            prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_HBM_MEM_HUGE);
-            ret = DlAclApi::AclrtMallocPhysical(&aclHandle, size, &prop, 0);
-        }
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("AclrtMallocPhysical failed, ret:" << ret << " devId:" << devId << " size:" << size);
-            return ret;
-        }
-        *handle = reinterpret_cast<drv_mem_handle_t *>(aclHandle);
-        return BM_OK;
+    const bool is310P = Is310PPath();
+    drv_mem_prop prop{MEM_DEV_SIDE, devId, 0, MEM_HUGE_PAGE_TYPE,
+                      is310P ? MEM_P2P_DDR_TYPE : MEM_HBM_TYPE, 0};
+    auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
+    if (is310P && ret == HAL_OUT_OF_MEMORY_ERROR) {
+        BM_LOG_WARN("HalMemCreate(P2P_DDR) exhausted, retry DDR, devId:"
+                    << devId << " size:" << size << " ret:" << ret);
+        prop.mem_type = MEM_DDR_TYPE;
+        ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
     }
-    drv_mem_prop prop{};
-    prop = {MEM_DEV_SIDE, static_cast<uint32_t>(devId), 0, MEM_HUGE_PAGE_TYPE, MEM_HBM_TYPE, 0};
-    return DlHalApi::HalMemCreate(handle, size, &prop, 0);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("HalMemCreate failed, devId:" << devId << " size:" << size << " ret:" << ret);
+    }
+    return ret;
 }
 
 Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
@@ -290,16 +270,19 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
     return BM_OK;
 }
 
-/* ACL access descriptors use process-visible device ids.
- * ASCEND_RT_VISIBLE_DEVICES can renumber physical devices.
- * Use the same device-id namespace as aclrtMallocPhysical.
- */
-
-static Result FillAclAccessDesc(aclrtMemAccessDesc &desc, uint32_t userDevId, uint32_t /* rankId */)
+// HAL uses driver logical device ids, including when ACL visible devices are renumbered.
+static Result FillHalAccessDesc(drv_mem_access_desc &desc, uint32_t userDevId, uint32_t rankId)
 {
-    desc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    desc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-    desc.location.id = userDevId;
+    int32_t logicDevId = -1;
+    auto ret = DlAclApi::RtGetLogicDevIdByUserDevId(static_cast<int32_t>(userDevId), &logicDevId);
+    if (ret != BM_OK || logicDevId < 0) {
+        BM_LOG_ERROR("Translate HAL access device failed, userDevId:" << userDevId << " rank:" << rankId
+                                                                 << " ret:" << ret << " logicDevId:" << logicDevId);
+        return BM_DL_FUNCTION_FAILED;
+    }
+    desc.type = MEM_ACCESS_TYPE_READWRITE;
+    desc.location.side = MEM_DEV_SIDE;
+    desc.location.id = static_cast<uint32_t>(logicDevId);
     return BM_OK;
 }
 
@@ -363,9 +346,7 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
 
     void *mapHandle = reinterpret_cast<void *>(handle);
     if (options_.segType == HYBM_MST_DRAM && options_.shared && (options_.flags & HYBM_FLAG_DRAM_MAP_HOST_VA) == 0) {
-        if (Is310PAclPath()) {
-            /* 310P3 ACL path: re-import for shared DRAM is not needed in P0 */
-        } else {
+        if (!Is310PPath()) {
             drv_mem_handle_t *dHandle = handle;
             ret = DlHalApi::HalMemImport(MEM_HANDLE_TYPE_FABRIC, &sHandle, logicDeviceId_, &dHandle);
             BM_VALIDATE_RETURN(ret == BM_OK, "HalMemImport memory failed:" << ret, BM_ERROR);
@@ -373,13 +354,8 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         }
     }
 
-    if (Is310PAclPath()) {
-        ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(allocAddr), size, 0,
-                                    reinterpret_cast<aclrtDrvMemHandle>(mapHandle), 0);
-    } else {
-        ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(allocAddr), size, 0,
-                                  reinterpret_cast<drv_mem_handle_t *>(mapHandle), 0);
-    }
+    ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(allocAddr), size, 0,
+                              reinterpret_cast<drv_mem_handle_t *>(mapHandle), 0);
     if (ret != BM_OK) {
         BM_LOG_ERROR("MapMem failed, ret: " << ret << " addr: 0x" << std::hex << allocAddr << " size: " << size
                                             << " segType: " << options_.segType);
@@ -387,7 +363,7 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         slices_.erase(slice->index_);
         return BM_DL_FUNCTION_FAILED;
     }
-    if (Is310PAclPath() && options_.segType == HYBM_MST_HBM) {
+    if (Is310PPath() && options_.segType == HYBM_MST_HBM) {
         /* 310P3: SetAccess(RW) on local HBM for all peer devices (cross-card).
          * Same-card peers share the P2P domain and don't need SetAccess.
          * deviceId equals rankId on 310P3 Duo, so rankCnt is the total device count. */
@@ -398,34 +374,34 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
             if (IsSamePhysicalCard(dev, static_cast<uint32_t>(deviceId_))) {
                 continue;
             }
-            aclrtMemAccessDesc desc{};
+            drv_mem_access_desc desc{};
             /* 换算失败即终止: 回退/跳过=把显性报错变成无声的错误授权 */
-            auto faRet = FillAclAccessDesc(desc, dev, options_.rankId);
+            auto faRet = FillHalAccessDesc(desc, dev, options_.rankId);
             if (faRet != BM_OK) {
-                (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+                (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
                 ReleaseHandle(handle);
                 slices_.erase(slice->index_);
                 return faRet;
             }
-            auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &desc, 1);
+            auto saRet = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &desc, 1);
             if (saRet != BM_OK) {
-                BM_LOG_WARN("AclrtMemSetAccess(RW) dev:" << dev << " failed:" << saRet << " addr:0x" << std::hex
+                BM_LOG_WARN("HalMemSetAccess(RW) dev:" << dev << " failed:" << saRet << " addr:0x" << std::hex
                                                          << allocAddr << std::dec << " segType:" << options_.segType
                                                          << " rankId:" << options_.rankId);
             }
         }
         /* Also set for local device */
-        aclrtMemAccessDesc localDesc{};
-        auto faRet = FillAclAccessDesc(localDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
+        drv_mem_access_desc localDesc{};
+        auto faRet = FillHalAccessDesc(localDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
         if (faRet != BM_OK) {
-            (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
+            (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
             ReleaseHandle(handle);
             slices_.erase(slice->index_);
             return faRet;
         }
-        auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &localDesc, 1);
+        auto saRet = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &localDesc, 1);
         if (saRet != BM_OK) {
-            BM_LOG_WARN("AclrtMemSetAccess(RW) local dev failed:" << saRet << " addr:0x" << std::hex << allocAddr
+            BM_LOG_WARN("HalMemSetAccess(RW) local dev failed:" << saRet << " addr:0x" << std::hex << allocAddr
                                                                   << std::dec << " segType:" << options_.segType
                                                                   << " rankId:" << options_.rankId);
         } else {
@@ -442,11 +418,7 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
             BM_LOG_ERROR("HalMemSetAccess failed: " << ret << " addr:0x" << std::hex << allocAddr
                                                     << " size:" << size << " segType:" << options_.segType);
             /* unmap before releasing handle to avoid dangling mapping */
-            if (Is310PAclPath()) {
-                DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(allocAddr));
-            } else {
-                DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
-            }
+            DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
             ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
             slices_.erase(slice->index_);
             return BM_DL_FUNCTION_FAILED;
@@ -476,8 +448,7 @@ Result HybmVmmBasedSegment::ReleaseSliceMemory(const MemSlicePtr &slice) noexcep
             BM_LOG_ERROR("input slice(magic:" << std::hex << slice->magic_ << ") not match.");
             return BM_INVALID_PARAM;
         }
-        auto res = Is310PAclPath() ? DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(slice->vAddress_))
-                                   : DlHalApi::HalMemUnmap(reinterpret_cast<void *>(slice->vAddress_));
+        auto res = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(slice->vAddress_));
         BM_LOG_INFO("unmap slice(idx:" << slice->index_ << "), size: " << slice->size_ << " return:" << res);
 
         ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(pos->second.handle));
@@ -527,26 +498,17 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
     auto pos = slices_.find(slice->index_);
     Result ret = BM_OK;
 
-    if (Is310PAclPath()) {
+    if (Is310PPath()) {
         uint64_t shareable = 0U;
-        BM_LOG_DEBUG("310P3 export: sliceIdx:" << slice->index_ << " va:0x" << std::hex << slice->vAddress_ << " size:"
-                                               << std::dec << slice->size_ << " handle:" << pos->second.handle
-                                               << " deviceId_:" << deviceId_ << " logicDeviceId_:" << logicDeviceId_);
-        /* DISABLE_PID_VALIDATION is required for multi-process sharing: each rank
-         * runs as a separate process with a different PID. The shareable handle is
-         * exchanged via the trusted config store (TCP/etcd) and is NOT logged (see
-         * PR#2 #10). If untrusted peers gain access to the store URL, they could
-         * import device memory — mitigate by restricting store URL to trusted network. */
-        ret = DlAclApi::AclrtMemExportToShareableHandle(reinterpret_cast<aclrtDrvMemHandle>(pos->second.handle),
-                                                        aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE,
-                                                        ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &shareable);
-        BM_LOG_DEBUG("310P3 export: AclrtMemExportToShareableHandle ret=" << ret);
-        if (ret != 0) {
-            BM_LOG_ERROR("AclrtMemExportToShareableHandle failed, ret:" << ret << " sliceIdx:" << slice->index_
-                                                                        << " va:0x" << std::hex << slice->vAddress_
-                                                                        << " size:" << slice->size_);
-            return BM_DL_FUNCTION_FAILED;
-        }
+        ret = DlHalApi::HalMemExportToShareableHandle(
+            reinterpret_cast<drv_mem_handle_t *>(pos->second.handle), &shareable);
+        BM_VALIDATE_RETURN(ret == BM_OK, "HAL export failed, rank:" << options_.rankId << " ret:" << ret,
+                           BM_DL_FUNCTION_FAILED);
+        // Preserve the existing cross-process sharing policy and uint64_t wire handle.
+        ShareHandleAttr attr{SHR_HANDLE_NO_WLIST_ENABLE, {0}};
+        ret = DlHalApi::HalMemShareHandleSetAttribute(shareable, SHR_HANDLE_ATTR_NO_WLIST_IN_SERVER, attr);
+        BM_VALIDATE_RETURN(ret == BM_OK, "HAL handle attribute failed, rank:" << options_.rankId << " ret:" << ret,
+                           BM_DL_FUNCTION_FAILED);
         /* Store shareable handle (uint64_t) in the first 8 bytes of MemShareHandle */
         memcpy(info.shareHandle.share_info, &shareable, sizeof(shareable));
     } else {
@@ -646,7 +608,7 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
         if (options_.shared && options_.segType == HYBM_MST_HBM && info.rankId != options_.rankId &&
             devicePhyId_ != static_cast<int>(info.devicePhyId) &&
             CanLocalHostReaches(info.superPodId, info.serverId, info.devicePhyId)) {
-            if (Is310PAclPath()) {
+            if (Is310PPath()) {
                 /* 310P3: same-card ctx trick is applied in Mmap; cross-card P2P must be explicitly enabled.
                  * 15_peer_needed measured cross-card must be bidirectionally EnablePeerAccess (one direction fails
                  * with 507899); p3_store_repro/04_vmm_cross only verified host-copy paths can succeed without EPA
@@ -705,7 +667,7 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
 
 uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
 {
-    if (Is310PAclPath()) {
+    if (Is310PPath()) {
         /* Device-side access uses GVA directly. All ranks of a pool must reserve the same
          * window and map a peer slice at its exported address. Fixed-range allocation
          * therefore requires the same pool creation order on all ranks. */
@@ -746,12 +708,7 @@ uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
 
 Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_t lva, void *&mapHandle) noexcept
 {
-    /* Minimal ACL path — exactly as p3_store_repro test that PASS:
-     * 1. SetDevice(local, force=true)
-     * 2. If same-card: SetDevice(exporter, force=true) for ctx trick
-     * 3. AclrtMemImportFromShareableHandle
-     * 4. If same-card: SetDevice(local) to restore
-     * No pre-enable P2P, no retry, no mutex, no CreateContext */
+    // Keep the existing device-context setup for same-card imports.
     uint64_t shareable = 0;
     memcpy(&shareable, im.shareHandle.share_info, sizeof(shareable));
     bool sameCard = IsSameCard(im.devicePhyId);
@@ -773,15 +730,15 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
                              << " canAccess:" << canAccess << " local:" << deviceId_
                              << " peer:" << im.devicePhyId << " sameCard:" << sameCard);
     }
-    aclrtDrvMemHandle aclHandle = nullptr;
-    auto ret = DlAclApi::AclrtMemImportFromShareableHandle(shareable, deviceId_, &aclHandle);
-    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step2: AclrtMemImportFromShareableHandle"
-                         << " ret:" << ret << " handle:" << aclHandle << " rank:" << im.rankId
+    drv_mem_handle_t *halHandle = nullptr;
+    auto ret = DlHalApi::HalMemImportFromShareableHandle(shareable, logicDeviceId_, &halHandle);
+    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step2: HalMemImportFromShareableHandle"
+                         << " ret:" << ret << " handle:" << halHandle << " rank:" << im.rankId
                          << " deviceId:" << deviceId_);
     if (sameCard) {
         DlAclApi::AclrtSetDevice(deviceId_);
     }
-    if (ret != BM_OK || aclHandle == nullptr) {
+    if (ret != BM_OK || halHandle == nullptr) {
         BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
                               << " sameCard:" << sameCard
                               << " deviceId:" << deviceId_ << " segType:" << options_.segType);
@@ -789,31 +746,32 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
          * released by UnReserveMemorySpace. Pre-releasing causes double-free. */
         return BM_ERROR;
     }
-    mapHandle = aclHandle;
-    ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(lva), im.size, 0,
-                                reinterpret_cast<aclrtDrvMemHandle>(mapHandle), 0);
-    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step3: AclrtMapMem ret:" << ret
+    mapHandle = halHandle;
+    ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(lva), im.size, 0,
+                              reinterpret_cast<drv_mem_handle_t *>(mapHandle), 0);
+    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step3: HalMemMap ret:" << ret
                          << " rank:" << im.rankId << " lva:" << VaToStr(lva) << " size:" << im.size);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("[rank " << options_.rankId << "] AclrtMapMem failed:" << ret << " rank:" << im.rankId
+        BM_LOG_ERROR("[rank " << options_.rankId << "] HalMemMap failed:" << ret << " rank:" << im.rankId
                               << " va:" << VaToStr(lva) << " size:" << im.size
                               << " segType:" << options_.segType);
         ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
         return BM_ERROR;
     }
     /* SetAccess on imported VA for local device */
-    aclrtMemAccessDesc impDesc{};
-    auto faRet = FillAclAccessDesc(impDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
+    drv_mem_access_desc impDesc{};
+    auto faRet = FillHalAccessDesc(impDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
     if (faRet != BM_OK) {
-        BM_LOG_ERROR("FillAclAccessDesc(imported) failed, ret:" << faRet << " rankId:" << options_.rankId
+        BM_LOG_ERROR("FillHalAccessDesc(imported) failed, ret:" << faRet << " rankId:" << options_.rankId
                                                                 << " remoteRank:" << im.rankId
                                                                 << " va:" << VaToStr(lva));
+        (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(lva));
         ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
         return BM_ERROR;
     }
-    auto saRet = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(lva), im.size, &impDesc, 1);
+    auto saRet = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(lva), im.size, &impDesc, 1);
     if (saRet != BM_OK) {
-        BM_LOG_WARN("[rank " << options_.rankId << "] AclrtMemSetAccess on imported VA failed:" << saRet
+        BM_LOG_WARN("[rank " << options_.rankId << "] HalMemSetAccess on imported VA failed:" << saRet
                              << " rank:" << im.rankId << " va:" << VaToStr(lva) << " size:" << im.size
                              << " segType:" << options_.segType);
     }
@@ -828,7 +786,7 @@ Result HybmVmmBasedSegment::Mmap() noexcept
     /* 310P3: sort imports_ — same-card first, cross-card second.
      * This ensures ctx trick (same-card) runs before cross-card import,
      * which is required by ACL runtime's P2P state management. */
-    if (Is310PAclPath()) {
+    if (Is310PPath()) {
         /* Mmap() runs on the group listen thread (grp_listen_evt), NOT the main
          * thread. ACL runtime device context is thread-local, so the main
          * thread's aclrtSetDevice does not apply here. Without setting the
@@ -893,7 +851,7 @@ Result HybmVmmBasedSegment::Mmap() noexcept
         void *mapHandle = nullptr;
         Result ret = BM_OK;
 
-        if (Is310PAclPath()) {
+        if (Is310PPath()) {
             ret = MmapImport310P(im, lva, mapHandle);
             if (ret != BM_OK) {
                 return ret;
@@ -928,11 +886,7 @@ Result HybmVmmBasedSegment::Mmap() noexcept
         ret = HybmVaManager::GetInstance().AddVaInfoFromExternal({im.gva, lva, 0, im.size, memType}, options_.rankId,
                                                                  im.rankId);
         if (ret != BM_OK) {
-            if (Is310PAclPath()) {
-                DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(lva));
-            } else {
-                DlHalApi::HalMemUnmap(reinterpret_cast<void *>(lva));
-            }
+            DlHalApi::HalMemUnmap(reinterpret_cast<void *>(lva));
             ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
             imports_.clear();
             return ret;
@@ -957,13 +911,8 @@ Result HybmVmmBasedSegment::Unmap() noexcept
 
     for (auto it : mappedGvaMem_) {
         auto deviceVa = HybmVaManager::GetInstance().TransformVa(it.first, HVM_GVA, HVM_DVA);
-        if (Is310PAclPath()) {
-            DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(deviceVa));
-            DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(it.second));
-        } else {
-            DlHalApi::HalMemUnmap(reinterpret_cast<void *>(deviceVa));
-            DlHalApi::HalMemRelease(reinterpret_cast<drv_mem_handle_t *>(it.second));
-        }
+        DlHalApi::HalMemUnmap(reinterpret_cast<void *>(deviceVa));
+        DlHalApi::HalMemRelease(reinterpret_cast<drv_mem_handle_t *>(it.second));
         HybmVaManager::GetInstance().RemoveOneVaInfo(it.first);
     }
     mappedGvaMem_.clear();
@@ -991,13 +940,8 @@ Result HybmVmmBasedSegment::RemoveImported(const std::vector<uint32_t> &ranks) n
         auto st = it;
         while (it != mappedGvaMem_.end() && (*it).first < gvaLocal + options_.maxSize) {
             auto deviceVa = HybmVaManager::GetInstance().TransformVa((*it).first, HVM_GVA, HVM_DVA);
-            if (Is310PAclPath()) {
-                DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(deviceVa));
-                DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>((*it).second));
-            } else {
-                DlHalApi::HalMemUnmap(reinterpret_cast<void *>(deviceVa));
-                DlHalApi::HalMemRelease(reinterpret_cast<drv_mem_handle_t *>((*it).second));
-            }
+            DlHalApi::HalMemUnmap(reinterpret_cast<void *>(deviceVa));
+            DlHalApi::HalMemRelease(reinterpret_cast<drv_mem_handle_t *>((*it).second));
             HybmVaManager::GetInstance().RemoveOneVaInfo((*it).first);
             it++;
         }
@@ -1108,7 +1052,7 @@ void HybmVmmBasedSegment::ReleaseP2PLeases(const std::set<uint32_t> &removedRank
     }
 }
 
-bool HybmVmmBasedSegment::Is310PAclPath() const noexcept
+bool HybmVmmBasedSegment::Is310PPath() const noexcept
 {
     return DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P;
 }
@@ -1118,9 +1062,5 @@ void HybmVmmBasedSegment::ReleaseHandle(drv_mem_handle_t *handle) noexcept
     if (handle == nullptr) {
         return;
     }
-    if (Is310PAclPath()) {
-        DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(handle));
-    } else {
-        DlHalApi::HalMemRelease(handle);
-    }
+    DlHalApi::HalMemRelease(handle);
 }

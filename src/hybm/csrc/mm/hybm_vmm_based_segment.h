@@ -80,7 +80,7 @@ private:
     uint64_t ReserveLva(const HostSdmaExportInfo &im);
     Result MmapImport310P(const HostSdmaExportInfo &im, uint64_t lva, void *&mapHandle) noexcept;
     void ReleaseP2PLeases(const std::set<uint32_t> &removedRanks = {}) noexcept;
-    bool Is310PAclPath() const noexcept;
+    bool Is310PPath() const noexcept;
     void ReleaseHandle(drv_mem_handle_t *handle) noexcept;
 
     std::vector<HostSdmaExportInfo> imports_;
@@ -92,7 +92,7 @@ private:
     std::map<uint32_t, MemSliceStatus> slices_;
     std::map<uint32_t, std::pair<MemSliceStatus, uint64_t>> registerSlices_;
     std::map<uint32_t, std::string> exportMap_;
-    std::map<uint64_t, void *> mappedGvaMem_; // mapped gva, handle is drv_mem_handle_t* or aclrtDrvMemHandle
+    std::map<uint64_t, void *> mappedGvaMem_; // mapped gva, handle is drv_mem_handle_t*
     std::vector<void *> reservedLva_;
     std::set<int32_t> p2pLeases_; // enabled peer physical device ids for cleanup
 };

@@ -1,6 +1,6 @@
 # 310P 2-rank BM 场景 bm_perf_benchmark 带宽测试改造计划（V1）
 
-## 当前内存段实现说明（trunk_for_escc_v1.2.0，1f41b8a6）
+## 当前内存段实现说明
 
 本文件保留 V1 改造前的问题、实施步骤和当时的带宽数据。下文“无回退”、
 `HybmAclVmmSegment`、专用类文件和对应 UT 数量均属于历史记录。
@@ -11,13 +11,14 @@
 | V1 历史内容 | 当前对应实现 |
 |---|---|
 | `hybm_acl_vmm_segment.cpp/.h` | `src/hybm/csrc/mm/hybm_vmm_based_segment.cpp/.h` |
-| `FillMemProp` / `MallocPhysicalWithFallback` | `HybmVmmBasedSegment::MallocFromDevice` 的 310P 分支；已包含 P2P_HUGE 内存不足时回退 HBM_MEM_HUGE 的逻辑 |
+| `FillMemProp` / `MallocPhysicalWithFallback` | `HybmVmmBasedSegment::MallocFromDevice` 的 310P 分支；调用 HAL 使用 MEM_P2P_DDR_TYPE，内存不足时回退 MEM_DDR_TYPE |
 | `HybmAclVmmSegmentTest` | `test/ut/testcase/hybm/mm/hybm_vmm_based_segment_test.cpp` 中的共用类测试 |
 | 310P 专用类分派 | `MemSegment::Create` 将 310P HBM 段分派到 `HybmVmmBasedSegment` |
 
-窗口选择和预留已改为地址管理器配合 HAL 远端预留，物理内存分配、映射和释放保留 ACL 路径。
+窗口选择由地址管理器负责，预留、物理内存分配、共享句柄导入导出、映射和释放统一调用 HAL。
+310P 使用 DDR/P2P_DDR 设备内存类型及64位 NONE 共享句柄；ACL 继续负责上下文和数据拷贝。
 详细说明见 [VMM 开发计划的当前实现说明](310p-2rank-vmm-开发计划.md)。
-本次仅按源码更新实现对应关系，未重新运行带宽测试或 UT，历史性能数据保持原样。
+本次同步HAL实现及回退方式，历史带宽数据保持原样。完整UT结果见VMM开发计划的当前实现说明。
 
 ## V1 历史实施记录
 

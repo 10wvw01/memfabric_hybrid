@@ -88,7 +88,7 @@ MemSegmentPtr MemSegment::Create(const MemSegmentOptions &options, int entityId)
                                          socType_ == AscendSocType::ASCEND_310P));
             if (HybmGetGvaVersion() == HYBM_GVA_V4 || socType_ == AscendSocType::ASCEND_950 ||
                 socType_ == AscendSocType::ASCEND_310P) {
-                /* 310P 的差异(Aclrt* 接口/对称窗口/2MB 对齐)由类内 Is310PAclPath 分支处理 */
+                /* 310P 的内存类型、共享句柄和对齐差异由类内分支处理。 */
                 tmpSeg = std::make_shared<HybmVmmBasedSegment>(options, entityId);
             } else {
                 tmpSeg = std::make_shared<HybmDevLegacySegment>(options, entityId);
@@ -370,7 +370,7 @@ bool MemSegment::IsSameCard(uint32_t peerId) noexcept
      *            INFO_TYPE_PHY_CHIP_ID returns per-die values and cannot be used here.
      *   - Other SoCs: peerId is the peer's physicalChipId (info.physicalChipId).
      *            Direct comparison with local physicalChipId_.
-     * Callers MUST pass the correct field based on Is310PAclPath(). */
+     * Callers MUST pass the correct field based on the target API device-id namespace. */
     if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
         auto peerDevId = static_cast<int32_t>(peerId);
         bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(devicePhyId_), peerDevId);

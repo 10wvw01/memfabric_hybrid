@@ -1,6 +1,6 @@
 # 310P 单卡双 die 2-rank VMM 内存池开发计划与实现说明
 
-## 当前实现（trunk_for_escc_v1.2.0，1f41b8a6）
+## 当前实现
 
 310P HBM 池使用 `HybmVmmBasedSegment`。提交 `3a56de8f` 已删除原专用类
 `hybm_acl_vmm_segment.cpp/.h` 及其测试文件，并将工厂分派改为共用类。
@@ -10,18 +10,38 @@
 |---|---|
 | 创建内存段 | `src/hybm/csrc/mm/hybm_mem_segment.cpp`：HBM 且 SoC 为 310P 时创建 `HybmVmmBasedSegment` |
 | 选择与预留虚拟地址 | `HybmVaManager::AllocReserveGva` 选择管理区间内的可用窗口；`ReserveMemorySpace` 调用 `HalMemAddressReserve`，使用 `MEM_RSV_TYPE_REMOTE_MAP`，检查返回地址与预期一致 |
-| 申请物理内存 | `MallocFromDevice` 的 310P 分支调用 `AclrtMallocPhysical`；P2P_HUGE 返回 `RT_ERROR_DRV_OUT_MEMORY` 时回退 HBM_MEM_HUGE |
-| 映射、导入与释放 | 共用类通过 310P 分支使用 `AclrtMapMem`、`MmapImport310P`、`AclrtUnmapMem`、`AclrtFreePhysical`；虚拟地址预留由 `HalMemAddressFree` 释放 |
+| 申请物理内存 | `MallocFromDevice` 调用 `HalMemCreate`；310P 使用 MEM_P2P_DDR_TYPE，驱动返回内存不足时回退 MEM_DDR_TYPE |
+| 映射、导入与释放 | 使用 `HalMemMap`、`HalMemUnmap`、`HalMemRelease`；310P 通过 HAL 的64位 NONE 句柄接口导出和导入，虚拟地址由 `HalMemAddressFree` 释放 |
 | 当前测试位置 | `test/ut/testcase/hybm/mm/hybm_vmm_based_segment_test.cpp` 和 `hybm_mem_segment_test.cpp`；原专用类测试已删除 |
 
-当前实现结合 HAL 窗口预留与 ACL 物理内存管理。下文 V1 的“纯 aclrt*”、专用类、
+当前内存生命周期统一调用 HAL；ACL 仍负责设备上下文、设备号转换和数据拷贝。
+HAL 参数使用驱动逻辑设备号，保留设备可见列表重编号的支持。下文 V1 的“纯 aclrt*”、专用类、
 `AclVmmExportInfo`、不经过地址管理器等描述属于历史方案。当前交换结构为共用类中的
-`HostSdmaExportInfo`。完整地址预留能力验证见
+`HostSdmaExportInfo`，310P 的64位共享句柄仍存入原有 `share_info` 字段，交换格式保持一致。完整地址预留能力验证见
 [310P 能力验证第 17 项](310p-capability_matrix/17_va_reservation/README.md)。
 
 当前没有两套内存段实现并存的功能冗余。是否进一步拆分类或提取 API 适配层，应结合共用类中
 硬件分支的维护成本决定；恢复旧专用类需要同步后续窗口和映射修复。
-本节为源码核查结果，没有新增硬件测试或 UT 结果。
+地址窗口、物理内存和共享句柄的 HAL 迁移需配套验证；原有 V1 数据仍保留在下文。
+
+### HAL 路径验证（2026-11-12）
+
+10006 / Ascend310P3 / CANN 9.2.1，同卡设备4、5。验证前先比较ACL与HAL：
+2MiB HAL HBM/P2P_HBM分配返回6，DDR/P2P_DDR成功；FABRIC句柄导出返回8，
+64位NONE导出成功。ACL对照的驱动日志也显示P2P_DDR与64位NONE接口。
+最终使用NONE导出、设置原有共享属性、NONE导入，保持原交换数据格式。
+
+| 验证 | 结果 |
+|---|---|
+| HAL三个1GiB窗口，每rank每池2MiB物理内存 | 双向全量读写校验通过，释放后首窗口复用通过 |
+| `ASCEND_RT_VISIBLE_DEVICES=4,5`，进程设备号0、1 | 同上通过，HAL使用转换后的驱动设备号 |
+| 普通DDR类型双进程共享对照 | 同上通过；未制造P2P内存耗尽条件 |
+| 修改后的运行库RELEASE构建 | 通过 |
+| MemFabric双实体端到端 | 每rank设备池32MiB、DRAM池32MiB；三阶段8MiB校验均mismatch=0，正常销毁，两rank退出0 |
+
+端到端使用07双die示例的临时副本，仅更换端口和临时目录，先启动rank1再启动rank0以满足
+旧示例的目录标记等待逻辑。该副本未修改仓库示例。验证未覆盖跨卡、910硬件或大模型推理。
+新增12项分配、回退、共享句柄、设备号及失败清理回归。提交前完整ASAN UT：2070项通过、12项环境跳过、无失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。
 
 ## V1 历史实施记录
 
