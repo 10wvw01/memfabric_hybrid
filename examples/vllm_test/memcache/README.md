@@ -324,3 +324,5 @@ TTFT 以首个实际 token 的 SSE 响应计时，支持仅有 token ID 的特�
 `verify.sh` 核对当前版本、Python 包加载路径、MemCache wheel、已安装 MemFabric 运行库和 MetaService 构建产物。
 仅同步源码的记录写入 `retest_logs/source_revisions.json`，不会替代完整构建后的部署记录。
 测试结果引用该记录中的提交号，分支更新后重新部署、验证并运行测试。
+
+共享前缀比例测试（Qwen 35B、4K 输入、TP=1/2）的数据构造、运行方式和缓存来源检查见 [测试说明](docs/prefix_cache_ratio_35b.md)。
