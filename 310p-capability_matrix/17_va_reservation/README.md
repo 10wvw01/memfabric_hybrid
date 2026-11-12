@@ -115,3 +115,86 @@ runtime 日志能进一步显示底层调用及驱动返回码。
 
 
 本目录验证预留接口和共享映射能力。MemFabric 的地址管理器及正常 BM/SHM 入口另有单元测试和集成测试；本目录可以独立构建运行。
+
+## HAL 内存生命周期与超过4GiB的双rank设备池
+
+`hal_vmm.c` 补充验证物理内存分配、共享、映射及释放。ACL负责设备初始化、设备号转换和数据拷贝，
+内存生命周期使用HAL。进程设备号经 `aclrtGetLogicDevIdByUserDevId` 转为HAL使用的驱动设备号。
+
+| 命令 | 内容 |
+|---|---|
+| `hal-probe` | 单rank比较2MiB的HBM、DDR、P2P_HBM、P2P_DDR分配，以及V2的NONE、FABRIC句柄导出；对照项输出OBSERVE，DDR和P2P_DDR分配及所有已分配资源释放必须成功 |
+| `hal-pools` | 同卡双rank，三个1GiB窗口，每rank每池2MiB物理内存；完整HAL共享映射、双向全量校验、清理和窗口复用 |
+| `hal-large-pools` | 同卡双rank，默认每rank实际分配8GiB物理内存，共享一个16GiB虚拟窗口；分块覆盖全部8GiB的双向读写、逐字校验及释放复用 |
+
+HAL共享读写流程为：
+
+1. `halMemAddressReserve` 使用 `MEM_RSV_TYPE_REMOTE_MAP` 精确预留窗口，每rank占一半。
+2. `halMemCreate` 使用 `MEM_P2P_DDR_TYPE`；仅当返回 `DRV_ERROR_OUT_OF_MEMORY=6` 时，
+   改用 `MEM_DDR_TYPE` 重试，日志分别保留两次分配结果。
+3. `halMemMap`、`halMemSetAccess` 映射本地物理内存。
+4. `halMemExportToShareableHandle` 使用64位NONE句柄、flags=0；
+   `halMemShareHandleSetAttribute` 设置与原ACL实现相同的共享属性，MPI交换句柄。
+5. 保留同卡导入的设备上下文处理，通过 `halMemImportFromShareableHandle` 导入，
+   再使用 `halMemMap`、`halMemSetAccess` 映射对端槽位。
+6. 写满本地范围，读对端并逐字校验；随后写满对端范围，读本地并逐字校验。
+   每个阶段两rank同步；主机缓冲区固定8MiB，循环覆盖整个池，包含4GiB边界及尾部。
+7. `halMemUnmap`、`halMemRelease` 释放导入映射，两rank同步后释放本地资源；
+   `halMemAddressFree` 释放窗口，再次预留首地址验证复用。
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+cd 310p-capability_matrix/17_va_reservation
+A_DEV=4 bash run.sh hal-probe
+A_DEV=4 B_DEV=5 bash run.sh hal-pools
+
+# 每rank 8GiB物理内存，总共16GiB；要求两个rank均实际触发回退
+POOL_GIB=8 EXPECT_FALLBACK=1 A_DEV=4 B_DEV=5 bash run.sh hal-large-pools
+
+# 可见设备重编号；POOL_GIB支持5～16，按当前空闲内存选择
+ASCEND_RT_VISIBLE_DEVICES=4,5 POOL_GIB=8 EXPECT_FALLBACK=1 A_DEV=0 B_DEV=1 \
+  bash run.sh hal-large-pools
+```
+
+`all` 包含原地址探测、ACL共享映射及新增HAL小池验证；大池显式运行。
+`hal-large-pools` 默认超时300秒，其余命令90秒，可用 `TEST_TIMEOUT` 调整。
+`EXPECT_FALLBACK=1` 要求每个rank实际经历P2P分配失败后回退成功，未触发回退也判失败；
+未设置时只检查所选容量可用。这里的DDR/P2P_DDR是设备侧内存类型。
+
+### 2026-11-12 实测
+
+环境：10006，Ascend310P3，CANN 9.2.1，npu-smi 26.1.1，同卡设备4、5。
+
+| 检查 | 结果 |
+|---|---|
+| HAL 2MiB HBM/P2P_HBM分配 | 均返回6 |
+| HAL 2MiB DDR/P2P_DDR分配 | 成功 |
+| V2 NONE/FABRIC导出 | NONE成功；FABRIC返回8；双rank共享验证使用64位NONE接口 |
+| HAL三个小池 | 两rank的每个池双向全量校验通过，窗口复用通过，退出0 |
+| 每rank 8GiB大池 | 两rank的P2P_DDR均返回6、DDR回退均成功；各8GiB全范围双向校验通过，窗口复用通过，退出0 |
+| 可见设备4、5重编号为0、1，每rank 8GiB | 两rank均触发回退，全范围双向校验和复用通过，退出0 |
+| MemCache两rank，每rank 8GiB设备池、DRAM=0 | 两rank均触发HAL回退，跨rank对象写入/恢复数据一致，正常关闭、退出0；实际加载的新库路径已检查 |
+| Qwen3.6-35B TP=2，每rank 8GiB设备池、DRAM=0 | 服务启动成功，两rank实际触发HAL回退；0%用例外部命中0，重复输入恢复3072 tokens、本地命中0、首token与种子一致；退出0 |
+| 修改后MemFabric库，每rank 8GiB设备池 | 两rank实际触发回退；8MiB范围跨越4GiB边界及池尾部的H2G/G2H、G2G检查均mismatch=0；配套DRAM读写通过，正常销毁，两轮两rank退出均为0 |
+
+MemFabric补查使用07双die示例的临时副本，设备池改为8GiB，分别从4GiB−4MiB及8GiB−16MiB处验证；
+端口和工作目录隔离，先启动rank1再启动rank0。大池容量为每个rank的物理分配量。
+Qwen TP=2补查使用Qwen3.6-35B-A3B-w8a8，同卡4、5，输入4096、输出1 token，
+并发1、block_size与max_num_batched_tokens均1024、gpu_memory_utilization=0.65、
+expandable_segments=True；0%和100%共享输入各一个正式请求。此为大池功能检查，提交前UT结果见下节。
+
+MemCache补查采用隔离Python包目录加载新构建的三份MemFabric库，逐进程检查实际加载路径；
+首次使用原Python环境的记录走了旧ACL库，已单独保留为对照，未计入HAL路径通过结果。
+MemCache对象检查为每rank 256KiB，池容量为8GiB；超过4GiB部分的全范围访问由前述HAL测试覆盖，
+实际MemFabric访问另检查4GiB边界及尾部。测试中未修改系统安装的Python包。
+
+MemCache两rank对象测试退出0，但关闭过程中出现 `thread pool has stopped` 日志，旧ACL库对照也出现同样日志。
+本次没有修改该关闭流程。vLLM测试的HAL回退由服务日志确认；进程退出后才检查maps，未取得该轮worker的maps快照。
+
+### 提交前UT与检查
+
+完整ASAN UT：2070项通过、12项环境跳过、无失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。
+定向的两个VMM测试套件共23项通过。本次新增12项回归，覆盖分配、回退、共享格式和策略、
+设备号、导入失败、映射失败、转换失败清理及缺失符号。非310P的HBM分配行为也有回归覆盖。
+转换失败时的导入映射清理已由UT验证，实际成功路径沿用上述硬件记录。
+另完成能力验证程序编译、run.sh语法检查及git diff --check。

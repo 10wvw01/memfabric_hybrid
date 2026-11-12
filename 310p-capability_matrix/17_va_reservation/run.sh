@@ -4,8 +4,8 @@ cd "$(dirname "$0")"
 
 mode="${1:-all}"
 case "$mode" in
-    all|probe|pools|acl-pools) ;;
-    *) echo "Usage: $0 [all|probe|pools|acl-pools]" >&2; exit 2 ;;
+    all|probe|pools|acl-pools|hal-probe|hal-pools|hal-large-pools) ;;
+    *) echo "Usage: $0 [all|probe|pools|acl-pools|hal-probe|hal-pools|hal-large-pools]" >&2; exit 2 ;;
 esac
 
 export ASCEND_HOME="${ASCEND_HOME:-${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}}"
@@ -23,4 +23,14 @@ if [[ "$mode" == all || "$mode" == pools ]]; then
 fi
 if [[ "$mode" == acl-pools ]]; then
     timeout --kill-after=10 "${TEST_TIMEOUT:-90}" mpirun --allow-run-as-root -np 2 ./test acl-pools </dev/null
+fi
+
+if [[ "$mode" == all || "$mode" == hal-probe ]]; then
+    timeout --kill-after=10 "${TEST_TIMEOUT:-90}" mpirun --allow-run-as-root --stdin none -np 1 ./hal_vmm probe
+fi
+if [[ "$mode" == all || "$mode" == hal-pools ]]; then
+    timeout --kill-after=10 "${TEST_TIMEOUT:-90}" mpirun --allow-run-as-root --stdin none -np 2 ./hal_vmm pools
+fi
+if [[ "$mode" == hal-large-pools ]]; then
+    timeout --kill-after=10 "${TEST_TIMEOUT:-300}" mpirun --allow-run-as-root --stdin none -np 2 ./hal_vmm large-pools
 fi

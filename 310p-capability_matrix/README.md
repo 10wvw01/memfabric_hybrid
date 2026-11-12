@@ -187,3 +187,21 @@ A_DEV=2 B_DEV=3 bash 17_va_reservation/run.sh acl-pools
 ```
 
 完整 API 步骤、测试条件及返回值见[第 17 项 README](17_va_reservation/README.md)。
+
+### 第17项补充：HAL内存生命周期与大池（2026-11-12）
+
+新增 `hal-probe`、`hal-pools`、`hal-large-pools`，验证HAL分配、NONE共享句柄、映射、访问权限及释放。
+同卡设备4、5上，每rank 8GiB物理分配均触发P2P_DDR返回6后回退DDR成功，
+各8GiB全范围双向校验与窗口复用通过。修改后的MemFabric库也完成4GiB边界和8GiB尾部读写校验；设备重编号下的全范围校验、
+MemCache两rank各8GiB池的跨rank对象读写均通过。
+
+```bash
+A_DEV=4 bash 17_va_reservation/run.sh hal-probe
+A_DEV=4 B_DEV=5 bash 17_va_reservation/run.sh hal-pools
+POOL_GIB=8 EXPECT_FALLBACK=1 A_DEV=4 B_DEV=5 bash 17_va_reservation/run.sh hal-large-pools
+```
+
+大池显式运行。Qwen3.6-35B的TP=2补查也通过：每rank 8GiB设备池、DRAM=0，
+4096输入/1输出，0%与完整重复输入各一例，外部恢复3072 tokens且首token与种子一致。
+测试使用gpu_memory_utilization=0.65，属于功能验证。提交前完整ASAN UT：2070项通过、12项环境跳过、无失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。
+参数、完整API流程及实测记录见[第17项README](17_va_reservation/README.md#hal-内存生命周期与超过4gib的双rank设备池)。
