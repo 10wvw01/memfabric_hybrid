@@ -1,6 +1,27 @@
 # 310P 2-rank BM 场景 bm_perf_benchmark 带宽测试改造计划（V1）
 
-> **状态：已完成并实机验收通过（2026-09-09）**
+## 当前内存段实现说明（trunk_for_escc_v1.2.0，1f41b8a6）
+
+本文件保留 V1 改造前的问题、实施步骤和当时的带宽数据。下文“无回退”、
+`HybmAclVmmSegment`、专用类文件和对应 UT 数量均属于历史记录。
+
+当前 310P HBM 池由 `HybmVmmBasedSegment` 处理。原专用类及其测试在提交 `3a56de8f` 中删除，
+不存在两个内存段实现同时编译的问题。对应关系如下：
+
+| V1 历史内容 | 当前对应实现 |
+|---|---|
+| `hybm_acl_vmm_segment.cpp/.h` | `src/hybm/csrc/mm/hybm_vmm_based_segment.cpp/.h` |
+| `FillMemProp` / `MallocPhysicalWithFallback` | `HybmVmmBasedSegment::MallocFromDevice` 的 310P 分支；已包含 P2P_HUGE 内存不足时回退 HBM_MEM_HUGE 的逻辑 |
+| `HybmAclVmmSegmentTest` | `test/ut/testcase/hybm/mm/hybm_vmm_based_segment_test.cpp` 中的共用类测试 |
+| 310P 专用类分派 | `MemSegment::Create` 将 310P HBM 段分派到 `HybmVmmBasedSegment` |
+
+窗口选择和预留已改为地址管理器配合 HAL 远端预留，物理内存分配、映射和释放保留 ACL 路径。
+详细说明见 [VMM 开发计划的当前实现说明](310p-2rank-vmm-开发计划.md)。
+本次仅按源码更新实现对应关系，未重新运行带宽测试或 UT，历史性能数据保持原样。
+
+## V1 历史实施记录
+
+> **历史状态：已完成并实机验收通过（2026-09-09）**
 > - 核心回退 + 枚举修复 + `benchmark/bm_310p` 独立用例全部落地
 > - 实机：2-rank dev4/dev5 十方向 × {2MB, 16MB} 全部 WrongBytes=0；8GB 池回退链路 WARN 实证触发
 > - UT：HybmAclVmmSegmentTest 9/9（含新增回退用例）、DlAclApiVmmTest 3/3、HybmMemSegmentTest 37/37
@@ -19,9 +40,9 @@
 
 ---
 
-## 一、结论先行
+## 一、V1 改造前的问题
 
-**当前 bm_perf_benchmark 不能直接跑 2-rank 310P 带宽，需要修改后才能测。**
+**以下为 V1 改造前的限制；对应改造与当时的验证结果见附录。**
 核心原因 3 条（均已实测或代码证实）：
 
 1. **4GB 物理分配必失败**：benchmark 硬编码 `GVA_SIZE = 4GB`（benchmark/bm/band_width_calculator.cpp:24），
@@ -119,8 +140,10 @@
 
 ## 六、修改方案
 
-### M1（可选增强）：核心 HBM_HUGE 回退 —— `src/hybm/csrc/mm/hybm_acl_vmm_segment.cpp`
+### M1（历史实施方案）：核心 HBM_HUGE 回退
 
+> 此节保留专用类时期的修改方案；当前回退已在共用类 `MallocFromDevice` 中实现。
+>
 > **方案 A（默认，零核心改动）**：benchmark 池默认 2GB，完全避开 F1/F3。
 > **方案 B（本节，增强）**：P2P_HUGE 失败（207001）时自动回退 HBM_HUGE 重试，支持 ≥4GB 池。
 > 建议：**先 A 后 B**。A 当天可出数据；B 作为独立小改动（约 15 行 + UT），不影响 A 验证。
