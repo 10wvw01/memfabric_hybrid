@@ -233,6 +233,9 @@ TEST_F(SmemTransTest, smem_trans_register_mem_failed_invalid_param)
 
 TEST_F(SmemTransTest, smem_trans_register_mem_failed_invalid_param_ipv6)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     pid_t pid = fork();
     EXPECT_NE(pid, -1);
 
@@ -1694,6 +1697,9 @@ TEST_F(SmemTransTest, smem_trans_batch_write_failed_invalid_param)
 
 TEST_F(SmemTransTest, smem_trans_batch_write_failed_invalid_param_ipv6)
 {
+    if (!IsIpv6LoopbackAvailable()) {
+        GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
+    }
     pid_t pid = fork();
     EXPECT_NE(pid, -1);
 
