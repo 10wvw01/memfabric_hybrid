@@ -41,7 +41,6 @@ const uint32_t TRANS_TEST_WAIT_TIME = 1; // 1s
 constexpr size_t REGISTER_MEM_ELEM_COUNT = 10;
 constexpr int MAX_TEST_ATTEMPTS = 10;
 constexpr int STORE_CREATE_FAILED_EXIT_CODE = 10;
-constexpr int INVALID_PARAM_SETUP_FAILED_EXIT_CODE = 8;
 constexpr int STREAM_COUNT_MISMATCH_EXIT_CODE = 10;
 constexpr int STORE_CREATE_RETRY_FAILED_EXIT_CODE = 11;
 const smem_trans_config_t g_trans_options = {SMEM_TRANS_SENDER, SMEM_DEFAUT_WAIT_TIME, 0, 0};
@@ -238,39 +237,20 @@ TEST_F(SmemTransTest, smem_trans_register_mem_failed_invalid_param_ipv6)
         GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
     }
     pid_t pid = fork();
-    ASSERT_NE(pid, -1);
+    EXPECT_NE(pid, -1);
 
     if (pid == 0) {
         uint8_t flag = 0;
-        smem_trans_t handle = nullptr;
-        bool storeCreated = false;
-        bool transInitialized = false;
         int *address = new int[REGISTER_MEM_ELEM_COUNT];
         size_t size = REGISTER_MEM_ELEM_COUNT * sizeof(int);
 
         // first create server
         smem_set_conf_store_tls(false, nullptr, 0);
-        int ret = smem_create_config_store(STORE_URL_IPV6, SMEM_STORE_SKIP_RECOVER);
-        if (ret != SM_OK) {
-            ADD_FAILURE() << "smem_create_config_store failed, ret=" << ret;
-            flag = INVALID_PARAM_SETUP_FAILED_EXIT_CODE;
-            goto cleanup;
-        }
-        storeCreated = true;
-        ret = smem_trans_init(&g_trans_options);
-        if (ret != SM_OK) {
-            ADD_FAILURE() << "smem_trans_init failed, ret=" << ret;
-            flag = INVALID_PARAM_SETUP_FAILED_EXIT_CODE;
-            goto cleanup;
-        }
-        transInitialized = true;
+        smem_create_config_store(STORE_URL_IPV6, SMEM_STORE_SKIP_RECOVER);
+        int ret = smem_trans_init(&g_trans_options);
+        EXPECT_EQ(ret, 0);
         // client connect to server when initializing
-        handle = smem_trans_create(STORE_URL_IPV6, UNIQUE_IPV6_ID, &g_trans_options);
-        if (handle == nullptr) {
-            ADD_FAILURE() << "smem_trans_create returned a null handle";
-            flag = INVALID_PARAM_SETUP_FAILED_EXIT_CODE;
-            goto cleanup;
-        }
+        auto handle = smem_trans_create(STORE_URL_IPV6, UNIQUE_IPV6_ID, &g_trans_options);
 
         // handle = nullptr
         ret = smem_trans_register_mem(nullptr, address, size, 0);
@@ -293,22 +273,15 @@ TEST_F(SmemTransTest, smem_trans_register_mem_failed_invalid_param_ipv6)
 
     cleanup:
         delete[] address;
-        if (handle != nullptr) {
-            smem_trans_destroy(handle, 0);
-        }
-        if (transInitialized) {
-            smem_trans_uninit(0);
-        }
-        if (storeCreated) {
-            smem_destroy_config_store(STORE_URL_IPV6);
-        }
+        smem_trans_destroy(handle, 0);
+        smem_trans_uninit(0);
         exit(flag);
     }
 
     int status;
-    ASSERT_NE(waitpid(pid, &status, 0), -1);
+    EXPECT_NE(waitpid(pid, &status, 0), -1);
 
-    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_TRUE(WIFEXITED(status));
     EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
@@ -1728,13 +1701,10 @@ TEST_F(SmemTransTest, smem_trans_batch_write_failed_invalid_param_ipv6)
         GTEST_SKIP() << "IPv6 loopback is disabled in this environment";
     }
     pid_t pid = fork();
-    ASSERT_NE(pid, -1);
+    EXPECT_NE(pid, -1);
 
     if (pid == 0) {
         uint8_t flag = 0;
-        smem_trans_t handle = nullptr;
-        bool storeCreated = false;
-        bool transInitialized = false;
         int *srcPtr1 = new int[1000];
         int *srcPtr2 = new int[2000];
         std::vector<const void *> srcAddrPtrs = {srcPtr1, srcPtr2};
@@ -1745,28 +1715,12 @@ TEST_F(SmemTransTest, smem_trans_batch_write_failed_invalid_param_ipv6)
 
         // first create server
         smem_set_conf_store_tls(false, nullptr, 0);
-        int ret = smem_create_config_store(STORE_URL_IPV6, SMEM_STORE_SKIP_RECOVER);
-        if (ret != SM_OK) {
-            ADD_FAILURE() << "smem_create_config_store failed, ret=" << ret;
-            flag = INVALID_PARAM_SETUP_FAILED_EXIT_CODE;
-            goto cleanup;
-        }
-        storeCreated = true;
-        ret = smem_trans_init(&g_trans_options);
-        if (ret != SM_OK) {
-            ADD_FAILURE() << "smem_trans_init failed, ret=" << ret;
-            flag = INVALID_PARAM_SETUP_FAILED_EXIT_CODE;
-            goto cleanup;
-        }
-        transInitialized = true;
+        smem_create_config_store(STORE_URL_IPV6, SMEM_STORE_SKIP_RECOVER);
+        int ret = smem_trans_init(&g_trans_options);
+        EXPECT_EQ(ret, 0);
 
         // client connect to server when initializing
-        handle = smem_trans_create(STORE_URL_IPV6, UNIQUE_IPV6_ID, &g_trans_options);
-        if (handle == nullptr) {
-            ADD_FAILURE() << "smem_trans_create returned a null handle";
-            flag = INVALID_PARAM_SETUP_FAILED_EXIT_CODE;
-            goto cleanup;
-        }
+        auto handle = smem_trans_create(STORE_URL_IPV6, UNIQUE_IPV6_ID, &g_trans_options);
 
         // handle = nullptr
         ret = smem_trans_batch_write(nullptr, srcAddrPtrs.data(), UNIQUE_IPV6_ID, destAddrPtrs.data(), dataSizes.data(),
@@ -1816,22 +1770,16 @@ TEST_F(SmemTransTest, smem_trans_batch_write_failed_invalid_param_ipv6)
         delete[] srcPtr2;
         delete[] destPtr1;
         delete[] destPtr2;
-        if (handle != nullptr) {
-            smem_trans_destroy(handle, 0);
-        }
-        if (transInitialized) {
-            smem_trans_uninit(0);
-        }
-        if (storeCreated) {
-            smem_destroy_config_store(STORE_URL_IPV6);
-        }
+        smem_trans_destroy(handle, 0);
+        smem_trans_uninit(0);
+        smem_destroy_config_store(STORE_URL);
         exit(flag);
     }
 
     int status;
-    ASSERT_NE(waitpid(pid, &status, 0), -1);
+    EXPECT_NE(waitpid(pid, &status, 0), -1);
 
-    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_TRUE(WIFEXITED(status));
     EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
