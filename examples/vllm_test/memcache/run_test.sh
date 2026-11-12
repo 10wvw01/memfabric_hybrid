@@ -470,7 +470,8 @@ run_integration() {
             "test_full_miss_baseline_1rank" \
             "test_50pct_hit_1rank" \
             "test_100pct_hit_1rank" \
-            "test_cache_source_correctness"
+            "test_cache_source_correctness" \
+            "test_native_prefix_cache_benchmark"
     elif [[ "$RANK" == "4" && "$SPLIT_TESTS" -eq 1 ]]; then
         # 4-rank: run each test separately with NPU cleanup between,
         # because 310P3 vLLM exit leaves orphan NPU context (HBM not released).
@@ -478,7 +479,8 @@ run_integration() {
             "test_full_miss_baseline_4rank" \
             "test_50pct_hit_4rank" \
             "test_100pct_hit_4rank" \
-            "test_cache_source_correctness"
+            "test_cache_source_correctness" \
+            "test_native_prefix_cache_benchmark"
     else
         local marker="rank2"
         case "$RANK" in

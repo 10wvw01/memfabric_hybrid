@@ -4,6 +4,10 @@
 
 本文保留历史环境的测试数据和问题记录。当前指定分支的部署流程见[部署说明](vllm_deployment_flow.md)，最新验证条件与结果见[迁移报告](vllm_024_migration_results.md)。
 
+历史记录中的 `--no-enable-prefix-caching` 对应当时的测试配置。
+当前 vLLM 0.24 基线开启 prefix caching，并在请求后重置本地前缀；
+新增原生缓存对照则保留本地前缀且不配置外部 connector。三种方式的实测对比见上述迁移报告。
+
 ## 1. 概述
 
 本报告记录 MemCache v1.2.1 在 Ascend 310P3 NPU 上的 vLLM TTFT（Time To First Token）性能测试结果。

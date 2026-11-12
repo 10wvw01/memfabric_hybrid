@@ -12,11 +12,14 @@
 
 """vLLM integration tests: MemCache TTFT under full miss, partial hit, and full hit.
 
-Three test scenarios (each with 1-rank, 2-rank and 4-rank variants):
+Latency scenarios (each available with TP=1, TP=2 and TP=4):
 
   1. Full miss (baseline)  — all unique prompts; also compares with/without MemCache overhead
   2. 50% hit               — half prompts pre-populated in MemCache, mixed hit/miss
   3. 100% hit              — prompt pre-populated, re-sent for full cache hit
+  4. Native prefix cache   — no connector; record real hits for 50% repeated inputs
+
+A separate test verifies local, external, and mixed cache sources and generated tokens.
 
 Default spec: prefill 4096 tokens, decode 1536 tokens.
 Adjust via environment variables:
@@ -450,7 +453,9 @@ class VLLMBenchmark:
     # ------------------------------------------------------------------
     # TTFT measurement (streaming API, single token)
     # ------------------------------------------------------------------
-    def measure_e2e_ttft_ms(self, prompt_ids: List[int], max_tokens: int = MAX_TOKENS_TTFT) -> float:
+    def measure_e2e_ttft_ms(
+        self, prompt_ids: List[int], max_tokens: int = MAX_TOKENS_TTFT, reset_local: bool = True
+    ) -> float:
         body = json.dumps(
             {
                 "model": self._served_model_name,
@@ -484,7 +489,11 @@ class VLLMBenchmark:
             else:
                 raise RuntimeError("completion stream ended without a token")
             resp.close()
-            self.reset_local_prefix_cache()
+            if reset_local:
+                self.reset_local_prefix_cache()
+            else:
+                # Allow engine request cleanup to finish before inspecting cache metrics.
+                time.sleep(0.2)
             return ttft_ms
         finally:
             conn.close()
@@ -542,7 +551,7 @@ class VLLMBenchmark:
             time.sleep(0.1)
         raise RuntimeError("Engine did not confirm local prefix cache reset")
 
-    def cache_hit_counts(self) -> tuple[float, float]:
+    def cache_hit_counts(self, include_queries: bool = False) -> tuple[float, ...]:
         conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=30)
         try:
             conn.request("GET", "/metrics")
@@ -553,7 +562,10 @@ class VLLMBenchmark:
         finally:
             conn.close()
         counts = []
-        for name in ("vllm:prefix_cache_hits_total", "vllm:external_prefix_cache_hits_total"):
+        names = ["vllm:prefix_cache_hits_total", "vllm:external_prefix_cache_hits_total"]
+        if include_queries:
+            names.append("vllm:prefix_cache_queries_total")
+        for name in names:
             counts.append(
                 sum(
                     float(line.split()[-1])
@@ -738,8 +750,7 @@ def meta_service():
         pytest.fail("MetaService port is already in use; configure an isolated test environment")
 
 
-@pytest.fixture
-def benchmark(meta_service):
+def _create_benchmark():
     if not _vllm_available():
         pytest.skip("vLLM environment not available")
 
@@ -756,6 +767,21 @@ def benchmark(meta_service):
         device_ids=device_ids,
         tensor_parallel_size=tp_size,
     )
+    return bench
+
+
+@pytest.fixture
+def benchmark(meta_service):
+    bench = _create_benchmark()
+    yield bench
+    bench.stop_vllm()
+
+
+@pytest.fixture
+def native_benchmark():
+    if not _npu_available():
+        pytest.skip("Ascend NPU environment not available")
+    bench = _create_benchmark()
     yield bench
     bench.stop_vllm()
 
@@ -1377,3 +1403,117 @@ def test_cache_source_correctness(benchmark):
             assert actual == expected, f"{stage}: actual={actual}, expected={expected}"
     finally:
         benchmark.stop_vllm()
+
+
+def _native_prefix_sample(benchmark, prompt, expected_local):
+    before = benchmark.cache_hit_counts(include_queries=True)
+    ttft = benchmark.measure_e2e_ttft_ms(prompt, reset_local=False)
+    deadline = time.monotonic() + 20
+    delta = (0.0, 0.0, 0.0)
+    while time.monotonic() < deadline:
+        after = benchmark.cache_hit_counts(include_queries=True)
+        delta = tuple(end - start for start, end in zip(before, after))
+        if delta[2] > 0:
+            assert delta[1] == 0, f"Native request used external cache: {delta}"
+            if expected_local is None or (delta[0] > 0) == expected_local:
+                return {
+                    "ttft_ms": ttft,
+                    "local_hit_tokens": delta[0],
+                    "external_hit_tokens": delta[1],
+                    "queried_tokens": delta[2],
+                }
+        time.sleep(0.5)
+    raise AssertionError(f"Native prefix metrics did not match local={expected_local}: {delta}")
+
+
+def _native_prefix_stats(samples):
+    latencies = [sample["ttft_ms"] for sample in samples]
+    return {
+        "p50_ms": _percentile(latencies, 0.50) if samples else None,
+        "p99_ms": _percentile(latencies, 0.99) if samples else None,
+        "count": len(samples),
+        "samples": samples,
+    }
+
+
+def _native_prefix_half_hits(benchmark):
+    benchmark.reset_local_prefix_cache()
+    hit_count = MEASURED_REQUESTS // 2
+    for seed in range(5000, 5000 + hit_count):
+        _native_prefix_sample(benchmark, _build_prompt_ids(PROMPT_TOKENS, seed=seed), False)
+    requests = [(5000 + i, True) for i in range(hit_count)]
+    requests += [(6000 + i, False) for i in range(MEASURED_REQUESTS - hit_count)]
+    random.Random(42).shuffle(requests)
+    hits, misses, all_samples, repeated = [], [], [], []
+    for seed, expected_repeat in requests:
+        expected_local = None if expected_repeat else False
+        sample = _native_prefix_sample(benchmark, _build_prompt_ids(PROMPT_TOKENS, seed=seed), expected_local)
+        sample.update(seed=seed, expected_repeat=expected_repeat)
+        all_samples.append(sample)
+        (hits if sample["local_hit_tokens"] > 0 else misses).append(sample)
+        if expected_repeat:
+            repeated.append(sample)
+    return {
+        "hit": _native_prefix_stats(hits), "miss": _native_prefix_stats(misses),
+        "all": _native_prefix_stats(all_samples), "repeated": _native_prefix_stats(repeated),
+        "expected_repeated_requests": hit_count,
+        "observed_hit_requests": len(hits),
+    }
+
+
+def _native_prefix_pairs(benchmark):
+    misses, hits = [], []
+    for i in range(MEASURED_REQUESTS):
+        benchmark.reset_local_prefix_cache()
+        prompt = _build_prompt_ids(PROMPT_TOKENS, seed=1000 + i)
+        misses.append(_native_prefix_sample(benchmark, prompt, False))
+        time.sleep(1)
+        hits.append(_native_prefix_sample(benchmark, prompt, True))
+        print(f"Native pair {i + 1}: miss={misses[-1]['ttft_ms']:.2f}ms, hit={hits[-1]['ttft_ms']:.2f}ms")
+    return {"miss": _native_prefix_stats(misses), "hit": _native_prefix_stats(hits)}
+
+
+def _check_native_prefix_tokens(benchmark):
+    benchmark.reset_local_prefix_cache()
+    prompt = (
+        "Paris is the capital of France. Berlin is the capital of Germany. " * 400
+        + "\nQuestion: What is 2 + 2? Answer:"
+    )
+    before = benchmark.cache_hit_counts()
+    reference = benchmark.completion_tokens(prompt, reset_local=False)
+    benchmark.check_cache_source(before, local=False, external=False)
+    before = benchmark.cache_hit_counts()
+    cached = benchmark.completion_tokens(prompt, reset_local=False)
+    benchmark.check_cache_source(before, local=True, external=False)
+    assert reference and cached == reference, "Native prefix reuse changed completion tokens"
+    return reference
+
+
+@pytest.mark.rank1
+@pytest.mark.rank2
+@pytest.mark.rank4
+def test_native_prefix_cache_benchmark(native_benchmark):
+    """Measure built-in prefix-cache misses and hits without an external connector."""
+    bench = native_benchmark
+    bench.start_vllm_baseline()
+    for i in range(WARMUP_REQUESTS):
+        _native_prefix_sample(bench, _build_prompt_ids(PROMPT_TOKENS, seed=10_000_000 + i), False)
+    bench.reset_local_prefix_cache()
+    misses = [_native_prefix_sample(bench, _build_prompt_ids(PROMPT_TOKENS, seed=i), False)
+              for i in range(MEASURED_REQUESTS)]
+    results = {
+        "model": bench._served_model_name,
+        "tp": bench._tensor_parallel_size,
+        "connector": None,
+        "full_miss": _native_prefix_stats(misses),
+        "half_hit": _native_prefix_half_hits(bench),
+        "paired": _native_prefix_pairs(bench),
+        "completion_tokens": _check_native_prefix_tokens(bench),
+    }
+    print("NATIVE_PREFIX_RESULT=" + json.dumps(results))
+    result_dir = os.environ.get("MMC_TEST_RESULT_DIR")
+    if result_dir:
+        os.makedirs(result_dir, exist_ok=True)
+        path = os.path.join(result_dir, f"native-prefix-tp{bench._tensor_parallel_size}.json")
+        with open(path, "w") as output:
+            json.dump(results, output, indent=2)

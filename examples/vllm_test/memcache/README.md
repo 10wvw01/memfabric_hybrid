@@ -51,7 +51,7 @@ ttft_test/
 
 当前使用原版 vLLM 0.24，适配集中在 vLLM-Ascend、MemCache 和 MemFabric。两个模型为 `Qwen3.5-4B-W8A8-310P` 和 `Qwen3.6-35B-A3B-w8a8`。最终代码的测试结果以 [迁移报告](docs/vllm_024_migration_results.md) 为准，旧实验不计为本版本通过结果。TP=4 按用户要求暂停。
 
-测试开启本地 prefix cache 以使用原版 vLLM 的 Mamba `align` 路径。原有三项延迟测试在请求结束后清除本地 prefix cache、保留外部 MemCache；新增缓存来源测试保留本地缓存，分别核对本地、外部和混合命中的指标增量与生成结果。重置操作在 TTFT 计时之外执行，测得的是串行首 token 延迟，不是吞吐。
+测试开启本地 prefix cache 以使用原版 vLLM 的 Mamba `align` 路径。原有三项延迟测试在请求结束后清除本地 prefix cache、保留外部 MemCache；新增缓存来源测试保留本地缓存，分别核对本地、外部和混合命中的指标增量与生成结果。原生 prefix cache 对照不接外部 connector，保留本地缓存并验证本地命中。重置操作在 TTFT 计时之外执行，测得的是串行首 token 延迟。
 
 MemFabric 使用远端 VA 管理区，通过 HAL 远端模式预留窗口，再由 ACL 分配和映射物理页；线程执行 ACL 操作前检查设备和上下文。`host_shm` 需要足够的 `/dev/shm` 容量，运行前检查。
 
@@ -150,9 +150,9 @@ bash run_test.sh --memcache-dir /path/to/memcache --type puredram --device-ids 4
 | `--type` | `--rank` | 默认 marker | 说明 |
 |----------|----------|-------------|------|
 | workload | — | `workload` | MemCache 工作负载的全部 6 个场景 |
-| integration | 1 | `rank1` | TP=1 的四项集成测试 |
-| integration | 2 | `rank2` | TP=2 的四项集成测试 |
-| integration | 4 | `rank4` | TP=4 的四项集成测试 |
+| integration | 1 | `rank1` | TP=1 的五项集成测试 |
+| integration | 2 | `rank2` | TP=2 的五项集成测试 |
+| integration | 4 | `rank4` | TP=4 的五项集成测试 |
 | largecap | — | `largecap`（MemCache 工作负载）/ `rank4`（vLLM 集成） | 大容量测试 |
 | puredram | — | `rank4` | 纯 DRAM（host_shm, 0 HBM, 10GB DRAM）4-rank |
 | bench | 1/2/4 | — | 吞吐基准，无 marker 过滤 |
@@ -267,6 +267,7 @@ vLLM 集成测试度量: 全链路 TTFT（含网络 + prefill + KV Cache + outpu
 | 全 miss 基准 | 比较不接入 MemCache 与接入后未命中的 TTFT | 全新输入；分别记录两组 P50 | `rank1` / `rank2` / `rank4` |
 | 50% 请求命中 | 观察混合流量 | 预写 5 个输入，再混合 5 个重复输入和 5 个新输入，逐次核对命中计数 | `rank1` / `rank2` / `rank4` |
 | 配对 miss/hit | 比较同一输入写入前后的耗时 | 10 组先写后读，分别统计 miss 和 hit，并比较生成 token | `rank1` / `rank2` / `rank4` |
+| 原生 prefix cache | 与无外部 connector 的内置缓存比较 | 保留本地缓存，记录全 miss、50% 重复负载的实际命中、配对 miss/hit 和生成一致性 | `rank1` / `rank2` / `rank4` |
 | 缓存来源与正确性 | 检查本地、外部及混合读取 | 核对计数增量，逐 token 对照独立基线 | `rank1` / `rank2` / `rank4` |
 
 ### 大容量测试
@@ -283,7 +284,7 @@ vLLM 集成测试度量: 全链路 TTFT（含网络 + prefill + KV Cache + outpu
 
 最终方案保留原版 vLLM 0.24 的本地 prefix cache，使用 Mamba `align` 配置；vLLM 核心不打补丁。vLLM-Ascend 的混合前缀匹配包含对应 Mamba 状态，避免只恢复注意力 KV 时生成错误结果。
 
-三项 TTFT 用例在每个完成请求之后调用 `POST /reset_prefix_cache?reset_external=false`，只清理本地缓存；检查 HTTP 成功及引擎新增的成功重置日志。重置发生在计时之外。相同隔离方法用于无 MemCache 的基线。
+MemCache 的全 miss、50% 命中和配对 miss/hit 三项 TTFT 用例在每个完成请求之后调用 `POST /reset_prefix_cache?reset_external=false`，只清理本地缓存；检查 HTTP 成功及引擎新增的成功重置日志。重置发生在计时之外。相同隔离方法用于无 MemCache 的基线。
 
 | 测试 | 缓存处理 |
 |------|---------|

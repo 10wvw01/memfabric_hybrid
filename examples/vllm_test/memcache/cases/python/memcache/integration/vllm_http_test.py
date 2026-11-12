@@ -50,7 +50,8 @@ def test_invalid_completions_are_rejected(status, events, message):
         b'data: {"choices":[{"text":"","token_ids":[151645]}]}\n',
     ],
 )
-def test_ttft_waits_for_generated_token_after_empty_metadata(token_event):
+@pytest.mark.parametrize("reset_local", [True, False])
+def test_ttft_waits_for_generated_token_after_empty_metadata(token_event, reset_local):
     benchmark = VLLMBenchmark.__new__(VLLMBenchmark)
     benchmark._served_model_name = 'test-model'
     benchmark._port = 1
@@ -66,8 +67,8 @@ def test_ttft_waits_for_generated_token_after_empty_metadata(token_event):
     connection = MagicMock()
     connection.getresponse.return_value = response
     with patch('http.client.HTTPConnection', return_value=connection):
-        assert benchmark.measure_e2e_ttft_ms([1]) >= 0
-    benchmark.reset_local_prefix_cache.assert_called_once()
+        assert benchmark.measure_e2e_ttft_ms([1], reset_local=reset_local) >= 0
+    assert benchmark.reset_local_prefix_cache.call_count == int(reset_local)
 
 
 @pytest.mark.parametrize("ttft,external_hits,expected_external", [(1.0, 0, False), (10000.0, 128, True)])
@@ -125,3 +126,35 @@ def test_stop_vllm_cleans_children_in_other_sessions_and_preserves_unrelated_pro
         benchmark.stop_vllm()
         unrelated.kill()
         unrelated.wait(timeout=5)
+
+
+@pytest.mark.parametrize("local_hits", [0, 3840])
+def test_native_mixed_workload_records_actual_hits_after_query_metrics_update(local_hits):
+    from integration.vllm_integration_test import _native_prefix_sample
+
+    benchmark = MagicMock()
+    benchmark.cache_hit_counts.side_effect = [(0, 0, 0), (local_hits, 0, 4096)]
+    benchmark.measure_e2e_ttft_ms.return_value = 12.0
+    sample = _native_prefix_sample(benchmark, [1, 2], expected_local=None)
+    assert sample["local_hit_tokens"] == local_hits
+    assert sample["queried_tokens"] == 4096
+    benchmark.measure_e2e_ttft_ms.assert_called_once_with([1, 2], reset_local=False)
+
+
+def test_native_measurement_rejects_external_cache_hits():
+    from integration.vllm_integration_test import _native_prefix_sample
+
+    benchmark = MagicMock()
+    benchmark.cache_hit_counts.side_effect = [(0, 0, 0), (0, 128, 4096)]
+    with pytest.raises(AssertionError, match="used external cache"):
+        _native_prefix_sample(benchmark, [1, 2], expected_local=None)
+
+
+def test_native_fixture_skips_without_npu_before_creating_server():
+    from integration.vllm_integration_test import native_benchmark
+
+    with patch("integration.vllm_integration_test._npu_available", return_value=False), \
+         patch("integration.vllm_integration_test._create_benchmark") as create:
+        with pytest.raises(pytest.skip.Exception):
+            next(native_benchmark.__wrapped__())
+    create.assert_not_called()

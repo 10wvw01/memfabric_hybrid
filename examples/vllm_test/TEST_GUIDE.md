@@ -33,10 +33,11 @@ MemCache 的 vLLM 0.24 实测条件与结果见[迁移报告](memcache/docs/vllm
 
 <a id="memcache-tests"></a>
 
-## MemCache 的四项 vLLM 集成测试
+## MemCache 与原生 prefix cache 的 vLLM 集成测试
 
 当前主测试文件是 [`vllm_integration_test.py`](memcache/cases/python/memcache/integration/vllm_integration_test.py)。
-每种模型和 TP 配置执行下面四项。本轮两个模型、TP=1/TP=2，共计 `2 × 2 × 4 = 16` 项。
+每种模型和 TP 配置包含五项：原有四项 MemCache 验证，以及不使用外部 connector 的原生 prefix cache 对照。
+各模型和 TP 的实测完成情况见结果报告。
 TTFT 采样使用 4096 输入 token、生成 1 token、1 次预热和 10 次正式测量；完整启动参数以迁移报告为准。
 
 ### 全 miss 基准：比较未命中时接入缓存的影响
@@ -90,6 +91,28 @@ TTFT 采样使用 4096 输入 token、生成 1 token、1 次预热和 10 次正�
 三项延迟用例在请求完成后调用 `POST /reset_prefix_cache?reset_external=false`，只重置本地缓存，保留 MemCache 数据。
 重置和命中指标查询位于 TTFT 计时之外。测试同时检查 HTTP 响应及引擎新增的成功重置日志。
 缓存来源正确性用例则按上述步骤有意保留本地缓存。
+
+### 原生 prefix cache：不使用外部 connector 的对照
+
+`test_native_prefix_cache_benchmark` 使用 vLLM 自身的 prefix cache，不配置 `kv_transfer_config`，
+也不启动 MemCache MetaService。模型、TP、4096-token 输入、1-token 输出、随机种子、预热次数与测量次数
+与外部缓存用例一致。该用例保留本地缓存，测量全 miss、50% 重复请求负载和 10 组配对 miss/hit。
+混合负载根据查询与命中计数增量记录实际命中率；缓存容量不足时，重复请求也可能因淘汰而 miss。
+配对请求逐组检查本地命中计数增加、外部命中计数不增加，并比较重复请求的生成 token。
+
+| 对照方式 | 外部 connector | 请求之间的本地缓存 | 作用 |
+|---|---|---|---|
+| 原有全 miss 基线 | 无 | 每次清理 | 测量不发生前缀复用的新输入请求 |
+| 原生 prefix cache | 无 | 保留；各场景开始及配对前清理 | 测量内置缓存的 miss 和本地 hit |
+| MemCache | AscendStoreConnector | 每次清理，保留外部数据 | 测量接入后的 miss 和外部 hit |
+
+原有基线始终开启 KV cache 和 prefix caching，清理的是可复用的本地前缀。
+原生 miss 与全 miss 基线的差值用于观察保留本地前缀时的未命中耗时变化；
+MemCache miss 与原生 miss、MemCache hit 与原生 hit 分别比较。
+命中比较同时查看复用 token 数，因为缓存检查点不同可能导致剩余计算量不同。
+TTFT 计时不包含缓存清理、请求结束后的等待及指标查询。
+设置 `MMC_TEST_RESULT_DIR` 可保存 `native-prefix-tpN.json`，包含 P50/P99、逐请求耗时和命中 token 数。
+不同模型和 TP 使用独立目录；未设置时结果仍打印在测试日志中。
 
 <a id="metrics"></a>
 
