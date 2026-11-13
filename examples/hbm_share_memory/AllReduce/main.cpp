@@ -108,7 +108,7 @@ static int32_t TestAllReduce(aclrtStream stream, uint8_t *gva, uint32_t rankId, 
 
     CHECK_ACL(aclrtFreeHost(inputHost));
     CHECK_ACL(aclrtFreeHost(outputHost));
-    return 0;
+    return hashValue1 == hashValue2 ? 0 : -1;
 }
 
 int32_t main(int32_t argc, char *argv[])
@@ -154,7 +154,7 @@ int32_t main(int32_t argc, char *argv[])
     WARN_LOG("[TEST] smem_shm_create, size %llu, rank:%d", static_cast<unsigned long long>(g_npuMallocSpace), rankId);
     g_npuMallocSpace = smem_shm_get_symmetric_size(handle);
     INFO_LOG("[TEST] smem_shm_get_symmetric_size size %lu, rank:%d", g_npuMallocSpace, rankId);
-    TestAllReduce(stream, (uint8_t *)gva, rankId, rankSize);
+    ret = TestAllReduce(stream, (uint8_t *)gva, rankId, rankSize);
 
     std::cout << "[TEST] begin to exit...... rank: " << rankId << std::endl;
     smem_shm_destroy(handle, flags);
@@ -162,5 +162,5 @@ int32_t main(int32_t argc, char *argv[])
     CHECK_ACL(aclrtDestroyStream(stream));
     CHECK_ACL(aclrtResetDevice(deviceId));
     CHECK_ACL(aclFinalize());
-    return 0;
+    return ret == 0 ? 0 : 1;
 }

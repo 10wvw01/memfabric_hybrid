@@ -55,21 +55,22 @@ const int OUTPUT_WIDTH = 10U;
 #define INFO_LOG(fmt, args...)  fprintf(stdout, "[INFO]  " fmt "\n", ##args)
 #define WARN_LOG(fmt, args...)  fprintf(stdout, "[WARN]  " fmt "\n", ##args)
 #define ERROR_LOG(fmt, args...) fprintf(stdout, "[ERROR]  " fmt "\n", ##args)
-#define CHECK_ACL(x)                                                                                  \
-    do {                                                                                              \
-        aclError __ret = x;                                                                           \
-        if (__ret != ACL_ERROR_NONE) {                                                                \
-            std::cerr << LOG_FILENAME_SHORT << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
-        }                                                                                             \
+#define CHECK_ACL(x)                                                                                                \
+    do {                                                                                                            \
+        aclError __ret = x;                                                                                         \
+        if (__ret != ACL_ERROR_NONE) {                                                                              \
+            std::cerr << "[ERROR] " << LOG_FILENAME_SHORT << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
+            return __ret;                                                                                           \
+        }                                                                                                           \
     } while (0)
 
-#define CHECK_ACL_RET(x, msg)                                              \
-    do {                                                                   \
-        aclError __ret = x;                                                \
-        if (__ret != ACL_ERROR_NONE) {                                     \
-            std::cerr << msg << ":" << " aclError:" << __ret << std::endl; \
-            return __ret;                                                  \
-        }                                                                  \
+#define CHECK_ACL_RET(x, msg)                                                            \
+    do {                                                                                 \
+        aclError __ret = x;                                                              \
+        if (__ret != ACL_ERROR_NONE) {                                                   \
+            std::cerr << "[ERROR] " << msg << ":" << " aclError:" << __ret << std::endl; \
+            return __ret;                                                                \
+        }                                                                                \
     } while (0)
 
 template<typename T>
