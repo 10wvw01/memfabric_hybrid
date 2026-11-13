@@ -1,31 +1,32 @@
 # vLLM TTFT 测试环境部署包
 
-在 memcache 基准源码上应用补丁、更新子模块、构建安装，然后在**打包目录内**直接运行测试。新增的测试文件不拷贝回原工程。
+测试用例、TTFT/P50 和常用术语见[测试说明](../TEST_GUIDE.md)。
+
+从指定上游仓库获取分支、构建安装，然后在**打包目录内**运行测试。集成测试保留在本目录。
 
 ## 目录结构
 
 ```
 ttft_test/
 ├── README.md
-├── setup.sh                 # 部署脚本：对 memcache 仓库打补丁 + 构建安装
+├── setup.sh                 # 部署脚本：获取指定上游分支并构建安装
 ├── verify.sh                # 验证部署结果
 ├── run_test.sh              # 统一测试运行脚本（workload / integration / largecap / bench）
 ├── start_service.sh         # 启动 MetaService + vLLM（支持 --detach 后台模式）
-├── pytest.ini               # pytest 配置（注册 marker：throughput / rank1 / rank2 / rank4 / workload / largecap）
-├── patches/
-│   ├── memcache_modified_files.patch                  # memcache pymmc.cpp pybind11 枚举 static_cast 适配
-│   └── vllm_ascend_310p_kv_transfer.patch             # vLLM-Ascend 310P3 适配（3 文件）
+├── pytest.ini               # pytest 配置（注册 marker：rank1 / rank2 / rank4 / workload / largecap）
+├── source_repos.sh          # 上游仓库与分支同步
+├── source_manifest.py       # 提交版本、构建产物和加载路径核对
 ├── cases/                    # 新增测试文件
 │   ├── config/
-│   │   ├── mmc-local-workload.conf          # Layer 2 配置
-│   │   ├── mmc-local-integration.conf       # Layer 3 2-rank 配置
-│   │   ├── mmc-local-integration-4rank.conf # Layer 3 4-rank 配置 (world_size=4)
+│   │   ├── mmc-local-workload.conf          # MemCache 工作负载测试配置
+│   │   ├── mmc-local-integration.conf       # vLLM 集成测试 2-rank 配置
+│   │   ├── mmc-local-integration-4rank.conf # vLLM 集成测试 4-rank 配置 (world_size=4)
 │   │   └── mmc-local-eviction-repro.conf    # Eviction 复现配置
 │   └── python/memcache/
-│       ├── workload/                        # Layer 2: prefill TTFT（6 个核心场景）
+│       ├── workload/                        # MemCache 工作负载测试: prefill TTFT（6 个核心场景）
 │       ├── largecap/                        # 大容量测试: HBM→DRAM eviction + rewarm（5 场景）+ eviction repro（2 场景）
 │       └── integration/                      # 统一测试文件 vllm_integration_test.py
-│           └── vllm_integration_test.py     # 6 个测试函数：全 miss 基准 + 50% 命中 + 100% 命中 + 4rank 变体
+│           └── vllm_integration_test.py     # TP=1/2/4 延迟用例及缓存来源正确性
 ├── aux_scripts/             # 辅助脚本（环境清理、故障复现）
 │   ├── clean_stale_env.sh
 │   ├── repro_207001.c / repro_207001_run.sh
@@ -41,42 +42,68 @@ ttft_test/
 
 | 项目 | 基准 |
 |------|------|
-| memcache | tag `v1.2.1` |
-| memfabric_hybrid | `dev-v1.2.0` 分支（`https://gitcode.com/GDD_ESCC/memfabric_hybrid.git`） |
-| vLLM-Ascend | `v0.26.0rc1`（`f2f74a16c`） |
+| memcache | `GDD_ESCC/memcache` 的 `trunk_for_escc_v1.2.1` |
+| memfabric_hybrid | `GDD_ESCC/memfabric_hybrid` 的 `trunk_for_escc_v1.2.0` |
+| vLLM-Ascend | `GDD_ESCC/vllm-ascend` 的 `trunk_for_escc_v24.0` |
+| vLLM | `v0.24.0`（`ee0da84a`） |
+
+## 310P 迁移验证状态
+
+当前使用原版 vLLM 0.24，适配集中在 vLLM-Ascend、MemCache 和 MemFabric。两个模型为 `Qwen3.5-4B-W8A8-310P` 和 `Qwen3.6-35B-A3B-w8a8`。最终代码的测试结果以 [迁移报告](docs/vllm_024_migration_results.md) 为准，旧实验不计为本版本通过结果。TP=4 按用户要求暂停。
+
+测试开启本地 prefix cache 以使用原版 vLLM 的 Mamba `align` 路径。原有三项延迟测试在请求结束后清除本地 prefix cache、保留外部 MemCache；新增缓存来源测试保留本地缓存，分别核对本地、外部和混合命中的指标增量与生成结果。原生 prefix cache 对照不接外部 connector，保留本地缓存并验证本地命中。重置操作在 TTFT 计时之外执行，测得的是串行首 token 延迟。
+
+MemFabric 使用远端 VA 管理区，通过 HAL 远端模式预留窗口，再由 ACL 分配和映射物理页；线程执行 ACL 操作前检查设备和上下文。`host_shm` 需要足够的 `/dev/shm` 容量，运行前检查。
 
 ## 前置条件
 
-1. **memcache 仓库**（setup.sh 自动 clone + checkout v1.2.1，无需手动准备）
-2. **memfabric_hybrid** 子模块 remote 可 fetch `dev-v1.2.0` 分支
-3. **vLLM-Ascend** 已安装（Layer 3 需要，Layer 2 不需要）
-4. **CANN** 已安装（默认 `/usr/local/Ascend/cann-9.1.0`）
-5. **W8A8 量化模型**已部署（默认路径 `/home/models/Qwen3.6-35B-A3B-w8a8`，Layer 3 需要，Layer 2 不需要；可通过环境变量 `MMC_TEST_VLLM_MODEL_PATH` 覆盖）
+1. **memcache 仓库**（setup.sh 可自动 clone 指定分支）
+2. **memfabric_hybrid** 子模块 remote 可 fetch `trunk_for_escc_v1.2.0` 分支
+3. **vLLM-Ascend** 已安装（vLLM 集成测试需要，MemCache 工作负载测试不需要）
+4. **CANN** 已安装（使用当前 CANN 环境脚本设置的路径）
+5. **W8A8 量化模型**已部署（vLLM 集成测试需要，MemCache 工作负载测试不需要）。
+   示例模型为 `/workspace/models/Qwen3.5-4B-W8A8-310P` 和 `/workspace/models/Qwen3.6-35B-A3B-w8a8`，
+   可通过环境变量 `MMC_TEST_VLLM_MODEL_PATH` 覆盖。
 
 ## 快速部署
 
 ```bash
-# 一键部署（memcache 目录不存在则自动 clone + checkout v1.2.1）
-bash setup.sh --memcache-dir /path/to/memcache --yes
+# 部署（需在独立 Python 环境执行，并准备 vLLM 0.24 和 vLLM-Ascend 源码）
+bash setup.sh --memcache-dir /path/to/memcache --vllm-dir /path/to/vllm --vllm-ascend-dir /path/to/vllm-ascend --yes
 
-# 仅 Layer 2（不碰 vLLM-Ascend）
-bash setup.sh --memcache-dir /path/to/memcache --yes --skip-patch-vllm
+# 仅 MemCache 工作负载测试环境（无需 vLLM-Ascend）
+bash setup.sh --memcache-dir /path/to/memcache --yes --memcache-only
 
-# 仅打补丁不构建
-bash setup.sh --memcache-dir /path/to/memcache --yes --skip-build
+# 仅同步源码和记录版本，不构建
+bash setup.sh --memcache-dir /path/to/memcache --vllm-dir /path/to/vllm --vllm-ascend-dir /path/to/vllm-ascend --yes --skip-build
 ```
 
-> 首次编译约 15-20 分钟（207 个编译目标），后续增量编译更快。
+部署包含 MemCache、MemFabric 和 vLLM-Ascend 的构建，具体耗时记录在构建日志中。
 
 ## 验证
 
 ```bash
-bash verify.sh --memcache-dir /path/to/memcache
+bash verify.sh --memcache-dir /path/to/memcache --vllm-dir /path/to/vllm --vllm-ascend-dir /path/to/vllm-ascend
 ```
 
 ## 运行测试
 
 测试在**打包目录**中执行，通过 `--memcache-dir` 指向 memcache 仓库（用于查找构建产物和 `config/mmc-meta.conf`）。
+
+### 310P 单 rank 示例
+
+先在独立 Python 环境安装并构建 vLLM 0.24、vLLM-Ascend 和上述补丁。以下命令使用小模型，设备和显存比例按实际空闲资源调整：
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+export PATH=/workspace/vllm024-venv/bin:$PATH
+export MMC_TEST_VLLM_MODEL_PATH=/workspace/models/Qwen3.5-4B-W8A8-310P
+bash run_test.sh --memcache-dir /workspace/memcache-v121-test \
+    --type integration --rank 1 --device-ids 6 --gpu-mem-util 0.50
+```
+
+测试只处理文本，启动前等待目标设备的已用显存降至总量的 25% 以下。启动前确认端口 5000、6000、8000 和测试 HTTP 端口空闲。测试使用的 MetaService 异常退出时应查看其日志。
 
 ### 测试前检查
 
@@ -91,16 +118,16 @@ npu-smi info
 ### 基本用法
 
 ```bash
-# 1. 准备环境：拉取源码 + 补丁 + 编译安装
-bash setup.sh --memcache-dir /path/to/memcache --yes
+# 1. 准备环境：获取指定上游分支 + 编译安装
+bash setup.sh --memcache-dir /path/to/memcache --vllm-dir /path/to/vllm --vllm-ascend-dir /path/to/vllm-ascend --yes
 
-# 2. Layer 2 workload 测试（2-rank, device 6,7, ~1 分钟）
+# 2. MemCache 工作负载测试（2-rank, device 6,7, ~1 分钟）
 bash run_test.sh --memcache-dir /path/to/memcache --type workload --device-ids 6,7 --log
 
-# 3. Layer 3 集成测试（2-rank, device 6,7, ~25 分钟，含 vLLM 启动）
+# 3. vLLM 集成测试（2-rank, device 6,7, ~25 分钟，含 vLLM 启动）
 bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --protocol host_shm --device-ids 6,7 --log
 
-# 4. Layer 3 集成测试（4-rank, device 4,5,6,7, ~16 分钟）
+# 4. vLLM 集成测试（4-rank, device 4,5,6,7, ~16 分钟）
 bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 4 --protocol device_sdma --device-ids 4,5,6,7 --gpu-mem-util 0.60 --log
 
 # 4b. 4-rank 分次运行（推荐，避免 310P3 孤儿 NPU 上下文问题）
@@ -118,23 +145,23 @@ bash run_test.sh --memcache-dir /path/to/memcache --type puredram --device-ids 4
 
 ### 测试过滤（`--filter`）
 
-`--filter` 透传给 `pytest -m`（marker 过滤），值为单个单词，无空格。不传 `--filter` 时按 `--type` 和 `--rank` 自动选择默认 marker。
+`--filter` 透传给 `pytest -m`。组合表达式需加引号，例如 `--filter "rank1 and rank2"`。不传 `--filter` 时按 `--type` 和 `--rank` 自动选择默认 marker。
 
 | `--type` | `--rank` | 默认 marker | 说明 |
 |----------|----------|-------------|------|
-| workload | — | `workload` | Layer 2 全部 6 个场景 |
-| integration | 1 | `rank1` | L3 单 rank 变体（TP=1） |
-| integration | 2 | `rank2` | L3-1/L3-2/L3-3（含 30%/50% 参数化） |
-| integration | 4 | `rank4` | L3-4/L3-5（4-rank 变体） |
-| largecap | — | `largecap`（L2）/ `rank4`（L3） | 大容量测试 |
+| workload | — | `workload` | MemCache 工作负载的全部 6 个场景 |
+| integration | 1 | `rank1` | TP=1 的五项集成测试 |
+| integration | 2 | `rank2` | TP=2 的五项集成测试 |
+| integration | 4 | `rank4` | TP=4 的五项集成测试 |
+| largecap | — | `largecap`（MemCache 工作负载）/ `rank4`（vLLM 集成） | 大容量测试 |
 | puredram | — | `rank4` | 纯 DRAM（host_shm, 0 HBM, 10GB DRAM）4-rank |
 | bench | 1/2/4 | — | 吞吐基准，无 marker 过滤 |
 
-可用 marker：`workload`、`largecap`、`rank1`、`rank2`、`rank4`、`throughput`
+主集成测试使用 `rank1`、`rank2`、`rank4`；存储工作负载使用 `workload`，大容量工作负载使用 `largecap`。
 
 ```bash
 # 只跑 throughput bench
-bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --device-ids 6,7 --filter throughput
+bash run_test.sh --memcache-dir /path/to/memcache --type bench --rank 2 --device-ids 6,7
 ```
 
 ### `run_test.sh` 完整参数
@@ -143,7 +170,8 @@ bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --
 |------|------|--------|
 | `--memcache-dir <DIR>` | memcache 仓库目录（必选） | — |
 | `--type <TYPE>` | 测试类型：workload / integration / largecap / bench / puredram | workload |
-| `--rank <N>` | rank 数：2 或 4（integration/bench 必选） | — |
+| `--rank <N>` | rank 数：1、2 或 4（integration/bench 必选） | — |
+| `--suite <SUITE>` | 大容量测试选择：workload / integration / all | all |
 | `--protocol <PROTO>` | 协议：host_shm 或 device_sdma（integration） | 配置默认 |
 | `--device-ids <a,b,...>` | NPU 设备 ID（逗号分隔） | 2-rank: 6,7 / 4-rank: 0,1,2,3 / largecap,puredram: 4,5,6,7 |
 | `--filter <name>` | pytest `-m` marker 过滤 | 按 type/rank 自动 |
@@ -156,152 +184,143 @@ bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --
 | `--bench-input-len <N>` | bench: 输入 token 长度 | 1024 |
 | `--bench-output-len <N>` | bench: 输出 token 长度 | 32 |
 
-## 补丁说明
+## 上游实现说明
 
-### memcache 补丁（1 个文件）
+### MemCache Python 绑定
 
 | 文件 | 修改内容 |
 |------|---------|
 | `src/memcache/csrc/python_wrapper/pymmc.cpp` | pybind11 枚举参数 `static_cast<int32_t>` 适配 |
 
-**为什么需要：** `pymmc.cpp` 中 10 处 `py::arg("direct") = SMEMB_COPY_G2H` 使用 C 枚举值作为 pybind11 默认参数。pybind11 在运行时 `import` 时尝试将枚举值转换为 Python 对象，但 `SMEMB_COPY_*` 所属的 C 风格 `typedef enum` 未向 pybind11 注册类型，导致 `ImportError: could not convert default argument into a Python object (type not registered yet?)`，`memcache_hybrid` 模块完全无法导入。加 `static_cast<int32_t>()` 将枚举值隐式转为 `int32_t`（已注册类型），解决导入失败。
+**为什么需要：** `pymmc.cpp` 中 10 处 `py::arg("direct") = SMEMB_COPY_G2H` 使用 C 枚举值作为 pybind11 默认参数。pybind11 在运行时 `import` 时尝试将枚举值转换为 Python 对象，但 `SMEMB_COPY_*` 所属的 C 风格 `typedef enum` 未向 pybind11 注册类型，导致 `ImportError: could not convert default argument into a Python object (type not registered yet?)`，`memcache_hybrid` 模块完全无法导入。加 `static_cast<int32_t>()` 将枚举值显式转为 `int32_t`（已注册类型），解决导入失败。
 
-**编译影响：** 无。C++ 编译器允许枚举到 `int32_t` 的隐式转换，不打补丁也能编译通过，问题仅在 `python3 -c "from memcache_hybrid import ..."` 时触发。
+**编译影响：** 无。C++ 编译器允许枚举到 `int32_t` 的隐式转换，原默认参数也能通过 C++ 编译，问题仅在 `python3 -c "from memcache_hybrid import ..."` 时触发。
 
 ### memfabric_hybrid 子模块
 
-切到 `GDD_ESCC/memfabric_hybrid.git` 的 `dev-v1.2.0` 分支（已合入 IsSameCard 修复、107002 修复、207001 P2P_HUGE 回退），无需额外补丁。
+MemFabric 从 `GDD_ESCC/memfabric_hybrid.git` 获取 `trunk_for_escc_v1.2.0`，并切换到该分支。窗口由地址管理器选择并精确预留，执行线程检查 ACL 上下文。构建后安装本次产物，并由 `verify.sh` 比较已安装运行库与构建文件的 SHA256。
 
-### vLLM-Ascend 补丁（3 个已有文件）
+
+### vLLM-Ascend 适配
 
 | 文件 | 修改内容 |
 |------|---------|
-| `vllm_ascend/_310p/model_runner_310p.py` ~L704 | 移除 310P KV transfer `raise ValueError` 阻断 |
-| `vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py` ~L763 | 2MB 对齐 `assert` 改为 `logger.warning` + `continue` |
-| `vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/memcache_backend.py` | 新增 `_is_host_shm()`/`_get_protocol()`/`_resolve_physical_device_id()`、ACL init、register_buffer 错误处理 |
+| `vllm_ascend/_310p/model_runner_310p.py` | 310P 允许 AscendStoreConnector + MemCache，保留其他 connector/backend 检查 |
+| `vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py` | 使用 0.24 的 hash block size 解析；未满足 2 MiB 起始对齐时保留原区域 |
+| `vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/memcache_backend.py` | 协议读取、ACL 设备初始化、缓存区域注册日志 |
+| `vllm_ascend/patch/platform/patch_kv_cache_coordinator.py` | 使用包含 Mamba 状态的共同有效前缀，按缓存组返回命中 token 数 |
+| `csrc/moe/chunk_fwd_o/op_kernel/arch20/compat_310p.h` | Bisheng 编译器已有 bf16 类型时避免重复定义，保留 310P 转换 shim |
+| `csrc/moe/chunk_gated_delta_rule_fwd_h/op_kernel/arch20/compat_310p.h` | 同上 |
+| `csrc/moe/chunk_gated_delta_rule_compute_wy/op_kernel/arch20/compat_310p.h` | 同上 |
+
+`tests/ut/patch/platform/test_prefix_cache_cp_patches.py` 中的回归用例由 vLLM-Ascend 仓库维护。
 
 ## 测试设计
 
-测试采用三层分层架构，从底向上逐步验证 KV Cache 存储对 LLM 推理 TTFT 的影响：
+测试采用存储 API 基准、MemCache 工作负载和 vLLM 集成测试，分别验证 KV Cache 存储对 LLM 推理 TTFT 的影响：
 
-| 层级 | 度量目标 | 含模型前向 | 测试目录 | --type | marker |
+| 测试类型 | 度量目标 | 含模型前向 | 测试目录 | --type | marker |
 |------|---------|-----------|---------|--------|--------|
-| Layer 2 | T_kv_cache 存储延迟 | 否 | `workload/` | workload | `workload` |
-| Layer 3 | 全链路 TTFT | 是 | `integration/` | integration | `rank2` / `rank4` |
-| 大容量 L2 | 大容量存储延迟 | 否 | `largecap/` | largecap | `largecap` |
-| 大容量 L3 | 大容量全链路 TTFT | 是 | `integration/` | largecap | `rank4` |
-| 吞吐基准 | throughput/TTFT/ITL | 是 | `integration/` | bench | — |
+| MemCache 工作负载测试 | T_kv_cache 存储延迟 | 否 | `workload/` | workload | `workload` |
+| vLLM 集成测试 | 全链路 TTFT | 是 | `integration/` | integration | `rank2` / `rank4` |
+| 大容量 MemCache 工作负载 | 大容量存储延迟 | 否 | `largecap/` | largecap | `largecap` |
+| 大容量 vLLM 集成 | 大容量全链路 TTFT | 是 | `integration/` | largecap | `rank4` |
+| 吞吐基准 | 请求与 token 吞吐、完整响应耗时 | 是 | `integration/` | bench | — |
 
 ### 全链路 TTFT 分解
+
+下例保留历史报告中的耗时示意；本轮两模型的实测值见迁移报告。存储接口计时与请求计时分别统计。
 
 ```
 全链路 TTFT = T_network + T_prefill_compute + T_kv_cache + T_output
    (~1-5ms)    (~3400ms, 96%+)   (~4.3ms)     (~1-5ms)
 
-Layer 2 度量: T_kv_cache（MemCache 存储延迟，不含模型前向计算）
-Layer 3 度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
+MemCache 工作负载测试度量: T_kv_cache（MemCache 存储延迟，不含模型前向计算）
+vLLM 集成测试度量: 全链路 TTFT（含网络 + prefill + KV Cache + output）
 ```
 
-### Layer 2：存储延迟微基准
+### MemCache 工作负载测试：存储延迟
 
-`LLMWorkloadSimulator` 直连 `DistributedObjectStore` API（`put_from_layers`/`get_into_layers`），不经 vLLM，使用 `time.perf_counter()` + `torch_npu.npu.current_stream().synchronize()` 精确度量 NPU 异步操作完成时间。6 个场景覆盖 KV Cache 全生命周期：
+`LLMWorkloadSimulator` 直连 `DistributedObjectStore` API（`put_from_layers`/`get_into_layers`），不经 vLLM，使用 `time.perf_counter()` + `torch_npu.npu.current_stream().synchronize()` 精确度量 NPU 异步操作完成时间。共列出 6 类用例，其中并发项当前固定跳过，其余用例覆盖 KV 缓存写入、更新、读取和恢复：
 
-| # | 测试场景 | 方法 | 门限 |
-|---|---------|------|------|
-| L2-1 | 单请求 prefill TTFT | 100 次 L2G write（seq_len=4096），统计 P99 | P99 < 50ms |
-| L2-2 | 变长序列 prefill TTFT | seq_len 512~16384，验证线性扩展 | R² > 0.9 |
-| L2-3 | 并发 prefill TTFT | 多 rank 并行（需多卡环境） | SKIP（同卡共享 SDMA） |
-| L2-4 | prefill→decode 生命周期 | 1 次 prefill + 256 步 decode | Decode P50 < prefill × 0.5 |
-| L2-5 | prefix cache hit vs miss | 20 轮 miss(写) vs hit(读) 配对 | Hit P50 ≤ Miss P50 × 1.0 |
-| L2-6 | DRAM→HBM rewarm TTFT | 50 次 G2L 跨层级读取 | rewarm > hit 且 < prefill × 1.1 |
+| # | 测试场景 | 方法 |
+|---|---------|------|
+| L2-1 | 单请求 prefill TTFT | 100 次 L2G write（seq_len=4096），统计 P99 |
+| L2-2 | 变长序列 prefill TTFT | seq_len 512~16384，验证线性扩展 |
+| L2-3 | 并发 prefill TTFT | 设计为多 rank 并行；当前函数固定跳过，未实现并发测量 |
+| L2-4 | prefill→decode 生命周期 | 1 次 prefill + 256 步 decode |
+| L2-5 | prefix cache hit vs miss | 20 轮 miss(写) vs hit(读) 配对 |
+| L2-6 | DRAM→HBM rewarm TTFT | 50 次 G2L 跨层级读取 |
 
-### Layer 3：vLLM 端到端 TTFT
+### vLLM 集成测试：端到端 TTFT
 
-启动真实 vLLM serve 进程（TP=2 或 TP=4），通过 HTTP streaming API 度量请求发送到首 token 的时间。三种运行模式对比：
+启动真实 vLLM serve 进程（TP=1、TP=2 或 TP=4），通过 HTTP streaming API 度量请求发送到首 token 的时间。三种运行模式对比：
 
 | 模式 | `--enable-prefix-caching` | `--kv-transfer-config` | 说明 |
 |------|--------------------------|------------------------|------|
-| Baseline | 关闭 | 无 | 完整 prefill，无缓存 |
-| Cache miss | 开启 | memcache | prefill + KV 写入 MemCache |
-| Cache hit | 开启 | memcache | 从 MemCache 读 KV，跳过 prefill |
+| Baseline | 开启 | 无 | 请求后重置本地缓存，完整 prefill |
+| Cache miss | 开启 | memcache | 请求后重置本地缓存，prefill + KV 写入 |
+| Cache hit | 开启 | memcache | 本地缓存已重置，从 MemCache 读 KV |
 
-| # | 测试场景 | 方法 | 门限 | marker |
-|---|---------|------|------|--------|
-| L3-1 | MemCache vs Baseline 开销 | 全 miss，MemCache P50 vs Baseline P50 | 开销 < 20% | `rank2` |
-| L3-2 | Prefix cache hit 降幅 | 20 轮 miss→hit 配对 | Hit P50 / Miss P50 < 70% | `rank2` |
-| L3-3 | 部分命中率 TTFT | 30%/50% 混合请求 | 实际命中 ≥70%，改善 > hit_rate×20% | `rank2` |
-| L3-4 | 4-rank MemCache vs Baseline | 同 L3-1，TP=4 | 同上 | `rank4` |
-| L3-5 | 4-rank Prefix cache hit | 同 L3-2，TP=4 | 同上 | `rank4` |
-| L3-1r | 1-rank MemCache vs Baseline | 同 L3-1，TP=1 | 同上 | `rank1` |
-| L3-2r | 1-rank Prefix cache hit | 同 L3-2，TP=1 | 同上 | `rank1` |
-| L3-3r | 1-rank 部分命中率 TTFT | 同 L3-3，TP=1 | 同上 | `rank1` |
-| L3-6 | Throughput bench（可选） | `vllm bench serve` | 默认 deselected | `throughput` |
+| 测试 | 目的 | 方法 | marker |
+|---|---------|------|--------|
+| 全 miss 基准 | 比较不接入 MemCache 与接入后未命中的 TTFT | 全新输入；分别记录两组 P50 | `rank1` / `rank2` / `rank4` |
+| 50% 请求命中 | 观察混合流量 | 预写 5 个输入，再混合 5 个重复输入和 5 个新输入，逐次核对命中计数 | `rank1` / `rank2` / `rank4` |
+| 配对 miss/hit | 比较同一输入写入前后的耗时 | 10 组先写后读，分别统计 miss 和 hit，并比较生成 token | `rank1` / `rank2` / `rank4` |
+| 原生 prefix cache | 与无外部 connector 的内置缓存比较 | 保留本地缓存，记录全 miss、50% 重复负载的实际命中、配对 miss/hit 和生成一致性 | `rank1` / `rank2` / `rank4` |
+| 缓存来源与正确性 | 检查本地、外部及混合读取 | 核对计数增量，逐 token 对照独立基线 | `rank1` / `rank2` / `rank4` |
 
 ### 大容量测试
 
-大容量测试（`--type largecap`）使用 3GB HBM + 10GB DRAM（4-rank, TP=4），专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 等大容量场景，与 Layer 2/3 使用不同的配置文件（`mmc-local-largecap-4rank.conf`）。
+以下为历史测试模式，尚未完成本次 0.24 迁移回归。`large_capacity_vllm_test.py` 仍使用旧参数 `--prefix-match-unit` 和关闭本地 prefix cache 的配置，当前请使用 `--type integration` 验证。
 
-### vLLM 本地缓存排除方案
+大容量测试（`--type largecap`）使用 3GB HBM + 10GB DRAM（4-rank, TP=4），
+专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 等大容量场景，
+与 MemCache 工作负载测试和 vLLM 集成测试使用不同的配置文件（`mmc-local-largecap-4rank.conf`）。
 
-#### 背景：双写问题
+大容量测试可用 `--suite workload` 选择 MemCache 工作负载，或用 `--suite integration` 选择 vLLM 集成测试；默认 `--suite all` 依次执行两组测试。
 
-vLLM 开启 `--enable-prefix-caching` 时有自带的 GPU 驻留 block-level prefix cache。当同时启用 MemCache（`--kv-transfer-config`），一次 full miss 请求的 prefill 计算完成后，KV cache 会被**同时写入**两处：
+### 缓存隔离与正确性
 
-- **vLLM 本地缓存**：GPU 显存 block + `block_hash → block` 映射字典（vLLM 自身机制，同步写入）
-- **MemCache**：通过 `AscendStoreConnector` 异步写入 HBM/DRAM pool（后台线程 `KVCacheStoreSendingThread` 执行 `m_store.put()` → `batch_put_from_layers` L2G DMA）
+最终方案保留原版 vLLM 0.24 的本地 prefix cache，使用 Mamba `align` 配置；vLLM 核心不打补丁。vLLM-Ascend 的混合前缀匹配包含对应 Mamba 状态，避免只恢复注意力 KV 时生成错误结果。
 
-读取时 vLLM **优先查本地**：本地命中则直接用 GPU block，跳过 MemCache connector。若不排除本地缓存，hit 测试的 TTFT 降幅无法区分是 vLLM 本地缓存还是 MemCache 的贡献。
+MemCache 的全 miss、50% 命中和配对 miss/hit 三项 TTFT 用例在每个完成请求之后调用 `POST /reset_prefix_cache?reset_external=false`，只清理本地缓存；检查 HTTP 成功及引擎新增的成功重置日志。重置发生在计时之外。相同隔离方法用于无 MemCache 的基线。
 
-#### 排除手段：`--no-enable-prefix-caching` + `--kv-transfer-config`
-
-测试在 MemCache 模式下使用 `--no-enable-prefix-caching` + `--kv-transfer-config` 启动 vLLM。vLLM 的 block hasher 仍然创建（`v1/engine/core.py:214`：`enable_prefix_caching or kv_connector is not None`），因此 `request.block_hashes` 照常生成，MemCache connector 的 lookup/save 正常工作。但 vLLM 本地 prefix cache 被永久关闭：
-
-- `get_computed_blocks` 始终返回 `(empty, 0, 0)`（`v1/core/kv_cache_manager.py:228`），每条请求都走 connector lookup
-- 无需 `VLLM_SERVER_DEV_MODE=1` 或 `POST /reset_prefix_cache`
-- 无 reset 失败风险（`v1/core/block_pool.py:770` 的 `num_used_blocks != 1` 前置条件问题）
-- `local_hit_rate` 始终为 0%，`external_hit_rate` 直接反映 MemCache 贡献
-
-> **注意**：关闭 prefix caching 后，hybrid 模型（如 Qwen3.5）的 attention block_size=640、mamba block_size=8192，AscendStoreConnector 的 `pool_worker.py:171` 断言 `group_block_size % hash_block_size == 0` 会因 `8192 % 640 ≠ 0` 失败。需显式传 `--prefix-match-unit 128`（GCD(640, 8192)）解决。
-
-各测试用例的隔离方式：
-
-| 测试 | 隔离方法 |
+| 测试 | 缓存处理 |
 |------|---------|
-| L3-1（开销对比） | Baseline 和 MemCache 模式均用 `--no-enable-prefix-caching`；MemCache 模式全 miss（unique prompts），不依赖 hit 隔离 |
-| L3-2（100% hit） | `--no-enable-prefix-caching` + connector，每条请求走 MemCache lookup；miss 后 sleep 1s 等待 async save，再重发同一 prompt |
-| L3-3（30%/50% hit） | 同上；pre-populate 后 sleep 1s，混合请求中 hit 部分走 MemCache |
-| LC-L3-2（大容量 hit） | 同 L3-2 模式，40-key pre-populate |
-| LC-L3-3（eviction 混合） | pre-populate 30 keys 后混合 30%/70% hit |
+| 全 miss | 不同输入，基线和 MemCache 请求后均重置本地缓存 |
+| 50% hit | 先写入部分输入，等待外部保存，再混合命中和 miss；每请求后重置本地缓存 |
+| 100% hit | 先写后读相同输入，等待外部保存；每请求后重置本地缓存 |
+| 缓存来源正确性 | 独立基线生成 A/B 参考 token；MemCache 预填 A/B，再分别构造外部、本地和混合命中，与参考 token 比较 |
 
-#### 三种缓存来源区分
+缓存来源测试从 `/metrics` 读取 `vllm:prefix_cache_hits_total` 和 `vllm:external_prefix_cache_hits_total`，等待指标刷新并检查增量：
 
-vLLM engine metrics 日志周期性输出两个独立指标，测试通过 `get_cache_stats()` 解析区分：
+| 场景 | 本地命中增量 | 外部命中增量 |
+|------|-------------|-------------|
+| 纯外部命中 | 0 | >0 |
+| 纯本地命中 | >0 | 0 |
+| 混合命中 | >0 | >0 |
 
-| 缓存来源 | 日志指标 | 判定条件 |
-|---------|---------|---------|
-| vLLM 本地命中 | `Prefix cache hit rate: XX%` | `local_computed >= token_len`，connector 被跳过（本方案下始终为 0%） |
-| MemCache 命中 | `External prefix cache hit rate: XX%` | `local_computed = 0`，`external_hit > 0` |
-| 全 miss | — | `local_computed = 0`，`external_hit = 0` |
-
-测试日志中 `vLLM local hit=0.0%` 证明本地缓存已永久关闭，hit 的 TTFT 降幅来自 MemCache external hit。
+TTFT 以首个实际 token 的 SSE 响应计时，支持仅有 token ID 的特殊 token；HTTP 错误、SSE error 和空流均失败。当前完整测试结果及限制见 [迁移报告](docs/vllm_024_migration_results.md)。
 
 ## 注意事项
 
 1. **设备选择**: 测试需同卡 die-pair（dev0+1, dev2+3, dev4+5, dev6+7）；4-rank 需 2 组 die-pair（如 dev4,5,6,7），通过 `--device-ids` 指定
 2. **TP 由 --rank 指定**: `run_test.sh --type integration` 通过 `--rank 1`、`--rank 2` 或 `--rank 4` 选择 TP 和配置文件（1→integration-1rank.conf, 2→integration.conf, 4→integration-4rank.conf），设备数必须匹配
 3. **gpu-mem-util**: 默认 0.80；4-rank 若设备显存被其他进程占用，可降低到 0.60（如 `--gpu-mem-util 0.60`）
-4. **环境清理**: 每次测试前必须执行 `clean_stale_env.sh`（run_test.sh 自动调用，可用 `--skip-clean` 跳过）
+4. **环境清理**: integration 测试管理自己启动的进程，不执行全局清理；其他测试类型仍需检查其清理脚本对共享环境的影响
 5. **孤儿 NPU 上下文**: VLLM::Worker_TP 异常退出后 HBM 可能不释放，需改选其他设备
-6. **4-rank 分次运行**: 310P3 上 vLLM 正常退出后 HBM 也可能残留（孤儿 NPU 上下文），连续运行两个 4-rank 测试时第二个 vLLM 会 OOM。**推荐加 `--split` 参数**，自动逐个测试分次运行，每个测试之间清理 NPU + 重启 MetaService。也可手动分次：
-   ```bash
-   # 手动分次运行（等效于 --split）
-   bash run_test.sh --memcache-dir /path --type integration --rank 4 --device-ids 2,3,6,7 --filter rank4 --gpu-mem-util 0.60 --log
-   # 清理 NPU 后再运行下一个
-   bash /path/memcache/debug/test/clean_stale_env.sh
-   # 用 -k 指定单个测试
-   MMC_TEST_TENSOR_PARALLEL_SIZE=4 MMC_TEST_DEVICE_IDS=2,3,6,7 \
-       pytest cases/python/memcache/integration/vllm_integration_test.py -v -s -k test_prefix_cache_hit_e2e_ttft_4rank
-   ```
+6. **4-rank 分次运行**: `--split` 分别运行用例。性能会受其他设备任务影响，应在空闲设备上测试。
 7. **/dev/shm**: host_shm 协议下 dram.size 不超过 1GB；4-rank 时 4 × 1GB = 4GB（/dev/shm 8GB 充足）；largecap 模式自动 resize 到 100GB
-8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；可用 marker：`workload`、`largecap`、`rank1`、`rank2`、`rank4`
+8. **测试过滤**: `--filter` 使用 pytest `-m`（marker），值为单个单词无空格；主集成测试 marker 为 `rank1`、`rank2`、`rank4`；其他文件的 marker 按对应测试文件选择。历史用例还使用：`workload`、`largecap`、`rank1`、`rank2`、`rank4`
 9. **文件日志**: 加 `--log` 参数将输出 tee 到 `retest_logs/` 目录
+
+
+## 源码与运行库记录
+
+部署固定获取上述三个上游分支。目录不存在时 clone，存在时 fetch、切换到指定分支并进行快进更新；
+有未提交源码修改或无法快进时报告错误，不覆盖文件。
+部署记录保存在 `retest_logs/source_manifest.json`，包含各仓库实际提交号及关键构建文件 SHA256。
+`verify.sh` 核对当前版本、Python 包加载路径、MemCache wheel、已安装 MemFabric 运行库和 MetaService 构建产物。
+仅同步源码的记录写入 `retest_logs/source_revisions.json`，不会替代完整构建后的部署记录。
+测试结果引用该记录中的提交号，分支更新后重新部署、验证并运行测试。

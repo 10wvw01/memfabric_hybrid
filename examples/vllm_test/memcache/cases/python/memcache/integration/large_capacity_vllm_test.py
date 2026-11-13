@@ -10,7 +10,7 @@
 # MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-"""Layer 3 large-capacity vLLM end-to-end TTFT tests (8GB HBM + 20GB DRAM, TP=4).
+"""Large-capacity vLLM integration tests (8GB HBM + 20GB DRAM, TP=4).
 
 Tests how large-capacity MemCache (8GB HBM + 20GB DRAM per rank) affects
 vLLM end-to-end TTFT under various cache-hit patterns. The large capacity

@@ -1,10 +1,18 @@
 # MemCache vLLM TTFT 测试问题记录
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
+本文保留历史环境的测试数据和问题记录。当前指定分支的部署流程见[部署说明](vllm_deployment_flow.md)，最新验证条件与结果见[迁移报告](vllm_024_migration_results.md)。
+
+历史记录中的 `--no-enable-prefix-caching` 对应当时的测试配置。
+当前 vLLM 0.24 基线开启 prefix caching，并在请求后重置本地前缀；
+新增原生缓存对照则保留本地前缀且不配置外部 connector。三种方式的实测对比见上述迁移报告。
+
 ## 1. device_sdma HBM→DRAM Eviction 107002 错误
 
 ### 1.1 问题概述
 
-Layer 3 vLLM 端到端 TTFT 测试（device_sdma 协议）中，HBM→DRAM eviction 全部失败，错误码 107002（`ACL_ERROR_RT_CONTEXT_NULL`）。DRAM 存储层形同虚设，MemCache 实际只有 HBM 单层在用。
+vLLM 端到端 TTFT 测试（device_sdma 协议）中，HBM→DRAM eviction 全部失败，错误码 107002（`ACL_ERROR_RT_CONTEXT_NULL`）。在该次记录中，HBM→DRAM 迁移未成功，缓存数据未能按预期转入 DRAM。
 
 | 测试 | media=0→1 (HBM→DRAM) 次数 | 107002 错误数 | 成功次数 |
 |------|---------------------------|--------------|---------|
@@ -39,9 +47,12 @@ MmcLocalServiceDefault::CopyBlob          [mmc_local_service_default.cpp:432]
                        └─ AclrtMemcpyAsync(..., stream_)  ← 返回 107002
 ```
 
-### 1.4 根因
+### 1.4 历史日志与当时的排查假设
 
-**`HostDataOpAclMemcpy` 的 `stream_` 在对端进程的设备上创建，但 eviction 线程绑定了本端进程的设备，导致 stream 与 context 不匹配。**
+日志记录了复制调用返回 `107002`，以及线程记录的设备号与参与数据地址。
+当时曾推测 stream 与 context 不匹配；下面的图表保留该排查过程。
+当前 `SetThreadAclDevice` 的实现同时检查线程的设备号和 ACL context，缺少 context 时重新调用 `AclrtSetDevice`。
+现有日志没有直接记录 stream 创建及跨进程传递，图中的对应关系应作为当时假设阅读。
 
 #### 证据
 
@@ -63,14 +74,14 @@ MmcLocalServiceDefault::CopyBlob          [mmc_local_service_default.cpp:432]
 | rank0 | 555001 (Worker_TP0) | `0x12da00000000` | device 0 (phyId 4) |
 | rank1 | 555009 (Worker_TP1) | `0x12db00000000` | device 1 (phyId 5) |
 
-#### 关键矛盾
+#### 当时用于比较的日志信息
 
 - 所有 34 次 `CopyD2H` 失败：`rankId:1`，`src:0x12da*`（device 0 地址范围），`curDevice:0`
 - `SetThreadAclDevice` 用 `HybmGetInitDeviceId()` 设置 device 0（调用方 Worker_TP0 的 initDeviceId）
 - 但 `CopyD2H` 使用的 `stream_` 属于 rank1 entity（Worker_TP1 进程），在 device 1 上创建
 - device 0 的 context + device 1 的 stream → `AclrtMemcpyAsync` 返回 107002
 
-#### 机制详解
+#### 当时的推测示意
 
 ```
 vLLM Worker_TP0 (pid 555001)          vLLM Worker_TP1 (pid 555009)
@@ -89,9 +100,9 @@ vLLM Worker_TP0 (pid 555001)          vLLM Worker_TP1 (pid 555009)
       ❌ dev 0 context + dev 1 stream → 107002
 ```
 
-### 1.5 为什么 Layer 2 没有此问题
+### 1.5 为什么 MemCache 工作负载测试没有此问题
 
-| 维度 | Layer 2 (模拟推理) | Layer 3 (vLLM) |
+| 维度 | MemCache 工作负载测试 (模拟推理) | vLLM 集成测试 (vLLM) |
 |------|--------------------|-----------------|
 | 进程模型 | 单进程（fork rank1 keepalive 后数据操作在 rank0 线程） | 多进程（Worker_TP0 和 Worker_TP1 是独立 OS 进程） |
 | stream_ 创建 | rank0 线程在 device 0 创建，eviction 也在同一线程 | rank1 进程在 device 1 创建 stream_，但 rank0 进程的 eviction 线程用 device 0 context |
@@ -114,7 +125,6 @@ Python API（`put_from_layers`）的分配器有跨 rank + DRAM fallback 逻辑�
 
 | 结论 | 影响程度 | 说明 |
 |------|---------|------|
-| Layer 3 测试通过 | 无影响 | 测试门限（开销 < 20%、hit/miss < 70%）仍满足 |
 | MemCache cache hit 降幅 85%+ | 需修正归因 | 降幅主要来自 vLLM 内部 prefix cache（5.65 GiB >> 20 prompt），而非 MemCache 分布式存储 |
 | device_sdma DRAM 层可用 | 需修正 | DRAM 层实际不可用（eviction 全部失败），MemCache 在 device_sdma 下实际只有 HBM 单层 |
 | device_sdma vs host_shm 对比 | 需修正 | 两种协议实际都是单层存储（host_shm 只有 DRAM，device_sdma 只有 HBM），开销差异来自 HBM SDMA vs DRAM 共享内存的带宽差异 |
@@ -160,7 +170,7 @@ Python API（`put_from_layers`）的分配器有跨 rank + DRAM fallback 逻辑�
 - `PutFromLayers` 的 blob 分散到多个 rank，单 rank HBM 使用率达不到 eviction 阈值
 - vLLM `AscendStoreConnector` 使用不同的分配策略（更集中写入），才能触发 eviction
 
-**实际复现方式**：带诊断日志重跑 Layer 3 vLLM 测试，在 vLLM log 中捕获 107002 错误和 `SetThreadAclDevice`/`CopyData`/`CopyD2H` 诊断输出。
+**实际复现方式**：带诊断日志重跑 vLLM 集成测试 vLLM 测试，在 vLLM log 中捕获 107002 错误和 `SetThreadAclDevice`/`CopyData`/`CopyD2H` 诊断输出。
 
 ### 2.3 诊断日志增强
 
@@ -203,11 +213,11 @@ Python API（`put_from_layers`）的分配器有跨 rank + DRAM fallback 逻辑�
 | `hybm_data_op_acl_memcpy.cpp:171` | `CopyH2D` | 同上 |
 | `hybm_data_op_acl_memcpy.cpp:123` | `SubmitD2D` | 同上 |
 
-**验证状态**：修复已编译安装，但因 NPU 设备 HBM 被孤儿驱动上下文占用，暂无法运行 Layer 3 测试验证。待设备恢复后重跑。
+**验证状态**：修复已编译安装，但因 NPU 设备 HBM 被孤儿驱动上下文占用，暂无法运行 vLLM 集成测试验证。待设备恢复后重跑。
 
 ### 3.3 验证结果
 
-修复后在 dev4,5 上重跑 Layer 3 device_sdma 测试，2 passed。vLLM 日志验证 eviction 恢复正常：
+修复后在 dev4,5 上重跑 vLLM 集成测试 device_sdma 测试，2 passed。vLLM 日志验证 eviction 恢复正常：
 
 | 指标 | 修复前 | 修复后 |
 |------|--------|--------|
@@ -284,7 +294,7 @@ WARNING kv cache tensor ptr 0x12d2885c8000 not 2MB-aligned (storage_key=0x12d288
 
 **根因**: vLLM KV cache tensor 指针由 vLLM 显存分配器决定，未保证 2MB 物理对齐。`AscendStoreConnector` 的 `KVPoolWorker._align_kv_ptrs`（`pool_worker.py:758`）将 tensor 起始地址向下 2MB 对齐（memfabric_hybrid 大页要求），当 `new_start < storage_key`（对齐后地址越过 raw tensor 边界）时，原代码 `assert new_start >= storage_key` 崩溃，vLLM 启动失败。
 
-**适配改动**: 通过 `patches/vllm_ascend_310p_kv_transfer.patch` 将 `pool_worker.py:758` 的 assert 改为 `logger.warning` + `continue`，跳过该 region 的对齐调整，不再阻断启动：
+**适配改动**: 通过 vLLM-Ascend 指定分支中的适配实现 将 `pool_worker.py:758` 的 assert 改为 `logger.warning` + `continue`，跳过该 region 的对齐调整，不再阻断启动：
 
 ```python
 # patch 前

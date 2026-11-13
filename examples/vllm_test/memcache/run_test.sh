@@ -1,7 +1,7 @@
 #!/bin/bash
 # run_test.sh — Unified vLLM TTFT test runner
 #
-# Merges: run_test.sh, retest_layer3.sh, retest_layer3_4rank.sh, run_large_capacity_test.sh, run_memcache_bench.sh
+# Run MemCache workloads, vLLM integration tests, and benchmarks.
 #
 # Usage:
 #   bash run_test.sh --memcache-dir <DIR> [options]
@@ -9,11 +9,9 @@
 # Options:
 #   --memcache-dir <DIR>                    memcache repo dir (required)
 #   --type workload|integration|largecap|bench|puredram  test type (default: workload)
-#                                           integration now includes hitdecode tests
-#                                           use -m hitdecode to select subset
 #                                           puredram: pure-DRAM (host_shm, 0 HBM) 4-rank
 #   --rank 1|2|4                            rank count: 1-rank (TP=1), 2-rank (TP=2) or 4-rank (TP=4) (integration/bench, required for integration)
-#   --layer layer2|layer3|all               largecap layer selection (default: all)
+#   --suite workload|integration|all       large-capacity test selection (default: all)
 #   --protocol host_shm|device_sdma         protocol (integration only, default: config default)
 #   --device-ids <a,b,...>                  NPU device IDs (default: 0 for 1-rank, 6,7 for 2-rank, 0,1,2,3 for 4-rank, 4,5,6,7 for largecap/puredram)
 #   --filter <name>                         pytest -m marker filter (e.g. rank2, rank4, throughput, hitdecode)
@@ -29,23 +27,23 @@
 #   --help                                  show help
 #
 # Examples:
-#   # Layer 2 workload
+#   # MemCache workload tests
 #   bash run_test.sh --memcache-dir /path/to/memcache --type workload --device-ids 6,7
 #
-#   # Layer 3 1-rank (TP=1)
+#   # vLLM 集成测试 1-rank (TP=1)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 1 --protocol device_sdma --device-ids 0 --log
 #
-#   # Layer 3 2-rank (TP=2)
+#   # vLLM 集成测试 2-rank (TP=2)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 2 --protocol host_shm --device-ids 6,7 --log
 #
-#   # Layer 3 4-rank (TP=4)
+#   # vLLM 集成测试 4-rank (TP=4)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 4 --protocol device_sdma --device-ids 0,1,2,3 --log
 #
 #   # Throughput benchmark (2-rank)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type bench --rank 2 --device-ids 6,7
 #
 #   # Large-capacity test (TP=4, large HBM + DRAM)
-#   bash run_test.sh --memcache-dir /path/to/memcache --type largecap --layer layer3 --device-ids 4,5,6,7 --log
+#   bash run_test.sh --memcache-dir /path/to/memcache --type largecap --suite integration --device-ids 4,5,6,7 --log
 #
 #   # Pure-DRAM test (TP=4, host_shm, 0 HBM, 10GB DRAM)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type puredram --device-ids 4,5,6,7 --log
@@ -60,7 +58,7 @@ readonly PKG_DIR="$(cd "$(dirname "$0")" && pwd)"
 MEMCACHE_DIR=""
 TEST_TYPE="workload"
 RANK=""
-LAYER="all"
+LARGECAP_SUITE="all"
 PROTOCOL=""
 DEVICE_IDS=""
 TEST_FILTER=""
@@ -78,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         --memcache-dir)       MEMCACHE_DIR="$2"; shift 2 ;;
         --type)               TEST_TYPE="$2"; shift 2 ;;
         --rank)               RANK="$2"; shift 2 ;;
-        --layer)              LAYER="$2"; shift 2 ;;
+        --suite|--layer)      LARGECAP_SUITE="$2"; shift 2 ;;
         --protocol)           PROTOCOL="$2"; shift 2 ;;
         --device-ids)         DEVICE_IDS="$2"; shift 2 ;;
         --filter)             TEST_FILTER="$2"; shift 2 ;;
@@ -175,7 +173,7 @@ log() {
 # ============================================================================
 # Environment setup
 # ============================================================================
-export ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.1.0}"
+export ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}"
 export LD_LIBRARY_PATH="$ASCEND_HOME_PATH/lib64:${LD_LIBRARY_PATH:-}"
 export ASCEND_KERNEL_META_DIR="${ASCEND_KERNEL_META_DIR:-/tmp/ascend_kernel_meta}"
 mkdir -p "$ASCEND_KERNEL_META_DIR"
@@ -184,6 +182,11 @@ export LD_LIBRARY_PATH="$MEMCACHE_DIR/output/memcache/lib64:${LD_LIBRARY_PATH}"
 for mod in memcache_hybrid memfabric_hybrid; do
     libdir=$(python3 -c "import $mod, os; print(os.path.dirname($mod.__file__)+'/lib')" 2>/dev/null || echo "")
     [[ -n "$libdir" && -d "$libdir" ]] && export LD_LIBRARY_PATH="$libdir:${LD_LIBRARY_PATH}"
+done
+
+MF_OUTPUT="$MEMCACHE_DIR/3rdparty/memfabric_hybrid/output"
+for dir in "$MF_OUTPUT/acc_offload/lib64" "$MF_OUTPUT/hybm/lib64" "$MF_OUTPUT/smem/lib64"; do
+    [[ -d "$dir" ]] && export LD_LIBRARY_PATH="$dir:$LD_LIBRARY_PATH"
 done
 
 export MMC_MEMCACHE_DIR="$MEMCACHE_DIR"
@@ -225,10 +228,15 @@ case "$TEST_TYPE" in
         export MMC_TEST_GPU_MEM_UTIL="$GPU_MEM_UTIL"
         if [[ -n "$PROTOCOL" ]]; then
             TEMP_CONF="$PKG_DIR/cases/config/.mmc-local-integration-${PROTOCOL}.conf"
-            sed -e "s/^ock\.mmc\.local_service\.protocol.*/ock.mmc.local_service.protocol = ${PROTOCOL}/" \
-                -e "s/^ock\.mmc\.local_service\.hbm\.size.*/ock.mmc.local_service.hbm.size = $([[ "$PROTOCOL" == "host_shm" ]] && echo 0 || echo 1GB)/" \
-                -e "s/^ock\.mmc\.local_service\.dram\.size.*/ock.mmc.local_service.dram.size = $([[ "$PROTOCOL" == "host_shm" ]] && echo 2GB || echo 1GB)/" \
-                "$BASE_CONFIG" > "$TEMP_CONF"
+            if [[ "$PROTOCOL" == "host_shm" ]]; then
+                sed -e "s/^ock\.mmc\.local_service\.protocol.*/ock.mmc.local_service.protocol = host_shm/" \
+                    -e "s/^ock\.mmc\.local_service\.hbm\.size.*/ock.mmc.local_service.hbm.size = 0/" \
+                    -e "s/^ock\.mmc\.local_service\.dram\.size.*/ock.mmc.local_service.dram.size = 2GB/" \
+                    "$BASE_CONFIG" > "$TEMP_CONF"
+            else
+                sed -e "s/^ock\.mmc\.local_service\.protocol.*/ock.mmc.local_service.protocol = device_sdma/" \
+                    "$BASE_CONFIG" > "$TEMP_CONF"
+            fi
             export MMC_LOCAL_CONFIG_PATH="$TEMP_CONF"
         else
             export MMC_LOCAL_CONFIG_PATH="$BASE_CONFIG"
@@ -290,12 +298,19 @@ if ! check_npu; then
 fi
 log "[INFO] NPU detected"
 
+# Verify the repository revisions and runtime packages before starting tests.
+VERIFY_ARGS=(verify --memcache-dir "$MEMCACHE_DIR")
+if [[ "$TEST_TYPE" == integration || "$TEST_TYPE" == bench || "$TEST_TYPE" == puredram ]]; then
+    VERIFY_ARGS+=(--require-vllm)
+fi
+python3 "$PKG_DIR/source_manifest.py" "${VERIFY_ARGS[@]}"
+
 # ============================================================================
 # Clean stale environment
 # ============================================================================
 CLEAN_SCRIPT="$MEMCACHE_DIR/debug/test/clean_stale_env.sh"
-if [[ "$SKIP_CLEAN" -eq 1 ]]; then
-    log "[INFO] 跳过环境清理（--skip-clean）"
+if [[ "$SKIP_CLEAN" -eq 1 || "$TEST_TYPE" == "integration" ]]; then
+    log "[INFO] 跳过全局环境清理"
 elif [[ -f "$CLEAN_SCRIPT" ]]; then
     log "[INFO] 清理残留进程和 IPC 资源..."
     if [[ -n "$LOG_FILE" ]]; then
@@ -360,7 +375,9 @@ stop_meta_service() {
 
 cleanup_meta() {
     stop_meta_service
-    pkill -9 -f 'VLLM::' 2>/dev/null || true
+    if [[ "$TEST_TYPE" != "integration" ]]; then
+        pkill -9 -f 'VLLM::' 2>/dev/null || true
+    fi
 }
 trap cleanup_meta EXIT
 
@@ -396,6 +413,9 @@ run_pytest() {
 
 # Shared cleanup between split tests: kill stale processes + restart MetaService.
 cleanup_between_tests() {
+    if [[ "$TEST_TYPE" == "integration" ]]; then
+        return
+    fi
     if [[ -f "$CLEAN_SCRIPT" ]]; then
         log "[INFO] Cleaning NPU between split tests..."
         if [[ -n "$LOG_FILE" ]]; then
@@ -441,7 +461,6 @@ run_integration() {
         log "[SKIP] vLLM not available, skipping integration tests"
         exit 0
     fi
-    ensure_meta_service
     local test_file="$PKG_DIR/cases/python/memcache/integration/vllm_integration_test.py"
     if [[ -n "$TEST_FILTER" ]]; then
         run_pytest "$test_file" -v -s -m "$TEST_FILTER"
@@ -450,14 +469,18 @@ run_integration() {
         run_pytest_split "$test_file" \
             "test_full_miss_baseline_1rank" \
             "test_50pct_hit_1rank" \
-            "test_100pct_hit_1rank"
+            "test_100pct_hit_1rank" \
+            "test_cache_source_correctness" \
+            "test_native_prefix_cache_benchmark"
     elif [[ "$RANK" == "4" && "$SPLIT_TESTS" -eq 1 ]]; then
         # 4-rank: run each test separately with NPU cleanup between,
         # because 310P3 vLLM exit leaves orphan NPU context (HBM not released).
         run_pytest_split "$test_file" \
             "test_full_miss_baseline_4rank" \
             "test_50pct_hit_4rank" \
-            "test_100pct_hit_4rank"
+            "test_100pct_hit_4rank" \
+            "test_cache_source_correctness" \
+            "test_native_prefix_cache_benchmark"
     else
         local marker="rank2"
         case "$RANK" in
@@ -489,30 +512,30 @@ run_puredram() {
     fi
 }
 
-run_largecap_layer2() {
+run_largecap_workload() {
     ensure_meta_service
     local test_file="$PKG_DIR/cases/python/memcache/largecap/large_capacity_test.py"
     if [[ -n "$TEST_FILTER" ]]; then
-        log "[INFO] Starting large-capacity Layer 2 tests (filter: $TEST_FILTER)..."
+        log "[INFO] Starting large-capacity MemCache workload tests (filter: $TEST_FILTER)..."
         run_pytest "$test_file" -v -s -m "$TEST_FILTER"
     else
-        log "[INFO] Starting large-capacity Layer 2 tests..."
+        log "[INFO] Starting large-capacity MemCache workload tests..."
         run_pytest "$test_file" -v -s -m largecap
     fi
 }
 
-run_largecap_layer3() {
+run_largecap_integration() {
     if ! python3 -c "import vllm" 2>/dev/null; then
-        log "[SKIP] vLLM not available, skipping Layer 3"
+        log "[SKIP] vLLM not available, skipping vLLM integration tests"
         return 0
     fi
     ensure_meta_service
     local test_file="$PKG_DIR/cases/python/memcache/integration/large_capacity_vllm_test.py"
     if [[ -n "$TEST_FILTER" ]]; then
-        log "[INFO] Starting large-capacity Layer 3 tests (filter: $TEST_FILTER)..."
+        log "[INFO] Starting large-capacity vLLM integration tests (filter: $TEST_FILTER)..."
         run_pytest "$test_file" -v -s -m "$TEST_FILTER"
     else
-        log "[INFO] Starting large-capacity Layer 3 tests..."
+        log "[INFO] Starting large-capacity vLLM integration tests..."
         run_pytest "$test_file" -v -s -m rank4
     fi
     pkill -9 -f 'VLLM::' 2>/dev/null || true
@@ -603,10 +626,6 @@ case "$TEST_TYPE" in
         ;;
     integration)
         run_integration || OVERALL_EXIT=$?
-        # Cleanup vLLM processes after integration
-        pkill -9 -f "vllm serve" 2>/dev/null || true
-        sleep 3
-        pkill -9 -f "VLLM::" 2>/dev/null || true
         ;;
     bench)
         run_bench || OVERALL_EXIT=$?
@@ -616,17 +635,17 @@ case "$TEST_TYPE" in
         pkill -9 -f "VLLM::" 2>/dev/null || true
         ;;
     largecap)
-        case "$LAYER" in
-            layer2|l2)
-                run_largecap_layer2 || OVERALL_EXIT=$?
+        case "$LARGECAP_SUITE" in
+            workload|layer2|l2)
+                run_largecap_workload || OVERALL_EXIT=$?
                 ;;
-            layer3|l3)
-                run_largecap_layer3 || OVERALL_EXIT=$?
+            integration|layer3|l3)
+                run_largecap_integration || OVERALL_EXIT=$?
                 ;;
             all)
-                run_largecap_layer2 || OVERALL_EXIT=$?
+                run_largecap_workload || OVERALL_EXIT=$?
                 log ""
-                log "[INFO] === Layer 2 complete, starting Layer 3 ==="
+                log "[INFO] === MemCache workloads complete, starting vLLM integration tests ==="
                 if [[ -f "$CLEAN_SCRIPT" ]]; then
                     if [[ -n "$LOG_FILE" ]]; then
                         bash "$CLEAN_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
@@ -635,10 +654,10 @@ case "$TEST_TYPE" in
                     fi
                 fi
                 stop_meta_service
-                run_largecap_layer3 || OVERALL_EXIT=$?
+                run_largecap_integration || OVERALL_EXIT=$?
                 ;;
             *)
-                log "[ERROR] Unknown layer: $LAYER (use: layer2, layer3, all)"
+                log "[ERROR] Unknown suite: $LARGECAP_SUITE (use: workload, integration, all)"
                 exit 1
                 ;;
         esac

@@ -10,7 +10,7 @@
 # MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-"""Layer 2 large-capacity MemCache workload tests (8GB HBM + 20GB DRAM, TP=4).
+"""Large-capacity MemCache workload tests (8GB HBM + 20GB DRAM, TP=4).
 
 Tests large-scale KV Cache storage behavior that the 1GB+1GB config cannot
 exercise:

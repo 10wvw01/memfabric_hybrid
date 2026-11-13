@@ -10,7 +10,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-"""Prefill TTFT benchmark test cases (Layer 2).
+"""MemCache prefill workload benchmarks.
 
 These tests measure MemCache KV Cache storage latency under workloads that
 simulate real LLM inference patterns: single prefill, varied sequence lengths,

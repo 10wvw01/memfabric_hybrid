@@ -1,5 +1,9 @@
 # Mooncake 接入 MemFabric 到 vLLM 的修改总结
 
+测试用例、TTFT/P50 和常用术语见[测试说明](../../TEST_GUIDE.md)。
+
+本文记录 Mooncake 的历史环境与适配方案。当前目录的测试脚本缺失情况见[入口说明](../README.md#当前目录状态)。
+
 ## 功能架构
 
 ```
@@ -32,12 +36,12 @@ MemFabric (底层 SDMA 引擎)
   HYBM: 统一设备/主机内存地址空间
   SDMA: NPU 芯片内 DMA 拷贝
   Config Store: 拓扑发现与 rank 协调
-  310P3: HBM (128GB) + DRAM (1GB 段)
+  310P3: 设备 HBM + 本示例配置的 DRAM (1GB 段)
 ```
 
 两种接入路径的核心区别：
 
-- **MooncakeConnector**：prefiller 和 decoder 各自注册 NPU HBM，SDMA 直接在 NPU 之间搬运 KV cache。两端都是设备内存，HYBM 天然支持。
+- **MooncakeConnector**：prefiller 和 decoder 各自注册 NPU HBM，SDMA 直接在 NPU 之间搬运 KV cache。两端注册设备内存后，通过 MF Transport 搬运。
 - **MooncakeStoreConnector**：单实例将 KV cache offload 到 CPU 内存池。需要 HYBM 分配 DRAM 段作为存储池，SDMA 从 NPU HBM 搬到 DRAM 段。
 
 ---
@@ -71,7 +75,7 @@ MemFabric (底层 SDMA 引擎)
 
 ---
 
-## 第一层：vLLM 适配混合注意力模型
+## vLLM 适配混合注意力模型
 
 > **适配问题**：310P3 上 Qwen3.5 是混合注意力模型（linear + full attention），KV cache 以 `(k, v)` tuple 形式传递，但 vLLM 0.26.0 代码假设是单个 Tensor 或 list，导致 `AssertionError`。
 
@@ -100,7 +104,7 @@ def _repr_tensor(v: torch.Tensor | list | tuple) -> torch.Tensor:
 
 ---
 
-## 第二层：Mooncake Store 适配 mf 协议 + DRAM 段挂载
+## Mooncake Store 适配 mf 协议 + DRAM 段挂载
 
 > **适配问题**：Store 的 `client_service.cpp` 不认识 `mf` 协议；Store 用 `malloc` 分配 CPU 内存，但 SDMA 要求 HYBM 注册的内存；HYBM 已注册的 DRAM 段被 Store 重复注册导致 `address overlap`。
 
@@ -148,7 +152,7 @@ MemFabricSmemDl::SetSmemTypeFlag(mooncake::SMEM_BM);
 
 ---
 
-## 第三层：MF Transport 适配 BM 模式 DRAM 分配
+## MF Transport 适配 BM 模式 DRAM 分配
 
 > **适配问题**：默认 SMEM_TRANS 模式不分配 DRAM 段（`maxDRAMSize=0`）；install 时序导致 flag 修改在读取之后；`MemFabricGetSegment` 用错内存类型；HYBM 注册 CPU 内存失败时无容错。
 
@@ -215,7 +219,7 @@ if (dramSize > 0) {
 
 ---
 
-## 第四层：构建辅助
+## 构建辅助
 
 ### ⑩ `libub_allocator.so` — 解决 store.so 未定义符号
 
