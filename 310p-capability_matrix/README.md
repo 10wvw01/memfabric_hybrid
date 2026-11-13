@@ -164,7 +164,6 @@ npu-smi info | grep Hugepages
    不支持路径的确定性回复而非随机错误——die 对 PEER import、跨卡 DEFAULT import
    (无双向 P2P)、共享内存 sync D2D、同卡跨 die EnablePeerAccess、超槽位 enable 均返回它。
 
-
 ## 17：地址预留与共享映射能力验证
 
 环境：Ascend310P3 / Atlas 300I Duo，aarch64，CANN 9.2.1，驱动 26.1.0，同卡设备 2、3。
@@ -187,3 +186,27 @@ A_DEV=2 B_DEV=3 bash 17_va_reservation/run.sh acl-pools
 ```
 
 完整 API 步骤、测试条件及返回值见[第 17 项 README](17_va_reservation/README.md)。
+
+### 第17项补充：HAL内存生命周期与大池（2026-11-12）
+
+新增 `hal-probe`、`hal-pools`、`hal-large-pools`，验证HAL分配、NONE共享句柄、映射、访问权限及释放。
+同卡设备4、5上，每rank 8GiB物理分配均触发P2P_DDR返回6后回退DDR成功，
+各8GiB全范围双向校验与窗口复用通过。修改后的MemFabric库也完成4GiB边界和8GiB尾部读写校验；设备重编号下的全范围校验、
+MemCache两rank各8GiB池的跨rank对象读写均通过。
+
+```bash
+A_DEV=4 bash 17_va_reservation/run.sh hal-probe
+A_DEV=4 B_DEV=5 bash 17_va_reservation/run.sh hal-pools
+POOL_GIB=8 EXPECT_FALLBACK=1 A_DEV=4 B_DEV=5 bash 17_va_reservation/run.sh hal-large-pools
+```
+
+大池显式运行。Qwen3.6-35B的TP=2补查也通过：每rank 8GiB设备池、DRAM=0，
+4096输入/1输出，0%与完整重复输入各一例，外部恢复3072 tokens且首token与种子一致。
+测试使用gpu_memory_utilization=0.65，属于功能验证。
+参数、完整API流程及实测记录见[第17项README](17_va_reservation/README.md#hal-内存生命周期与超过4gib的双rank设备池)。
+
+第17项新增`hal-context`对照：同卡2、3及4、5上，HAL保持本地上下文或切到导出方上下文均完成导入、映射、双向校验和窗口复用；可见设备重编号也通过。每rank 8GiB大池保持本地上下文的全范围读写及回退验证通过。
+
+```bash
+A_DEV=2 B_DEV=3 bash 17_va_reservation/run.sh hal-context
+```

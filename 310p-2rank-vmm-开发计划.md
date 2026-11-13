@@ -1,6 +1,6 @@
 # 310P 单卡双 die 2-rank VMM 内存池开发计划与实现说明
 
-## 当前实现（trunk_for_escc_v1.2.0，1f41b8a6）
+## 当前实现
 
 310P HBM 池使用 `HybmVmmBasedSegment`。提交 `3a56de8f` 已删除原专用类
 `hybm_acl_vmm_segment.cpp/.h` 及其测试文件，并将工厂分派改为共用类。
@@ -10,18 +10,44 @@
 |---|---|
 | 创建内存段 | `src/hybm/csrc/mm/hybm_mem_segment.cpp`：HBM 且 SoC 为 310P 时创建 `HybmVmmBasedSegment` |
 | 选择与预留虚拟地址 | `HybmVaManager::AllocReserveGva` 选择管理区间内的可用窗口；`ReserveMemorySpace` 调用 `HalMemAddressReserve`，使用 `MEM_RSV_TYPE_REMOTE_MAP`，检查返回地址与预期一致 |
-| 申请物理内存 | `MallocFromDevice` 的 310P 分支调用 `AclrtMallocPhysical`；P2P_HUGE 返回 `RT_ERROR_DRV_OUT_MEMORY` 时回退 HBM_MEM_HUGE |
-| 映射、导入与释放 | 共用类通过 310P 分支使用 `AclrtMapMem`、`MmapImport310P`、`AclrtUnmapMem`、`AclrtFreePhysical`；虚拟地址预留由 `HalMemAddressFree` 释放 |
+| 申请物理内存 | `MallocFromDevice` 调用 `HalMemCreate`；310P 使用 MEM_P2P_DDR_TYPE，驱动返回内存不足时回退 MEM_DDR_TYPE |
+| 映射、导入与释放 | 使用 `HalMemMap`、`HalMemUnmap`、`HalMemRelease`；310P 通过 HAL 的64位 NONE 句柄接口导出和导入，虚拟地址由 `HalMemAddressFree` 释放 |
 | 当前测试位置 | `test/ut/testcase/hybm/mm/hybm_vmm_based_segment_test.cpp` 和 `hybm_mem_segment_test.cpp`；原专用类测试已删除 |
 
-当前实现结合 HAL 窗口预留与 ACL 物理内存管理。下文 V1 的“纯 aclrt*”、专用类、
+当前内存生命周期统一调用 HAL；ACL 仍负责设备上下文、设备号转换和数据拷贝。
+HAL 参数使用驱动逻辑设备号，保留设备可见列表重编号的支持。同卡HAL导入保持本地上下文；下文V1的对端上下文切换针对ACL接口。下文 V1 的“纯 aclrt*”、专用类、
 `AclVmmExportInfo`、不经过地址管理器等描述属于历史方案。当前交换结构为共用类中的
-`HostSdmaExportInfo`。完整地址预留能力验证见
+`HostSdmaExportInfo`，310P 的64位共享句柄仍存入原有 `share_info` 字段，交换格式保持一致。完整地址预留能力验证见
 [310P 能力验证第 17 项](310p-capability_matrix/17_va_reservation/README.md)。
 
 当前没有两套内存段实现并存的功能冗余。是否进一步拆分类或提取 API 适配层，应结合共用类中
 硬件分支的维护成本决定；恢复旧专用类需要同步后续窗口和映射修复。
-本节为源码核查结果，没有新增硬件测试或 UT 结果。
+地址窗口、物理内存和共享句柄的 HAL 迁移需配套验证；原有 V1 数据仍保留在下文。
+
+### HAL 路径验证（2026-11-12）
+
+10006 / Ascend310P3 / CANN 9.2.1，同卡设备4、5。验证前先比较ACL与HAL：
+2MiB HAL HBM/P2P_HBM分配返回6，DDR/P2P_DDR成功；FABRIC句柄导出返回8，
+64位NONE导出成功。ACL对照的驱动日志也显示P2P_DDR与64位NONE接口。
+最终使用NONE导出、设置原有共享属性、NONE导入，保持原交换数据格式。
+
+| 验证 | 结果 |
+|---|---|
+| HAL三个1GiB窗口，每rank每池2MiB物理内存 | 双向全量读写校验通过，释放后首窗口复用通过 |
+| `ASCEND_RT_VISIBLE_DEVICES=4,5`，进程设备号0、1 | 同上通过，HAL使用转换后的驱动设备号 |
+| 普通DDR类型双进程共享对照 | 同上通过；未制造P2P内存耗尽条件 |
+| 修改后的运行库RELEASE构建 | 通过 |
+| MemFabric双实体端到端 | 每rank设备池32MiB、DRAM池32MiB；三阶段8MiB校验均mismatch=0，正常销毁，两rank退出0 |
+
+端到端使用07双die示例的临时副本，仅更换端口和临时目录，先启动rank1再启动rank0以满足
+旧示例的目录标记等待逻辑。该副本未修改仓库示例。验证未覆盖跨卡、910硬件或大模型推理。
+新增12项分配、回退、共享句柄、设备号及失败清理回归。
+
+### HAL本地上下文验证（2026-11-13）
+
+设备2、3和4、5的第17项上下文对照均通过；每rank 8GiB大池保持本地上下文完成全范围双向读写，两个rank均触发DDR回退。新运行库在设备2、3上使用32MiB设备池与32MiB DRAM池，三个8MiB读写校验均mismatch=0，正常销毁并退出。
+
+运行库删除HAL导入前后的对端设备切换，保留监听线程本地ACL上下文初始化。导入成功、失败两项UT检查均未发生上下文切换。
 
 ## V1 历史实施记录
 
@@ -32,7 +58,6 @@
 > - P0-P6 全部完成；实机裁决补充见下表 F16-F20
 > - 实机验收凭证：`examples/memory_pool/01_basic/07_310p_die_pair_pool/07_310p_die_pair_pool.cpp`
 >   （双 rank 双池三阶段 8MB 逐字校验 mismatch=0，干净销毁）
-> - 全量 UT 已完成：83/90 套件 PASS（1700/1700 用例），非通过项经纯基线对照证实为存量问题（见第二节）
 > - **UT / example 复现命令见第八节（可直接复制执行）**；**V2 候选改进（PID 白名单恢复、公开 API 设备查询、算子真异步）见第九节 TODO**
 > - **开发流程踩坑记录与规范见附录（A1-A7）——构建/测试/验证前必读，防止复犯**
 >
@@ -64,29 +89,6 @@
 | F18 | **本地池地址分类依赖 reservedMap**（AclVmm 段不登记）→ G2H 方向校验失败 → `ClassifyAddressMask` 扩展：allocatedMap 命中且非 imported → LOCAL\|GLOBAL 双位（与 reservedMap 分支语义一致，对 910B 行为等价） | e2e 实测 | 公共路径修改（需全量 UT 回归） |
 | F19 | **join 为动态成员语义**：先 join 的 rank 单成员即返回 OK，peer 映射在对端 join 完成后才就绪 → 使用方需在全员 join 后同步再拷贝（现有 Python 示例的 Barrier 模式即正确姿势） | e2e 实测 | example/使用方契约 |
 | F20 | **全量 UT 发现 `ReleaseSliceMemory` use-after-free**（ASAN 独有检出：入参为 map 内 shared_ptr 的引用，`slices_.erase` 后再访问 `slice->index_`；析构路径下 map 为最后所有者时触发）→ 入口 `MemSlicePtr holder = slice` 拷贝修复 | 正式 UT 二进制（ASAN+gcov）实测 | 段健壮性修复（手工链接非 ASAN 版漏检） |
-
-## 二、全量 UT 回归结论（本机，逐套件独立进程模式）
-
-> 本机首次具备 UT 运行条件（子模块已拉取、pybind11 已装）。`run_ut.sh` 单进程串行模式会因
-> mockcpp API-hook 与 ASAN fake-stack 的存量不兼容在多个套件中途崩溃（见下），故采用
-> **逐套件独立进程**模式取得确定性结果。
-
-**结果：83/90 套件 PASS（1700/1700 用例全过），非通过项全部经纯基线对照证实为存量环境问题，与本方案改动无关：**
-
-| 套件 | 现象 | 纯基线对照 | 根因 |
-|---|---|---|---|
-| HybmDataOpSdmaTest | ASAN 崩溃（44/52 后） | **相同进度崩溃** | 存量：mockcpp AArch64 机器码打桩（覆写函数前 16 字节）与 ASAN fake-stack 不兼容，进程内状态累积触发，布局敏感 |
-| SmemBmTest | ASAN 崩溃（109/127 后） | **相同进度崩溃** | 同上 |
-| SmemHaConfigStoreTest | ASAN 崩溃（14/33 后） | **相同进度崩溃** | 同上 |
-| SmemShmTest | ASAN 崩溃（17/27 后） | **相同进度崩溃** | 同上 |
-| NetworkEndpointUtilTest | 3 例失败（ipv6） | 相同失败 | 本机无 IPv6 地址 |
-| SmemNetTest / SmemTransTest | GetLocalIpWithTarget / ipv6+超时 | 相同失败 | 本机网络环境（无 IPv6） |
-
-**本方案改动覆盖路径全部通过**：HybmVaManagerTest 105/105（含 ClassifyAddressMask 修改）、
-HybmMemSegmentTest 37/37（含 Create 分派与 QueryDeviceInfoSocTolerant）、HybmComposeDataOpTest 21/21
-（含 310P 算子分支）、HybmDataOpAclMemcpyTest 5/5、DlAclApiVmmTest(+Init) 4/4、
-HybmAclVmmSegmentTest 6/6（UAF 修复后）、ExInfoTransferTest 16/16（含 EE05 扩展）。
-实机 e2e 修复后复验通过。
 
 ## 三、V1 设计决策
 
@@ -206,7 +208,7 @@ bash script/run_ut.sh --fast HybmMemSegmentTest
 原 `HybmAclVmmSegmentTest` 已删除，不能继续用它筛选当前测试。
 V1 的 177 用例记录为历史结果，当前用例数量以实际运行输出为准。
 
-### 8.2 UT：全量 90 套件逐套件扫描（规避存量 mockcpp+ASAN 崩溃，~10 分钟）
+### 8.2 UT：按套件独立运行
 
 ```bash
 cd /home/t00842504/memfabric_hybrid/output/bin/ut && \

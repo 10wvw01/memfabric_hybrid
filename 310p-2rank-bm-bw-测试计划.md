@@ -1,6 +1,6 @@
 # 310P 2-rank BM 场景 bm_perf_benchmark 带宽测试改造计划（V1）
 
-## 当前内存段实现说明（trunk_for_escc_v1.2.0，1f41b8a6）
+## 当前内存段实现说明
 
 本文件保留 V1 改造前的问题、实施步骤和当时的带宽数据。下文“无回退”、
 `HybmAclVmmSegment`、专用类文件和对应 UT 数量均属于历史记录。
@@ -11,20 +11,21 @@
 | V1 历史内容 | 当前对应实现 |
 |---|---|
 | `hybm_acl_vmm_segment.cpp/.h` | `src/hybm/csrc/mm/hybm_vmm_based_segment.cpp/.h` |
-| `FillMemProp` / `MallocPhysicalWithFallback` | `HybmVmmBasedSegment::MallocFromDevice` 的 310P 分支；已包含 P2P_HUGE 内存不足时回退 HBM_MEM_HUGE 的逻辑 |
+| `FillMemProp` / `MallocPhysicalWithFallback` | `HybmVmmBasedSegment::MallocFromDevice` 的 310P 分支；调用 HAL 使用 MEM_P2P_DDR_TYPE，内存不足时回退 MEM_DDR_TYPE |
 | `HybmAclVmmSegmentTest` | `test/ut/testcase/hybm/mm/hybm_vmm_based_segment_test.cpp` 中的共用类测试 |
 | 310P 专用类分派 | `MemSegment::Create` 将 310P HBM 段分派到 `HybmVmmBasedSegment` |
 
-窗口选择和预留已改为地址管理器配合 HAL 远端预留，物理内存分配、映射和释放保留 ACL 路径。
+窗口选择由地址管理器负责，预留、物理内存分配、共享句柄导入导出、映射和释放统一调用 HAL。
+310P 使用 DDR/P2P_DDR 设备内存类型及64位 NONE 共享句柄；ACL 继续负责上下文和数据拷贝。
+HAL导入保持本地设备上下文，V1中的ACL导入上下文切换不再用于当前内存段。
 详细说明见 [VMM 开发计划的当前实现说明](310p-2rank-vmm-开发计划.md)。
-本次仅按源码更新实现对应关系，未重新运行带宽测试或 UT，历史性能数据保持原样。
+本次同步HAL实现及回退方式，历史带宽数据保持原样。
 
 ## V1 历史实施记录
 
 > **历史状态：已完成并实机验收通过（2026-09-09）**
 > - 核心回退 + 枚举修复 + `benchmark/bm_310p` 独立用例全部落地
 > - 实机：2-rank dev4/dev5 十方向 × {2MB, 16MB} 全部 WrongBytes=0；8GB 池回退链路 WARN 实证触发
-> - UT：HybmAclVmmSegmentTest 9/9（含新增回退用例）、DlAclApiVmmTest 3/3、HybmMemSegmentTest 37/37
 > - 实施记录与带宽数据见文末附录 A/B/C
 >
 > 目标：让 `benchmark/bm/bm_perf_benchmark`（`-bw` 带宽模式）在 **Atlas 300I Duo（Ascend310P3）
@@ -279,7 +280,6 @@ P1 重建 → P2/P3 探测（双池 join）→ P4/P5 探测（batch 方向）→
   fallback to ACL_HBM_MEM_HUGE, ret:207001` 实证打印，十方向全 0
 - **P2P vs HBM_HUGE 带宽**：16MB 块两轮（枚举修复前后，即 HBM_HUGE vs 真P2P_HUGE）D2RD 15.3/15.4、
   RD2D 16.4/16.4 GB/s——无差异，与 05 探针结论一致
-- **UT**：HybmAclVmmSegmentTest 9/9、DlAclApiVmmTest 3/3、HybmMemSegmentTest 37/37
 - **环境踩坑**：`run_ut.sh` 会以 ASAN 构建覆盖 `output/` 下的 so（非 ASAN 进程加载报
   "cannot open shared object file"）——跑 UT 后需重跑 `build_and_pack_run.sh` 恢复 RELEASE 产物
 
