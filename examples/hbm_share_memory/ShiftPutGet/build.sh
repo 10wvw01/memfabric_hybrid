@@ -27,6 +27,11 @@ while :; do
     esac
 done
 
+if [[ "$INPUT_ENV_VERSION" == *310P* ]]; then
+    echo "[ERROR] ShiftPutGet uses legacy SHM kernels. For Ascend310P use examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma or 09_310p_aicore_aicpu_sdma_4rank."
+    exit 1
+fi
+
 VERSION_LIST="A2 A3 A5"
 if [[ " $VERSION_LIST " != *" $INPUT_ENV_VERSION "* ]]; then
     echo "ERROR: INPUT_ENV_VERSION should be in [$VERSION_LIST]"

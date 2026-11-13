@@ -155,6 +155,15 @@ int32_t main(int32_t argc, char *argv[])
     }
 
     CHECK_ACL(aclInit(nullptr));
+
+    const char *socName = aclrtGetSocName();
+    if (socName != nullptr && std::string(socName).find("Ascend310P") == 0) {
+        ERROR_LOG("RDMADemo uses legacy SHM kernels. For Ascend310P use "
+                  "examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma or 09_310p_aicore_aicpu_sdma_4rank.");
+        (void)aclFinalize();
+        return 1;
+    }
+
     int32_t deviceId = rankId % gNpuNum;
     CHECK_ACL(aclrtSetDevice(deviceId));
     aclrtStream stream = nullptr;
