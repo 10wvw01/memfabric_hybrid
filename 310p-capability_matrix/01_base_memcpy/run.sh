@@ -1,5 +1,8 @@
 #!/bin/bash
+set -euo pipefail
 cd "$(dirname "$0")"
-make >/dev/null 2>&1
-DEV=${DEV:-0} timeout 60 ./test
-echo "[run] exit=$? (124=timeout/hang)"
+make
+ret=0
+DEV=${DEV:-0} timeout --kill-after=10 60 ./test </dev/null || ret=$?
+echo "[run] exit=$ret (124=timeout/hang)"
+exit "$ret"

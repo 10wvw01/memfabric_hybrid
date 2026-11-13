@@ -1,10 +1,37 @@
-# 10_vmm_hardcell — VMM 跨卡 import 验证
+# 10：指定跨卡组合的VMM导入方式
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/10_vmm_hardcell
+A_DEV=3 B_DEV=6 bash run.sh
+```
+
+## 2026-11-13测试结果
+
+Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64。
+
+| 检查项 | 本轮结果 |
+|---|---|
+| 设备与大小 | 3、6，跨卡；三种方式各用独立16MiB物理块 |
+| 方法一：保持导入方上下文 | 导入返回0，句柄释放完成 |
+| 方法二：先切到导出方设备再导入 | 导入返回0，句柄释放完成 |
+| 方法三：CreateContext/SetCurrentContext后导入 | 导入返回0，句柄释放完成 |
+| 总结果 | PASS，两个rank退出0 |
+
+3→6的三种导入方式均成功。完整跨卡VMM读写见[04](../04_vmm_cross/README.md)。
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、输出及分析。2026-11-13的执行情况见上表。
 
 Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64,MPI 双进程:
 rank0=exporter(dev A,`A_DEV` 默认 1),rank1=importer(dev B,`B_DEV` 默认 4)。
 
 ## 验证能力
-- VMM 跨卡 import 可达性:EnablePeerAccess(双向)ret=0 ✓(能打通 P2P 通路)
+- VMM 跨卡 import 可达性:EnablePeerAccess双向返回0，另检查三种导入方式的返回值
 - 方式一(本进程 ctx):`aclrtMemImportFromShareableHandle(sh1, B, &h)`(ctx=B)
   → 验证 import 是否成功
 - 方式二(ctx 技巧):`aclrtSetDevice(A)` → `ImportFromShareableHandle(sh2, B, &h2)`
@@ -13,7 +40,7 @@ rank0=exporter(dev A,`A_DEV` 默认 1),rank1=importer(dev B,`B_DEV` 默认 4)。
   `aclrtSetCurrentContext(ctx)` → `ImportFromShareableHandle(sh3, B, &h3)` →
   `SetDevice(B)` 切回 + `aclrtDestroyContext(ctx)`。与方式二等效(ctx 落在导出方
   →跳过自动 P2P),但 ctx 生命周期显式可控,不 lazy 创建 A 的 primary ctx
-- 三种方式均成功即 PASS;若失败记录错误码
+- 导出准备成功且三种导入均完成观测时输出结果；导入后只释放句柄，不进行映射或数据拷贝
 
 > **ctx 技巧的适用场景(源码+实测验证, CANN 9.1.0)**:方式二仅在**同卡跨 die**(如
 > dev0↔dev1,两 die 共享一个 PCIe 设备)场景有意义。机制:import 内部
@@ -21,7 +48,7 @@ rank0=exporter(dev A,`A_DEV` 默认 1),rank1=importer(dev B,`B_DEV` 默认 4)。
 > die 对的 P2P 被内核显式拒绝(`devdrv_ctrl.c:4424` 注释 `/* 2DIe : 1PCIe 2PF */`,
 > 返回 -EINVAL→507899),导致方式一 import 在自动 P2P 步骤夭折。ctx 技巧使当前
 > ctx 设备==导出方设备,`raw_device.cc:2206` 直接**跳过 P2P 启用**,import ioctl
-> 本身对同卡跨 die 无限制,故成功。跨卡场景 P2P 能打通,方式一即可,方式二冗余。
+> 在所测同卡跨die组合上导入成功。跨卡场景 P2P 能打通,方式一即可,方式二冗余。
 > 实测:跨卡 dev1→dev4 两方式均 OK;同卡 dev0→dev1 方式一 FAIL 507899、方式二 OK。
 > 替代方式 `aclrtCreateContext(A)`+`aclrtSetCurrentContext`(实测同效,推荐:
 > context 生命周期显式可控)。
@@ -30,8 +57,8 @@ rank0=exporter(dev A,`A_DEV` 默认 1),rank1=importer(dev B,`B_DEV` 默认 4)。
 - exporter(dev A):`aclrtDeviceEnablePeerAccess(B, 0)` → `aclrtMallocPhysical` 16MB
   (memAttr 七级回退链 `ACL_HBM_MEM_P2P_HUGE` → `ACL_HBM_MEM_P2P_NORMAL` →
   `ACL_DDR_MEM_P2P_HUGE` → `ACL_DDR_MEM_P2P_NORMAL` → `ACL_MEM_P2P_HUGE` →
-  `ACL_MEM_P2P_NORMAL` → `ACL_HBM_MEM_HUGE`;310P3 实测仅 `ACL_MEM_P2P_HUGE`
-  成功;16MB 按 granularity=2MB 对齐,MapMem size == MallocPhysical size)→
+  `ACL_MEM_P2P_NORMAL` → `ACL_HBM_MEM_HUGE`;该回退链命中 `ACL_MEM_P2P_HUGE`
+  后停止;16MB 按 granularity=2MB 对齐,MapMem size == MallocPhysical size)→
   `aclrtReserveMemAddress(NULL hint)` → `aclrtMapMem` →
   `aclrtMemSetAccess(RW, A)` → H2D pattern →
   `aclrtMemExportToShareableHandle(ACL_MEM_HANDLE_TYPE_NONE,
@@ -102,15 +129,14 @@ runtime 内部是否在"当前 ctx 设备 ↔ 导出方设备"之间自动启用
 - 方式二/三成功的原因:import 内部用**当前 ctx 的设备**调用
   `EnableP2PWithOtherDevice`(api_impl.cc:7338);当前 ctx=导出方设备时
   `phyId == peerPhyId` 直接跳过 P2P 启用(raw_device.cc:2206),import ioctl
-  本身对同卡跨 die 无任何限制(svm_master_mem_share.c:1135)
+  在所测同卡跨die组合上导入成功（原调查参考svm_master_mem_share.c:1135）
 - 方式三(替代方式)与方式二等效,且 ctx 生命周期显式可控(Create/Destroy),
   不 lazy 创建 primary ctx,已作为正式测试用例(step 4)常驻本测试
 
 RESULT: PASS。Cleanup 全部正常(含方式三 DestroyContext ret=0),无 D 态挂死。
 
 ### D 态挂死防护(沿用 03/04 修复)
-本测试做跨卡 `aclrtDeviceEnablePeerAccess`,进程退出时若不显式拆除 P2P 状态会触发
-驱动 SRCU 死锁(exit_mmap → synchronize_srcu 永久等待,SIGKILL 不可回收,耗尽
+本测试做跨卡 `aclrtDeviceEnablePeerAccess`,旧版环境记录过退出时残留D状态进程，原调查关联到
+驱动SRCU等待(exit_mmap → synchronize_srcu 永久等待,SIGKILL 不可回收,耗尽
 hugepages)。cleanup 在 `aclrtResetDevice` 前加 `aclrtDeviceDisablePeerAccess(peer)`
-对称拆除(r0 拆 devB、r1 拆 devA);`run.sh` 加 `timeout 60` 兜底。详见
-03_ipc_cross/README.md 的三条证据链。运行后检查 `ps aux|grep test` 不应有 D 态残留。
+对称拆除(r0 拆 devB、r1 拆 devA);`run.sh` 加 `timeout 60` 中转。运行后检查 `ps aux|grep test` 不应有 D 态残留。

@@ -267,47 +267,12 @@ int main(int argc, char *argv[])
     if (init_ok)
         aclFinalize();
 
-    /* RESULT */
-    {
-        int pass = 0;
-        const char *verdict = "";
-        if (strcmp(mode, "DEFAULT") == 0) {
-            pass = !imp_ok;
-            verdict = pass ? "符合预期: 裸 DEFAULT 跨卡 507899(需 PEER flag)"
-                           : "★推翻: 裸 DEFAULT 跨卡可用";
-        } else if (strcmp(mode, "ENABLE") == 0) {
-            pass = !imp_ok;
-            if (pass)
-                verdict = peer_en
-                    ? "符合预期: 显式 EnablePeerAccess 不够, DEFAULT flag 跨卡仍 507899"
-                    : "符合预期(弱): EnablePeerAccess 本身失败, DEFAULT 跨卡 507899, 无法证明 enable 够不够";
-            else
-                verdict = "★推翻: 显式 enable 让 DEFAULT import 可用";
-        } else if (strcmp(mode, "ENABLE_R0") == 0) {
-            pass = imp_ok && d2d_ok;
-            if (pass)
-                verdict = "★方向确认: 仅 exporter 端 enable(dev0 调 EnablePeerAccess(2)) 即可让 DEFAULT import 成功";
-            else
-                verdict = "仅 exporter 端 enable 不够, 需要双向(或 importer 端方向)";
-        } else if (strcmp(mode, "ENABLE_BOTH") == 0) {
-            pass = imp_ok && d2d_ok;
-            if (!imp_ok && !peer_en0 && !peer_en)
-                verdict = "无法判定: 双向 EnablePeerAccess 均失败";
-            else if (pass)
-                verdict = "★重要发现: 双向 EnablePeerAccess + DEFAULT flag 跨卡可用, 说明 PEER flag 内部核心就是双向 P2P";
-            else
-                verdict = "符合预期: 双向 EnablePeerAccess 仍不够, PEER flag 还做了更多";
-        } else { /* PEER */
-            pass = imp_ok && d2d_ok;
-            verdict = pass ? "符合预期: PEER flag import 是跨卡唯一可行方式"
-                           : "不符合预期: PEER flag 不可用";
-        }
-        printf("[15] RESULT: MODE=%-7s import=%-10s d2d=%-5s -> %s\n",
-               mode, imp_ok ? "OK" : "FAIL", d2d_ok ? "OK" : "-", verdict);
-        fflush(stdout);
-        if (fatal || !pass)
-            fatal = 1;
-    }
+    /* Import rejection is a capability observation; invalid data is a test failure. */
+    if (imp_ok && !d2d_ok)
+        fatal = 1;
+    printf("[15] RESULT: MODE=%-7s import=%-10s d2d=%-5s observation=%s\n",
+           mode, imp_ok ? "OK" : "FAIL", d2d_ok ? "OK" : "-", fatal ? "FAIL" : "COMPLETE");
+    fflush(stdout);
 
     MPI_Finalize();
     return fatal ? 1 : 0;

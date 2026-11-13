@@ -1,24 +1,37 @@
-# 16_vmm_matrix — 8 NPU VMM 内存池全连接
+# 16：8设备VMM共享矩阵
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/16_vmm_matrix
+bash run.sh
+```
+
+## 2026-11-13状态
+
+未执行：八设备未同时空闲。设备0、1、4、5有其他任务，设备2、3、6、7空闲。
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、数据和分析；2026-11-13的执行情况见上表。
 
 Atlas 300I Duo(310P3,4 卡 × 2 die = 8 dev)/ CANN 9.1.0 / aarch64,MPI 8 进程,
 rank k = dev k(恒等映射)。die 对 = (0,1)(2,3)(4,5)(6,7)。
 
-## 动机(对照 07_d2d_matrix)
+## 动机与对照条件
 
-07 已证明 **IPC 方式 8-rank 全连接不可达**:每卡 8 个入向 P2P 授权槽位
-(4 卡 × 8 = 32 上限),全连接需 card0 参与 12 条跨卡关系(12 > 8),
-`ENABLE_PEER_ACCESS` flag import 内部的 `halDeviceEnableP2P` 必然触顶(507899)。
+07的IPC八rank同时共享出现部分导入失败，原分析提出P2P状态数量限制假设。本项使用ACL VMM共享物理句柄，对照IPC的失败分布，检查不显式调用EnablePeerAccess时能否建立56条有向共享映射。
 
-本测试验证:**VMM shareable handle 路径全程不调用 `EnablePeerAccess`**
-(04 step16 实测跨卡 import 不依赖 EPA;05 实测 die 对用 ctx 技巧无需 EPA),
-是否能绕过 P2P 槽位配额,实现 56 条有向链路全连接。
+04的step16只省略了导入方的显式peer启用，导出方此前已经启用peer；本项单独记录无显式EnablePeerAccess的导入流程。同卡上下文切换属于ACL路径，HAL本地上下文导入验证见[17](../17_va_reservation/README.md)。
 
 ## 建池方式(gva_pool 同款槽位窗口)
 
 每 rank 预留 128MB VA 窗口(N × 16MB slot),`slot p = base + p*16MB`:
 - own 物理内存 `MapMem` 到 slot r
 - import 的各 peer 物理内存 `MapMem` 到 slot p
-- → 所有 rank 的 slot 布局一致(VA 矩阵按构造对称)
+- → 各rank采用相同槽位偏移；绝对地址一致性取决于各自预留的base
 
 ## 验证能力
 
@@ -56,7 +69,7 @@ rank k = dev k(恒等映射)。die 对 = (0,1)(2,3)(4,5)(6,7)。
 ./run.sh                            # 8 NPU, 16MB slab, timeout 120s
 SLAB_MB=2 ./run.sh                  # 2MB slab(最小粒度, 排除内存大小假设的对照)
 SLAB_MB=64 ./run.sh                 # 64MB slab
-make && ./test                      # 等价(默认 SLAB_MB=16)
+make && mpirun --allow-run-as-root -np 8 ./test  # 默认SLAB_MB=16
 ```
 
 ## 预期结果
@@ -74,7 +87,7 @@ make && ./test                      # 等价(默认 SLAB_MB=16)
 PASS = (8 rank join 全 7/7)&&(写校验全 OK)。VA 一致性仅 OBS 报告
 (NULL-hint reserve 的 base 由各进程 VA 分配器决定,不构成构造保证)。
 
-## ★实测结论(2026-08-26 运行,两次运行结果完全一致)
+## 实测结论(2026-08-26 运行,两次运行结果完全一致)
 
 `./run.sh`(8 NPU,timeout 120s),退出码 exit=1(**干净 FAIL,非 124 超时,无 D 态残留**)。
 
@@ -104,7 +117,7 @@ PASS = (8 rank join 全 7/7)&&(写校验全 OK)。VA 一致性仅 OBS 报告
   与 04/05 完全一致;唯一构造差异是 gva_pool 式 128MB 槽位窗口(Reserve 一次,
   每 peer MapMem 16MB 到固定 slot),运行验证可行(所有 map ret=0)。
 
-### ★★核心结论:VMM 不能绕过 P2P 槽位配额 —— 与 IPC 失败矩阵完全相同
+### 主要观察：VMM与IPC的导入失败分布相同
 
 失败全部集中在跨卡 import 的 `507899`,**分布与 07 IPC 版逐格一致**:
 
@@ -127,7 +140,7 @@ die 对 ctx 技巧 import 不产生 P2P 状态,disable 恒 507899)。
 即 VMM 跨卡 import 与 IPC `ENABLE_PEER_ACCESS` flag import 一样,内部调用
 `halDeviceEnableP2P`,消耗同一份每卡 8 个槽位配额。
 
-### ★★★对照实验:排除"内存大小超限"假设(SLAB_MB 参数)
+### 块大小对照：2/16/64MiB（SLAB_MB参数）
 
 **问题**:失败会不会是每次 import 的 P2P 内存太大超出限制导致的?
 
@@ -157,18 +170,19 @@ die 对 ctx 技巧 import 不产生 P2P 状态,disable 恒 507899)。
    7×16MB=112MB,r1 只 import 到 3×16MB=48MB 就被拒——若是字节上限,应该
    先限制导入更多的 r0,而非更少的 r1。
 
-**结论:与内存大小无关,是每卡 8 条 P2P 连接的条数硬配额。**
+**实验结论**：2/16/64MiB的导入失败分布相同；原分析据此优先调查连接状态数量。
 (运行方法:`SLAB_MB=2 ./run.sh` 或 `SLAB_MB=64 mpirun --allow-run-as-root -np 8 ./test`)
 
-### ★★★精确配额模型(可完整解释每一个成功/失败)
+### 历史配额模型与逐步推演
+
+下面按每卡8个槽位、双向关系复用模型解释该次导入顺序和失败位置。07的纯Enable探针另记录36次成功，计数口径尚未统一，保留本模型及实际矩阵供后续复核。
 
 **只有跨卡关系消耗槽位,die 对(同卡两 die)完全不占槽**:
 
 - 一条**跨卡** import r→p 建立双向 P2P 关系 (dev_r, dev_p):两端卡各扣 1 个
   槽位;已存在的关系可复用(不重复扣费)。
-- **die 对 import 零扣费**:runtime 源码 `EnableP2PWithOtherDevice`
-  (raw_device.cc:2198)`if (phyDeviceId != peerPhyDeviceId)` —— 同一物理芯片
-  的两个 die phy id 相同,**直接跳过** EnableP2P,不产生任何 P2P 状态。
+- **die 对 import 不计入该模型**:runtime 源码 `EnableP2PWithOtherDevice`
+  (raw_device.cc:2198)`if (phyDeviceId != peerPhyDeviceId)` —— 当前上下文切到导出方后，当前上下文设备与被导入对象所属设备相同，从而跳过该分支；这里的参数相等来自上下文切换。
 - 每卡 2 die 共享的 8 个槽位,**全部由跨卡关系占用**;8/8 饱和 = 该卡两个 die
   的跨卡关系总数恰好填满 8 槽,die 对一条槽都不占。
 
@@ -186,11 +200,11 @@ die 对免费的三重证据:
 |---|---|---|---|
 | 0 | r0 | 7/7 | 新建关系 (0,2)(0,3)(0,4)(0,5)(0,6)(0,7) → card0=6, card1=2, card2=2, card3=2 |
 | 1 | r1 | 3/7(失 p4-p7) | (1,2)(1,3) 新建 → card0=8 **满**;p4 起需 card0 第 9 槽 → 507899 |
-| 2 | r2 | 7/7 | p0/p1 **复用** (0,2)(1,2) 零扣费;(2,4)(2,5)(2,6)(2,7) 新建 → card1=8 **满** |
+| 2 | r2 | 7/7 | p0/p1 **复用** (0,2)(1,2) 不计入该模型;(2,4)(2,5)(2,6)(2,7) 新建 → card1=8 **满** |
 | 3 | r3 | 3/7(失 p4-p7) | p0/p1 复用;(3,x) 新关系需 card1 第 9 槽 → 507899 |
 | 4-7 | r4-r7 | 各 5/7(失 p1,p3) | p0/p2 复用已有关系;(1,4)(3,4) 等新关系需 card0/card1 槽,两卡皆满 → 507899;(4,6)(4,7)(5,6)(5,7) 新建 → card2=card3=8 **满** |
 
-**最终状态:4 张卡全部恰好 8/8 饱和,且 8 个槽全部是跨卡关系(die 对零参与)**
+**模型推演状态：四张卡各8条关系，计数只包含跨卡关系**
 ——共 16 条跨卡 P2P 关系、32 条跨卡 import 成功(48-32=16 条 507899),每张卡
 的 8 个槽位全部用尽。各卡 8 条关系的构成(括号内为 dev 对,全部跨卡):
 
@@ -202,14 +216,14 @@ die 对免费的三重证据:
 | card3 (dev6,7) | (0,6)(0,7)(2,6)(2,7)(4,6)(4,7)(5,6)(5,7) |
 
 16 条 × 2 端 = 32 = 4 卡 × 8,四个 die 对 (0,1)(2,3)(4,5)(6,7) 不出现在任何
-一行。这不是部分失败,而是配额被精确榨干的饱和特征。
+一行。这不是部分失败,而是配额被精确占满的饱和特征。
 
 **全连接的数学**(注意只数跨卡关系,die 对免费):全连接需 24 条跨卡关系
 (C(8,2)−4 个 die 对),每卡参与 2 die × 6 个远端 die = 12 条**跨卡**关系
 (die 对不占槽,帮不上忙)→ 12 > 8,**拓扑本身超配额,与 import 方式、
-顺序、IPC/VMM 后端均无关,数学上不可达**。
+顺序、IPC/VMM 后端均无关,按上述模型推算不可达**。
 
-### ★★★驱动代码实证(/home/t00842504/cann-repo,2026-08-26 调研)
+### 历史驱动源码调查（2026-08-26）
 
 **① 官方注释直接写明限制**(pkg_inc/ascend_hal_base.h:1695-1720,halDeviceEnableP2P):
 
@@ -295,7 +309,7 @@ must be set to take effect"的 runtime 侧实现——**runtime 代用户完成�
 
 - **VA 矩阵 CONSISTENT**:gva_pool 槽位窗口构造(每 rank Reserve 128MB,
   slot p = base + p*16MB)下 8 进程 VA 完全一致(base 均 `0x12c140000000`),
-  且这是**按构造保证**的一致,不是 IPC 的顺序性巧合——若需要全网同 VA,
+  这是该次窗口基址和槽位偏移共同得到的观察——若需要全网同 VA,
   VMM 槽位窗口是可行方案。
 - 建池阶段 8 rank 并发 MallocPhysical/Reserve/Map/Export 无任何失败
   (首轮 r0 export 偶发失败为环境噪声,复跑消失)。

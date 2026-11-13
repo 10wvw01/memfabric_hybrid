@@ -90,18 +90,21 @@ int main(void)
     ret = aclInit(NULL);
     if (ret != ACL_ERROR_NONE) {
         printf("[01] init: aclInit FAIL (ret=%d)\n", ret);
+        g_fail = 1;
         goto out;
     }
     init_ok = 1;
     ret = aclrtSetDevice(dev);
     if (ret != ACL_ERROR_NONE) {
         printf("[01] init: aclrtSetDevice(%d) FAIL (ret=%d)\n", dev, ret);
+        g_fail = 1;
         goto out;
     }
     dev_ok = 1;
     ret = aclrtCreateStream(&stream);
     if (ret != ACL_ERROR_NONE) {
         printf("[01] init: aclrtCreateStream FAIL (ret=%d)\n", ret);
+        g_fail = 1;
         goto out;
     }
     printf("[01] init: aclInit / aclrtSetDevice(%d) / aclrtCreateStream OK (ret=0)\n", dev);
@@ -109,13 +112,14 @@ int main(void)
     hbuf = (uint32_t *)malloc(DEV_MEM_SIZE);
     vbuf = (uint32_t *)malloc(DEV_MEM_SIZE);
     if (!hbuf || !vbuf) {
-        printf("[01] init: host malloc 2x32MB FAIL\n");
+        printf("[01] init: host malloc 2x128MiB FAIL\n");
+        g_fail = 1;
         goto out;
     }
 
     /* ---- step 1: device memory malloc ---- */
     ret = aclrtMalloc(&da, DEV_MEM_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-    step_line(1, "aclrtMalloc 32MB dev mem (ACL_MEM_MALLOC_HUGE_FIRST)",
+    step_line(1, "aclrtMalloc 128MiB dev mem (ACL_MEM_MALLOC_HUGE_FIRST)",
               ret == ACL_ERROR_NONE, ret);
     if (ret != ACL_ERROR_NONE)
         goto out;
@@ -198,7 +202,7 @@ int main(void)
             if (ret == ACL_ERROR_NONE)
                 ok = (check_pat((uint32_t *)hp, words, TAG_STEP5) == 0);
         }
-        step_line(5, "aclrtMallocHost 32MB + H2D/D2H roundtrip (pinned host)", ok, ret);
+        step_line(5, "aclrtMallocHost 128MiB + H2D/D2H roundtrip (pinned host)", ok, ret);
         if (ret != ACL_ERROR_NONE)
             goto out;
     }

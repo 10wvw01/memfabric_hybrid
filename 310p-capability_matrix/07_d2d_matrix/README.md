@@ -1,4 +1,23 @@
-# 07_d2d_matrix — 8 NPU IPC 内存池全链路
+# 07：8设备IPC共享矩阵
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/07_d2d_matrix
+bash run.sh
+```
+
+## 2026-11-13状态
+
+未执行：八设备未同时空闲。设备0、1、4、5有其他任务，设备2、3、6、7空闲。
+
+`minimal/`保留独立的历史对照程序，本轮未额外运行这些变体。
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、输出及分析。2026-11-13的执行情况见上表。
 
 Atlas 300I Duo(310P3,4 卡 × 2 die = 8 dev)/ CANN 9.1.0 / aarch64,MPI 8 进程,
 rank k = dev k(恒等映射)。die 对 = (0,1)(2,3)(4,5)(6,7)。
@@ -29,17 +48,17 @@ rank k = dev k(恒等映射)。die 对 = (0,1)(2,3)(4,5)(6,7)。
 ## 运行方法
 ```
 ./run.sh        # 8 NPU,timeout 120s
-make && ./test  # 等价
+make && mpirun --allow-run-as-root -np 8 ./test  # 八个MPI进程
 ```
 ## 预期结果
 - 8 rank 各 create slab 16MB + export key OK
 - token 环 join:每 rank joined 7/7(56 条有向链路全通;IPC-PEER 预期打通含 ✗ 单元格,见 03)
 - 全网写+校验:8 条 D2D 写 + D2H 逐字校验全 OK
-- VA 一致性:8 行 VA 表完全一致(同序 import 的 GVA 确定性;若不一致则为有效观测,见实测结论回填)
+- VA 一致性:8 行 VA 表完全一致(比较相同导入顺序下的地址;若不一致则为有效观测,见实测结论回填)
 - 带宽:die 对 ~17–19 GB/s(参考 02)/ 跨卡 ~10–14 GB/s(参考 03)
 - `RESULT: PASS(join:OK write:OK VA:CONSISTENT)`
 
-## ★实测结论(2026-08-25 运行)
+## 实测结论(2026-08-25 运行)
 
 `./run.sh`(8 NPU, timeout 120s),退出码 exit=1(**干净 FAIL,非 124 超时,无 D 态残留**)。
 
@@ -56,7 +75,9 @@ make && ./test  # 等价
 | ⑦ cleanup | IpcMemClose / DisablePeerAccess 全 ret=0,无挂死 | 干净退出 |
 | RESULT | `FAIL (join:FAIL write:FAIL VA:INCONSISTENT)` | PASS |
 
-### 根因:跨卡 P2P 映射资源耗尽(ret=507899)
+### 第一阶段分析：跨卡P2P状态与导入失败（2026-08-25）
+
+该阶段提出约30条映射的解释，后续实验进一步区分卡、die及启用方向；以下保留推导过程。
 
 - 失败全部集中在**跨卡 `ENABLE_PEER_ACCESS` import**,返回 `507899 = ACL_ERROR_RT_DRV_INTERNAL_ERROR`
   (`rt_error_codes.h:148`);die 对(`DEFAULT` flag,无 EnablePeerAccess)8/8 全部成功,零失败。
@@ -91,7 +112,7 @@ make && ./test  # 等价
    不同 rank 成功子集不同 → 各列错位,矩阵无法对齐。
 2. **write 链断裂**:r3 写 p4 因 import 未成功而 SKIP → r4 等不到 writer p3 的 delivered → 校验失败 → 全局 write FAIL。
 
-### ⚠ 发现的 VA 一致性检查固有问题(与本次 507899 无关)
+### 发现的 VA 一致性检查固有问题(与本次 507899 无关)
 
 `va_tab` 对角赋的是 own slab 的 malloc 地址(`0x12c140000000`),而各 import 落到
 `0x12c180000000` 起的**另一 VA 区域**,两者天然不相等。因此每个列里 owner 行是 `0x140`、
@@ -109,9 +130,9 @@ observer 行是 `0x180`,比对 `va_all[r*N+p] == va_all[0*N+p]` **恒为假**—
 
 ---
 
-## ★★ 深入分析: 310P Duo 每卡 P2P 槽位限制 (2026-08-25 更新)
+## 深入分析: 310P Duo 每卡 P2P 槽位限制 (2026-08-25 更新)
 
-### 根因定位
+### 当时参考的驱动限制
 
 通过 `minimal/` 目录下 20+ 个最小化测试的精确定位,发现根因是 **310P Duo 每卡共享 8 个 P2P 连接槽位**。
 
@@ -196,7 +217,7 @@ T=20 mpirun --allow-run-as-root -np 8 ./minitest8  # 运行 T20
 
 ---
 
-## ★★ DEFAULT vs PEER_ACCESS flag 对比测试 (2026-08-25 更新)
+## DEFAULT vs PEER_ACCESS flag 对比测试 (2026-08-25 更新)
 
 ### 测试目的
 
@@ -206,7 +227,7 @@ T=20 mpirun --allow-run-as-root -np 8 ./minitest8  # 运行 T20
 
 | flag | 同卡 die pair | 跨卡 | 说明 |
 |------|--------------|------|------|
-| **DEFAULT** | ✅ OK | ❌ 507899 | 只能 import 同卡 die pair |
+| **DEFAULT** | ✅ OK | ❌ 507899 | 本组未显式建立跨卡双向peer；显式启用对照见15 |
 | **PEER_ACCESS** | ❌ 507899 | ✅ OK (受 8 槽位限制) | 只能 import 跨卡 |
 
 ### 详细数据
@@ -233,7 +254,7 @@ r1: p0(DEFAULT) OK, p2-p3(PEER_ACCESS) OK, p4-p7(PEER_ACCESS) FAIL → 3/7
 3. **test 07 的原始设计是正确的** — die pair 必须用 DEFAULT，跨卡必须用 PEER_ACCESS
 4. **无法绕过 P2P 槽位限制** — 两种 flag 各有适用范围，不能互换
 
-### 对 test 07 的最终结论
+### 该阶段的实验结论
 
 **56 条有向链路全连接在当前 310P Duo 硬件上不可达:**
 
@@ -248,7 +269,7 @@ r1: p0(DEFAULT) OK, p2-p3(PEER_ACCESS) OK, p4-p7(PEER_ACCESS) FAIL → 3/7
 
 ---
 
-## ★★ 4-rank 测试结果 (2026-08-25)
+## 4-rank 测试结果 (2026-08-25)
 
 ### 测试方案
 
@@ -281,11 +302,11 @@ r1: p0(DEFAULT) OK, p2-p3(PEER_ACCESS) OK, p4-p7(PEER_ACCESS) FAIL → 3/7
 ### VA 矩阵
 
 ```
-         r0(dev0)      r1(dev2)      r2(dev4)      r3(dev6)    
-r0(dev0) 0x12c140000000 0x12c180000000 0x12c181000000 0x12c182000000 
-r1(dev2) 0x12c180000000 0x12c140000000 0x12c181000000 0x12c182000000 
-r2(dev4) 0x12c180000000 0x12c181000000 0x12c140000000 0x12c182000000 
-r3(dev6) 0x12c180000000 0x12c181000000 0x12c182000000 0x12c140000000 
+         r0(dev0)      r1(dev2)      r2(dev4)      r3(dev6)
+r0(dev0) 0x12c140000000 0x12c180000000 0x12c181000000 0x12c182000000
+r1(dev2) 0x12c180000000 0x12c140000000 0x12c181000000 0x12c182000000
+r2(dev4) 0x12c180000000 0x12c181000000 0x12c140000000 0x12c182000000
+r3(dev6) 0x12c180000000 0x12c181000000 0x12c182000000 0x12c140000000
 ```
 
 对角线是 own slab (0x12c140000000)，非对角线是 import VA。
@@ -309,7 +330,7 @@ mpirun --allow-run-as-root -np 4 ./test_4rank
 
 ---
 
-## ★★★ P2P 配额模型最终修正 + 卡内共享实验 (2026-08-26)
+## P2P 配额模型最终修正 + 卡内共享实验 (2026-08-26)
 
 ### 实验组 1: 4-rank 卡内共享探针 (test_shared_p2p.c)
 
@@ -341,7 +362,9 @@ r3(dev3)   Q3'✗    Q4'✗    die✓    self
 - 正序: 第 1~36 条全成功, **第 37 条 (r6→dev0) 起全拒**
 - 逆序 (r6,r7 先行): r6/r7 各 6 条全成功, **r4/r5 全拒** (死于 r4→dev0)
 
-### 最终配额模型 (推翻此前"每卡 8 条关系"的理解)
+### 后续配额模型及计数疑点
+
+此模型同时出现32条理论上限和36次成功，计数口径尚未统一。保留正反序实验及推算，精确上限待复核。
 
 ```
 每卡 8 个"入向 P2P 授权"槽位:
@@ -355,7 +378,7 @@ r3(dev3)   Q3'✗    Q4'✗    die✓    self
 ```
 
 **全连接不可行的数学**: card0 需参与 12 条跨卡关系 (die0 六条 + die1 六条),
-每条消耗 card0 一个入向槽 → 12 > 8, 必然有 4 条被拒。与正/逆序实验的拒绝点完全吻合。
+每条消耗 card0 一个入向槽 → 按该模型12 > 8；具体拒绝位置需与正反序实验的方向和已有状态一起核对。
 
 ### 对 hcomm 的重新理解
 
@@ -372,9 +395,9 @@ test 07 失败根因 = 全连接拓扑本身超出配额, 与 import flag 选择
 
 ---
 
-## ★★★ VMM 替代路径验证 (2026-08-26, 见 17_vmm_matrix)
+## VMM 替代路径验证 (2026-08-26, 见 16_vmm_matrix)
 
-"换 VMM 绕过 P2P 槽位配额做 8-rank 全连接"的假设已被 **17_vmm_matrix** 否定:
+后续**16_vmm_matrix**同样未完成八rank全连接，失败分布与IPC对照一致：
 
 - VMM 跨卡 import(`aclrtMemImportFromShareableHandle`,全程零显式 EnablePeerAccess)
   的失败矩阵与本测试 IPC 版**逐格相同**(r1/r3=3/7 失 p4-p7;r4-r7=5/7 失 p1,p3);
@@ -384,7 +407,7 @@ test 07 失败根因 = 全连接拓扑本身超出配额, 与 import flag 选择
 - 精确模型: 实测 4 卡全部恰好 8/8 饱和(16 条关系 / 32 条跨卡 import 成功),
   全连接每卡需 12 条关系 > 8, 拓扑级不可达(逐 token 推演见 17 README);
 - 附带成果: VMM + gva_pool 槽位窗口(每 rank Reserve 128MB, slot p=base+p*16MB)
-  的 VA 矩阵 **CONSISTENT**(按构造保证全网同 VA, IPC 做不到)。
+  的 VA 矩阵 **CONSISTENT**(该次观察到全网同VA；NULL提示预留的基址由各进程分配)。
 
 结论: 8-rank 全连接在本平台 IPC/VMM 双路径均不可达, 根因同为每卡 8 P2P 槽位硬约束
 (全连接每卡需 12);
@@ -392,7 +415,7 @@ test 07 失败根因 = 全连接拓扑本身超出配额, 与 import flag 选择
 
 ---
 
-## ★★★ Ring 中继方案可行性分析 (2026-08-27)
+## Ring中继方案推演（2026-08-27，未完成端到端验证）
 
 ### 动机
 
@@ -423,7 +446,7 @@ card0 (dev0,dev1): dev0↔dev7 + dev1↔dev2 = 2 槽 ✅
 card1 (dev2,dev3): dev2↔dev1 + dev3↔dev4 = 2 槽 ✅
 ```
 
-### 可行性验证
+### 设计条件检查
 
 | 维度 | 评估 |
 |------|------|
@@ -452,7 +475,7 @@ Ring-B (反向): r0 → r7 → r6 → ... → r1 → r0
 | 访问模式以邻居为主, 偶发远端 | ✅ | 多数 1 hop, 少数 2-4 hop 可接受 |
 | 只做集合通信底层 | ✅ | 直接对齐 hcomm ring/doubling 拓扑 |
 | 大量随机远端访问 | ⚠️ | 多 hop 开销累积, 带宽按比例衰减 |
-| 需真正任意全连接 + 零中转 | ❌ | 物理不可达, 只能 4-rank 或 VMM 槽位窗口 |
+| 任意全连接且不经中转 | 待解决 | 该次八rank同时导入未通过；四rank对照通过 |
 
 ### 前提条件
 
@@ -462,9 +485,11 @@ Ring-B (反向): r0 → r7 → r6 → ... → r1 → r0
 
 ---
 
-## ★★★ 拓扑方案全面对比: 6-rank / 8-rank Doubling (2026-08-27)
+## 候选拓扑推算：6-rank与8-rank Doubling（2026-08-27）
 
-### 6-rank 全连接: 可行 (2+2+1+1 分配, 刚好 8 槽)
+本节保留连接数、路由和中继步骤的设计推算；依赖前述配额模型，尚无完整拓扑端到端测试结果。
+
+### 6-rank全连接：按8槽模型推算（2+2+1+1分配）
 
 6 ranks 分配在 4 卡上 (2+2+1+1), die 对走 HCCS 不占槽, 每 die 只需 4 个跨卡连接:
 
@@ -506,7 +531,7 @@ Card3: r5(die5)               ← 1 die
 | Ring | 2 | 3 | 3 | ✅ |
 | Doubling | 3 | 5 | 2 | ✅ |
 
-### 8-rank Doubling: 可行
+### 8-rank Doubling：按8槽模型推算
 
 Doubling 拓扑: rank r 连 `r⊕1`, `r⊕2`, `r⊕4`, 每 rank 3 个 peer。
 

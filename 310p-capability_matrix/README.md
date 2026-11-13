@@ -1,10 +1,49 @@
-# 0824-test — 310P3 GVA 内存池能力矩阵测试套件
+# 310P内存与数据传输能力验证
+
+每个目录包含独立C程序、运行脚本和实验说明，用于区分接口调用成功、映射成功和实际数据可读写。接口返回0并不自动代表后续数据通路可用。
+
+## 测试环境与执行范围
+
+2026-11-13：Ascend310P3 / Atlas 300I Duo，aarch64，CANN 9.2.1，驱动26.1.1。完成01–16中的13项，第13项分别测试同卡和跨卡组合。第17项见本文末尾的独立说明。
+
+07、12、16需要全部八设备。测试时设备0、1、4、5被占用，因此这三项未执行，各目录保留历史实验数据。
+
+## 本轮结果
+
+| 用例 | 验证内容 | 设备 | 实际结果 |
+|---|---|---|---|
+| [01](01_base_memcpy/README.md) | 单设备分配和拷贝 | 2 | 同步/异步H2D、D2H、普通D2D通过 |
+| [02](02_ipc_die/README.md) | 同卡跨die IPC | 2、3 | DEFAULT导入及异步读写通过；PEER导入、共享映射同步D2D返回507899 |
+| [03](03_ipc_cross/README.md) | 跨卡IPC | 2、6 | PEER导入及异步读写通过 |
+| [04](04_vmm_cross/README.md) | 跨卡VMM | 2、6 | 共享物理句柄导入、映射和异步读写通过 |
+| [05](05_vmm_die/README.md) | 同卡跨die VMM | 2、3 | 切换到导出方设备上下文导入后读写通过；本地上下文导入返回507899 |
+| [06](06_host_pool/README.md) | 共享Host内存 | 2、3 | POSIX共享页及H2D/D2H通过；PINNED注册返回0，但未获得有效设备映射 |
+| [07](07_d2d_matrix/README.md) | 8设备IPC矩阵 | — | 未运行：没有八设备空闲窗口 |
+| [08](08_host_swap/README.md) | Host中转拷贝 | 2、6 | 经Host双向中转和数据校验通过 |
+| [09](09_vmm_samedev/README.md) | 同设备跨进程VMM | 2、2 | 异步D2D和Host读写通过；共享映射同步D2D返回207000 |
+| [10](10_vmm_hardcell/README.md) | 指定跨卡组合的VMM导入 | 3、6 | 三种上下文方式均导入成功；本项未做导入后的映射和数据拷贝 |
+| [11](11_ipc_va_determinism/README.md) | IPC导入地址比较 | 2、6、2 | 四个对象导入成功；跨进程地址不全相同；rank1读回校验通过 |
+| [12](12_topo_probe/README.md) | 8设备peer拓扑 | — | 未运行：没有八设备空闲窗口 |
+| [13](13_bw_compare/README.md) | IPC/VMM/Host中转比较 | 2、3及2、6 | 两组设备上三条路径均通过数据校验 |
+| [14](14_transfer_remote/README.md) | 远端共享内存到Host | 2、6 | pageable/pinned Host及偏移读取校验通过 |
+| [15](15_peer_needed/README.md) | 跨卡IPC的peer条件 | 2、6 | DEFAULT需双侧显式启用；PEER标志方式通过；单侧启用仍拒绝导入 |
+| [16](16_vmm_matrix/README.md) | 8设备VMM矩阵 | — | 未运行：没有八设备空闲窗口 |
+
+已执行13项均退出0。各项README列明测试步骤、API、数据校验和返回值；包含失败对照的用例按表中的具体结果判断接口能力。
+
+## 本目录的接口范围
+
+01–16是独立的ACL及Host能力实验，第17项补充HAL内存生命周期。原有实验记录使用CANN9.1.0，最新结果表使用CANN9.2.1；第17项的HAL同卡导入已验证保持本地上下文可用。
+
+## 原有实验过程与汇总
+
+以下保留原有测试矩阵、执行步骤、故障调查、带宽比较和机制分析。驱动配额模型曾有不同计数口径，第07和16项保留了各阶段推导；以具体实验条件、接口返回值及数据校验区分观察和解释。
 
 > 机器:Atlas 300I Duo(310P3)× 4 卡 = 8 dev / CANN 9.1.0 / aarch64
 > 目标:逐项验证 GVA 内存池的建立(IPC/VMM/host)、数据传输(H2D/D2H/D2D)、
 > 跨进程共享能力,每项一个独立可运行目录,正反对照,结论回填 README。
 
-## ⚠ 运行前必读:D 态挂死根因与防护
+## 运行前必读:D 态挂死根因与防护
 
 ### 问题
 跨卡 P2P 测试(`aclrtDeviceEnablePeerAccess`)在**进程退出时**会触发驱动级死锁:
@@ -19,7 +58,7 @@ exit_mmap → __mmu_notifier_release → mn_hlist_release → synchronize_srcu
    EnablePeerAccess(die 对 DEFAULT)、03 有(跨卡 PEER flag)→ 02 正常 / 03 旧版挂死;
 2. **修复**:cleanup 在 `aclrtResetDevice` 前显式 `aclrtDeviceDisablePeerAccess(peer)`
    对称拆除 P2P 状态;03/04/07/10/12/16 修复后实测均干净退出、无 D 态残留;
-3. **05_vmm_die 不调用 EnablePeerAccess(ctx 技巧)**,天然无 D 态风险。
+3. **05_vmm_die**主路径切换上下文导入；EnablePeerAccess对照返回507899。
 
 ### 运行纪律
 1. **每次运行后检查**:`ps aux | grep test | grep -v grep`——不应有 D 状态残留
@@ -63,9 +102,9 @@ ps aux | grep test | grep -v grep
 npu-smi info | grep Hugepages
 ```
 
-## 已验证的核心结论(全部来自 01-16 实测)
+## 原有能力、性能与机制分析汇总（CANN9.1.0）
 
-### 一、建池与传输能力矩阵
+### 一、历史建池与传输能力矩阵
 
 | 链路 | 建池方式 | 传输 | 实测带宽 |
 |---|---|---|---|
@@ -96,7 +135,7 @@ npu-smi info | grep Hugepages
 - PCIe 链路本身不是瓶颈(效率 73-83%);跨 socket 与同 socket 跨卡 dst=die0 带宽相同。
 - IPC 与 VMM 两种后端带宽逐组一致(13)。
 
-### 三、硬件约束
+### 三、历史约束观察与解释模型
 
 | 约束 | 值 | 影响 | 出处 |
 |------|-----|------|------|
@@ -110,7 +149,7 @@ npu-smi info | grep Hugepages
 | pinned vs pageable | 2.86x 带宽差 | 远端 D2H:pinned 12.78 vs pageable 4.47 GB/s(14);本地 H2D 2.9x / D2H 4.3x(01);pageable 走驱动 staging 两次拷贝 | 01/14 |
 | PCIe lane 数 | x16 ≈ 1.9× x8 | H2D:x16 卡 26.9-26.92 / x8 卡 13.78-13.93 GB/s(06 四卡实测);跨卡 P2P 带宽与 lane 数无关(13) | 06/13 |
 
-### 四、API 行为规律
+### 四、历史ACL API行为与调用顺序
 
 1. **VMM memAttr(04 test_memattr 实测)**:310P3 支持 6 种——`ACL_MEM_NORMAL`/
    `ACL_MEM_HUGE`/`ACL_MEM_P2P_NORMAL`/`ACL_MEM_P2P_HUGE` + `ACL_HBM_MEM_HUGE`/
@@ -124,21 +163,19 @@ npu-smi info | grep Hugepages
    内部用当前 ctx 设备调 `EnableP2PWithOtherDevice`,ctx=导出方时跳过 P2P 启用。
 3. **IPC VA 部分确定性(11)**:importer 间 VA 完全一致(跨卡 PEER + 同设备 DEFAULT)
    且等于 exporter 的 malloc 地址;exporter 自 import 得到不同 VA。IPC 按成功 import
-   顺序分配 VA,不同 rank 顺序不同则矩阵错位(07);VMM + gva_pool 式槽位窗口
-   (每 rank Reserve 128MB,slot p=base+p×16MB)按构造保证全网同 VA(16 实测 CONSISTENT)。
-4. **host register 全系列不可用(06)**:`aclrtHostMemMapCapabilities` 10 种 HAC 类型
-   全 NOT_SUPPORTED;`aclrtHostRegister` V1/V2 MAPPED 207000;V2 PINNED ret=0 但为
-   空操作(仅 RT 层记录区间,无驱动调用);`aclrtHostGetDevicePointer` 107000;
-   `halHostRegister` flag=0→8 / flag=3→65534。310P3 无法实现设备直接访问 host 内存。
+   顺序分配 VA,不同 rank 顺序不同则矩阵错位(07);VMM槽位窗口（每rank预留128MiB）在该次16项实验中观察到VA一致；其绝对基址仍由各进程预留结果决定。
+4. **Host注册与映射接口对照(06)**:`aclrtHostMemMapCapabilities` 10 种 HAC 类型
+   全 NOT_SUPPORTED;`aclrtHostRegister` V1/V2 MAPPED 207000;V2 PINNED注册返回0，随后设备指针查询失败;`aclrtHostGetDevicePointer` 107000;
+   `halHostRegister` flag=0→8 / flag=3→65534。该组调用未取得有效设备映射。
 5. **拓扑 API(12)**:CanAccessPeer 8×8 对称——die 对 can=0(4/4),跨卡 can=1(24/24);
    EnablePeerAccess——die 对 507899(8/8 有序对),跨卡全部成功(48/48)。每对测试后
    立即 disable 可消除 sticky 状态污染。
 6. **拷贝 API 路径(01)**:H2D/D2H pinned 下 sync 反比 async 快 1.4×(26.96/19.13、
    24.22/17.75 GB/s,async 提交/同步开销抵消流水线收益);D2D sync 走 drvMemcpy
    ~5 GB/s,async 走 SDMA 65~91 GB/s,差距 12.6×(sweep 4-256MB 单调扩大)。
-   H2D/D2H 推荐 sync + pinned;D2D 必须 async。
+   H2D/D2H 推荐 sync + pinned;这些共享映射的D2D使用异步调用；普通本地设备指针的同步D2D见01。
 
-### 五、关键发现
+### 五、历史主要观察及后续修正
 
 1. **8-rank 全连接在本平台双路径均不可达(07/16)**:每卡 8 个入向 P2P 授权槽位
    (TX ATU 16 窗口 ÷ 每连接 2 = 8,驱动注释 "Ascend310P Duo 两 die share 8"),
@@ -153,16 +190,23 @@ npu-smi info | grep Hugepages
 4. **host DRAM 池完全可用(06)**:POSIX shm(MAP_SHARED)跨进程共享同物理页,
    跨进程写入对端 H2D 立即可见;共享 host 内存可直接作 `aclrtMemcpy(H2D)` 源,
    4 卡配置全 PASS。
-5. **远端直达与本地无差异(14)**:imported VA(远端 die)→ pinned host 12.78 vs
-   本地 dev → pinned host 12.84 GB/s,数据路径同为 die0→PCIe→host;pageable 是
-   唯一瓶颈(2.86×)。
+5. **远端映射与本地Host拷贝带宽接近(14)**:imported VA(远端 die)→ pinned host 12.78 vs
+   本地 dev → pinned host 12.84 GB/s,数据路径同为 die0→PCIe→host;pageable与pinned缓冲区的带宽差异明显(2.86×)。
 6. **Push 模式可绕过 dst=die1 读瓶颈(13)**:跨卡写 dst die0/die1 均 ~13 GB/s;
    性能建议——跨卡优先 dst die0 接收、必须写 die1 时用 Push(src 主动写)、
    避免跨 socket + dst=die1 + Pull 最差组合(~1.25 GB/s);关键数据 Push 后补校验
    (Posted 写的 ACK 不保证 HCCS 转发落地)。
-7. **507899 = `ACL_ERROR_RT_DRV_INTERNAL_ERROR`**(rt_error_codes.h:148):驱动对
-   不支持路径的确定性回复而非随机错误——die 对 PEER import、跨卡 DEFAULT import
+7. **507899 = `ACL_ERROR_RT_DRV_INTERNAL_ERROR`**(rt_error_codes.h:148):具体原因需结合失败接口与底层日志——die 对 PEER import、跨卡 DEFAULT import
    (无双向 P2P)、共享内存 sync D2D、同卡跨 die EnablePeerAccess、超槽位 enable 均返回它。
+
+
+### 当前测试对原有解释的修正
+
+- 同卡ACL VMM导入需要切换上下文的实验与HAL导入分开记录；HAL本地上下文方式见第17项。
+- 04的省略EnablePeerAccess对照中，导出方此前已显式启用peer。独立的单侧/双侧启用对照见15。
+- 06的PINNED注册返回0，但查询设备指针失败；Host共享读写、Host与设备拷贝及设备直接映射分别说明。
+- 07/16的槽位数及启用计数保留为历史解释模型；NULL提示地址的窗口预留以每进程实际基址为准。
+- 13保留全部方向、Pull/Push数据和路径图；内部并发度、事务时延与故障可靠性列为待验证因素。
 
 ## 17：地址预留与共享映射能力验证
 
