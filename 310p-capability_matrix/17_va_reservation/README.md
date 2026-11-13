@@ -78,8 +78,6 @@ A_DEV=2 B_DEV=3 bash run.sh acl-pools
 `TEST_TIMEOUT` 设置每个 MPI 命令的超时秒数，默认 90 秒；超时后最多再等待 10 秒强制结束。
 运行脚本传递构建、MPI 和测试程序的失败退出码，超时返回 124。
 
-
-
 ### 查看 ACL 到 HAL 的调用记录
 
 ```bash
@@ -112,7 +110,6 @@ grep -E 'aclrtReserveMemAddressImpl|halMemAddressReserve|drvRetCode' \
 runtime 日志能进一步显示底层调用及驱动返回码。
 例如本轮 ACL 对 `0x280040000000` 的 `flags=0` 请求下发到 `halMemAddressReserve`，驱动返回 13，ACL 对外返回 507899。
 其他失败原因需要结合对应调用的底层日志定位。
-
 
 本目录验证预留接口和共享映射能力。MemFabric 的地址管理器及正常 BM/SHM 入口另有单元测试和集成测试；本目录可以独立构建运行。
 
@@ -183,7 +180,7 @@ MemFabric补查使用07双die示例的临时副本，设备池改为8GiB，分�
 端口和工作目录隔离，先启动rank1再启动rank0。大池容量为每个rank的物理分配量。
 Qwen TP=2补查使用Qwen3.6-35B-A3B-w8a8，同卡4、5，输入4096、输出1 token，
 并发1、block_size与max_num_batched_tokens均1024、gpu_memory_utilization=0.65、
-expandable_segments=True；0%和100%共享输入各一个正式请求。此为大池功能检查，提交前UT结果见下节。
+expandable_segments=True；0%和100%共享输入各一个正式请求。此为大池功能检查。
 
 MemCache补查采用隔离Python包目录加载新构建的三份MemFabric库，逐进程检查实际加载路径；
 首次使用原Python环境的记录走了旧ACL库，已单独保留为对照，未计入HAL路径通过结果。
@@ -192,14 +189,6 @@ MemCache对象检查为每rank 256KiB，池容量为8GiB；超过4GiB部分的�
 
 MemCache两rank对象测试退出0，但关闭过程中出现 `thread pool has stopped` 日志，旧ACL库对照也出现同样日志。
 本次没有修改该关闭流程。vLLM测试的HAL回退由服务日志确认；进程退出后才检查maps，未取得该轮worker的maps快照。
-
-### 提交前UT与检查
-
-完整ASAN UT：2070项通过、12项环境跳过、无失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。
-定向的两个VMM测试套件共23项通过。本次新增12项回归，覆盖分配、回退、共享格式和策略、
-设备号、导入失败、映射失败、转换失败清理及缺失符号。非310P的HBM分配行为也有回归覆盖。
-转换失败时的导入映射清理已由UT验证，实际成功路径沿用上述硬件记录。
-另完成能力验证程序编译、run.sh语法检查及git diff --check。
 
 ### 同卡HAL导入的上下文对照
 
@@ -227,5 +216,3 @@ Ascend310P3，CANN 9.2.1，驱动26.1.1。下列上下文对照每种模式均�
 | 新运行库双rank读写，设备2、3 | 每rank设备池32MiB、DRAM池32MiB；跨die H2G/G2H、G2G及DRAM三个8MiB校验均mismatch=0，两rank退出0 |
 
 HAL的64位NONE共享句柄在本地上下文可直接导入；当前运行库已去掉同卡导入前后的设备切换，监听线程仍初始化自己的本地ACL上下文。
-
-本次完整ASAN UT共2082项，2070通过、12跳过、0失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。导入成功与失败用例均检查未发生上下文切换。

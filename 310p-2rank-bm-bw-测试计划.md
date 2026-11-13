@@ -19,14 +19,13 @@
 310P 使用 DDR/P2P_DDR 设备内存类型及64位 NONE 共享句柄；ACL 继续负责上下文和数据拷贝。
 HAL导入保持本地设备上下文，V1中的ACL导入上下文切换不再用于当前内存段。
 详细说明见 [VMM 开发计划的当前实现说明](310p-2rank-vmm-开发计划.md)。
-本次同步HAL实现及回退方式，历史带宽数据保持原样。完整UT结果见VMM开发计划的当前实现说明。
+本次同步HAL实现及回退方式，历史带宽数据保持原样。
 
 ## V1 历史实施记录
 
 > **历史状态：已完成并实机验收通过（2026-09-09）**
 > - 核心回退 + 枚举修复 + `benchmark/bm_310p` 独立用例全部落地
 > - 实机：2-rank dev4/dev5 十方向 × {2MB, 16MB} 全部 WrongBytes=0；8GB 池回退链路 WARN 实证触发
-> - UT：HybmAclVmmSegmentTest 9/9（含新增回退用例）、DlAclApiVmmTest 3/3、HybmMemSegmentTest 37/37
 > - 实施记录与带宽数据见文末附录 A/B/C
 >
 > 目标：让 `benchmark/bm/bm_perf_benchmark`（`-bw` 带宽模式）在 **Atlas 300I Duo（Ascend310P3）
@@ -281,7 +280,6 @@ P1 重建 → P2/P3 探测（双池 join）→ P4/P5 探测（batch 方向）→
   fallback to ACL_HBM_MEM_HUGE, ret:207001` 实证打印，十方向全 0
 - **P2P vs HBM_HUGE 带宽**：16MB 块两轮（枚举修复前后，即 HBM_HUGE vs 真P2P_HUGE）D2RD 15.3/15.4、
   RD2D 16.4/16.4 GB/s——无差异，与 05 探针结论一致
-- **UT**：HybmAclVmmSegmentTest 9/9、DlAclApiVmmTest 3/3、HybmMemSegmentTest 37/37
 - **环境踩坑**：`run_ut.sh` 会以 ASAN 构建覆盖 `output/` 下的 so（非 ASAN 进程加载报
   "cannot open shared object file"）——跑 UT 后需重跑 `build_and_pack_run.sh` 恢复 RELEASE 产物
 

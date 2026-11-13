@@ -41,13 +41,13 @@ HAL 参数使用驱动逻辑设备号，保留设备可见列表重编号的支�
 
 端到端使用07双die示例的临时副本，仅更换端口和临时目录，先启动rank1再启动rank0以满足
 旧示例的目录标记等待逻辑。该副本未修改仓库示例。验证未覆盖跨卡、910硬件或大模型推理。
-新增12项分配、回退、共享句柄、设备号及失败清理回归。提交前完整ASAN UT：2070项通过、12项环境跳过、无失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。
+新增12项分配、回退、共享句柄、设备号及失败清理回归。
 
 ### HAL本地上下文验证（2026-11-13）
 
 设备2、3和4、5的第17项上下文对照均通过；每rank 8GiB大池保持本地上下文完成全范围双向读写，两个rank均触发DDR回退。新运行库在设备2、3上使用32MiB设备池与32MiB DRAM池，三个8MiB读写校验均mismatch=0，正常销毁并退出。
 
-运行库删除HAL导入前后的对端设备切换，保留监听线程本地ACL上下文初始化。导入成功、失败两项UT检查均未发生上下文切换。完整UT为2070通过、12跳过、0失败，行覆盖率70.3%、分支覆盖率46.5%。
+运行库删除HAL导入前后的对端设备切换，保留监听线程本地ACL上下文初始化。导入成功、失败两项UT检查均未发生上下文切换。
 
 ## V1 历史实施记录
 
@@ -58,7 +58,6 @@ HAL 参数使用驱动逻辑设备号，保留设备可见列表重编号的支�
 > - P0-P6 全部完成；实机裁决补充见下表 F16-F20
 > - 实机验收凭证：`examples/memory_pool/01_basic/07_310p_die_pair_pool/07_310p_die_pair_pool.cpp`
 >   （双 rank 双池三阶段 8MB 逐字校验 mismatch=0，干净销毁）
-> - 全量 UT 已完成：83/90 套件 PASS（1700/1700 用例），非通过项经纯基线对照证实为存量问题（见第二节）
 > - **UT / example 复现命令见第八节（可直接复制执行）**；**V2 候选改进（PID 白名单恢复、公开 API 设备查询、算子真异步）见第九节 TODO**
 > - **开发流程踩坑记录与规范见附录（A1-A7）——构建/测试/验证前必读，防止复犯**
 >
@@ -90,29 +89,6 @@ HAL 参数使用驱动逻辑设备号，保留设备可见列表重编号的支�
 | F18 | **本地池地址分类依赖 reservedMap**（AclVmm 段不登记）→ G2H 方向校验失败 → `ClassifyAddressMask` 扩展：allocatedMap 命中且非 imported → LOCAL\|GLOBAL 双位（与 reservedMap 分支语义一致，对 910B 行为等价） | e2e 实测 | 公共路径修改（需全量 UT 回归） |
 | F19 | **join 为动态成员语义**：先 join 的 rank 单成员即返回 OK，peer 映射在对端 join 完成后才就绪 → 使用方需在全员 join 后同步再拷贝（现有 Python 示例的 Barrier 模式即正确姿势） | e2e 实测 | example/使用方契约 |
 | F20 | **全量 UT 发现 `ReleaseSliceMemory` use-after-free**（ASAN 独有检出：入参为 map 内 shared_ptr 的引用，`slices_.erase` 后再访问 `slice->index_`；析构路径下 map 为最后所有者时触发）→ 入口 `MemSlicePtr holder = slice` 拷贝修复 | 正式 UT 二进制（ASAN+gcov）实测 | 段健壮性修复（手工链接非 ASAN 版漏检） |
-
-## 二、全量 UT 回归结论（本机，逐套件独立进程模式）
-
-> 本机首次具备 UT 运行条件（子模块已拉取、pybind11 已装）。`run_ut.sh` 单进程串行模式会因
-> mockcpp API-hook 与 ASAN fake-stack 的存量不兼容在多个套件中途崩溃（见下），故采用
-> **逐套件独立进程**模式取得确定性结果。
-
-**结果：83/90 套件 PASS（1700/1700 用例全过），非通过项全部经纯基线对照证实为存量环境问题，与本方案改动无关：**
-
-| 套件 | 现象 | 纯基线对照 | 根因 |
-|---|---|---|---|
-| HybmDataOpSdmaTest | ASAN 崩溃（44/52 后） | **相同进度崩溃** | 存量：mockcpp AArch64 机器码打桩（覆写函数前 16 字节）与 ASAN fake-stack 不兼容，进程内状态累积触发，布局敏感 |
-| SmemBmTest | ASAN 崩溃（109/127 后） | **相同进度崩溃** | 同上 |
-| SmemHaConfigStoreTest | ASAN 崩溃（14/33 后） | **相同进度崩溃** | 同上 |
-| SmemShmTest | ASAN 崩溃（17/27 后） | **相同进度崩溃** | 同上 |
-| NetworkEndpointUtilTest | 3 例失败（ipv6） | 相同失败 | 本机无 IPv6 地址 |
-| SmemNetTest / SmemTransTest | GetLocalIpWithTarget / ipv6+超时 | 相同失败 | 本机网络环境（无 IPv6） |
-
-**本方案改动覆盖路径全部通过**：HybmVaManagerTest 105/105（含 ClassifyAddressMask 修改）、
-HybmMemSegmentTest 37/37（含 Create 分派与 QueryDeviceInfoSocTolerant）、HybmComposeDataOpTest 21/21
-（含 310P 算子分支）、HybmDataOpAclMemcpyTest 5/5、DlAclApiVmmTest(+Init) 4/4、
-HybmAclVmmSegmentTest 6/6（UAF 修复后）、ExInfoTransferTest 16/16（含 EE05 扩展）。
-实机 e2e 修复后复验通过。
 
 ## 三、V1 设计决策
 
@@ -232,7 +208,7 @@ bash script/run_ut.sh --fast HybmMemSegmentTest
 原 `HybmAclVmmSegmentTest` 已删除，不能继续用它筛选当前测试。
 V1 的 177 用例记录为历史结果，当前用例数量以实际运行输出为准。
 
-### 8.2 UT：全量 90 套件逐套件扫描（规避存量 mockcpp+ASAN 崩溃，~10 分钟）
+### 8.2 UT：按套件独立运行
 
 ```bash
 cd /home/t00842504/memfabric_hybrid/output/bin/ut && \
