@@ -183,46 +183,59 @@ void BandWidthCalculator::RunSubProcess(uint32_t idx, int32_t pipeFdWrite)
 int32_t BandWidthCalculator::CollectSubProcessResults(std::vector<pid_t> &pids,
                                                       std::vector<std::array<int, 2>> &pipes)
 {
-    int status[RANK_SIZE_MAX];
+    bool failed = false;
     for (uint32_t i = 0; i < cmdParam_.localRankSize; ++i) {
-        waitpid(pids[i], &status[i], 0);
-        if (WIFEXITED(status[i]) && WEXITSTATUS(status[i]) != 0) {
-            LOG_INFO("subprocess exit error: " << i);
-        } else if (WIFSIGNALED(status[i])) {
-            LOG_INFO("subprocess (" << i << ") terminated by signal: " << WTERMSIG(status[i]));
+        int status = 0;
+        pid_t waited;
+        do {
+            waited = waitpid(pids[i], &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited != pids[i] || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            LOG_ERROR("subprocess failed, rank:" << i << " pid:" << pids[i] << " status:" << status);
+            failed = true;
         }
     }
     std::vector<BwTestResult> resultVec;
     for (uint32_t i = 0; i < cmdParam_.localRankSize; ++i) {
-        ReadPipeResult(pipes[i][0], resultVec);
+        if (ReadPipeResult(pipes[i][0], resultVec) != 0) {
+            failed = true;
+        }
         close(pipes[i][0]);
     }
     PrintResult(resultVec);
-    return 0;
+    return failed ? -1 : 0;
 }
 
-void BandWidthCalculator::ReadPipeResult(int32_t fd, std::vector<BwTestResult> &resultVec)
+int32_t BandWidthCalculator::ReadPipeResult(int32_t fd, std::vector<BwTestResult> &resultVec)
 {
     BwTestResult results[DIRECTION_TYPE_NUM_MAX];
-    auto len = sizeof(BwTestResult) * DIRECTION_TYPE_NUM_MAX;
-    auto n = read(fd, &results, len);
-    if (n == 0) {
-        LOG_WARN("pipe " << fd << " no data received");
-        return;
+    const auto len = sizeof(results);
+    ssize_t n;
+    do {
+        n = read(fd, results, len);
+    } while (n < 0 && errno == EINTR);
+    if (n != static_cast<ssize_t>(len)) {
+        LOG_ERROR("incomplete pipe result, fd:" << fd << " bytes:" << n << " expected:" << len);
+        return -1;
     }
-    if (n < 0) {
-        LOG_ERROR("pipe read failed, fd:" << fd << " errno:" << errno);
-        return;
-    }
-    if (n < len) {
-        LOG_WARN("pipe partial data received: " << n << " bytes, fd:" << fd);
-        return;
-    }
-    for (int32_t j = 0; j < DIRECTION_TYPE_NUM_MAX; ++j) {
-        if (results[j].flag >= 0) {
-            resultVec.push_back(results[j]);
+    const auto before = resultVec.size();
+    bool failed = false;
+    for (const auto &result : results) {
+        if (result.flag >= 0) {
+            resultVec.push_back(result);
+            if (result.wrongNum != 0) {
+                LOG_ERROR("copy validation failed, rank:" << result.rankId << " direction:" << result.flag
+                                                          << " wrongBytes:" << result.wrongNum);
+                failed = true;
+            }
         }
     }
+    const auto expected = cmdParam_.type == CopyType::ALL_DIRECTION ? DIRECTION_TYPE_NUM_MAX : 1;
+    if (resultVec.size() - before != static_cast<size_t>(expected)) {
+        LOG_ERROR("missing direction results, fd:" << fd << " expected:" << expected);
+        failed = true;
+    }
+    return failed ? -1 : 0;
 }
 
 int32_t BandWidthCalculator::PreInit(uint32_t deviceId, BarrierUtil *&barrier, uint32_t rankId, uint32_t rkSize,

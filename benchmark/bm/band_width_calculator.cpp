@@ -166,12 +166,23 @@ int32_t BandWidthCalculator::MultiProcessExecute()
         }
     }
 
-    int status[RANK_SIZE_MAX];
+    bool failed = false;
+    int status[RANK_SIZE_MAX] = {};
     for (uint32_t i = 0; i < cmdParam_.localRankSize; ++i) {
-        waitpid(pids[i], &status[i], 0);
+        pid_t waited;
+        do {
+            waited = waitpid(pids[i], &status[i], 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited != pids[i]) {
+            LOG_ERROR("waitpid failed, pid:" << pids[i] << " errno:" << errno);
+            failed = true;
+            continue;
+        }
         if (WIFEXITED(status[i]) && WEXITSTATUS(status[i]) != 0) {
-            LOG_INFO("subprocess exit error: " << i);
+            LOG_ERROR("subprocess exit error: " << i);
+            failed = true;
         } else if (WIFSIGNALED(status[i])) {
+            failed = true;
             LOG_INFO("subprocess (" << i << ") terminated by signal: " << WTERMSIG(status[i]));
             if (WCOREDUMP(status[i])) {
                 LOG_INFO("subprocess (" << i << ") dumped core.");
@@ -183,7 +194,14 @@ int32_t BandWidthCalculator::MultiProcessExecute()
     for (uint32_t i = 0; i < cmdParam_.localRankSize; ++i) {
         BwTestResult results[DIRECTION_TYPE_NUM_MAX];
         auto len = sizeof(BwTestResult) * DIRECTION_TYPE_NUM_MAX;
-        auto n = read(pipes[i][0], &results, len);
+        ssize_t n;
+        do {
+            n = read(pipes[i][0], &results, len);
+        } while (n < 0 && errno == EINTR);
+        if (n != static_cast<ssize_t>(len)) {
+            LOG_ERROR("incomplete pipe result, rank:" << i << " bytes:" << n << " expected:" << len);
+            failed = true;
+        }
         if (n == 0) {
             LOG_WARN("pipe " << i << " no data received");
         } else if (n < 0) {
@@ -201,7 +219,13 @@ int32_t BandWidthCalculator::MultiProcessExecute()
         close(pipes[i][0]);
     }
     PrintResult(resultVec);
-    return 0;
+    const auto directions = cmdParam_.type == CopyType::ALL_DIRECTION ? DIRECTION_TYPE_NUM_MAX : 1;
+    if (resultVec.size() != cmdParam_.localRankSize * directions ||
+        std::any_of(resultVec.begin(), resultVec.end(), [](const BwTestResult &r) { return r.wrongNum != 0; })) {
+        LOG_ERROR("bandwidth result validation failed, rows:" << resultVec.size());
+        failed = true;
+    }
+    return failed ? -1 : 0;
 }
 
 int32_t BandWidthCalculator::MultiThreadExecute()

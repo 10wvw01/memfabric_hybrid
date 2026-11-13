@@ -254,13 +254,14 @@ void ParseCmdBw(int argc, char *argv[], BwTestParam &opts)
     CheckCmdBw(opts);
 }
 
-void RunBwTest(BwTestParam &opts)
+int32_t RunBwTest(BwTestParam &opts)
 {
     BandWidthCalculator bwCalculator(opts);
     auto ret = bwCalculator.MultiProcessExecute();
     if (ret != 0) {
         LOG_ERROR("bandwidth test failed.");
     }
+    return ret;
 }
 
 int main(int32_t argc, char *argv[])
@@ -270,6 +271,7 @@ int main(int32_t argc, char *argv[])
         return 0;
     }
 
+    int32_t ret = 0;
     std::string cmd = argv[1];
     if (cmd == "-h" || cmd == "--help") {
         PrintHelp();
@@ -279,11 +281,11 @@ int main(int32_t argc, char *argv[])
         opts.hbmPoolSize = DEFAULT_HBM_POOL_SIZE;
         opts.dramPoolSize = DEFAULT_DRAM_POOL_SIZE;
         ParseCmdBw(argc, argv, opts);
-        RunBwTest(opts);
+        ret = RunBwTest(opts);
     } else {
         ExitWithError("unknown command: " + cmd);
     }
 
     LOG_INFO("main process exited.");
-    return 0;
+    return ret == 0 ? 0 : 1;
 }
