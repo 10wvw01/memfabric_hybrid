@@ -215,7 +215,7 @@ TEST_F(SmemShmTest, smem_shm_init_failed)
     EXPECT_EQ(ret, SM_ERROR);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(-1));
     ret = smem_shm_init(UT_IP_PORT, rankCount, rankId, rankId, &config);
@@ -265,17 +265,17 @@ TEST_F(SmemShmTest, smem_shm_create_failed)
     EXPECT_EQ(handle, nullptr);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, rankCount, rankId, rankId, &config);
     EXPECT_EQ(ret, 0);
 
-    MOCKER_CPP(&SmemShmEntry::Initialize, int32_t(*)(hybm_options &)).stubs().will(returnValue(-1));
+    MOCKER_CPP(&SmemShmEntry::Initialize, int32_t(*)(SmemShmEntry *, hybm_options &)).stubs().will(returnValue(-1));
     handle = smem_shm_create(UT_SMEM_ID, rankCount, rankId, UT_CREATE_MEM_SIZE, SMEMS_DATA_OP_RDMA, 0, &gva);
     EXPECT_EQ(handle, nullptr);
 
-    MOCKER_CPP(&SmemShmEntryManager::CreateEntryById, int32_t(*)(uint32_t, SmemShmEntryPtr &))
+    MOCKER_CPP(&SmemShmEntryManager::CreateEntryById, int32_t(*)(SmemShmEntryManager *, uint32_t, SmemShmEntryPtr &))
         .stubs()
         .will(returnValue(-1));
     handle = smem_shm_create(UT_SMEM_ID, rankCount, rankId, UT_CREATE_MEM_SIZE, SMEMS_DATA_OP_RDMA, 0, &gva);
@@ -583,7 +583,9 @@ TEST_F(SmemShmTest, smem_shm_get_symmetric_size_paths)
     auto handle = smem_shm_create(UT_SMEM_ID, rankCount, rankId, UT_CREATE_MEM_SIZE, SMEMS_DATA_OP_RDMA, 0, &gva);
     EXPECT_NE(handle, nullptr);
 
-    MOCKER_CPP(&SmemShmEntry::GetHbmMaxSize, uint64_t(*)(void)).stubs().will(returnValue(UT_MOCK_HBM_MAX_SIZE));
+    MOCKER_CPP(&SmemShmEntry::GetHbmMaxSize, uint64_t(*)(const SmemShmEntry *))
+        .stubs()
+        .will(returnValue(UT_MOCK_HBM_MAX_SIZE));
     size = smem_shm_get_symmetric_size(handle);
     EXPECT_EQ(size, UT_MOCK_HBM_MAX_SIZE);
 
@@ -625,7 +627,7 @@ TEST_F(SmemShmTest, smem_shm_topology_can_reach_paths)
     EXPECT_NE(handle, nullptr);
 
     constexpr uint32_t kRemoteRank = 0;
-    MOCKER_CPP(&SmemShmEntry::GetReachInfo, int32_t(*)(uint32_t, uint32_t &))
+    MOCKER_CPP(&SmemShmEntry::GetReachInfo, int32_t(*)(SmemShmEntry *, uint32_t, uint32_t &))
         .stubs()
         .will(returnValue(static_cast<int32_t>(SM_OK)));
 
@@ -734,7 +736,7 @@ TEST_F(SmemShmTest, smem_shm_control_barrier_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);
@@ -755,7 +757,7 @@ TEST_F(SmemShmTest, smem_shm_subgroup_barrier_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);
@@ -775,7 +777,7 @@ TEST_F(SmemShmTest, smem_shm_subgroup_allgather_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);
@@ -796,7 +798,7 @@ TEST_F(SmemShmTest, smem_shm_topology_can_reach_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);
@@ -817,7 +819,7 @@ TEST_F(SmemShmTest, smem_shm_atomic_alloc_value_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);
@@ -838,7 +840,7 @@ TEST_F(SmemShmTest, smem_shm_atomic_release_value_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);
@@ -858,7 +860,7 @@ TEST_F(SmemShmTest, smem_shm_register_exit_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);
@@ -878,7 +880,7 @@ TEST_F(SmemShmTest, smem_shm_global_exit_invalid_handle)
     EXPECT_EQ(ret, 0);
 
     MOCKER_CPP(&SmemShmEntryManager::Initialize,
-               int32_t(*)(const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
+               int32_t(*)(SmemShmEntryManager *, const char *, uint32_t, uint32_t, uint16_t, smem_shm_config_t *))
         .stubs()
         .will(returnValue(0));
     ret = smem_shm_init(UT_IP_PORT, 1, 0, 0, &config);

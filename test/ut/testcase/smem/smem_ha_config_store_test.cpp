@@ -267,7 +267,7 @@ TEST_F(SmemHaConfigStoreTest, ConnectClientFirstConnectionRegistersBrokenHandler
     auto client = MakeClientDelegate();
     HaConfigStore store(backend, client, K_STORE_ENDPOINT, K_DEFAULT_WORLD_SIZE);
 
-    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(const smem_tls_config &, int))
+    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(TcpConfigStore *, const smem_tls_config &, int))
         .stubs()
         .will(returnValue(int32_t(0)));
 
@@ -290,7 +290,7 @@ TEST_F(SmemHaConfigStoreTest, ConnectClientSetsConnectStatusOnFirstConnection)
     EXPECT_FALSE(client->GetConnectStatus());
 
     // Stub ClientStart to return success.
-    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(const smem_tls_config &, int))
+    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(TcpConfigStore *, const smem_tls_config &, int))
         .stubs()
         .will(returnValue(int32_t(0)));
 
@@ -310,7 +310,7 @@ TEST_F(SmemHaConfigStoreTest, ConnectClientDoesNotSetConnectStatusOnFailure)
     EXPECT_FALSE(client->GetConnectStatus());
 
     // Stub ClientStart to return failure.
-    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(const smem_tls_config &, int))
+    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(TcpConfigStore *, const smem_tls_config &, int))
         .stubs()
         .will(returnValue(int32_t(-1)));
 
@@ -326,7 +326,9 @@ TEST_F(SmemHaConfigStoreTest, ConnectClientReconnectPathPropagatesDelegateResult
     auto client = MakeClientDelegate(0);
     HaConfigStore store(backend, client, K_STORE_ENDPOINT, K_DEFAULT_WORLD_SIZE);
 
-    MOCKER_CPP(&TcpConfigStore::ReConnectAfterBroken, int32_t(*)(int)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&TcpConfigStore::ReConnectAfterBroken, int32_t(*)(TcpConfigStore *, int))
+        .stubs()
+        .will(returnValue(int32_t(0)));
 
     EXPECT_EQ(SM_OK, store.ConnectClient(K_LOOPBACK_IP, K_STORE_PORT));
 }
@@ -339,7 +341,7 @@ TEST_F(SmemHaConfigStoreTest, BecomeFollowerRejectsInvalidAddressAndConnectsVali
 
     EXPECT_EQ(SM_ERROR, store.BecomeFollower(K_INVALID_LEADER_ADDRESS));
 
-    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(const smem_tls_config &, int))
+    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(TcpConfigStore *, const smem_tls_config &, int))
         .stubs()
         .will(returnValue(int32_t(0)));
     EXPECT_EQ(SM_OK, store.BecomeFollower(K_LEADER_ADDRESS));
@@ -366,9 +368,11 @@ TEST_F(SmemHaConfigStoreTest, StartServerRecoversWorldSizeAndReplaysCachedHandle
     ConfigStoreServerBrokenHandler brokenHandler = [](const uint32_t, StoreBackendPtr &) {};
     store.RegisterServerBrokenHandler(brokenHandler);
 
-    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(bool)).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)()).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(const smem_tls_config &)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(AccStoreServer *, bool)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)(AccStoreServer *)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(AccStoreServer *, const smem_tls_config &))
+        .stubs()
+        .will(returnValue(int32_t(0)));
 
     store.StartServer();
 
@@ -399,9 +403,11 @@ TEST_F(SmemHaConfigStoreTest, StartServerFallsBackToDefaultWorldSizeWhenBackendV
         return StoreErrorCode::NOT_EXIST;
     };
 
-    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(bool)).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)()).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(const smem_tls_config &)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(AccStoreServer *, bool)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)(AccStoreServer *)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(AccStoreServer *, const smem_tls_config &))
+        .stubs()
+        .will(returnValue(int32_t(0)));
 
     store.StartServer();
 
@@ -422,11 +428,13 @@ TEST_F(SmemHaConfigStoreTest, TryBecomeLeaderRegistersLeaderSuccessfully)
     MOCKER_CPP(&NetworkEndpointUtil::GetLocalIpWithTarget, bool (*)(const std::string &, std::string &))
         .stubs()
         .will(returnValue(true));
-    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(bool)).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)()).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(const smem_tls_config &)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(AccStoreServer *, bool)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)(AccStoreServer *)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(AccStoreServer *, const smem_tls_config &))
+        .stubs()
+        .will(returnValue(int32_t(0)));
 
-    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(const smem_tls_config &, int))
+    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(TcpConfigStore *, const smem_tls_config &, int))
         .stubs()
         .will(returnValue(int32_t(0)));
     EXPECT_EQ(SM_OK, store.TryBecomeLeader());
@@ -448,10 +456,12 @@ TEST_F(SmemHaConfigStoreTest, TryBecomeLeaderDeletesLeaderOnSelfConnectFailure)
     MOCKER_CPP(&NetworkEndpointUtil::GetLocalIpWithTarget, bool (*)(const std::string &, std::string &))
         .stubs()
         .will(returnValue(true));
-    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(bool)).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)()).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(const smem_tls_config &)).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(const smem_tls_config &, int))
+    MOCKER_CPP(&AccStoreServer::UpdateStatus, int32_t(*)(AccStoreServer *, bool)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::RestoreFromBackend, int32_t(*)(AccStoreServer *)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&AccStoreServer::Startup, int32_t(*)(AccStoreServer *, const smem_tls_config &))
+        .stubs()
+        .will(returnValue(int32_t(0)));
+    MOCKER_CPP(&TcpConfigStore::ClientStart, int32_t(*)(TcpConfigStore *, const smem_tls_config &, int))
         .stubs()
         .will(returnValue(int32_t(-1)));
     EXPECT_EQ(SM_ERROR, store.TryBecomeLeader());
@@ -465,22 +475,26 @@ TEST_F(SmemHaConfigStoreTest, ForwardingApisDelegateToClientOrUseClientLocalStat
     auto client = MakeClientDelegate();
     HaConfigStore store(backend, client, K_STORE_ENDPOINT, K_DEFAULT_WORLD_SIZE);
 
-    MOCKER_CPP(&TcpConfigStore::Set, int32_t(*)(const std::string &, const std::vector<uint8_t> &))
+    MOCKER_CPP(&TcpConfigStore::Set, int32_t(*)(TcpConfigStore *, const std::string &, const std::vector<uint8_t> &))
         .stubs()
         .will(returnValue(int32_t(0)));
-    MOCKER_CPP(&TcpConfigStore::Add, int32_t(*)(const std::string &, int64_t, int64_t &))
+    MOCKER_CPP(&TcpConfigStore::Add, int32_t(*)(TcpConfigStore *, const std::string &, int64_t, int64_t &))
         .stubs()
         .will(returnValue(int32_t(0)));
-    MOCKER_CPP(&TcpConfigStore::Remove, int32_t(*)(const std::string &, bool)).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&TcpConfigStore::Append, int32_t(*)(const std::string &, const std::vector<uint8_t> &, uint64_t &))
+    MOCKER_CPP(&TcpConfigStore::Remove, int32_t(*)(TcpConfigStore *, const std::string &, bool))
         .stubs()
         .will(returnValue(int32_t(0)));
-    MOCKER_CPP(&TcpConfigStore::Cas, int32_t(*)(const std::string &, const std::vector<uint8_t> &,
+    MOCKER_CPP(&TcpConfigStore::Append,
+               int32_t(*)(TcpConfigStore *, const std::string &, const std::vector<uint8_t> &, uint64_t &))
+        .stubs()
+        .will(returnValue(int32_t(0)));
+    MOCKER_CPP(&TcpConfigStore::Cas, int32_t(*)(TcpConfigStore *, const std::string &, const std::vector<uint8_t> &,
                                                 const std::vector<uint8_t> &, std::vector<uint8_t> &))
         .stubs()
         .will(returnValue(int32_t(0)));
-    MOCKER_CPP(&TcpConfigStore::Unwatch, int32_t(*)(uint32_t)).stubs().will(returnValue(int32_t(0)));
-    MOCKER_CPP(&TcpConfigStore::Write, int32_t(*)(const std::string &, const std::vector<uint8_t> &, uint32_t))
+    MOCKER_CPP(&TcpConfigStore::Unwatch, int32_t(*)(TcpConfigStore *, uint32_t)).stubs().will(returnValue(int32_t(0)));
+    MOCKER_CPP(&TcpConfigStore::Write,
+               int32_t(*)(TcpConfigStore *, const std::string &, const std::vector<uint8_t> &, uint32_t))
         .stubs()
         .will(returnValue(int32_t(0)));
 
