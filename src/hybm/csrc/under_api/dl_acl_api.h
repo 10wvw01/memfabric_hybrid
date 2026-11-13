@@ -137,7 +137,7 @@ typedef enum aclrtMemMallocPolicy {
 using aclrtSetDeviceFunc = int32_t (*)(int32_t);
 using aclrtGetDeviceFunc = int32_t (*)(int32_t *);
 using aclrtDeviceEnablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
-using aclrtDeviceDisablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
+using aclrtDeviceDisablePeerAccessFunc = int32_t (*)(int32_t);
 using aclrtDeviceCanAccessPeerFunc = int32_t (*)(int32_t *, int32_t, int32_t);
 using aclrtCreateStreamFunc = int (*)(void **);
 using aclrtCreateStreamWithConfigFunc = int (*)(void **, int32_t, uint32_t);
@@ -304,12 +304,12 @@ public:
         return pAclrtDeviceEnablePeerAccess(peerDeviceId, flags);
     }
 
-    static inline Result AclrtDeviceDisablePeerAccess(int32_t peerDeviceId, uint32_t flags)
+    static inline Result AclrtDeviceDisablePeerAccess(int32_t peerDeviceId)
     {
         if (pAclrtDeviceDisablePeerAccess == nullptr) {
             return BM_UNDER_API_UNLOAD;
         }
-        return pAclrtDeviceDisablePeerAccess(peerDeviceId, flags);
+        return pAclrtDeviceDisablePeerAccess(peerDeviceId);
     }
 
     static inline Result AclrtDeviceCanAccessPeer(int32_t *canAccessPeer, int32_t deviceId, int32_t peerDeviceId)

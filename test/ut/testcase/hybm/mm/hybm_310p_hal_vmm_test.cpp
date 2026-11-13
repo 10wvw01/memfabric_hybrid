@@ -247,3 +247,51 @@ TEST_F(Hybm310PHalVmmTest, MissingUint64SymbolsReturnUnloaded)
     DlHalApi::pHalMemExportToShareableHandle = exportFn;
     DlHalApi::pHalMemImportFromShareableHandle = importFn;
 }
+
+TEST_F(Hybm310PHalVmmTest, ReleasePeerUsesRemappedLogicalDevice)
+{
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(5);
+    MOCKER_CPP(&DlAclApi::AclrtGetLogicDevIdByPhyDevId, int (*)(int32_t, int32_t *))
+        .stubs()
+        .will(invoke(+[](int32_t physical, int32_t *logical) {
+            EXPECT_EQ(physical, 5);
+            *logical = 1;
+            return BM_OK;
+        }));
+    MOCKER_CPP(&DlAclApi::AclrtDeviceDisablePeerAccess, int (*)(int32_t))
+        .expects(once())
+        .with(eq(1))
+        .will(returnValue(BM_OK));
+    segment.ReleaseP2PLeases();
+    EXPECT_TRUE(segment.p2pLeases_.empty());
+}
+
+TEST_F(Hybm310PHalVmmTest, ReleasePeerKeepsLeaseWhenDeviceConversionFails)
+{
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(5);
+    MOCKER_CPP(&DlAclApi::AclrtGetLogicDevIdByPhyDevId, int (*)(int32_t, int32_t *))
+        .stubs()
+        .will(returnValue(BM_ERROR));
+    MOCKER_CPP(&DlAclApi::AclrtDeviceDisablePeerAccess, int (*)(int32_t)).expects(never());
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(segment.p2pLeases_.count(5), 1U);
+    segment.p2pLeases_.clear();
+}
+
+TEST_F(Hybm310PHalVmmTest, ReleasePeerRejectsInvalidLogicalDevice)
+{
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(5);
+    MOCKER_CPP(&DlAclApi::AclrtGetLogicDevIdByPhyDevId, int (*)(int32_t, int32_t *))
+        .stubs()
+        .will(invoke(+[](int32_t, int32_t *logical) {
+            *logical = -1;
+            return BM_OK;
+        }));
+    MOCKER_CPP(&DlAclApi::AclrtDeviceDisablePeerAccess, int (*)(int32_t)).expects(never());
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(segment.p2pLeases_.count(5), 1U);
+    segment.p2pLeases_.clear();
+}
