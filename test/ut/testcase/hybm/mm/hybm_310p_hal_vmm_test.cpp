@@ -50,6 +50,7 @@ int ImportHandle(uint64_t shareable, uint32_t device, drv_mem_handle_t **handle)
 {
     EXPECT_EQ(shareable, SHARED_HANDLE);
     EXPECT_EQ(device, 7U);
+    EXPECT_EQ(lastContext, -1);
     if (importResult == BM_OK) *handle = reinterpret_cast<drv_mem_handle_t *>(0x1234);
     return importResult;
 }
@@ -188,25 +189,25 @@ TEST_F(Hybm310PHalVmmTest, ExportAttributeFailureDoesNotPublishHandle)
     segment.slices_.clear();
 }
 
-TEST_F(Hybm310PHalVmmTest, ImportUsesDriverIdAndRestoresLocalContext)
+TEST_F(Hybm310PHalVmmTest, ImportUsesDriverIdWithoutContextSwitch)
 {
     auto info = PrepareImport();
     HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
     void *handle = nullptr;
     EXPECT_EQ(segment.MmapImport310P(info, IMPORT_ADDRESS, handle), BM_OK);
-    EXPECT_EQ(lastContext, 0);
+    EXPECT_EQ(lastContext, -1);
     EXPECT_EQ(handle, reinterpret_cast<void *>(0x1234));
     EXPECT_EQ(releaseCount, 0U);
 }
 
-TEST_F(Hybm310PHalVmmTest, ImportFailureRestoresContextWithoutReleasingUnownedHandle)
+TEST_F(Hybm310PHalVmmTest, ImportFailureDoesNotSwitchContextOrReleaseUnownedHandle)
 {
     auto info = PrepareImport();
     importResult = BM_ERROR;
     HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
     void *handle = nullptr;
     EXPECT_EQ(segment.MmapImport310P(info, IMPORT_ADDRESS, handle), BM_ERROR);
-    EXPECT_EQ(lastContext, 0);
+    EXPECT_EQ(lastContext, -1);
     EXPECT_EQ(handle, nullptr);
     EXPECT_EQ(releaseCount, 0U);
 }

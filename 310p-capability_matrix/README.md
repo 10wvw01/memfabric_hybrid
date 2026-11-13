@@ -205,3 +205,10 @@ POOL_GIB=8 EXPECT_FALLBACK=1 A_DEV=4 B_DEV=5 bash 17_va_reservation/run.sh hal-l
 4096输入/1输出，0%与完整重复输入各一例，外部恢复3072 tokens且首token与种子一致。
 测试使用gpu_memory_utilization=0.65，属于功能验证。提交前完整ASAN UT：2070项通过、12项环境跳过、无失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。
 参数、完整API流程及实测记录见[第17项README](17_va_reservation/README.md#hal-内存生命周期与超过4gib的双rank设备池)。
+
+
+第17项新增`hal-context`对照：同卡2、3及4、5上，HAL保持本地上下文或切到导出方上下文均完成导入、映射、双向校验和窗口复用；可见设备重编号也通过。每rank 8GiB大池保持本地上下文的全范围读写及回退验证通过。
+
+```bash
+A_DEV=2 B_DEV=3 bash 17_va_reservation/run.sh hal-context
+```

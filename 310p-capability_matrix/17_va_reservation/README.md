@@ -125,6 +125,7 @@ runtime 日志能进一步显示底层调用及驱动返回码。
 |---|---|
 | `hal-probe` | 单rank比较2MiB的HBM、DDR、P2P_HBM、P2P_DDR分配，以及V2的NONE、FABRIC句柄导出；对照项输出OBSERVE，DDR和P2P_DDR分配及所有已分配资源释放必须成功 |
 | `hal-pools` | 同卡双rank，三个1GiB窗口，每rank每池2MiB物理内存；完整HAL共享映射、双向全量校验、清理和窗口复用 |
+| `hal-context` | 同卡双rank分别以本地上下文、导出方上下文导入；每种模式新建MPI进程，检查当前设备、三个小池的映射和双向数据 |
 | `hal-large-pools` | 同卡双rank，默认每rank实际分配8GiB物理内存，共享一个16GiB虚拟窗口；分块覆盖全部8GiB的双向读写、逐字校验及释放复用 |
 
 HAL共享读写流程为：
@@ -135,8 +136,8 @@ HAL共享读写流程为：
 3. `halMemMap`、`halMemSetAccess` 映射本地物理内存。
 4. `halMemExportToShareableHandle` 使用64位NONE句柄、flags=0；
    `halMemShareHandleSetAttribute` 设置与原ACL实现相同的共享属性，MPI交换句柄。
-5. 保留同卡导入的设备上下文处理，通过 `halMemImportFromShareableHandle` 导入，
-   再使用 `halMemMap`、`halMemSetAccess` 映射对端槽位。
+5. 保持本地设备上下文，通过 `halMemImportFromShareableHandle` 导入，
+   再使用 `halMemMap`、`halMemSetAccess` 映射对端槽位。`hal-context`另行切换上下文作对照。
 6. 写满本地范围，读对端并逐字校验；随后写满对端范围，读本地并逐字校验。
    每个阶段两rank同步；主机缓冲区固定8MiB，循环覆盖整个池，包含4GiB边界及尾部。
 7. `halMemUnmap`、`halMemRelease` 释放导入映射，两rank同步后释放本地资源；
@@ -147,6 +148,7 @@ source /usr/local/Ascend/cann/set_env.sh
 cd 310p-capability_matrix/17_va_reservation
 A_DEV=4 bash run.sh hal-probe
 A_DEV=4 B_DEV=5 bash run.sh hal-pools
+A_DEV=2 B_DEV=3 bash run.sh hal-context
 
 # 每rank 8GiB物理内存，总共16GiB；要求两个rank均实际触发回退
 POOL_GIB=8 EXPECT_FALLBACK=1 A_DEV=4 B_DEV=5 bash run.sh hal-large-pools
@@ -156,7 +158,7 @@ ASCEND_RT_VISIBLE_DEVICES=4,5 POOL_GIB=8 EXPECT_FALLBACK=1 A_DEV=0 B_DEV=1 \
   bash run.sh hal-large-pools
 ```
 
-`all` 包含原地址探测、ACL共享映射及新增HAL小池验证；大池显式运行。
+`all`包含地址探测、ACL共享映射及HAL本地上下文小池验证；上下文对照和大池显式运行。
 `hal-large-pools` 默认超时300秒，其余命令90秒，可用 `TEST_TIMEOUT` 调整。
 `EXPECT_FALLBACK=1` 要求每个rank实际经历P2P分配失败后回退成功，未触发回退也判失败；
 未设置时只检查所选容量可用。这里的DDR/P2P_DDR是设备侧内存类型。
@@ -198,3 +200,32 @@ MemCache两rank对象测试退出0，但关闭过程中出现 `thread pool has s
 设备号、导入失败、映射失败、转换失败清理及缺失符号。非310P的HBM分配行为也有回归覆盖。
 转换失败时的导入映射清理已由UT验证，实际成功路径沿用上述硬件记录。
 另完成能力验证程序编译、run.sh语法检查及git diff --check。
+
+### 同卡HAL导入的上下文对照
+
+`hal-context`依次以新建双MPI进程运行两种模式，其他分配、导出、映射和校验流程相同：
+
+| 模式 | 导入顺序 |
+|---|---|
+| 本地上下文 | 初始化本地设备 → 查询当前设备 → HAL导入 → 映射 |
+| 导出方上下文 | 初始化本地设备 → 切到导出方 → 查询当前设备 → HAL导入 → 恢复本地 → 映射 |
+
+两种模式都检查`aclrtGetDevice`返回的当前设备，导入目标参数始终是本地驱动设备号。每rank每池2MiB，三个1GiB虚拟窗口；双向全范围读写逐字校验后释放资源，验证首窗口可再次预留。普通`hal-pools`及`hal-large-pools`均保持本地上下文。
+
+#### 2026-11-13测试结果
+
+Ascend310P3，CANN 9.2.1，驱动26.1.1。下列上下文对照每种模式均检查当前设备、HAL导入、三个池的映射和双向全量数据校验，以及释放后窗口复用。
+
+| 检查 | 结果 |
+|---|---|
+| 设备2、3，保持本地上下文 | 通过，退出0 |
+| 设备2、3，切到导出方上下文 | 通过，退出0 |
+| 设备4、5，保持本地上下文 | 通过，退出0 |
+| 设备4、5，切到导出方上下文 | 通过，退出0 |
+| 可见设备2、3重编号为0、1，两种模式 | 均通过，退出0 |
+| 每rank 8GiB大池，保持本地上下文 | 两rank均触发P2P_DDR不足后回退DDR；各8GiB全范围双向读写及窗口复用通过 |
+| 新运行库双rank读写，设备2、3 | 每rank设备池32MiB、DRAM池32MiB；跨die H2G/G2H、G2G及DRAM三个8MiB校验均mismatch=0，两rank退出0 |
+
+HAL的64位NONE共享句柄在本地上下文可直接导入；当前运行库已去掉同卡导入前后的设备切换，监听线程仍初始化自己的本地ACL上下文。
+
+本次完整ASAN UT共2082项，2070通过、12跳过、0失败，脚本退出0；行覆盖率70.3%，分支覆盖率46.5%。导入成功与失败用例均检查未发生上下文切换。

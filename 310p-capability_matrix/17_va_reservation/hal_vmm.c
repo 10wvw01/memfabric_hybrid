@@ -27,7 +27,7 @@ typedef struct {
 } Pool;
 
 static int rank_id, world, device, peer_device, driver_device;
-static int used_fallback;
+static int used_fallback, switch_context;
 static size_t physical_bytes = 2 * MIB, window_bytes = GIB;
 static void *library;
 
@@ -147,13 +147,22 @@ static int share_pool(Pool *pool)
     ret = f_halMemShareHandleSetAttribute(share, SHR_HANDLE_ATTR_NO_WLIST_IN_SERVER, attr);
     if (all_failed(check(ret, "halMemShareHandleSetAttribute"), "share policy")) return 1;
     MPI_Allgather(&share, 1, MPI_UINT64_T, shares, 1, MPI_UINT64_T, MPI_COMM_WORLD);
-    ret = aclrtSetDevice(peer_device);
-    int failed = check(ret, "set exporter context");
+    int failed = 0, current = -1;
+    if (switch_context) failed = check(aclrtSetDevice(peer_device), "set exporter context");
+    failed |= check(aclrtGetDevice(&current), "get import context");
+    if (current != (switch_context ? peer_device : device)) {
+        fprintf(stderr, "FAIL rank=%d import context=%d local=%d exporter=%d\n",
+                rank_id, current, device, peer_device);
+        failed = 1;
+    }
+    printf("rank=%d import_context=%s current=%d driver_device=%d\n",
+           rank_id, switch_context ? "exporter" : "local", current, driver_device);
     if (!failed) {
         ret = f_halMemImportFromShareableHandle(shares[1 - rank_id], driver_device, &pool->imported);
+        printf("rank=%d halMemImportFromShareableHandle ret=%d\n", rank_id, ret);
         failed |= check(ret, "halMemImportFromShareableHandle");
     }
-    failed |= check(aclrtSetDevice(device), "restore local context");
+    if (switch_context) failed |= check(aclrtSetDevice(device), "restore local context");
     if (all_failed(failed, "import")) return 1;
     ret = f_halMemMap(pool->peer, physical_bytes, 0, pool->imported, 0);
     if (!ret) pool->peer_mapped = 1;
@@ -265,7 +274,8 @@ int main(int argc, char **argv)
     setbuf(stdout, NULL);
     const char *mode = argc == 2 ? argv[1] : "";
     int probe = strcmp(mode, "probe") == 0, large = strcmp(mode, "large-pools") == 0;
-    int failed = (!probe && !large && strcmp(mode, "pools")) || world != (probe ? 1 : 2);
+    switch_context = strcmp(mode, "exporter-context") == 0;
+    int failed = (!probe && !large && !switch_context && strcmp(mode, "pools")) || world != (probe ? 1 : 2);
     int a = 0, b = 1;
     failed |= parse_int("A_DEV", 0, INT32_MAX, &a) | parse_int("B_DEV", 1, INT32_MAX, &b);
     device = rank_id ? b : a;

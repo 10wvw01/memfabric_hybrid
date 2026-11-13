@@ -708,7 +708,6 @@ uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
 
 Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_t lva, void *&mapHandle) noexcept
 {
-    // Keep the existing device-context setup for same-card imports.
     uint64_t shareable = 0;
     memcpy(&shareable, im.shareHandle.share_info, sizeof(shareable));
     bool sameCard = IsSameCard(im.devicePhyId);
@@ -716,12 +715,6 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
                          << " devId:" << std::dec << deviceId_
                          << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
                          << " peerDevicePhyId:" << im.devicePhyId);
-    if (sameCard) {
-        int32_t ctxDevId = static_cast<int32_t>(im.deviceUserId);
-        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ctx trick: SetDevice(exporter userId:" << ctxDevId
-                             << " phyId:" << im.devicePhyId << ") for rank:" << im.rankId);
-        DlAclApi::AclrtSetDevice(ctxDevId, true);
-    }
     /* Check P2P accessibility before import */
     {
         int32_t canAccess = -1;
@@ -735,9 +728,6 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
     BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step2: HalMemImportFromShareableHandle"
                          << " ret:" << ret << " handle:" << halHandle << " rank:" << im.rankId
                          << " deviceId:" << deviceId_);
-    if (sameCard) {
-        DlAclApi::AclrtSetDevice(deviceId_);
-    }
     if (ret != BM_OK || halHandle == nullptr) {
         BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
                               << " sameCard:" << sameCard
@@ -783,16 +773,8 @@ Result HybmVmmBasedSegment::Mmap() noexcept
     if (imports_.empty()) {
         return BM_OK;
     }
-    /* 310P3: sort imports_ — same-card first, cross-card second.
-     * This ensures ctx trick (same-card) runs before cross-card import,
-     * which is required by ACL runtime's P2P state management. */
     if (Is310PPath()) {
-        /* Mmap() runs on the group listen thread (grp_listen_evt), NOT the main
-         * thread. ACL runtime device context is thread-local, so the main
-         * thread's aclrtSetDevice does not apply here. Without setting the
-         * device on this thread, aclrtMemImportFromShareableHandle returns
-         * 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR) for cross-card imports.
-         * Force-set the device on the current thread before any ACL import. */
+        // The listener thread needs its own local ACL context.
         DlAclApi::AclrtSetDevice(deviceId_, true);
 
         auto sameCardFirst = [this](const HostSdmaExportInfo &a, const HostSdmaExportInfo &b) {

@@ -4,8 +4,8 @@ cd "$(dirname "$0")"
 
 mode="${1:-all}"
 case "$mode" in
-    all|probe|pools|acl-pools|hal-probe|hal-pools|hal-large-pools) ;;
-    *) echo "Usage: $0 [all|probe|pools|acl-pools|hal-probe|hal-pools|hal-large-pools]" >&2; exit 2 ;;
+    all|probe|pools|acl-pools|hal-probe|hal-pools|hal-large-pools|hal-context) ;;
+    *) echo "Usage: $0 [all|probe|pools|acl-pools|hal-probe|hal-pools|hal-large-pools|hal-context]" >&2; exit 2 ;;
 esac
 
 export ASCEND_HOME="${ASCEND_HOME:-${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}}"
@@ -33,4 +33,10 @@ if [[ "$mode" == all || "$mode" == hal-pools ]]; then
 fi
 if [[ "$mode" == hal-large-pools ]]; then
     timeout --kill-after=10 "${TEST_TIMEOUT:-300}" mpirun --allow-run-as-root --stdin none -np 2 ./hal_vmm large-pools
+fi
+
+if [[ "$mode" == hal-context ]]; then
+    for context in pools exporter-context; do
+        timeout --kill-after=10 "${TEST_TIMEOUT:-90}" mpirun --allow-run-as-root --stdin none -np 2 ./hal_vmm "$context"
+    done
 fi
