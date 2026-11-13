@@ -1,7 +1,70 @@
-# 简单版本——04_vmm_cross — VMM shareable 链路跨卡(PCIe)
+# 04：跨卡VMM分配、共享与映射
 
-Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64  
-MPI 双进程: rank0=exporter(dev A, `A_DEV` 默认 0), rank1=importer(dev B, `B_DEV` 默认 2)
+使用ACL物理内存、共享句柄、地址预留和映射建立跨进程设备池。验证异步D2D与Host读写，并对比导入时的设备上下文。
+
+## 测试步骤与API调用顺序
+
+rank0为导出方A，rank1为导入方B；共享句柄通过MPI传递。物理内存句柄、预留虚拟地址和映射分别管理。
+
+| 阶段 | 导出方A | 导入方B |
+|---|---|---|
+| 分配与导出 | 启用到B的peer；查询粒度并`aclrtMallocPhysical`；`aclrtReserveMemAddress` → `aclrtMapMem` → `aclrtMemSetAccess`；H2D写入；`aclrtMemExportToShareableHandle` | 接收共享句柄 |
+| step16对照 | 此前已启用到B的peer，另行导出对照句柄 | 尚未显式启用到A的peer，直接`aclrtMemImportFromShareableHandle`，记录返回值并释放句柄 |
+| 主数据路径 | 等待B完成后D2H检查反向写入 | 启用到A的peer；在本地设备上下文导入；预留、映射、设置权限；异步D2D读取并回读，再反向写入 |
+| 上下文对照 | 导出另一块独立物理内存 | `aclrtSetDevice(A)` → `aclrtMemImportFromShareableHandle(sh, B, ...)` → `aclrtSetDevice(B)`；仅检查导入及释放 |
+| Host与性能 | 复核B直接写入的前16MiB，最终复核完整主块 | 导入地址上D2H/H2D；主块高16MiB用于读带宽，低16MiB用于写带宽 |
+
+主物理块32MiB，独立对照块8/16MiB。分配辅助函数依次尝试多个memAttr，并按所选属性的粒度分配；命中一个可用属性就停止，不能把回退命中解释为其他未执行属性均不支持。
+
+导入方先`aclrtUnmapMem` → `aclrtFreePhysical` → `aclrtReleaseMemAddress`，MPI同步后导出方释放自己的映射、物理句柄和地址。随后拆除peer状态、销毁stream并重置设备。导入句柄与原物理内存的所有权应分开理解。
+
+step16只控制导入方是否显式启用peer，不是“双侧均未启用”的实验。该区别是保留本项步骤说明的必要条件。
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/04_vmm_cross
+A_DEV=2 B_DEV=6 bash run.sh
+```
+
+## 2026-11-13复测
+
+10006，Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64。设备及数据规模见下表。
+
+| 检查项 | 本轮结果 |
+|---|---|
+| 设备与大小 | 2、6；主要物理块32MiB，对照块8/16MiB |
+| 本地分配、导出、导入与映射 | 成功 |
+| 异步D2D及Host直接双向读写 | 校验通过 |
+| 省略导入方EnablePeerAccess | 导入成功；此前导出方已调用EnablePeerAccess |
+| 先切到导出方上下文再导入 | 导入成功；该项只观察导入，不另建数据窗口 |
+| 带宽 | 16MiB，3次预热、30次异步提交后同步：读12.96、写23.31 GB/s |
+| 总结果 | PASS，两个rank退出0 |
+
+跨卡VMM共享数据路径可用。关于不显式启用peer的结论，应以双方调用顺序为条件；本用例不构成双方都未启用peer的独立验证，完整对照见15项。
+
+## 历史memAttr探针结果
+
+本目录另有`test_memattr.c`。以下为旧README在2026-08-25、CANN 9.1.0的独立属性探针记录，不是本轮主程序的回退链覆盖情况。本轮未重跑此探针，参数、返回码和分配粒度供后续逐项复测。
+
+| memAttr | 旧记录结果 | 成功时粒度 |
+|---|---|---|
+| ACL_MEM_NORMAL | 成功 | 2MiB |
+| ACL_MEM_HUGE | 成功 | 2MiB |
+| ACL_MEM_P2P_NORMAL | 成功 | 2MiB |
+| ACL_MEM_P2P_HUGE | 成功 | 2MiB |
+| ACL_HBM_MEM_HUGE | 成功 | 2MiB |
+| ACL_HBM_MEM_NORMAL | 成功 | 2MiB |
+| ACL_MEM_HUGE1G、ACL_MEM_P2P_HUGE1G | 207000 | — |
+| ACL_HBM_MEM_P2P_HUGE、ACL_HBM_MEM_P2P_NORMAL | 100000 | — |
+| ACL_DDR_MEM_HUGE、ACL_DDR_MEM_NORMAL | 100000 | — |
+| ACL_DDR_MEM_P2P_HUGE、ACL_DDR_MEM_P2P_NORMAL | 100000 | — |
+
+主程序依次尝试属性，命中后停止；独立探针逐项调用，覆盖范围不同。不应根据前者“第一个成功属性”得出后续所有属性均不支持。
+
+
 
 ## 310P3 内存属性支持
 
@@ -21,7 +84,8 @@ MPI 双进程: rank0=exporter(dev A, `A_DEV` 默认 0), rank1=importer(dev B, `B
 - HBM_P2P 组合: ret=100000
 - DDR 前缀(仅 Host 内存): ret=100000
 
-**⚠ 与文档不符**: `ACL_HBM_MEM_HUGE`/`ACL_HBM_MEM_NORMAL` 文档标注仅 350/A3/A2，但 310P3 实测可用。
+**与官方文档有差异的地方**: `ACL_HBM_MEM_HUGE`/`ACL_HBM_MEM_NORMAL` 文档标注仅 350/A3/A2，但 310P3 实测可用。
+
 
 ## 核心结论
 
@@ -67,58 +131,6 @@ EnablePeerAccess(dev0) → ImportFromShareableHandle(sh1, dev2)
 
 **Cleanup**: Importer 先释放 → MPI_Barrier → Exporter 后释放 → DisablePeerAccess → ResetDevice
 
-## 运行
-
-```bash
-./run.sh                    # 默认 dev0→dev2
-A_DEV=1 B_DEV=4 ./run.sh    # 其他设备组合
-```
-
-## D 态挂死修复
-
-**问题**: 旧版退出时残留 D 状态进程(SIGKILL 不可回收)  
-**根因**: EnablePeerAccess 建立的 P2P 状态 + mmu notifier 释放 = 驱动 SRCU 死锁  
-**修复**: cleanup 在 ResetDevice 前调用 `aclrtDeviceDisablePeerAccess(peer)`  
-**验证**: exit=0，无 D 态残留
-
-## 310P3 所属系列与内存属性支持
-
-**310P3 属于 Atlas 推理系列(非 A3/A2 系列)**。根据 CANN 官方文档,`aclrtPhysicalMemProp.memAttr`
-支持的类型及 310P3 实测结果(`test_memattr` 验证):
-
-| 类型 | 说明 | 官方文档支持范围 | 310P3 实测 | gran(B) | 备注 |
-|------|------|------------------|------------|---------|------|
-| `ACL_MEM_NORMAL` | 普通内存 | 通用 | ✓ 成功 | 2MB | |
-| `ACL_MEM_HUGE` | 2M 大页 | 通用 | ✓ 成功 | 2MB | |
-| `ACL_MEM_HUGE1G` | 1G 大页 | ✗ 仅 A3/A2 | ✗ ret=207000 | - | 207000 ≠ 100000,驱动识别为"不支持" |
-| `ACL_MEM_P2P_NORMAL` | P2P 普通 | 通用 | ✓ 成功 | 2MB | |
-| `ACL_MEM_P2P_HUGE` | P2P 2M 大页 | 通用 | ✓ 成功 | 2MB | |
-| `ACL_MEM_P2P_HUGE1G` | P2P 1G 大页 | ✗ 仅 A3 | ✗ ret=207000 | - | |
-| `ACL_HBM_MEM_HUGE` | HBM 2M 大页 | ✗ 仅 350/A3/A2 | **✓ 成功** | 2MB | **⚠ 与文档不符!310P3 实际可用** |
-| `ACL_HBM_MEM_NORMAL` | HBM 普通 | ✗ 仅 350/A3/A2 | **✓ 成功** | 2MB | **⚠ 与文档不符!310P3 实际可用** |
-| `ACL_HBM_MEM_P2P_HUGE` | HBM P2P 2M | ✗ 仅 A3/A2 | ✗ ret=100000 | - | |
-| `ACL_HBM_MEM_P2P_NORMAL` | HBM P2P 普通 | ✗ 仅 A3/A2 | ✗ ret=100000 | - | |
-| `ACL_DDR_MEM_HUGE` | DDR 大页 | 仅 Host | ✗ ret=100000 | - | |
-| `ACL_DDR_MEM_NORMAL` | DDR 普通 | 仅 Host | ✗ ret=100000 | - | |
-| `ACL_DDR_MEM_P2P_HUGE` | DDR P2P 2M | 仅 Host | ✗ ret=100000 | - | |
-| `ACL_DDR_MEM_P2P_NORMAL` | DDR P2P 普通 | 仅 Host | ✗ ret=100000 | - | |
-
-**实测结论**:310P3 支持 **6 种** memAttr 类型:
-- 全部无介质前缀非 1G 类型:`ACL_MEM_NORMAL`、`ACL_MEM_HUGE`、`ACL_MEM_P2P_NORMAL`、`ACL_MEM_P2P_HUGE`
-- HBM 非 P2P 类型:`ACL_HBM_MEM_HUGE`、`ACL_HBM_MEM_NORMAL`(**与文档不符,文档说仅 350/A3/A2**)
-- 所有 1G 大页类型返回 207000(驱动识别为不支持,但错误码不同于 100000)
-- 所有 DDR 前缀、HBM_P2P 组合返回 100000
-
-**关键区别**:
-- **无介质前缀**(`ACL_MEM_*`):通用类型,除 1G 大页外均支持
-- **HBM 前缀**(`ACL_HBM_MEM_*`):文档说仅 350/A3/A2,但 310P3 实测非 P2P 的两种可用
-- **DDR 前缀**(`ACL_DDR_MEM_*`):仅 Host 内存,310P3 是 Device 卡,全部不支持
-- **P2P 组合**:`HBM_MEM_P2P_*` 不支持,仅 `ACL_MEM_P2P_*` 可用于跨设备复制
-
-**对 test.c 七级回退链的影响**:
-当前回退链中 `ACL_HBM_MEM_P2P_HUGE` 等返回 100000,而 `ACL_MEM_NORMAL`、`ACL_MEM_HUGE`、
-`ACL_MEM_P2P_NORMAL` 实际可用但未在链中。当前链第 5 级 `ACL_MEM_P2P_HUGE` 已能命中,
-功能不受影响,但回退链可以扩展为 10 级以覆盖更多可用类型。
 
 ## API 调用链详解
 
@@ -184,6 +196,7 @@ A_DEV=1 B_DEV=4 ./run.sh    # 其他设备组合
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+
 ### 对照实验(step16)—— EnablePeerAccess 必要性测试
 
 ```
@@ -216,31 +229,3 @@ A_DEV=1 B_DEV=4 ./run.sh    # 其他设备组合
 │ 结论: ctx 技巧是同卡 die 对方案,跨卡也能用但非必须                           │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Cleanup 顺序(铁律)
-
-```
-Importer 先释放:
-  UnmapMem(vmmVA) → FreePhysical(h_imp) → ReleaseMemAddress(vmmVA)
-  ↓
-MPI_Barrier(等待 Importer 全部释放)
-  ↓
-Exporter 后释放:
-  UnmapMem(ownVA/ctrlVA/p2p_ctrlVA) → FreePhysical(h_own/h_ctrl/h_p2p_ctrl) → ReleaseMemAddress(...)
-  ↓
-双方 DisablePeerAccess → ResetDevice → Finalize
-```
-
-## ★实测结论(2026-08-25)
-
-### 各步骤一句话总结
-
-| 步骤 | 做了什么 | 结论 |
-|------|----------|------|
-| step1 | Exporter 在 dev0 上分配 32MB 物理内存(七级 memAttr 回退,仅 `MEM_P2P_HUGE` 成功),Export 为 shareable handle sh1 发给 Importer | OK,跨卡 Export 链路通 |
-| step16 | **对照实验**:Exporter 分配独立 8MB 物理内存 Export 为 sh_p2p;Importer **不做 EnablePeerAccess** 直接尝试 Import | 成功(ret=0),310P3 已验证 EnablePeerAccess 不是跨卡 Import 的必要条件 |
-| step2 | Importer 在 dev2 上用本进程 ctx Import sh1,双向 async D2D 读写 32MB 并逐字校验 pattern | OK,跨卡 VMM 双向读写正确 |
-| step3 | 对照实验:Importer 用 ctx 技巧(同卡 die 对方案)跨卡 Import,验证是否也能用 | 成功(ret=0),310P3 已验证 ctx 技巧跨卡也能用但非必须 |
-| step5 | Importer 对 imported VA 直接做 host D2H 读 / H2D 写各 16MB,Exporter 复核 | OK,host 直达跨卡可用 |
-| step4 | 带宽测试:3 次预热 + 30×16MB async 提交 + 1 次 Sync | 读 11.07 GB/s,写 13.14 GB/s |
-| 终验 | Exporter D2H 校验全 32MB 是否为 TAG_BACK pattern | OK,数据完整 |

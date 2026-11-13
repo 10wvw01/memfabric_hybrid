@@ -1,4 +1,32 @@
-# 08_host_swap — host 中转兜底(D2H + H2D 跨设备)
+# 08：经Host中转的跨设备拷贝
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/08_host_swap
+A_DEV=2 B_DEV=6 bash run.sh
+```
+
+## 2026-11-13测试结果
+
+Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64。
+
+| 检查项 | 本轮结果 |
+|---|---|
+| 设备与数据 | 2、6跨卡；32MiB设备块，16MiB中转块 |
+| IPC导入 | PEER_ACCESS方式成功 |
+| Host中转读写 | 双向数据校验通过 |
+| 直接异步D2D读取 | 12.77 GB/s |
+| 经Host中转读取 | 4.26 GB/s，有效数据按30×16MiB计数，包含两段搬运 |
+| 总结果 | PASS，两个rank退出0 |
+
+直接D2D与Host中转均通过数据校验。带宽采用3次预热、30次测量。
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、输出及分析。2026-11-13的执行情况见上表。
 
 Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64,MPI 双进程:
 rank0=exporter(`A_DEV`,默认 0),rank1=importer(`B_DEV`,默认 1 die 对)。
@@ -6,8 +34,8 @@ rank0=exporter(`A_DEV`,默认 0),rank1=importer(`B_DEV`,默认 1 die 对)。
 
 ## 测试目的
 
-验证 **host 中转兜底路径**:当设备间直达传输不可用时(同步路径失败),通过 `远端设备内存
-→ host 内存 → 本地设备内存` 的 D2H + H2D 两跳搬运仍能完成跨设备数据传输,并量化该兜底
+验证 **host 中转中转路径**:当设备间直达传输不可用时(同步路径失败),通过 `远端设备内存
+→ host 内存 → 本地设备内存` 的 D2H + H2D 两跳搬运仍能完成跨设备数据传输,并量化该中转
 路径与 direct D2D 的带宽差距。(注:原假设的 ✗ 单元格 VMM 不可达已被 10 推翻)
 
 ## 测试内容
@@ -30,12 +58,11 @@ rank0=exporter(`A_DEV`,默认 0),rank1=importer(`B_DEV`,默认 1 die 对)。
 
 ## 关键结论
 
-1. **host-swap 功能完全可用**:读写双向逐字校验全部通过,~3 GB/s 是任何 IPC 链路上的
-   保底传输能力
+1. **host-swap 功能完全可用**:读写双向逐字校验全部通过,表中三组组合均通过了中转读写校验
 2. **带宽代价明确**:die 对上损失约 6 倍,跨卡上约 3.5-4 倍
 3. **✗ 单元格真相(已更新)**:原假设 dev1→dev4 为 VMM 不可达 ✗ 单元格,但 10_vmm_hardcell
    实测(CANN 9.1.0)显示 VMM import 实际可达(ret=0)。IPC-PEER import 和 async direct D2D
-   一直可用;host-swap 仍为兜底路径,但 VMM 场景下不再需要兜底
+   一直可用;host-swap 仍为中转路径,但 VMM 场景下不再需要中转
 4. **D 态修复有效**:跨卡时 ResetDevice 前 DisablePeerAccess,importer 侧 ret=0
    (exporter 侧 ret=507899,本侧未启用过 peer,预期内无害),进程干净退出
 
@@ -47,7 +74,7 @@ rank0=exporter(`A_DEV`,默认 0),rank1=importer(`B_DEV`,默认 1 die 对)。
   跨卡时 ResetDevice 前 `aclrtDeviceDisablePeerAccess`(D 态修复)
 
 ## 带宽口径
-3 预热 + 30×16MB MemcpyAsync 提交 + 末尾 1 次 StreamSync。**严禁同步循环测带宽**
+3 预热 + 30×16MB MemcpyAsync 提交 + 末尾 1 次 StreamSync。共享映射D2D使用异步提交；Host中转包含D2H与H2D两段
 (失败链路同步调用 ~140µs/次会伪造 114 GB/s 假带宽)。host-swap 按有效交付
 30×16MB=480MB 与 direct 同口径对比(总线流量 2×)。
 

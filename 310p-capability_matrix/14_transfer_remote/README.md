@@ -1,4 +1,42 @@
-# 14_transfer_remote — 远端 slab 直达 H2D/D2H
+# 14：Host直接访问导入的远端设备内存
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/14_transfer_remote
+A_DEV=2 B_DEV=6 bash run.sh
+```
+
+## 2026-11-13测试结果
+
+Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64。
+
+| 检查项 | 本轮结果 |
+|---|---|
+| 设备与数据 | 2、6跨卡；32MiB设备块，16MiB校验/带宽块 |
+| Host直接读取、写入远端映射 | 校验通过 |
+| 导入映射偏移16MiB处读取 | 校验通过 |
+| 总结果 | PASS，两个rank退出0 |
+
+远端导入映射可以直接参与Host与设备之间的拷贝。分别比较锁页Host缓冲区与普通Host缓冲区的带宽。
+
+
+## 本轮带宽
+
+3次预热、30次16MiB；单位GB/s。
+
+| 路径 | GB/s |
+|---|---:|
+| 远端→普通Host，异步后同步 | 5.55 |
+| 远端→普通Host，同步 | 5.56 |
+| 远端→锁页Host，同步 | 24.20 |
+| 本地设备→锁页Host，同步 | 23.76 |
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、输出及分析。2026-11-13的执行情况见上表。
 
 Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64,MPI 双进程:
 rank0=exporter(dev A,`A_DEV` 默认 0),rank1=importer(dev B,`B_DEV` 默认 1 die 对;或 `A_DEV=0 B_DEV=2` 跨卡)。
@@ -34,10 +72,10 @@ rank0=exporter(dev A,`A_DEV` 默认 0),rank1=importer(dev B,`B_DEV` 默认 1 die
 - **async 路(主口径)**:3 预热 + 30×16MB MemcpyAsync 提交 + 末尾 1 次 StreamSync
 - **sync 路(对照)**:3 预热 + 30 次同步 `aclrtMemcpy` 调用计时
 
-**严禁同步循环测带宽**(历史教训:失败链路同步调用 ~140µs/次会伪造 114 GB/s 假带宽)。
+共享设备映射的D2D与Host端点的D2H分别判断是否支持(历史教训:失败链路同步调用 ~140µs/次会伪造 114 GB/s 假带宽)。
 本测试 sync 路径仅作对照,且**仅在 step3 已逐字校验通过(host 直达 D2H 链路真实可用)后才执行** ——
 每次同步调用都真实搬运 16MB 数据,非失败返回的延迟,故 sync 计时反映真实搬运带宽。若 host
-直达链路本身坏(step3 FAIL 已 fatal),直接跳过,不踩假带宽坑。
+直达链路本身坏(step3 FAIL 已 fatal),直接跳过,不执行该轮带宽测量。
 
 ## 运行方法
 ```
@@ -51,7 +89,7 @@ A_DEV=1 B_DEV=4 ./run.sh    # 原 ✗ 单元格(10 实测 CANN 9.1.0 下 VMM 已
 - 跨卡:PEER import OK;直达校验全 OK;cleanup 无 D 态残留;RESULT: PASS
 - 带宽:sync D2H 远端 vs async D2H 远端对比(async 通常 ≥ sync,因 async 可重叠提交)
 
-## ★实测结论
+## 实测结论
 **测试环境**: Atlas 300I Duo (310P3) / CANN 9.1.0 / 默认 die 对 (A_DEV=0, B_DEV=1)
 
 **测试结果**: **PASS**
@@ -90,16 +128,16 @@ A_DEV=1 B_DEV=4 ./run.sh    # 原 ✗ 单元格(10 实测 CANN 9.1.0 下 VMM 已
 2. sync 与 async 带宽基本持平（~4.47 GB/s），说明该链路下 async 无明显重叠优势
 3. cleanup 正常，无 D 态残留
 
-**带宽低根因验证** (step 7/8 实测确认):
+**带宽影响因素对照** (step7/8)：
 
 | 对比 | 带宽变化 | 结论 |
 |------|----------|------|
-| Step 6 → Step 7 (pageable → pinned) | 4.47 → 12.78 GB/s (**2.86x**) | **Pageable 是唯一瓶颈** |
-| Step 7 → Step 8 (远端 → 本地) | 12.78 → 12.84 GB/s (**相同**) | **数据路径无差异** |
+| Step 6 → Step 7 (pageable → pinned) | 4.47 → 12.78 GB/s (**2.86x**) | 使用pinned后的带宽提高2.86倍 |
+| Step 7 → Step 8 (远端 → 本地) | 12.78 → 12.84 GB/s (**相同**) | 该次两种数据源的带宽接近 |
 
 **详细说明**:
 
-1. **Pageable vs Pinned 内存** (唯一主因，实测 2.86x 差异):
+1. **Pageable与Pinned内存**（实测2.86倍差异）:
    - **Step 6**: `malloc()` pageable → 驱动内部 bounce buffer 中转 (2 次拷贝) → **4.47 GB/s**
    - **Step 7**: `aclrtMallocHost()` pinned → DMA 直达 (1 次拷贝) → **12.78 GB/s**
    - 代码对比:
@@ -113,10 +151,10 @@ A_DEV=1 B_DEV=4 ./run.sh    # 原 ✗ 单元格(10 实测 CANN 9.1.0 下 VMM 已
      aclrtMemcpy(pinned_buf, BW_SIZE, p, BW_SIZE, D2H);  // DMA 直达
      ```
 
-2. **数据路径无差异** (实测确认):
+2. 该次两种数据源的带宽接近 (实测确认):
    - **Step 7**: imported VA (远端 die0) → pinned host = **12.78 GB/s**
    - **Step 8**: 本地 dev (die1) → pinned host = **12.84 GB/s**
-   - 两者完全一致，证明数据路径相同：**die0 → PCIe x8 → host**
+   - 两者测得12.78和12.84GB/s；原分析以**die0 → PCIe x8 → Host**作为路径解释
    - 硬件拓扑：die0 是 PCIe 主 die，所有 PCIe DMA 都通过 die0
 
 3. **优化效果**:

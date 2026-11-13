@@ -1,12 +1,62 @@
-# 05_vmm_die — VMM shareable 链路 die 对(同卡双 die)ctx 技巧
+# 05：同卡双die的VMM共享
 
-Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64,MPI 双进程:
-rank0=exporter(dev A,`A_DEV` 默认 0),rank1=importer(dev B,`B_DEV` 默认 1)。
+比较同卡两个进程导入VMM共享句柄时的设备上下文，并验证导入后的异步D2D和Host读写。
 
-## 验证能力(矩阵单元格)
-- VMM die 对:ctx 技巧 import ✓ / 本进程 ctx import ✗(对照,预期 507899)
-- die 对 async D2D ✓(读+写,双向逐字 pattern 校验)/ 同步 D2D ✗(不测,已知 507899,见 02)
-- host 直达 ✓(imported VA 上直接 D2H/H2D 各 16MB + 校验)
+## 测试步骤与API调用顺序
+
+导出方A和导入方B是同一卡的两个die，各运行一个MPI进程。
+
+1. A查询分配粒度，`aclrtMallocPhysical`分配32MiB；`aclrtReserveMemAddress`预留地址，`aclrtMapMem`映射，`aclrtMemSetAccess`设置访问权限。写入数据后`aclrtMemExportToShareableHandle`，经MPI传给B。
+2. B执行下述导入顺序。传给导入函数的目标设备号一直是B，改变的是调用时的当前设备上下文：
+
+   ```text
+   aclrtSetDevice(A)
+   aclrtMemImportFromShareableHandle(sh, B, &imported_handle)
+   aclrtSetDevice(B)
+   aclrtReserveMemAddress → aclrtMapMem → aclrtMemSetAccess
+   ```
+
+3. B从映射地址异步D2D读至本地设备缓冲区，等待stream后D2H校验；B再写入新数据，A从自己的映射读回校验。
+4. A另行导出16MiB对照块，B保持自身上下文直接导入，记录结果。再用另一独立块比较“先EnablePeerAccess，再在自身上下文导入”。独立句柄避免重复导入同一对象干扰对照。
+5. B对主映射的前16MiB直接D2H/H2D，A复核；随后测高16MiB的读带宽和低16MiB的写带宽。结束前恢复完整主块的数据，A作最终校验。
+6. B先解除映射、释放导入句柄和预留地址；MPI同步后A释放物理内存及自己的映射。最后销毁stream、重置使用过的设备并结束ACL。
+
+
+### 数据关系
+
+```text
+A的物理内存 ← A本进程映射ownVA
+            ← B导入句柄后的映射vmmVA
+B本地缓冲区local ↔ 异步D2D ↔ vmmVA
+A经ownVA读回，确认B写入的是共享物理内存
+```
+
+Host直接访问与D2D使用同一主映射，但源、目的端不同；两者分别校验。每步数据带不同tag，避免残留数据掩盖拷贝失败。
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/05_vmm_die
+A_DEV=2 B_DEV=3 bash run.sh
+```
+
+## 2026-11-13测试结果
+
+Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64。
+
+| 检查项 | 本轮结果 |
+|---|---|
+| 设备与数据 | 2、3；主要物理块32MiB，导入/Host对照块16MiB |
+| 切到导出方设备后导入，再切回本地设备 | 导入、映射、异步D2D双向和Host读写校验均通过 |
+| 保持导入方设备上下文直接导入 | 返回507899 |
+| 先EnablePeerAccess再保持导入方上下文导入 | EnablePeerAccess和导入均返回507899 |
+| 带宽 | 16MiB，3次预热、30次异步提交后同步：读19.04、写17.94 GB/s |
+| 总结果 | PASS，两个rank退出0 |
+
+当前同卡双die可以使用切换导出方设备上下文的导入流程。EnablePeerAccess未能使本地上下文的导入对照成功。共享物理内存由导出方释放，导入方解除映射并释放导入句柄。
+
 
 ## API 链（按执行顺序）
 
@@ -74,242 +124,6 @@ rank0=exporter(dev A,`A_DEV` 默认 0),rank1=importer(dev B,`B_DEV` 默认 1)。
 │  2.7 aclrtMemcpy(vbuf, 32MB, ownVA, 32MB, D2H) → check_pat(rank1, 0xD2)   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Step 3: 对照实验 (预期 507899)
-
-```
-┌─ rank0: 第二块独立 16MB ───────────────────────────────────────────────────┐
-│  3.1 MallocPhysical(16MB) + Reserve + Map + SetAccess + H2D pattern        │
-│  3.2 Export → sh2, MPI_Send(&sh2, tag=101)                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─ rank1: 本进程 ctx 直接 import (不做 ctx 技巧) ────────────────────────────┐
-│  3.3 MPI_Recv(&sh2, ...)                                                    │
-│  3.4 aclrtMemImportFromShareableHandle(sh2, devB, &h2)                      │
-│      → 预期 ret=507899 (runtime P2P 前置 para_check 拒绝 die 对)            │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Step 5: Host 直达 (imported VA 上直接 D2H/H2D)
-
-```
-┌─ rank1 ────────────────────────────────────────────────────────────────────┐
-│  5.1 D2H 读前 16MB:  aclrtMemcpy(vbuf, 16MB, vmmVA, 16MB, D2H)            │
-│      → check_pat(rank1, 0xD2)  (step2 反向写的内容)                        │
-│                                                                             │
-│  5.2 H2D 写前 16MB:  aclrtMemcpy(vmmVA, 16MB, hbuf, 16MB, H2D)            │
-│      → fill_pat(rank1, 0xD3)                                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─ rank0: 复核 ──────────────────────────────────────────────────────────────┐
-│  5.3 aclrtMemcpy(vbuf, 16MB, ownVA, 16MB, D2H) → check_pat(rank1, 0xD3)   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Step 6: 对照实验 — EnablePeerAccess + 不使用 ctx 技巧 (预期失败)
-
-```
-┌─ rank0: 第三块独立 16MB ───────────────────────────────────────────────────┐
-│  6.1 MallocPhysical(16MB) + Reserve + Map + SetAccess + H2D pattern        │
-│  6.2 Export → sh3, MPI_Send(&sh3, tag=102)                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─ rank1: EnablePeerAccess + 本进程 ctx 直接 import ─────────────────────────┐
-│  6.3 MPI_Recv(&sh3, ...)                                                    │
-│  6.4 aclrtDeviceEnablePeerAccess(devA, 0)                                   │
-│      → 实测 ret=507899 (EnablePeerAccess 本身就失败)                        │
-│  6.5 aclrtMemImportFromShareableHandle(sh3, devB, &h3)                      │
-│      → ret=507899 (import 也失败)                                           │
-│  6.6 aclrtDeviceDisablePeerAccess(devA)                                     │
-│      → ret=507899 (best-effort 清理)                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-★结论: EnablePeerAccess 无法替代 ctx 技巧, die 对场景下:
-  - aclrtDeviceEnablePeerAccess 本身就返回 507899
-  - 必须使用 ctx 技巧 (SetDevice(A)→Import→SetDevice(B)) 才能绕过 P2P 前置
-```
-
-### Step 4: 带宽测试 (正确性全过后)
-
-```
-┌─ rank1 ────────────────────────────────────────────────────────────────────┐
-│  读方向: VMM[16MB,32MB) → local[16MB,32MB)                                │
-│      3× 预热 (MemcpyAsync + StreamSync)                                    │
-│      30× aclrtMemcpyAsync (提交不等待)                                      │
-│      1× aclrtSynchronizeStream (末尾统一等待)                                │
-│      → 19.00 GB/s                                                          │
-│                                                                             │
-│  写方向: local[0,16MB) → VMM[0,16MB)                                       │
-│      同口径 → 17.94 GB/s                                                    │
-│                                                                             │
-│  ★终态: 全 32MB 恢复为 TAG_BACK(rank1, 0xD2), 供 exporter 终验             │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─ rank0: 终验 ──────────────────────────────────────────────────────────────┐
-│  aclrtMemcpy(vbuf, 32MB, ownVA, 32MB, D2H) → check_pat(rank1, 0xD2)       │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Cleanup 顺序 (铁律: importer 先释放, barrier 后 exporter 释放)
-
-```
-┌─ rank1 (importer) ─────────────────────────────────────────────────────────┐
-│  UnmapMem(vmmVA) → FreePhysical(h_imp) → ReleaseMemAddress(vmmVA)          │
-│  Free(local) → DestroyStream(stream)                                       │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓ MPI_Barrier
-┌─ rank0 (exporter) ─────────────────────────────────────────────────────────┐
-│  main: UnmapMem → FreePhysical(h_own) → ReleaseMemAddress                  │
-│  ctrl: UnmapMem → FreePhysical(h_ctrl) → ReleaseMemAddress                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─ 两 rank 对称 ─────────────────────────────────────────────────────────────┐
-│  DisablePeerAccess(peer)  ← best-effort, ret=507899 无害                   │
-│  ResetDevice(dev)                                                           │
-│  Finalize()                                                                 │
-│  rank1 额外: ResetDevice(devA)  ← ctx 技巧开过的 A 侧 context              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 关键点
-
-- **不调用 EnablePeerAccess**: ctx 技巧跳过 P2P 前置, 无 D 态风险
-- **校验 pattern**: `(rank<<28)|(tag<<24)|(idx&0xFFFFFF)`, tag 每步不同防假阳性
-- **带宽铁律**: 严禁同步循环, 必须 async 提交 + 末尾单次 Sync
-
-## 与 04_vmm_cross 的差异
-| 维度 | 04_vmm_cross(跨卡) | 05_vmm_die(die 对) |
-|---|---|---|
-| 默认 devB | 2(跨卡) | 1(die 对) |
-| 正向 import | 本进程 ctx + EnablePeerAccess | ctx 技巧(SetDevice(A)→Import→SetDevice(B)) |
-| 对照 | ctx 技巧(预期 507899) | 本进程 ctx(预期 507899) |
-| EnablePeerAccess | 双向(exporter+B, importer+A) | 不调用 |
-| D 态风险 | 有(EnablePeerAccess → cleanup 需 DisablePeerAccess) | 理论上无(P2P 前置被跳过) |
-
-## 运行方法
-```
-./run.sh                    # 默认 dev0↔dev1(die 对)
-A_DEV=2 B_DEV=3 ./run.sh    # 换 die 对(卡1 的 2,3)
-A_DEV=0 B_DEV=2 ./run.sh    # 跨卡(对照,ctx 技巧预期失败 — 同 04 场景)
-```
-
-## 预期结果
-正向 ctx 技巧 import(SetDevice(A)→Import→SetDevice(B))OK;async D2D 双向校验 OK;
-host 直达 OK;本进程 ctx import:预期 507899(EXPECTED-FAIL,如实记录);
-`[05] RESULT: PASS`(正向 1/2/5 全 OK 即 PASS;对照 3 不影响判定)。
-实测带宽: die 对 VMM ctx 技巧 async D2D 读 19.00 GB/s / 写 17.94 GB/s。
-
-## 实测结果（2026-08-25 运行）
-
-### 完整输出
-
-```
-[run] A_DEV=0 B_DEV=1 (die pair, timeout 60s)
-[05] === 05_vmm_die: VMM shareable handle link die-pair ctx trick, rank0 r0/exporter dev0 ===
-[05] === 05_vmm_die: VMM shareable handle link die-pair ctx trick, rank1 r1/importer dev1 ===
-[05] init: r0/exporter aclInit/SetDevice(0) OK
-[05] init: r1/importer aclInit/SetDevice(1)/CreateStream OK
-[05]   [main attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(32MB) ret=100000
-[05]   [main attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(32MB) ret=100000
-[05]   [main attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(32MB) ret=100000
-[05]   [main attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(32MB) ret=100000
-[05]   [main attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(32MB) ret=0
-[05]   [main] chosen MEM_P2P_HUGE  , 32MB = 16 x gran 2097152B
-[05] step 1 (r0): SetAccess(RW, A_dev) on own VA                             [OBS] OK (ret=0)
-[05] step 1 (r0): sh1=0x8 sent
-[05] step 1 (r0): MallocPhysical(7attr)+Reserve+Map+H2D pat+Export sh1+send  OK (ret=0)
-[05] step 2 (r1): ctx trick: SetDevice(A_dev) before import (bypass P2P prereq) [OBS] OK (ret=0)
-[05] step 2 (r1): SetDevice(B_dev) restore after import                      [OBS] OK (ret=0)
-[05] step 2 (r1): SetAccess(RW, B_dev) on imported VA                        [OBS] OK (ret=0)
-[05] step 2 (r1): ctx-trick import(A->Imp sh1,B->SetDevice B)+Reserve+Map+async D2D read+verify OK (ret=0)
-[05] step 2 (r1): async D2D reverse write (local->VMM) + StreamSync          OK (ret=0)
-[05] step 2 (r0): D2H verify reverse-written pattern (r1/TAG_D2) on own VA   OK (ret=0)
-[05]   [ctrl attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [ctrl attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [ctrl attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [ctrl attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [ctrl attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(16MB) ret=0
-[05]   [ctrl] chosen MEM_P2P_HUGE  , 16MB = 8 x gran 2097152B
-[05] step 3 (r0): SetAccess(RW, A_dev) on ctrl VA                            [OBS] OK (ret=0)
-[05] step 3 (r0): sh2=0xb sent
-[05] step 3 (r0): MallocPhysical 16MB #2 + H2D pattern + Export sh2 + MPI-send OK (ret=0)
-[05] step 3 (r1): ctrl: own-ctx Import(sh2,B) — expect 507899              EXPECTED-FAIL ret=507899
-[05]   [epa attr 1/7 HBM_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [epa attr 2/7 HBM_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [epa attr 3/7 DDR_P2P_HUGE  ] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [epa attr 4/7 DDR_P2P_NORMAL] gran ret=100000 gran=0; MallocPhysical(16MB) ret=100000
-[05]   [epa attr 5/7 MEM_P2P_HUGE  ] gran ret=0 gran=2097152; MallocPhysical(16MB) ret=0
-[05]   [epa] chosen MEM_P2P_HUGE  , 16MB = 8 x gran 2097152B
-[05] step 6 (r0): SetAccess(RW, A_dev) on epa VA                             [OBS] OK (ret=0)
-[05] step 6 (r0): sh3=0xc sent
-[05] step 6 (r0): MallocPhysical 16MB #3 + H2D pattern + Export sh3 + MPI-send OK (ret=0)
-[05] step 6 (r1): aclrtDeviceEnablePeerAccess(devA=0) ret=507899
-[05] step 6 (r1): epa: EnablePeerAccess+own-ctx Import(sh3,B)                FAIL ret=507899 (EnablePeerAccess 无法替代 ctx 技巧, die 对仍被拒绝)
-[05] step 6 (r1): DisablePeerAccess(devA=0) ret=507899
-[05] step 5 (r1): host direct D2H read remote 16MB (imported VA) + verify    OK (ret=0)
-[05] step 5 (r1): host direct H2D write remote 16MB (imported VA)            OK (ret=0)
-[05] step 5 (r0): D2H verify host-direct-written 16MB (r1/TAG_D3) on own VA  OK (ret=0)
-[05] step 4 (r1): bandwidth on imported VMM VA (ctx trick), 16 MB x 30 iters + 3 warmup, async submits + 1 final Sync ONLY (no sync loop!)
-[05] bw   D2D-read  (VMM->local) :   19.00 GB/s (30x16MB async + 1 Sync, total 0.026 s)
-[05] bw   D2D-write (local->VMM) :   17.94 GB/s (30x16MB async + 1 Sync, total 0.028 s)
-[05] step 2 (r0): final D2H verify reverse pattern (full 32MB) after r1 done OK (ret=0)
-[05] cleanup (r1): UnmapMem(imported VA) ret=0
-[05] cleanup (r1): FreePhysical(imported) ret=0
-[05] cleanup (r1): ReleaseMemAddress(imported VA) ret=0
-[05] cleanup (r0): UnmapMem(main VA) ret=0
-[05] cleanup (r0): FreePhysical(main) ret=0
-[05] cleanup (r0): ReleaseMemAddress(main VA) ret=0
-[05] cleanup (r0): UnmapMem(ctrl VA) ret=0
-[05] cleanup (r0): FreePhysical(ctrl) ret=0
-[05] cleanup (r0): ReleaseMemAddress(ctrl VA) ret=0
-[05] cleanup (r0): UnmapMem(epa VA) ret=0
-[05] cleanup (r0): FreePhysical(epa) ret=0
-[05] cleanup (r0): ReleaseMemAddress(epa VA) ret=0
-[05] cleanup (r1): DisablePeerAccess(0) ret=507899 (best-effort)
-[05] cleanup (r0): DisablePeerAccess(1) ret=507899 (best-effort)
-[05] RESULT: PASS  ★step3: 本进程 ctx import EXPECTED-FAIL ret=507899(符合预期)  ★step6: EnablePeerAccess+own-ctx import FAIL ret=507899(EnablePeerAccess 无法替代 ctx 技巧)
-[05] RESULT: PASS  ★step3: 本进程 ctx import EXPECTED-FAIL ret=507899(符合预期)  ★step6: EnablePeerAccess+own-ctx import FAIL ret=507899(EnablePeerAccess 无法替代 ctx 技巧)
-[run] exit=0 (124=timeout/hang)
-```
-
-### 逐步结果解读
-
-| Step | 内容 | 结果 | 说明 |
-|------|------|------|------|
-| **init** | aclInit + SetDevice + CreateStream | OK | r0 绑定 dev0, r1 绑定 dev1, r1 额外创建 async stream |
-| **1.1** | MallocPhysical 七级回退 | OK | 前 4 项 (HBM/DDR P2P 变体) ret=100000 不支持; 第 5 项 `ACL_MEM_P2P_HUGE` 成功, 粒度 2MB, 32MB=16×2MB ✓ |
-| **1.2-1.3** | Reserve + Map + SetAccess | OK | 虚拟地址保留 + 物理内存映射 + 设置 RW 权限 (devA) |
-| **1.4-1.6** | H2D 写 pattern + Export + MPI 发送 | OK | sh1=0x8 成功发送 |
-| **2.2** | ★ctx 技巧★ SetDevice(A)→Import→SetDevice(B) | OK | 临时切到 dev0 上下文做 import (devId=dev1), 绕过 P2P 前置 |
-| **2.3-2.4** | Reserve + Map + SetAccess | OK | importer 侧建立虚拟地址窗口, 设置 RW 权限 (devB) |
-| **2.5** | async D2D 读 VMM→local + 校验 | OK | 读到 pattern (rank0, 0xD1), 逐字匹配 |
-| **2.6** | async D2D 反向写 local→VMM | OK | 写入 pattern (rank1, 0xD2) |
-| **2.7** | exporter D2H 校验反向写 | OK | 读到 pattern (rank1, 0xD2), 证明 D2D 写成功到达远端 die |
-| **3.1-3.2** | 第二块 16MB 物理内存 + Export sh2 | OK | 独立块, 避免同 sh 二次 import 干扰 |
-| **3.4** | 本进程 ctx 直接 Import (对照) | **EXPECTED-FAIL ret=507899** | 不做 ctx 技巧 → runtime P2P 前置 para_check 拒绝 die 对 |
-| **6.1-6.2** | 第三块 16MB 物理内存 + Export sh3 | OK | 独立块, 用于 EnablePeerAccess 对照测试 |
-| **6.4** | aclrtDeviceEnablePeerAccess(devA) | **ret=507899** | EnablePeerAccess 本身就失败, die 对不被识别为合法 P2P 对 |
-| **6.5** | EnablePeerAccess + Import (对照) | **FAIL ret=507899** | EnablePeerAccess 无法替代 ctx 技巧 |
-| **5.1** | host 直达 D2H 读 16MB | OK | importer 直接 `aclrtMemcpy(D2H)` 读 imported VA, pattern (rank1, 0xD2) 匹配 |
-| **5.2** | host 直达 H2D 写 16MB | OK | importer 直接 `aclrtMemcpy(H2D)` 写 imported VA, pattern (rank1, 0xD3) |
-| **5.3** | exporter 复核 host 直达写 | OK | 读到 pattern (rank1, 0xD3), 证明 host→远端 die 写成功 |
-| **4** | 带宽测试 (async 口径) | OK | 读 19.00 GB/s, 写 17.94 GB/s |
-| **终验** | exporter 全 32MB 校验 | OK | 带宽写方向恢复后, 全块 pattern (rank1, 0xD2) 匹配 |
-| **cleanup** | Unmap + Free + Release | OK | importer 先释放, barrier 后 exporter 释放, 全部 ret=0 |
-| **DisablePeerAccess** | best-effort | ret=507899 | 未 enable 过则 disable 报错, 无害 |
-| **RESULT** | 最终判定 | **PASS** | 正向 1/2/5 全 OK, 对照 3 符合预期 |
-
-### 关键结论
-
-1. **die 对必须使用 ctx 技巧**: 本进程 ctx 直接 import 返回 507899, ctx 技巧绕过 para_check 成功
-2. **EnablePeerAccess 无法替代 ctx 技巧**: `aclrtDeviceEnablePeerAccess(devA)` 本身就返回 507899, die 对不被 runtime 识别为合法 P2P 对
-3. **memAttr 选择**: 310P3 仅 `ACL_MEM_P2P_HUGE` 成功, HBM/DDR 前缀变体均 ret=100000
-4. **双向 D2D 可用**: async D2D 读 (VMM→local) + 写 (local→VMM) 均校验通过
-5. **host 直达可用**: imported VA 上直接 D2H/H2D, 无需额外配置
-6. **带宽**: 读 19.01 GB/s / 写 17.95 GB/s (30×16MB async + 1 Sync 口径)
-7. **无 D 态风险**: 未调用 EnablePeerAccess, cleanup 正常退出 exit=0
-
----
 
 ## 附录: ctx 技巧图解
 

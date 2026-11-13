@@ -1,4 +1,37 @@
-# 13_bw_compare — 跨卡 P2P 带宽深度分析
+# 13：IPC、VMM与Host中转的拷贝对照
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/13_bw_compare
+A_DEV=2 B_DEV=3 bash run.sh
+A_DEV=2 B_DEV=6 bash run.sh
+```
+
+## 2026-11-13测试结果
+
+Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64。
+
+| 检查项 | 本轮结果 |
+|---|---|
+| 同卡2→3 | IPC、VMM和Host中转均校验通过，退出0 |
+| 跨卡2→6 | IPC、VMM和Host中转均校验通过，退出0 |
+| 测量规模 | 3次预热、30次16MiB；异步提交后同步，Host中转包含D2H和H2D两段 |
+
+同卡IPC使用DEFAULT导入，VMM切换导出方上下文；跨卡IPC使用PEER导入，VMM按用例启用peer。下表仅对应这两组设备和本轮调用方式。
+
+| 设备 | IPC GB/s | VMM GB/s | Host中转GB/s |
+|---|---:|---:|---:|
+| 2→3，同卡 | 19.01 | 19.05 | 3.32 |
+| 2→6，跨卡 | 12.91 | 12.63 | 3.92 |
+
+日志分别为 `13_bw_compare-2-3.log` 和 `13_bw_compare.log`。
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、数据和分析；2026-11-13的执行情况见上表。
 
 本测试程序用于测量 Atlas 300I Duo (310P3) 加速卡在不同拓扑下的跨卡 P2P 带宽，涵盖三种传输后端（IPC、VMM、host-swap），并深入分析 PCIe 事务类型对带宽的影响。
 
@@ -257,7 +290,9 @@ A_DEV=2 B_DEV=3 ./run.sh        # 换 die 对
 
 ---
 
-## 四、深度分析：四种带宽差异的根因
+## 四、带宽差异分析
+
+4.1和4.2为实测对照；4.3～4.7保留当时依据PCIe事务与卡内转发建立的解释模型。图中的事务顺序用于解释假设，Completion时延和DMA并发度尚未直接测量。
 
 ### 4.1 Push 模式测试数据
 
@@ -301,7 +336,7 @@ Master                    Slave
   |                        |--> 写入完成
   |    (无需返回)          |
 ```
-- 发送方不需要等待确认
+- 本测试提交异步写入后，仍调用`aclrtSynchronizeStream`等待完成并读回校验
 - 单向数据流
 - 延迟低，带宽高
 
@@ -319,7 +354,7 @@ Master                    Slave
 - 双向数据流
 - 延迟高，带宽受限
 
-### 4.4 四种情况的数据路径分析
+### 4.4 四种情况的数据路径示意
 
 #### 情况1：Pull dst=die0（~11-12 GB/s）
 
@@ -442,14 +477,14 @@ DMA 引擎持续发送 Write
 带宽：~13 GB/s
 ```
 
-### 4.5 DMA 流水线效率对比
+### 4.5 DMA流水线解释模型
 
 | 模式 | Outstanding 请求 | Completion 延迟 | 流水线效率 | 带宽 |
 |------|------------------|-----------------|-----------|------|
-| Pull dst=die0 | 32 | 低 | 高 | ~11-12 GB/s |
-| Pull dst=die1 | 32 | 高（需要 HCCS 往返） | 低（出现气泡） | ~4 GB/s |
-| Push dst=die0 | 无限制（Posted） | 无 | 高 | ~11-12 GB/s |
-| Push dst=die1 | 无限制（Posted） | 无 | 高 | ~13 GB/s |
+| Pull dst=die0 | 未测量（原估计32） | 低 | 高 | ~11-12 GB/s |
+| Pull dst=die1 | 未测量（原估计32） | 高（需要 HCCS 往返） | 低（出现气泡） | ~4 GB/s |
+| Push dst=die0 | 未测量 | 无 | 高 | ~11-12 GB/s |
+| Push dst=die1 | 未测量 | 无 | 高 | ~13 GB/s |
 
 ### 4.6 PCIe 4.0 带宽验证
 
@@ -459,116 +494,57 @@ DMA 引擎持续发送 Write
 | Pull dst=die0 实测 | 11.5 GB/s，效率 73% |
 | Push dst=die1 实测 | 13 GB/s，效率 83% |
 
-**结论：PCIe 链路本身不是瓶颈**（73-83% 效率合理，考虑协议开销）
+**观察**：该组结果达到x8理论编码带宽的73%～83%；具体带宽损失需要结合事务、并发度和拓扑测量。
 
-### 4.7 瓶颈总结
+### 4.7 原因假设汇总
 
-| 因素 | 是否瓶颈 | 说明 |
+| 因素 | 当时判断（待测量） | 解释 |
 |------|---------|------|
 | PCIe 链路带宽 | 否 | 73-83% 效率合理 |
 | HCCS 链路带宽 | 否 | Push 模式可达 13 GB/s |
 | **Completion 延迟** | **是** | dst=die1 时额外 HCCS 往返导致延迟增加 |
 | **DMA 流水线效率** | **是** | 高延迟导致流水线气泡，带宽下降 |
 
-**根本原因：**
+**对应解释模型：**
 1. PCIe Read 是 Non-Posted 事务，需要等待 Completion TLP
 2. dst=die1 时，Completion 路径多一次 HCCS 往返，延迟更高
 3. 高延迟导致 DMA 流水线效率下降，带宽降低
-4. PCIe Write 是 Posted 事务，不需要等待 Completion，不受延迟影响
+4. PCIe Write 是 Posted 事务，不需要等待 Completion，该模型下对读Completion往返的依赖较小
 
-### 4.8 PCIe 可靠性分析：Pull vs Push
+### 4.8 传输完成与数据校验
 
-#### 链路层可靠性（两种模式相同）
+原分析进一步讨论了PCIe链路应答与最终设备数据可见性的区别。这个问题需要沿调用顺序检查：
 
-PCIe 链路层对所有事务提供相同的可靠性保证：
-- 每个 TLP 都有 LCRC（Link CRC）校验
-- 接收方返回 ACK（确认）或 NAK（重传请求）
-- TLP 丢失或出错时自动重传
-- **Posted 和 Non-Posted 事务在链路层都有相同的可靠性保证**
-
-#### 端到端可靠性（两种模式不同）
-
-**Push 模式（PCIe Write）的可靠性问题：**
-
-```
-数据流：
-1. src DMA 发送 Write TLP
-2. Write TLP 到达 dst 的 PCIe endpoint (die0)
-3. die0 返回链路层 ACK  ← src 此时认为"写入成功"
-4. die0 通过 HCCS 转发数据到 die1
-5. die1 写入 HBM
-
-问题：步骤3的 ACK 只表示 TLP 到达了 die0，
-      不表示数据已经写入 die1 的 HBM！
+```text
+应用提交aclrtMemcpyAsync
+    ↓
+运行时及设备执行传输
+    ↓
+aclrtSynchronizeStream返回
+    ↓
+接收方D2H读回
+    ↓
+逐字比较预期pattern
 ```
 
-**异常场景：**
+上述实验保留了读回校验；下列故障场景尚未注入测试：
 
-```
-正常情况：
-  Write TLP → die0 → HCCS → die1 HBM ✅
-  die0 返回 ACK → src 认为成功 ✅
-  数据实际写入 ✅
-
-异常情况（HCCS 传输失败）：
-  Write TLP → die0 → HCCS → ❌ 传输失败
-  die0 返回 ACK → src 认为成功 ✅  ← 错误！
-  数据未写入 die1 ❌
-  src 不会重传（因为已经收到 ACK）
-  数据静默丢失 ❌
+```text
+待验证的异常场景：
+发送端提交 → 对端PCIe入口 → 卡内转发 → 目标内存
+                         ↑         ↑           ↑
+                   各阶段故障如何上报给API与stream？
 ```
 
-**Pull 模式（PCIe Read）的可靠性保证：**
+| 检查内容 | Pull（读） | Push（写） | 当前记录 |
+|---|---|---|---|
+| 提交调用是否成功 | 检查API返回值 | 检查API返回值 | 属于程序正确性检查 |
+| stream是否完成 | 等待stream同步 | 等待stream同步 | 再进行数据校验 |
+| 实际接收数据 | 从本地目标缓冲区D2H读回 | 从被写入的共享物理内存D2H读回 | 用带rank/tag/index的pattern比较 |
+| 目标设备异常或转发故障 | 待测试 | 待测试 | 未做故障注入 |
+| 超时、设备错误的上报 | 待测试 | 待测试 | 需要记录API及stream返回值 |
 
-```
-数据流：
-1. src DMA 发送 Read TLP
-2. Read TLP 到达 dst
-3. dst 从 HBM 读取数据  ← 必须先读到数据
-4. 返回 Completion TLP（包含实际数据）
-5. src 收到 Completion → 确认数据已读取
-
-关键：Completion TLP 包含实际数据，
-      如果 HBM 读取失败，不会返回 Completion，
-      src 会超时重试。
-```
-
-#### 可靠性对比
-
-| 阶段 | Write (Push) | Read (Pull) |
-|------|--------------|-------------|
-| 链路层传输 | ✅ ACK 确认 | ✅ ACK 确认 |
-| 数据到达 PCIe endpoint | ✅ 确认 | ✅ 确认 |
-| 数据写入目标 HBM | ❌ 无法确认 | ✅ Completion 确认 |
-| HCCS 传输失败 | ❌ src 不知道 | ✅ Completion 不会返回 |
-| 数据静默丢失风险 | ⚠️ 存在 | ✅ 不存在 |
-
-#### 实际影响评估
-
-**正常运行中：**
-- HCCS 有 ECC 保护，错误率极低（< 10⁻¹²）
-- 测试中 verify 步骤通过，说明数据正确
-- 几乎不会遇到问题
-
-**异常情况下：**
-- HCCS 不可纠正错误
-- die0 到 die1 的转发失败
-- 目标 HBM 写入失败
-- **src 已经认为写入成功，不会重试**
-- **数据静默丢失**
-
-#### 建议
-
-| 场景 | Push 模式可靠性 | 建议 |
-|------|----------------|------|
-| 正常运行 | ✅ 可靠 | 可使用 |
-| 目标设备可能崩溃 | ⚠️ 有风险 | 使用 Pull 模式或增加校验 |
-| 关键数据传输 | ⚠️ 建议校验 | 传输后验证数据完整性 |
-
-**实际建议：**
-1. **一般场景**：Push 模式可靠，可放心使用
-2. **关键场景**：传输后增加数据校验（如 checksum）
-3. **目标设备不稳定**：使用 Pull 模式（有端到端确认）
+原文根据Posted/Non-Posted事务推断“Push可能静默丢失、Pull没有该风险”，还给出了未测量的错误率。这里修正为待验证问题，保留完成通知与最终数据校验的分析过程。实际应用按传输API、stream完成结果及数据校验判断本次传输。
 
 ---
 
@@ -577,7 +553,7 @@ PCIe 链路层对所有事务提供相同的可靠性保证：
 ### 5.1 核心结论
 
 1. **die0 是 PCIe 主 die**：跨卡 P2P 数据先到 dst 的 die0，再经 HCCS 转发到 die1
-2. **src die 无影响**：无论 src 是 die0 还是 die1，带宽由 dst die 决定
+2. **历史矩阵中的方向差异**：所列跨卡读取结果与dst die类型存在明显关联
 3. **dst=die1 带宽骤降（Pull 模式）**：
    - 同 socket：~4 GB/s（Pull 模式的 3x 差异）
    - 跨 socket：~1.25 GB/s（Pull 模式的 10x 差异）
@@ -589,4 +565,4 @@ PCIe 链路层对所有事务提供相同的可靠性保证：
 1. **跨卡通信优先使用 dst die0**（偶数号设备）作为接收端
 2. **如必须使用 dst die1，优先采用 Push 模式**（src 主动写）
 3. **避免跨 socket + dst=die1 + Pull 模式**（最差场景，仅 ~1.25 GB/s）
-4. **关键数据传输**：使用 Push 模式后增加数据校验，确保完整性
+4. **数据完整性检查**：读取与写入方式均等待传输完成，并检查接收数据

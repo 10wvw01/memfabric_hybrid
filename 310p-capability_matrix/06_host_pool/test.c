@@ -155,7 +155,7 @@ static int boundary_line(int n, const char *who, const char *desc, int32_t ret)
         fflush(stdout);
         return 0;
     }
-    printf("[06] step %d (%s): %-58s 意外成功 ret=0 <- host register 可用?(310P3 文档为不可用)\n",
+    printf("[06] step %d (%s): %-58s 返回0；设备映射能力另由GetDevicePointer检查\n",
            n, who, desc);
     fflush(stdout);
     return 1;
@@ -732,7 +732,7 @@ int main(int argc, char *argv[])
 
         printf("[06] RESULT: %s", g_fail ? "FAIL" : "PASS");
         if (!g_fail && reg_ok)
-            printf("  ★观测: host register 系列接口意外成功(310P3 文档为不可用, 实测可用?)");
+            printf("  OBSERVE: 部分注册调用返回0；设备映射结果见step4h-4l");
         printf("\n");
         fflush(stdout);
     }

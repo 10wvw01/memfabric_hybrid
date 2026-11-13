@@ -1,10 +1,43 @@
-# 15_peer_needed — 跨卡 IPC 是否需要 enable peer(干净对照)
+# 15：跨卡IPC的peer启用条件
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/15_peer_needed
+A_DEV=2 B_DEV=6 bash run.sh
+```
+
+脚本依次执行下表五种模式。单独运行时先编译，再用`MODE=DEFAULT A_DEV=2 B_DEV=6 mpirun --allow-run-as-root -np 2 ./test`，按需替换MODE。
+
+## 2026-11-13测试结果
+
+Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64；跨卡设备2、6。
+
+| MODE | 显式peer启用操作 | 导入标志 | 导入返回值 | 数据校验 |
+|---|---|---|---:|---|
+| DEFAULT | 无 | DEFAULT | 507899 | 未执行 |
+| ENABLE | 仅导入方启用到导出方，返回0 | DEFAULT | 507899 | 未执行 |
+| ENABLE_R0 | 仅导出方启用到导入方，返回0 | DEFAULT | 507899 | 未执行 |
+| ENABLE_BOTH | 双方分别启用到对端，均返回0 | DEFAULT | 0 | 通过 |
+| PEER | 无 | ENABLE_PEER_ACCESS | 0 | 通过 |
+
+设备2、6上，DEFAULT导入在双侧显式启用peer后成功；仅一侧启用时返回507899。PEER标志方式无需显式启用即可导入并完成数据校验。
+
+五种模式均完成测试，脚本退出0。导入返回值和数据校验见表；初始化失败或成功导入后的数据错误返回非零。
+
+另用无效导出设备99验证初始化失败路径，程序退出1。`run.sh`会保留各模式真实退出码，并在任一模式发生测试失败时返回非零。
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、输出及分析。2026-11-13的执行情况见上表。
 
 Atlas 300I Duo (310P3) / CANN 9.1.0 / aarch64,MPI 双进程:
 rank0=exporter(dev A,`A_DEV` 默认 0),rank1=importer(dev B,`B_DEV` 默认 2)。
 
 ## 目的
-干净回答 **"跨卡 IPC import 是否需要 enable peer"**。
+比较跨卡IPC导入在未启用、单侧启用、双侧启用和PEER标志下的行为。
 
 本测试每次运行只测一个 MODE,进程独立,互不干扰。
 
@@ -31,7 +64,7 @@ MODE=DEFAULT A_DEV=0 B_DEV=2 mpirun --allow-run-as-root -np 2 ./test  # 单跑�
 **跨卡 IPC import 的必要条件是"双向 P2P 均已使能";PEER flag 并非唯一方式——手动双向 `aclrtDeviceEnablePeerAccess` + DEFAULT flag 同样可行(ENABLE_BOTH 已验证)。**
 
 五个 MODE 结果:
-- **DEFAULT → 507899**:无 P2P,跨卡必然失败。
+- **DEFAULT → 507899**:本组未启用P2P，导入返回507899。
 - **ENABLE → 507899**:rank1 单向(dev2→dev0)不够。
 - **ENABLE_R0 → 507899**:rank0 单向(dev0→dev2)也不够——证明不是"缺某个特定方向",是**双向都要**。
 - **ENABLE_BOTH → import OK + D2D OK**:两端各调一次 `EnablePeerAccess`,DEFAULT flag 即可跨卡成功。
@@ -63,3 +96,7 @@ if ((p2p_attr->ref == 0) && (p2p_peer_attr->ref > 0)) {
 **实用结论**:
 1. 推荐直接用 `ENABLE_PEER_ACCESS` flag,自动处理双向 P2P。
 2. 若用 DEFAULT flag,必须两端各调一次 `aclrtDeviceEnablePeerAccess`(或单进程 SetDevice 切换调两次,见官方文档示例)建立双向 P2P。
+
+## 当前程序的结果判定
+
+五种模式各用新进程，分别记录导入返回值。拒绝导入属于能力观察；初始化失败或导入成功后的数据校验错误使脚本返回非零。2026-11-13五种模式均完成，成功导入的两种模式读回校验通过；无效设备99的初始化对照返回非零。

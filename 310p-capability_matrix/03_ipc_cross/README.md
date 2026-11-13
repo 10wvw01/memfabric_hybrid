@@ -1,46 +1,49 @@
-# 03_ipc_cross — IPC key 链路跨卡(PCIe)
+# 03：跨卡IPC共享
 
-Atlas 300I Duo (310P3, 4 卡 × 2 die = 8 dev) / CANN 9.1.0 / aarch64,MPI 双进程:
-rank0=exporter(dev A,`A_DEV` 默认 0),rank1=importer(dev B,`B_DEV` 默认 2)。
+通过两个rank比较IPC跨卡导入，并验证导入映射的异步D2D及Host直接读写。
 
-## 验证能力
-- IPC 跨卡 PEER_ACCESS import ✓
-- 跨卡 async D2D 读+写 ✓(PEER imported VA,双向数据校验)
-- host 直达远端 H2D/D2H ✓(imported VA 上直接同步 memcpy)
+## 测试步骤与API
 
-## API 链
-- export:`aclrtMalloc(HUGE_FIRST_P2P)` → H2D pattern → `aclrtIpcMemGetExportKey(DISABLE_PID_VALIDATION)` → MPI 发 key
-- import:`aclrtIpcMemImportByKey(ENABLE_PEER_ACCESS)`(内部双向 EnablePeerAccess)
-- 拷贝:`aclrtMemcpyAsync(D2D)` + `aclrtSynchronizeStream`;host 直达:imported VA 上 `aclrtMemcpy`
-- cleanup:双方 `aclrtIpcMemClose`;exporter `aclrtFree`;ResetDevice 前 `aclrtDeviceDisablePeerAccess` 拆 P2P
+1. 导出方A以`aclrtMalloc(ACL_MEM_MALLOC_HUGE_FIRST_P2P)`分配32MiB，H2D写入带tag的数据。
+2. `aclrtIpcMemGetExportKey`导出IPC名称，经MPI传给导入方B。
+3. B调用`aclrtIpcMemImportByKey(..., ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS)`取得本进程地址。
+4. B异步D2D读取共享内存至本地设备缓冲区，等待stream，D2H逐字校验；再反向写入，由A读回校验。
+5. B直接对导入地址执行16MiB D2H/H2D，A复核更新。这里Host是传输源或目的端，不是D2D的中转区。
+6. 校验通过后分别测异步读取与写入带宽，3次预热、30次16MiB提交，末尾等待一次stream。
+7. 双方`aclrtIpcMemClose`，A释放物理内存；在设备重置前尝试`aclrtDeviceDisablePeerAccess`，销毁stream并结束ACL。
 
-校验 pattern:`value=(rank<<28)|(tag<<24)|(idx&0xFFFFFF)`,tag 每步不同防残留假阳性。
-带宽:正确性全过后,3 预热 + 30×16MB `MemcpyAsync` 提交 + 末尾 1 次 `StreamSync`(禁同步循环)。
 
 ## 运行
-```
-./run.sh                  # 默认 dev0→dev2(跨卡)
-A_DEV=1 B_DEV=4 ./run.sh  # 原 ✗ 单元格(10 实测 CANN 9.1.0 下 VMM 已可达)
-A_DEV=0 B_DEV=0 ./run.sh  # 同设备参考(PEER flag 非为同设备设计)
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/03_ipc_cross
+A_DEV=2 B_DEV=6 bash run.sh
 ```
 
-## 结论
+## 2026-11-13测试结果
 
-跨卡 IPC-PEER 全功能可用;RESULT: PASS。
+Ascend310P3，CANN 9.2.1，驱动26.1.1，aarch64。设备及数据规模见下表。
+
+| 检查项 | 本轮结果 |
+|---|---|
+| 设备 | 2、6，跨卡两个MPI rank |
+| PEER_ACCESS导入 | 成功 |
+| 异步D2D双向与Host直接读写 | 校验通过 |
+| 带宽 | 16MiB，3次预热、30次异步提交后同步：读12.42、写23.11 GB/s |
+| 清理 | 导入映射关闭和物理内存释放完成；r1 DisablePeerAccess返回0，r0返回507899 |
+| 总结果 | PASS，两个rank退出0 |
+
+本轮跨卡IPC共享读写可用。清理中一侧DisablePeerAccess的507899保留为实际观察，程序仍正常退出；不将该返回值写成全部清理API均成功。
+
+## 历史设备组合与方向对照
+
+之前的CANN 9.1.0记录如下：
 
 | 拓扑 | RESULT | bw 读 (p→local) | bw 写 (local→p) |
 |---|---|---|---|
 | 0→2 跨卡(默认) | PASS | ~11 GB/s | ~14 GB/s |
-| 1→4 ✗单元格 | PASS | 11.25 GB/s | 13.14 GB/s |
-| 4→1 ✗单元格反向 | PASS | **1.29 GB/s** | 13.00 GB/s |
+| 1→4 跨卡 | PASS | 11.25 GB/s | 13.14 GB/s |
+| 4→1 跨卡反向 | PASS | **1.29 GB/s** | 13.00 GB/s |
 | 0→0 同设备参考 | FAIL | — | — |
-
-- **跨卡 IPC-PEER 全功能通过**:import / async D2D 双向 / host 直达 / 逐字校验全 OK。
-  原 ✗ 单元格(dev1↔dev4)在 CANN 9.1.0 下 VMM 已可达(见 10),IPC-PEER 一直可用。
-- **带宽**:跨卡 PCIe 读 ~11 / 写 ~14 GB/s(写 > 读),低于 die 对 HCCS 17–19 GB/s(02),符合链路预期。
-- **4→1 单向慢读**:仅 1.29 GB/s(~9 倍差),两次复跑一致;正确性 OK,属带宽级单向不对称。
-- **同设备 0→0 FAIL**:PEER_ACCESS import ret=0 但数据通路坏;ENABLE_PEER_ACCESS 仅适用跨卡,同设备走 DEFAULT(02 已证)。
-- **D 态挂死已修复**:ResetDevice 前 `DisablePeerAccess` 拆 P2P,运行后无 D 状态残留。
-
-## 关联测试
-- **15_peer_needed**:跨卡裸 DEFAULT import 是否需要 PEER 的干净对照。本测试 step2 已 PEER import,P2P 状态 sticky 干扰后续 DEFAULT,故该问题由 15 在独立进程专门测试。

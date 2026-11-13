@@ -1,4 +1,21 @@
-# 12_topo_probe — 设备拓扑探测(CanAccessPeer / EnablePeerAccess)
+# 12：8设备拓扑与peer接口
+
+## 运行
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+export ASCEND_HOME=/usr/local/Ascend/cann
+cd 310p-capability_matrix/12_topo_probe
+bash run.sh
+```
+
+## 2026-11-13状态
+
+未执行：八设备未同时空闲。设备0、1、4、5有其他任务，设备2、3、6、7空闲。
+
+## 原有实验过程与数据
+
+以下保留CANN 9.1.0下的原有实验条件、步骤、输出及分析。2026-11-13的执行情况见上表。
 
 Atlas 300I Duo (310P3) / CANN 9.1.0 / aarch64,单进程,无 MPI。遍历 8 个 dev(4 卡 × 2 die,die 对 (0,1)(2,3)(4,5)(6,7))。
 
@@ -20,10 +37,10 @@ make && ./test     # 或 ./run.sh
 ## 预期结果
 - 8 个 dev SetDevice 全部 OK;
 - CanAccessPeer 矩阵:die 对(0,1)(2,3)(4,5)(6,7)can=0,其余 48 个有序跨卡对 can=1;
-- EnablePeerAccess:die 对预期返回 507899(drv internal error,同卡双 die 无 PCIe P2P 通路);跨卡预期全部返回 0(每对测试后立即 disable 避免累积状态污染);
+- EnablePeerAccess:die 对预期返回 507899(drv internal error,同卡双die的该调用返回驱动内部错误);跨卡预期全部返回 0(每对测试后立即 disable 避免累积状态污染);
 - RESULT: PASS(矩阵打印成功即 PASS,can 值 / enable 返回码是平台事实不算失败)。
 
-## ★实测结论
+## 实测结论
 
 **2026-08-25,单进程,`make && ./test`,RESULT: PASS(每对测试后立即 disable,消除累积状态污染;8 dev SetDevice 全 OK,两矩阵打印成功)。**
 
@@ -40,7 +57,7 @@ make && ./test     # 或 ./run.sh
   i=7           1       1       1       1       1       1       0       -
 ```
 - 全部 64 次查询 ret=0,无 API 错误;矩阵完全对称。
-- **die 对 (0,1)(2,3)(4,5)(6,7):can=0(双向,4/4)——符合预期,同卡双 die 之间无 P2P 通路。**
+- **die 对 (0,1)(2,3)(4,5)(6,7):can=0(双向,4/4)——符合预期,该接口对同卡双die返回can=0。**
 - **跨卡对(i<j)共 24 对:can=1 双向 24/24,can=0 为 0,无 mixed、无 API 错误——符合预期。**
 
 ### EnablePeerAccess 返回码矩阵(on dev i 调 `aclrtDeviceEnablePeerAccess(j,0)`,测试后立即 disable)
@@ -60,5 +77,5 @@ make && ./test     # 或 ./run.sh
 
 ### 结论摘要
 1. **拓扑事实确认:die 对 can=0(4/4)、跨卡 can=1(24/24),CanAccessPeer 完整可用且对称,与 4 卡 × 2 die 的 PCIe P2P 拓扑一致。**
-2. **EnablePeerAccess:die 对(同卡双 die)必然 507899;跨卡全部成功(48/48)。**
+2. **EnablePeerAccess:该次die对(同卡双die)调用返回507899;跨卡全部成功(48/48)。**
 3. 每对测试后立即 disable 可消除累积状态污染,确保所有跨卡 enable 正常完成。
