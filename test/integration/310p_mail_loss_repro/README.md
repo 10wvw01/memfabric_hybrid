@@ -1,53 +1,117 @@
-# mail_loss_repro：双 Rank 并发邮件丢失挂死（错误码 507014）复现器与取证工具
+# 310P3 接收通知丢失与等待超时复现测试
 
-## 背景
+该测试用于复现双 rank 并发收发过程中，接收通知未按预期就绪而导致等待超时的问题。
+历史故障表现为 vllm-ascend 中的 AICore 超时，错误码为507014。
+测试直接调用 MemFabric SHMEM SDMA 接口，无需启动 vLLM。
 
-vllm-ascend 侧 V2 融合算子在 310P3 单卡双 die TP=2 长稳验收（验收）中偶发双 Worker
-507014（AICore 超时）挂死，会话级复现率约 21%。取证交接包（`故障取证材料（vllm-ascend 仓库分支 MemFabric_GateE_507014_取证交接包），
-分支 wzy-dev-vllm-ascend）将丢失区间夹逼到 MemFabric 执行域。本工具在**不依赖 vLLM** 的前提下
-复现并裁决该类邮件丢失。
+每轮中，两个 rank 先连续提交搬运请求，再依次等待接收通知、校验通知字段和数据块首字，
+最后通过 quiet 等待本端发送完成。默认每轮处理4个数据块，每次 AICore kernel 执行一轮，
+两个 rank 通过 MPI 同步进度。
 
-## 已裁决的根因（本工具复现实锤，修复随本批合入）
+## 环境与构建
 
-| # | 根因 | 修复 | 复现特征 |
-|---|------|------|----------|
-| 1 | **ARR_HEAD 与 ARR_MAIL[1023] 共享 64B 缓存行**：AICPU（对端写邮件像）与 AICore（本端写消费游标）的软件缓存维护回写互踩，邮件内容被确定性清零 | 布局 V3：跨写者字段独占缓存行 | 确定性丢第 1024 封（首圈边界槽），邮件像全零 |
-| 2 | **戳 SQE 拷贝数据源=对端邮件像**：AICPU 跨芯片写面单后，同 die SDMA 立即跨芯片读回自己刚写的值——写在途时读到上一圈旧值（② 抄旧盖旧无声失效，③ 数微秒后读新值正确） | 单号改本端暂存数组（512×8B，本地写本地读） | ③成功②失效、旧值恰差 1024 一圈、双方向同窗各丢一封 |
-| 3 | 防 0 占位 SQE 曾用 src==dst 自拷贝——偶发卡死通道杀死紧随其后的戳指令 | 占位改邻字节拷贝（src≠dst） | ~2 万封/次、双方向同窗（同步步调同位插占位） |
+需要 Ascend310P3、CANN、bisheng 和 MPI。两个 rank 应使用同卡的两个 die，
+设备索引由 `EX09_DEVICE_BASE` 和 `EX09_DEVICE_BASE + 1` 指定。
+运行前通过 `npu-smi info` 确认目标设备及其占用情况。
 
-## 工具能力
-
-- **V2 同构流量**：双 rank 对称，每代 N chunk 突发 signal → 按序 wait（字段+数据双重校验）→ quiet；
-  收发缓冲分离；逐代 launch + MPI 栅栏同步步调
-- **有界等待**：等待/quiet/满环自旋全部有界——邮件丢失在秒级转化为显式状态码（不再依赖 507014 死等），
-  并杜绝 teardown 挂死（失败走 MPI_Abort）
-- **三重证据 dump**：kernel 卡点快照（stuck 槽/期待戳/实读戳/邮件像/请求游标）+ host 保留区全窗
-  （戳窗含被等槽邻柜、完成戳窗、请求槽原文）+ **编排诊断区**（逐单逐单日志：请求原文/计算地址/SQ 游标；
-  doorbell 尾值/返回码；固件 head 快照；冻结点 SQE 现场）
-- **判别逻辑**：dump 时复查被等槽——旧值=真丢失；新值=慢件（预算不足防误报）
-
-## 运行
+在仓库根目录加载本机的 CANN 环境，并设置 `ASCEND_HOME_PATH`。
+例如，使用已安装的 CANN 9.2.1：
 
 ```bash
-bash run.sh                # 默认 dev4/dev5, 1s 换轮(加压模式), 10000000 代
-# 关键旋钮:
-EX09_DEVICE_BASE=4         # 起始设备号(DEVICE_ID = base + rank)
-EX09_EPOCH_BUDGET_S=1      # 编排换轮周期: 1=攻击(边界×15), 15=生产对照
-EX09_GEN_DELAY_US=50000    # 每代间隔: 50000≈V2 真实速率; 0=不限速
-EX09_CHUNKS=4              # 每代 chunk 数(批步长鉴别旋钮)
-EX09_TOTAL_GENS=24000      # 总代数
-EX09_WAIT_BUDGET=10000000  # 单次 launch 轮询预算(防 28s 同步超时)
+source /usr/local/Ascend/cann-9.2.1/set_env.sh
+export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.2.1
 ```
 
-## 验证基线（v28 修复后，真机 310P3）
+`ASCEND_RT_VISIBLE_DEVICES` 会限制进程可见的设备并重新编号。以下示例先清除该变量，
+再使用当前容器中的设备索引0/1：
 
-- V2 工况长 soak：24000 代 × 4 = **96000 封/方向（94 圈）零丢失**（50ms/代、15s 换轮）
-- 加压组合（chunks 1/4/8 @1s 换轮）各 3000 代 + 长时加压 10000 代：零丢失
-- 历史失败样本（修复前）：确定性丢第 1024 封（根因 1）；~2 万封/次双侧同窗丢邮件（根因 2/3）
+```bash
+unset ASCEND_RT_VISIBLE_DEVICES
+EX09_DEVICE_BASE=0 EX09_TOTAL_GENS=10000 EX09_CHUNKS=4 \
+  bash test/integration/310p_mail_loss_repro/run.sh
+```
 
-## 与相关内容的关系
+脚本会编译测试程序；缺少主库静态库时先构建主库。测试程序写入
+`/tmp/mf_mail_loss_repro`，同一容器内应顺序执行该测试，避免并发覆盖编译产物。
+AICPU kernel 启动配置从当前仓库的构建目录中选择版本号最大的
+`libmf_sdma_orch_v*.json`。
 
-- 修复代码：`src/smem/include/device/smem_shm_sdma_layout.h`（布局 V3）、
-  `src/hybm/ops/hybm_kernel/hybm_sdma_orch_kernel.cc`（暂存源/加固/诊断）
-- 事实档案：`docs/310p/平台事实.md`（并发邮件丢失挂死（507014） 定案条目）
-- 姊妹测试：`test/integration/310p_sdma_stability/`（常规长稳+设备同步探针）
+也可以分开编译和运行：
+
+```bash
+bash test/integration/310p_mail_loss_repro/run.sh --build-only
+EX09_DEVICE_BASE=0 EX09_TOTAL_GENS=10000 EX09_CHUNKS=4 \
+  bash test/integration/310p_mail_loss_repro/run.sh --run-only
+```
+
+## 运行参数
+
+| 环境变量 | 默认值 | 含义 |
+|---|---:|---|
+| `EX09_DEVICE_BASE` | 4 | rank 0的起始设备索引，rank 1使用下一索引；上述示例显式指定0 |
+| `EX09_TOTAL_GENS` | 10000000 | 每个 rank 执行的总轮数 |
+| `EX09_CHUNKS` | 4 | 每轮发送的数据块数 |
+| `EX09_CHUNK_BYTES` | 131072 | 每个数据块的字节数 |
+| `EX09_BATCH_GENS` | 1 | 每次 AICore kernel 执行的轮数；值为1时逐轮进行 MPI 同步 |
+| `EX09_GEN_DELAY_US` | 0 | 两次 AICore kernel 执行之间的等待时间，单位为微秒 |
+| `EX09_EPOCH_BUDGET_S` | 1 | AICPU kernel 单次运行时间，单位为秒；缩短时间会增加重启频率 |
+| `EX09_WAIT_BUDGET` | 10000000 | 等待操作使用的轮询预算，实际耗时取决于设备 |
+| `EX09_STALL_S` | 60 | host 检查进度无变化的超时时间，单位为秒 |
+
+## 如何判断结果
+
+首先检查启动日志中的 `devId`，确认两个 rank 使用预期设备。
+程序正常完成时，应满足以下条件：
+
+- 进程退出码为0。
+- 两个 rank 的终态 `gensDone` 均等于配置的总轮数。
+- `sent` 和 `recv` 均等于总轮数乘以每轮数据块数。
+- 最终汇总行显示两个 rank 正常，且“本次运行未检测到异常”。
+
+`state=0` 表示尚未记录设备侧异常，`state=5` 表示完成。
+判断运行是否完整时还需核对轮数和收发数量。
+
+### AICPU 请求调试记录
+
+程序结束时输出 AICPU 调试信息，包括 doorbell 更新硬件提交位置时使用的值、
+返回码及累计请求记录数。随后输出最近的请求记录，每条包含请求序号、
+源地址、目标地址、长度、标签、接收通知地址和硬件提交位置变化。
+
+记录保存在60槽的环形缓冲区中。累计记录数为 `N` 时，应输出
+`min(N, 60)` 条；序号从 `max(0, N-60)` 到 `N-1` 连续递增。
+两个 rank 的输出可以交错，应分别检查各 rank 的序号。
+
+日志中的位置字段含义如下：
+
+| 字段 | 含义 |
+|---|---|
+| `reqTail` | 请求生产位置，AICore 下一条请求对应的累计序号 |
+| `reqHead` | 请求消费位置，AICPU 下一条待处理请求的累计序号 |
+| `pending` | 生产位置减消费位置，表示尚未消费的请求数量 |
+| `arrHead` | 接收通知消费位置，下一条待处理接收通知的累计序号 |
+| `notifyAddr` | 对端接收通知的写入地址 |
+| `sqTail` | SQE 硬件提交队列的提交位置，日志显示处理请求前后的值 |
+
+### 异常状态
+
+| state | 含义 |
+|---:|---|
+| 1 | 等待接收通知超出轮询预算 |
+| 2 | 软件请求环形队列持续满，或提交请求失败 |
+| 3 | 接收通知的序号、目标地址、长度或标签不匹配 |
+| 4 | 等待发送完成超出轮询预算 |
+| 6 | 接收数据块首字与预期校验值不符 |
+| 7 | 接收就绪序号超过期望值 |
+
+异常日志还会输出软件请求队列的生产和消费位置、接收就绪序号数组、
+发送完成序号数组及失败时的接收通知。序号复查结果只报告当时读取到的状态；
+具体原因需结合请求记录和收发计数分析。
+
+异常退出路径使用 `MPI_Abort`，避免设备异常导致资源清理过程阻塞。
+
+## 相关代码
+
+- `src/smem/include/device/smem_shm_sdma_layout.h`：软件请求队列、接收通知和序号数组布局。
+- `src/hybm/ops/hybm_kernel/hybm_sdma_orch_kernel.cc`：AICPU 请求处理及调试记录写入。
+- `src/hybm/ops/hybm_kernel/hybm_sdma_contract.h`：AICPU 工作区和调试记录共享布局。
+- `test/integration/310p_sdma_stability/`：SDMA 稳定性测试。
