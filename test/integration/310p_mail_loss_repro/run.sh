@@ -106,6 +106,7 @@ build_example()
         -DOMPI_SKIP_MPICXX \
         -I"$MPI_INC" -I"$CANN_INC" \
         -I"$ROOT/src/smem/include/host" -I"$ROOT/src/smem/include/device" \
+        -I"$ROOT/src/hybm/ops/hybm_kernel" \
         -Wl,--start-group "${MAIN_LIBS[@]}" -Wl,--end-group \
         -L"$MPI_LIB" -lmpi -L"$CANN_LIB" -lascendcl -lruntime \
         -ldl -pthread -lm
