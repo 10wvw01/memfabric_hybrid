@@ -73,6 +73,16 @@ void MpBarrier()
     MPI_Barrier(MPI_COMM_WORLD);
 }
 
+/* 单个rank失败时结束MPI任务，避免其他rank继续等待不同阶段的同步。 */
+[[noreturn]] void AbortTest(int rank, const char *stage, int32_t ret)
+{
+    fprintf(stderr, "[rank %d ERROR] %s失败: ret=%d，结束MPI任务\n", rank, stage, ret);
+    fflush(stdout);
+    fflush(stderr);
+    MPI_Abort(MPI_COMM_WORLD, 1);
+    std::exit(1);
+}
+
 std::string PeerUniqueId(int rank, int worldSize)
 {
     char buf[64];
@@ -400,31 +410,26 @@ int main(int argc, char *argv[])
 
     int32_t ret = smem_init(0);
     if (ret != 0) {
-        fprintf(stderr, "[rank %d] smem_init failed:%d\n", rank, ret);
-        MPI_Finalize();
-        return ret;
+        AbortTest(rank, "smem_init", ret);
     }
 
     if (rank == 0) {
         ret = smem_create_config_store(storeUrl, 0);
         if (ret != 0) {
             fprintf(stderr, "[rank 0] smem_create_config_store failed:%d storeUrl:%s\n", ret, storeUrl);
-            MPI_Abort(MPI_COMM_WORLD, ret);
+            AbortTest(rank, "smem_create_config_store", ret);
         }
     }
     MpBarrier();
 
     ret = TransInit(rank, devId);
     if (ret != 0) {
-        MPI_Finalize();
-        return ret;
+        AbortTest(rank, "TransInit", ret);
     }
 
     smem_trans_t handle = TransCreate(rank, devId, storeUrl);
     if (handle == nullptr) {
-        smem_trans_uninit(0);
-        MPI_Finalize();
-        return 1;
+        AbortTest(rank, "TransCreate", 1);
     }
     MpBarrier();
     sleep(1);
@@ -433,10 +438,7 @@ int main(int argc, char *argv[])
     devMem = hybm_alloc_vmm_buffer(static_cast<uint32_t>(devId), static_cast<uint32_t>(worldSize), ALLOC_SIZE);
     if (devMem == nullptr) {
         fprintf(stderr, "[rank %d] hybm_alloc_vmm_buffer failed size:%lu\n", rank, ALLOC_SIZE);
-        smem_trans_destroy(handle, 0);
-        smem_trans_uninit(0);
-        MPI_Finalize();
-        return -1;
+        AbortTest(rank, "hybm_alloc_vmm_buffer", -1);
     }
     printf("[rank %d] aclrtMalloc(VMM) OK addr:%p size:%lu\n", rank, devMem, ALLOC_SIZE);
 
@@ -444,32 +446,31 @@ int main(int argc, char *argv[])
 
     ret = TestSyncWriteRead(rank, worldSize, handle, devMem, devAddrs);
     if (ret != 0) {
-        goto cleanup;
+        AbortTest(rank, "TestSyncWriteRead", ret);
     }
 
     ret = TestAsyncSubmit(rank, worldSize, handle, devMem, devAddrs);
     if (ret != 0) {
-        goto cleanup;
+        AbortTest(rank, "TestAsyncSubmit", ret);
     }
 
     ret = TestSyncRead(rank, worldSize, handle, devMem, devAddrs);
     if (ret != 0) {
-        goto cleanup;
+        AbortTest(rank, "TestSyncRead", ret);
     }
 
     ret = TestAsyncReadSubmit(rank, worldSize, handle, devMem, devAddrs);
     if (ret != 0) {
-        goto cleanup;
+        AbortTest(rank, "TestAsyncReadSubmit", ret);
     }
 
     ret = TestDeregister(rank, handle, devMem);
     if (ret != 0) {
-        goto cleanup;
+        AbortTest(rank, "TestDeregister", ret);
     }
 
     printf("[rank %d] ALL TESTS PASS\n", rank);
 
-cleanup:
     if (devMem != nullptr) {
         hybm_free_vmm_buffer(devMem, ALLOC_SIZE);
     }
