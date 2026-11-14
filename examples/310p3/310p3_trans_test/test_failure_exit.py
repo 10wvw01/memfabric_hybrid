@@ -3,6 +3,7 @@
 
 需要已构建的示例、MemFabric库及CANN环境。注册结果不一致的用例会先完成两端真实注册，
 再仅向选定rank返回失败，以检查不同阶段的MPI等待能否及时结束。
+数据校验用例跳过指定方向的传输并返回成功，检查示例能否发现数据未更新。
 """
 
 import argparse
@@ -47,6 +48,16 @@ static int32_t Failure(const char *stage)
 static int32_t AfterCall(const char *stage, int32_t ret)
 {
     return ret == 0 && ShouldFail(stage) ? Failure(stage) : ret;
+}
+
+static int SkipTransfer(const char *stage)
+{
+    if (!ShouldFail(stage)) {
+        return 0;
+    }
+    fprintf(stderr, "[INJECT rank=%s] %s: skip transfer, return=0\n", getenv("OMPI_COMM_WORLD_RANK"), stage);
+    fflush(stderr);
+    return 1;
 }
 
 int32_t smem_trans_init(const smem_trans_config_t *config)
@@ -98,6 +109,9 @@ int32_t smem_trans_register_mem(smem_trans_t handle, void *address, size_t size,
 int32_t smem_trans_write(smem_trans_t handle, const void *local, const char *peer, void *remote, size_t size,
                          uint32_t flags)
 {
+    if (SkipTransfer("skip_write")) {
+        return 0;
+    }
     auto real_write = reinterpret_cast<decltype(&smem_trans_write)>(dlsym(RTLD_NEXT, "smem_trans_write"));
     return AfterCall("write", real_write(handle, local, peer, remote, size, flags));
 }
@@ -105,6 +119,9 @@ int32_t smem_trans_write(smem_trans_t handle, const void *local, const char *pee
 int32_t smem_trans_write_submit(smem_trans_t handle, const void *local, const char *peer, void *remote, size_t size,
                                 void *stream, uint32_t flags)
 {
+    if (SkipTransfer("skip_write_submit")) {
+        return 0;
+    }
     auto real_write = reinterpret_cast<decltype(&smem_trans_write_submit)>(dlsym(RTLD_NEXT, "smem_trans_write_submit"));
     return AfterCall("write_submit", real_write(handle, local, peer, remote, size, stream, flags));
 }
@@ -112,6 +129,9 @@ int32_t smem_trans_write_submit(smem_trans_t handle, const void *local, const ch
 int32_t smem_trans_read(smem_trans_t handle, void *local, const char *peer, const void *remote, size_t size,
                         uint32_t flags)
 {
+    if (SkipTransfer("skip_read")) {
+        return 0;
+    }
     auto real_read = reinterpret_cast<decltype(&smem_trans_read)>(dlsym(RTLD_NEXT, "smem_trans_read"));
     return AfterCall("read", real_read(handle, local, peer, remote, size, flags));
 }
@@ -119,6 +139,9 @@ int32_t smem_trans_read(smem_trans_t handle, void *local, const char *peer, cons
 int32_t smem_trans_read_submit(smem_trans_t handle, void *local, const char *peer, const void *remote, size_t size,
                                void *stream, uint32_t flags)
 {
+    if (SkipTransfer("skip_read_submit")) {
+        return 0;
+    }
     auto real_read = reinterpret_cast<decltype(&smem_trans_read_submit)>(dlsym(RTLD_NEXT, "smem_trans_read_submit"));
     return AfterCall("read_submit", real_read(handle, local, peer, remote, size, stream, flags));
 }
@@ -240,6 +263,15 @@ class TransFailureExitTest(unittest.TestCase):
 
     def test_deregister_failure(self):
         self.run_case("deregister", 0)
+
+    def test_missing_transfer(self):
+        for operation in ("write", "write_submit", "read", "read_submit"):
+            for rank in (0, 1):
+                with self.subTest(operation=operation, rank=rank):
+                    output = self.run_case("skip_" + operation, rank)
+                    self.assertIn("skip transfer, return=0", output)
+                    self.assertIn("verify FAIL total_errors:4194304", output)
+                    self.assertNotIn("ALL TESTS PASS", output)
 
     def test_completed(self):
         self.run_case("normal", expected=0)
