@@ -51,7 +51,8 @@ constexpr uint64_t COPY_SIZE = 16ULL * 1024ULL * 1024ULL;
 
 uint32_t Pat(uint32_t tag, size_t idx)
 {
-    return (tag << 24) | (static_cast<uint32_t>(idx) & 0x00FFFFFFU);
+    // 奇数乘法保留标签差异，避免高位标签左移后被截断。
+    return (tag * 0x9E3779B1U) ^ static_cast<uint32_t>(idx);
 }
 
 int MpRank()
