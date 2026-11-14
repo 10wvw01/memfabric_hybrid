@@ -69,7 +69,9 @@ EX09_DEVICE_BASE=0 EX09_TOTAL_GENS=10000 EX09_CHUNKS=4 \
 - 最终汇总行显示两个 rank 正常，且“本次运行未检测到异常”。
 
 `state=0` 表示尚未记录设备侧异常，`state=5` 表示完成。
-判断运行是否完整时还需核对轮数和收发数量。
+程序会自动检查是否收到中断信号、设备状态、完成轮数及收发数量。
+stream创建、同步、销毁或运行状态读取失败，以及进度超时，均返回失败。
+任一rank失败时通过MPI_Abort结束任务，避免其他rank继续等待同步。
 
 ### AICPU 请求调试记录
 
@@ -108,6 +110,21 @@ EX09_DEVICE_BASE=0 EX09_TOTAL_GENS=10000 EX09_CHUNKS=4 \
 具体原因需结合请求记录和收发计数分析。
 
 异常退出路径使用 `MPI_Abort`，避免设备异常导致资源清理过程阻塞。
+
+## 退出码回归测试
+
+先按上面的步骤编译测试程序，在已加载CANN环境且设备0/1可用时运行：
+
+```bash
+python3 test/integration/310p_mail_loss_repro/test_exit_status.py \
+  --binary /tmp/mf_mail_loss_repro \
+  --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v32.json
+```
+
+脚本会执行真实收发，并通过临时预加载库改变host收到的接口返回值或状态快照。
+检查内容包括stream错误、状态读取失败、进度超时、中断、完成轮数和计数不符，
+以及单个rank失败时能否结束MPI任务。正常完成和零轮运行作为对照。
+运行需要C编译器，日志可通过 --log-dir 指定目录保存。
 
 ## 相关代码
 
