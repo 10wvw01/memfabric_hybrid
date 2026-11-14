@@ -61,3 +61,23 @@ mpirun --allow-run-as-root -np 2 ./310p3_trans_test tcp://127.0.0.1:24000
 - 测试使用 `SMEM_TRANS_BOTH` 角色，每个 rank 既是 sender 又是 receiver
 - `devId = rankId`，MPI rank 0 对应 dev0，rank 1 对应 dev1，以此类推
 - 跨卡测试需确保 dev0..dev3 分别在不同卡上（dev0/dev1=card0, dev2/dev3=card1）
+
+## 失败退出与回归验证
+
+任一rank在初始化、创建、分配内存或测试阶段返回失败时，程序会记录rank、阶段和返回码，
+然后通过MPI_Abort结束整个任务。正常完成时执行原有退出流程，mpirun返回0。
+
+在已加载CANN和本次构建库的环境中，可以验证错误退出：
+
+```bash
+python3 examples/310p3/310p3_trans_test/test_failure_exit.py \
+  --binary examples/310p3/310p3_trans_test/310p3_trans_test
+```
+
+脚本固定使用设备0/1，执行真实注册及16MiB读写，并通过临时预加载库注入错误。
+注册结果不一致的用例先让两端完成真实注册，再仅向选定rank返回失败。
+无故障对照使用相同的额外同步，检查正常流程仍能完成。
+
+回归覆盖注册、各类读写、注销及初始化失败。单rank失败应使任务以非零退出，
+并在脚本的等待上限内结束（默认30秒）。脚本需要MPI的C++编译器，动态库和头文件默认使用仓库output目录；
+可通过--mf-home指定安装目录，通过--log-dir保存日志。
