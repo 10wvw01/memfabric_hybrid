@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <cerrno>
 #include <cstring>
 #include <string>
 #include <cstdio>
@@ -180,16 +181,27 @@ void BandWidthCalculator::RunSubProcess(uint32_t idx, int32_t pipeFdWrite)
     std::exit(ret != 0 ? 1 : 0);
 }
 
-int32_t BandWidthCalculator::CollectSubProcessResults(std::vector<pid_t> &pids,
-                                                      std::vector<std::array<int, 2>> &pipes)
+int32_t BandWidthCalculator::CollectSubProcessResults(std::vector<pid_t> &pids, std::vector<std::array<int, 2>> &pipes)
 {
-    int status[RANK_SIZE_MAX];
+    int32_t ret = 0;
     for (uint32_t i = 0; i < cmdParam_.localRankSize; ++i) {
-        waitpid(pids[i], &status[i], 0);
-        if (WIFEXITED(status[i]) && WEXITSTATUS(status[i]) != 0) {
-            LOG_INFO("subprocess exit error: " << i);
-        } else if (WIFSIGNALED(status[i])) {
-            LOG_INFO("subprocess (" << i << ") terminated by signal: " << WTERMSIG(status[i]));
+        int status = 0;
+        pid_t waited;
+        do {
+            waited = waitpid(pids[i], &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited < 0) {
+            const int waitError = errno;
+            LOG_ERROR("waitpid failed, pid:" << pids[i] << " rank:" << i + cmdParam_.localRankStart
+                                             << " errno:" << waitError);
+            ret = -1;
+            continue;
+        }
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            LOG_ERROR("subprocess failed, pid:" << pids[i] << " rank:" << i + cmdParam_.localRankStart
+                                                << " exitCode=" << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
+                                                << " signal=" << (WIFSIGNALED(status) ? WTERMSIG(status) : 0));
+            ret = -1;
         }
     }
     std::vector<BwTestResult> resultVec;
@@ -198,7 +210,7 @@ int32_t BandWidthCalculator::CollectSubProcessResults(std::vector<pid_t> &pids,
         close(pipes[i][0]);
     }
     PrintResult(resultVec);
-    return 0;
+    return ret;
 }
 
 void BandWidthCalculator::ReadPipeResult(int32_t fd, std::vector<BwTestResult> &resultVec)

@@ -254,13 +254,14 @@ void ParseCmdBw(int argc, char *argv[], BwTestParam &opts)
     CheckCmdBw(opts);
 }
 
-void RunBwTest(BwTestParam &opts)
+int32_t RunBwTest(BwTestParam &opts)
 {
     BandWidthCalculator bwCalculator(opts);
     auto ret = bwCalculator.MultiProcessExecute();
     if (ret != 0) {
-        LOG_ERROR("bandwidth test failed.");
+        LOG_ERROR("bandwidth test failed, ret:" << ret);
     }
+    return ret;
 }
 
 int main(int32_t argc, char *argv[])
@@ -279,7 +280,9 @@ int main(int32_t argc, char *argv[])
         opts.hbmPoolSize = DEFAULT_HBM_POOL_SIZE;
         opts.dramPoolSize = DEFAULT_DRAM_POOL_SIZE;
         ParseCmdBw(argc, argv, opts);
-        RunBwTest(opts);
+        if (RunBwTest(opts) != 0) {
+            return 1;
+        }
     } else {
         ExitWithError("unknown command: " + cmd);
     }
