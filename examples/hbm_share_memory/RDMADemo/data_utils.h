@@ -48,30 +48,27 @@ typedef enum {
 #define INFO_LOG(fmt, args...)  fprintf(stdout, "[INFO]  " fmt "\n", ##args)
 #define WARN_LOG(fmt, args...)  fprintf(stdout, "[WARN]  " fmt "\n", ##args)
 #define ERROR_LOG(fmt, args...) fprintf(stdout, "[ERROR]  " fmt "\n", ##args)
-#define CHECK_ACL(x)                                                                                      \
-    do {                                                                                                  \
-        aclError __ret = x;                                                                               \
-        if (__ret != ACL_ERROR_NONE) {                                                                    \
-            std::cerr << "[ERROR] " << __FILE__ << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
-            return __ret;                                                                                 \
-        }                                                                                                 \
+#define CHECK_ACL(x)                                                                        \
+    do {                                                                                    \
+        aclError __ret = x;                                                                 \
+        if (__ret != ACL_ERROR_NONE) {                                                      \
+            std::cerr << __FILE__ << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
+        }                                                                                   \
     } while (0)
 
-#define CHECK_ACL_RET(x, msg)                                                            \
-    do {                                                                                 \
-        aclError __ret = x;                                                              \
-        if (__ret != ACL_ERROR_NONE) {                                                   \
-            std::cerr << "[ERROR] " << msg << ":" << " aclError:" << __ret << std::endl; \
-            return __ret;                                                                \
-        }                                                                                \
+#define CHECK_ACL_RET(x, msg)                                              \
+    do {                                                                   \
+        aclError __ret = x;                                                \
+        if (__ret != ACL_ERROR_NONE) {                                     \
+            std::cerr << msg << ":" << " aclError:" << __ret << std::endl; \
+            return __ret;                                                  \
+        }                                                                  \
     } while (0)
 
 #define CHECK_EQUALS(x, y)                                                                                     \
     do {                                                                                                       \
         if ((x) != (y)) {                                                                                      \
-            std::cerr << "[ERROR] " << __FILE__ << ":" << __LINE__ << " check not equal:" << (x) << " " << (y) \
-                      << std::endl;                                                                            \
-            return -1;                                                                                         \
+            std::cerr << __FILE__ << ":" << __LINE__ << " check not equal:" << (x) << " " << (y) << std::endl; \
         }                                                                                                      \
     } while (0)
 

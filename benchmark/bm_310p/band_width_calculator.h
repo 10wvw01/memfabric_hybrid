@@ -93,7 +93,7 @@ private:
     int32_t ForkSubProcesses(std::vector<pid_t> &pids, std::vector<std::array<int, 2>> &pipes);
     void RunSubProcess(uint32_t idx, int32_t pipeFdWrite);
     int32_t CollectSubProcessResults(std::vector<pid_t> &pids, std::vector<std::array<int, 2>> &pipes);
-    int32_t ReadPipeResult(int32_t fd, std::vector<BwTestResult> &resultVec);
+    void ReadPipeResult(int32_t fd, std::vector<BwTestResult> &resultVec);
 
     int32_t CreateAndJoinPools(uint32_t rankId);
     void DestroyPools();

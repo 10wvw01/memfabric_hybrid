@@ -1034,7 +1034,7 @@ struct DeviceTestFixture {
 
     void OpenAndPreparePeer(DeviceUrmaTransportManager &manager) const
     {
-        TransportOptions opts{};
+        TransportOptions opts;
         opts.rankId = 0;
         opts.rankCount = 2UL;
         opts.protocol = HYBM_DOP_TYPE_DEVICE_URMA;

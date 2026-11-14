@@ -1021,14 +1021,7 @@ void HybmVmmBasedSegment::ReleaseP2PLeases(const std::set<uint32_t> &removedRank
     for (auto phyId : toRelease) {
         Result disRet = BM_OK;
         if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
-            int32_t logicId = -1;
-            auto convRet = DlAclApi::AclrtGetLogicDevIdByPhyDevId(phyId, &logicId);
-            if (convRet != BM_OK || logicId < 0) {
-                BM_LOG_ERROR("peer device conversion failed, ret:" << convRet << " local_user:" << deviceId_
-                                                                   << " remote_phy:" << phyId);
-                continue;
-            }
-            disRet = DlAclApi::AclrtDeviceDisablePeerAccess(logicId);
+            disRet = DlAclApi::AclrtDeviceDisablePeerAccess(phyId, 0);
         } else {
             disRet = DlAclApi::RtDisableP2P(static_cast<uint32_t>(deviceId_), static_cast<uint32_t>(phyId));
         }

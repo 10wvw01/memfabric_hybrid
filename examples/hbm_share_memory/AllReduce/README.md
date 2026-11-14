@@ -66,12 +66,3 @@
   ```
 
 - 如需要跨机在A3超节点内运行，可以参考run.sh内执行shm_kernels命令在多个节点内运行
-
-## Ascend310P 示例入口
-
-本目录使用通用 SHM kernel。Ascend310P 的设备发起搬运与多 rank 规约使用专用示例：
-
-- [08：双 rank AICore/AICPU SDMA 协同](../../memory_pool/01_basic/08_310p_aicore_aicpu_sdma/)
-- [09：四 rank AICore/AICPU SDMA AllReduce](../../memory_pool/01_basic/09_310p_aicore_aicpu_sdma_4rank/)
-
-构建参数检查与运行入口会识别 Ascend310P 并输出上述路径。

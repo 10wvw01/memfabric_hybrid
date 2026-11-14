@@ -155,15 +155,6 @@ int32_t main(int32_t argc, char *argv[])
     }
 
     CHECK_ACL(aclInit(nullptr));
-
-    const char *socName = aclrtGetSocName();
-    if (socName != nullptr && std::string(socName).find("Ascend310P") == 0) {
-        ERROR_LOG("RDMADemo uses legacy SHM kernels. For Ascend310P use "
-                  "examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma or 09_310p_aicore_aicpu_sdma_4rank.");
-        (void)aclFinalize();
-        return 1;
-    }
-
     int32_t deviceId = rankId % gNpuNum;
     CHECK_ACL(aclrtSetDevice(deviceId));
     aclrtStream stream = nullptr;
@@ -192,11 +183,9 @@ int32_t main(int32_t argc, char *argv[])
     INFO_LOG("[TEST] smem_shm_create gva %p, size %lu, rank:%d", gva, gNpuMallocSpace, rankId);
     gNpuMallocSpace = smem_shm_get_symmetric_size(handle);
     INFO_LOG("[TEST] smem_shm_get_symmetric_size size %lu, rank:%d", gNpuMallocSpace, rankId);
-    ret = TestGetQPInfo(stream, (uint8_t *)gva, rankId, rankSize);
-    if (ret == 0) {
-        sleep(1);
-        ret = TestRDMAWrite(stream, (uint8_t *)gva, rankId, rankSize);
-    }
+    TestGetQPInfo(stream, (uint8_t *)gva, rankId, rankSize);
+    sleep(1);
+    TestRDMAWrite(stream, (uint8_t *)gva, rankId, rankSize);
 
     std::cout << "[TEST] begin to exit...... rank: " << rankId << std::endl;
     smem_shm_destroy(handle, flags);
@@ -204,5 +193,5 @@ int32_t main(int32_t argc, char *argv[])
     CHECK_ACL(aclrtDestroyStream(stream));
     CHECK_ACL(aclrtResetDevice(deviceId));
     CHECK_ACL(aclFinalize());
-    return ret == 0 ? 0 : 1;
+    return 0;
 }

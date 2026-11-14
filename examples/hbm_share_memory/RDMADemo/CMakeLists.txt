@@ -3,14 +3,6 @@ project(Ascend_c)
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
 set(SOC_VERSION "Ascend910B3" CACHE STRING "system on chip type")
-
-if(SOC_VERSION MATCHES "310P")
-    message(FATAL_ERROR
-        "RDMADemo uses legacy SHM kernels. For Ascend310P use "
-        "examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma or "
-        "09_310p_aicore_aicpu_sdma_4rank.")
-endif()
-
 set(ASCEND_CANN_PACKAGE_PATH $ENV{ASCEND_HOME_PATH})
 if ("${ASCEND_CANN_PACKAGE_PATH}" STREQUAL "")
     message(FATAL_ERROR "ascend cann path not found!")

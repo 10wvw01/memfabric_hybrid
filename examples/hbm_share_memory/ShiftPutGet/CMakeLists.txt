@@ -1,14 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(Ascend_c)
 
-if(ENV_VERSION MATCHES "310P")
-    message(FATAL_ERROR
-        "ShiftPutGet uses legacy SHM kernels. For Ascend310P use "
-        "examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma or "
-        "09_310p_aicore_aicpu_sdma_4rank.")
-endif()
-
-
 set(ASCEND_CANN_PACKAGE_PATH $ENV{ASCEND_HOME_PATH})
 if ("${ASCEND_CANN_PACKAGE_PATH}" STREQUAL "")
     message(FATAL_ERROR "ascend cann path not found!")
