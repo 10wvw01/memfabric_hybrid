@@ -981,6 +981,31 @@ bool HybmVmmBasedSegment::CheckSdmaReaches(uint32_t rankId) const noexcept
     return true;
 }
 
+Result HybmVmmBasedSegment::ReleaseP2PLease(int32_t phyId) noexcept
+{
+    Result ret;
+    int32_t peerUserId = phyId;
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+        // P2P记录保存物理编号，ACL释放接口使用当前进程的程序设备编号。
+        ret = DlAclApi::AclrtGetLogicDevIdByPhyDevId(phyId, &peerUserId);
+        if (ret != BM_OK || peerUserId < 0) {
+            BM_LOG_ERROR("P2P释放设备编号转换失败 ret:" << ret << " local_user:" << deviceId_ << " remote_phy:" << phyId
+                                                        << " remote_user:" << peerUserId);
+            return BM_DL_FUNCTION_FAILED;
+        }
+        ret = DlAclApi::AclrtDeviceDisablePeerAccess(peerUserId, 0);
+    } else {
+        ret = DlAclApi::RtDisableP2P(static_cast<uint32_t>(deviceId_), static_cast<uint32_t>(phyId));
+    }
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("DisableP2P failed:" << ret << " local_user:" << deviceId_ << " remote_phy:" << phyId
+                                          << " remote_user:" << peerUserId);
+        return ret;
+    }
+    BM_LOG_INFO("DisableP2P success local_user:" << deviceId_ << " remote_phy:" << phyId);
+    return BM_OK;
+}
+
 void HybmVmmBasedSegment::ReleaseP2PLeases(const std::set<uint32_t> &removedRanks) noexcept
 {
     if (p2pLeases_.empty()) {
@@ -1019,18 +1044,9 @@ void HybmVmmBasedSegment::ReleaseP2PLeases(const std::set<uint32_t> &removedRank
         toRelease = std::move(actualRelease);
     }
     for (auto phyId : toRelease) {
-        Result disRet = BM_OK;
-        if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
-            disRet = DlAclApi::AclrtDeviceDisablePeerAccess(phyId, 0);
-        } else {
-            disRet = DlAclApi::RtDisableP2P(static_cast<uint32_t>(deviceId_), static_cast<uint32_t>(phyId));
+        if (ReleaseP2PLease(phyId) == BM_OK) {
+            p2pLeases_.erase(phyId);
         }
-        if (disRet != BM_OK) {
-            BM_LOG_WARN("DisableP2P failed:" << disRet << " local_user:" << deviceId_ << " remote_phy:" << phyId);
-        } else {
-            BM_LOG_INFO("DisableP2P success local_user:" << deviceId_ << " remote_phy:" << phyId);
-        }
-        p2pLeases_.erase(phyId);
     }
 }
 
