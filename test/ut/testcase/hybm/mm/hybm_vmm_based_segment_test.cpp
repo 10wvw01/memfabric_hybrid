@@ -99,6 +99,36 @@ int HalMemUnmapOk(void *)
 {
     return BM_OK;
 }
+int peerUserIdForRelease = 1;
+int convertPeerResult = BM_OK;
+int disablePeerResult = BM_OK;
+int disablePeerCalls = 0;
+
+ock::mf::Result ConvertPeerForRelease(int32_t phyId, int32_t *userId)
+{
+    EXPECT_EQ(phyId, 6);
+    *userId = peerUserIdForRelease;
+    return convertPeerResult;
+}
+
+ock::mf::Result DisablePeerForRelease(int32_t userId, uint32_t flags)
+{
+    EXPECT_EQ(userId, 1);
+    EXPECT_EQ(flags, 0U);
+    ++disablePeerCalls;
+    return disablePeerResult;
+}
+
+void Mock310PRelease()
+{
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
+    MOCKER_CPP(&DlAclApi::AclrtGetLogicDevIdByPhyDevId, ock::mf::Result(*)(int32_t, int32_t *))
+        .stubs()
+        .will(invoke(ConvertPeerForRelease));
+    MOCKER_CPP(&DlAclApi::AclrtDeviceDisablePeerAccess, ock::mf::Result(*)(int32_t, uint32_t))
+        .stubs()
+        .will(invoke(DisablePeerForRelease));
+}
 } // namespace
 
 class HybmVmmBasedSegmentTest : public testing::Test {
@@ -107,6 +137,10 @@ protected:
     {
         GlobalMockObject::reset();
         HybmVaManager::GetInstance().ClearAll();
+        peerUserIdForRelease = 1;
+        convertPeerResult = BM_OK;
+        disablePeerResult = BM_OK;
+        disablePeerCalls = 0;
         reserveResult = nullptr;
         reserveExpected = nullptr;
         releasedAddress = nullptr;
@@ -480,4 +514,90 @@ TEST_F(HybmVmmBasedSegmentTest, MallocNon310PKeepsHbmAndDoesNotUseDdrFallback)
     EXPECT_EQ(createCallCount, 1U);
     EXPECT_EQ(createdMemTypes[0], MEM_HBM_TYPE);
     EXPECT_EQ(handle, nullptr);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReleaseP2P310PConvertsPhysicalToUserDevice)
+{
+    Mock310PRelease();
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(6);
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(disablePeerCalls, 1);
+    EXPECT_TRUE(segment.p2pLeases_.empty());
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReleaseP2P310PRetainsLeaseWhenConversionFails)
+{
+    Mock310PRelease();
+    convertPeerResult = BM_ERROR;
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(6);
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(disablePeerCalls, 0);
+    EXPECT_EQ(segment.p2pLeases_.count(6), 1U);
+    convertPeerResult = BM_OK;
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(disablePeerCalls, 1);
+    EXPECT_TRUE(segment.p2pLeases_.empty());
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReleaseP2P310PRejectsNegativeConvertedDevice)
+{
+    Mock310PRelease();
+    peerUserIdForRelease = -1;
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(6);
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(disablePeerCalls, 0);
+    EXPECT_EQ(segment.p2pLeases_.count(6), 1U);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReleaseP2P310PRetainsFailedLeaseForRetry)
+{
+    Mock310PRelease();
+    disablePeerResult = BM_ERROR;
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(6);
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(disablePeerCalls, 1);
+    EXPECT_EQ(segment.p2pLeases_.count(6), 1U);
+    disablePeerResult = BM_OK;
+    segment.ReleaseP2PLeases();
+    EXPECT_EQ(disablePeerCalls, 2);
+    EXPECT_TRUE(segment.p2pLeases_.empty());
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReleaseP2PNon310PUsesOriginalDeviceNumbers)
+{
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_910C));
+    MOCKER_CPP(&DlAclApi::RtDisableP2P, ock::mf::Result(*)(uint32_t, uint32_t))
+        .expects(once())
+        .with(eq(2U), eq(6U))
+        .will(returnValue(BM_OK));
+    const int originalDeviceId = MemSegment::deviceId_;
+    MemSegment::deviceId_ = 2;
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 2);
+    segment.p2pLeases_.insert(6);
+    segment.ReleaseP2PLeases();
+    EXPECT_TRUE(segment.p2pLeases_.empty());
+    MemSegment::deviceId_ = originalDeviceId;
+}
+
+TEST_F(HybmVmmBasedSegmentTest, ReleaseP2PSharedPeerWaitsForLastRemovedRank)
+{
+    Mock310PRelease();
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    HostSdmaExportInfo first{};
+    first.rankId = 1;
+    first.devicePhyId = 6;
+    HostSdmaExportInfo second = first;
+    second.rankId = 2;
+    segment.imports_ = {first, second};
+    segment.p2pLeases_.insert(6);
+    segment.ReleaseP2PLeases({1});
+    EXPECT_EQ(disablePeerCalls, 0);
+    EXPECT_EQ(segment.p2pLeases_.count(6), 1U);
+    segment.ReleaseP2PLeases({1, 2});
+    EXPECT_EQ(disablePeerCalls, 1);
+    EXPECT_TRUE(segment.p2pLeases_.empty());
 }
