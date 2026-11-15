@@ -926,8 +926,12 @@ Result HybmVmmBasedSegment::ReleaseP2PLease(int32_t phyId) noexcept
         ret = DlAclApi::RtDisableP2P(static_cast<uint32_t>(deviceId_), static_cast<uint32_t>(phyId));
     }
     if (ret != BM_OK) {
-        BM_LOG_ERROR("DisableP2P failed:" << ret << " local_user:" << deviceId_ << " remote_phy:" << phyId
-                                          << " remote_user:" << peerUserId);
+        if (Is310PPath()) {
+            BM_LOG_ERROR("DisableP2P failed:" << ret << " local_user:" << deviceId_ << " remote_phy:" << phyId
+                                              << " remote_user:" << peerUserId);
+        } else {
+            BM_LOG_WARN("DisableP2P failed:" << ret << " local_user:" << deviceId_ << " remote_phy:" << phyId);
+        }
         return ret;
     }
     BM_LOG_INFO("DisableP2P success local_user:" << deviceId_ << " remote_phy:" << phyId);
@@ -972,7 +976,7 @@ void HybmVmmBasedSegment::ReleaseP2PLeases(const std::set<uint32_t> &removedRank
         toRelease = std::move(actualRelease);
     }
     for (auto phyId : toRelease) {
-        if (ReleaseP2PLease(phyId) == BM_OK) {
+        if (ReleaseP2PLease(phyId) == BM_OK || !Is310PPath()) {
             p2pLeases_.erase(phyId);
         }
     }
