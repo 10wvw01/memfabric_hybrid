@@ -31,7 +31,7 @@ GB = 1024 * MB
 STORE_URL = "tcp://127.0.0.1:20028"
 LOCAL_HBM_SIZE: int = 1 * GB
 LOCAL_DRAM_SIZE: int = 8 * GB
-DATA_OP_TYPE = memfabric_hybrid.bm.BmDataOpType.DEVICE_RDMA
+DATA_OP_TYPE = mf_hybrid.bm.BmDataOpType.DEVICE_RDMA
 COPY_SIZE: int = 64 * MB
 
 DEVICES = [0, 1]
@@ -226,6 +226,8 @@ class BigMemoryContext:
             )
             res = self.__handle.join()
             logging.info(f"join in return {hex(res)}")
+            if res != 0:
+                raise RuntimeError(f"bm join failed: {res=}")
             npu.set_device(device=self.__device_id)
         except RuntimeError as e:
             logging.error(f"mf_hybrid.bm.create failed: {e}")
@@ -299,7 +301,9 @@ def copy_data(src: BigMemoryBlock, dst: BigMemoryBlock, size: int, ctx: BigMemor
     kind = copy_kind(src, dst)
     size = min(size, src.size, dst.size)
     logging.info(f"copy {size} bytes from {src} to {dst}, {kind}")
-    ctx.get_handle().copy_data(src.address, dst.address, size, kind)
+    ret = ctx.get_handle().copy_data(src.address, dst.address, size, kind)
+    if ret != 0:
+        raise RuntimeError(f"copy_data failed: {ret=}, src={src}, dst={dst}, size={size}")
 
 
 class BigMemoryTest:
@@ -365,13 +369,14 @@ class BigMemoryTest:
             logging.error(f"prepare failed: {ret=}")
             self.begin_barrier.wait()
             self.end_barrier.wait()
-            return
+            raise SystemExit(1)
         logging.info("test prepare success.")
         self.begin_barrier.wait()
 
         src_checksum_list = []
         dst_checksum_list = []
         errors_list = []
+        test_failed = False
 
         try:
             for idx in range(REPEAT_TIMES):
@@ -400,6 +405,7 @@ class BigMemoryTest:
                 src_checksum_list.append(src_checksum)
                 dst_checksum_list.append(dst_checksum)
                 errors_list.append(errors)
+                test_failed |= bool(errors) or src_checksum != dst_checksum
                 print(f"{iter_mark} Checksum matches: {src_checksum == dst_checksum} {src_checksum} {dst_checksum}")
 
             print("\nTotal Results:")
@@ -413,7 +419,8 @@ class BigMemoryTest:
                     print(f"{action} error: {error}")
 
         except Exception as error:
-            logging.info(f"test error: {error}")
+            logging.error(f"test error: {error}")
+            test_failed = True
 
         self.end_barrier.wait()
         logging.info("test exiting...")
@@ -421,6 +428,8 @@ class BigMemoryTest:
         mf_hybrid.bm.uninitialize()
         mf_hybrid.uninitialize()
         logging.info("test exited.")
+        if test_failed:
+            raise SystemExit(1)
 
     def run_peer(self, device_id: int):
         logging.info("peer prepare start.")
@@ -431,7 +440,7 @@ class BigMemoryTest:
             logging.error(f"prepare failed: {ret=}")
             self.begin_barrier.wait()
             self.end_barrier.wait()
-            return
+            raise SystemExit(1)
 
         logging.info("peer prepare success.")
         self.begin_barrier.wait()
@@ -457,6 +466,7 @@ def main_process():
     [child.join() for child in children]
 
     logging.info("main process exit.")
+    return 1 if any(child.exitcode != 0 for child in children) else 0
 
 
 if __name__ == "__main__":
@@ -482,9 +492,19 @@ if __name__ == "__main__":
         choices=["bypass", "stop"],
         default="bypass",
     )
+    parser.add_argument(
+        "--data-op-type",
+        choices=["device_rdma", "sdma"],
+        default="device_rdma",
+        help="data operation used by the pool (default: device_rdma)",
+    )
     parser.add_argument("--repeat", help="specify test repeat times", type=int, default=1)
     args = parser.parse_args()
     DEVICES = args.devices
     ERROR_ACTION = args.error
     REPEAT_TIMES = args.repeat
-    main_process()
+    DATA_OP_TYPE = {
+        "device_rdma": mf_hybrid.bm.BmDataOpType.DEVICE_RDMA,
+        "sdma": mf_hybrid.bm.BmDataOpType.SDMA,
+    }[args.data_op_type]
+    sys.exit(main_process())
