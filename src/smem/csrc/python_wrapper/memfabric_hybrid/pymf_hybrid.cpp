@@ -650,10 +650,17 @@ Do barrier on a shm object, using control network.)")
                 auto outputSize = str.size() * shm.RankSize();
                 std::string output;
                 output.resize(outputSize);
-                shm.AllGather(str.c_str(), str.size(), const_cast<char *>(output.data()), outputSize);
+                int32_t ret;
+                {
+                    py::gil_scoped_release release;
+                    ret = shm.AllGather(str.c_str(), str.size(), output.data(), outputSize);
+                }
+                if (ret != 0) {
+                    throw std::runtime_error("all_gather failed, ret:" + std::to_string(ret));
+                }
                 return py::bytes(output.c_str(), outputSize);
             },
-            py::call_guard<py::gil_scoped_release>(), py::arg("local_data"), R"(
+            py::arg("local_data"), R"(
 Do all gather on a shm object, using control network
 
 Arguments:

@@ -24,14 +24,8 @@ namespace smem {
 static constexpr uint32_t P2P_SLOTS_PER_CARD = 8U;
 static const std::string TOPO_PREFIX = "TOPO_";
 
-Result CheckTopologyP2PSlots(StorePtr &store, uint32_t rankId, uint32_t devId, uint32_t rankSize,
-                             int64_t timeoutMs, const std::string &logTag)
+Result PublishTopologyRecord(StorePtr &store, uint32_t rankId, uint32_t devId, const std::string &logTag)
 {
-    if (rankSize <= 1U) {
-        return SM_OK;
-    }
-
-    /* publish local topology record */
     std::string topoKey = TOPO_PREFIX + std::to_string(rankId);
     std::string topoVal = std::to_string(rankId) + ":" + std::to_string(devId);
     auto ret = store->Set(topoKey, std::vector<uint8_t>(topoVal.begin(), topoVal.end()));
@@ -39,6 +33,21 @@ Result CheckTopologyP2PSlots(StorePtr &store, uint32_t rankId, uint32_t devId, u
         SM_LOG_ERROR("[" << logTag << "] Set topology key failed, ret:" << ret << " rank:" << rankId
                          << " key:" << topoKey);
         return SM_ERROR;
+    }
+
+    return SM_OK;
+}
+
+Result CheckTopologyP2PSlots(StorePtr &store, uint32_t rankId, uint32_t devId, uint32_t rankSize, int64_t timeoutMs,
+                             const std::string &logTag)
+{
+    if (rankSize <= 1U) {
+        return SM_OK;
+    }
+
+    auto ret = PublishTopologyRecord(store, rankId, devId, logTag);
+    if (ret != SM_OK) {
+        return ret;
     }
 
     /* gather all ranks' topology records */
@@ -95,15 +104,13 @@ Result CheckTopologyP2PSlots(StorePtr &store, uint32_t rankId, uint32_t devId, u
         uint32_t required = card.second * (static_cast<uint32_t>(rankTopos.size()) - card.second);
         if (required > P2P_SLOTS_PER_CARD) {
             SM_LOG_ERROR("[" << logTag << "] P2P slot budget exceeded: cardId:" << card.first
-                             << " ranks:" << card.second << " required:" << required
-                             << " limit:" << P2P_SLOTS_PER_CARD
+                             << " ranks:" << card.second << " required:" << required << " limit:" << P2P_SLOTS_PER_CARD
                              << " rank:" << rankId << " worldSize:" << rankSize);
             feasible = false;
         }
     }
     if (!feasible) {
-        SM_LOG_ERROR("[" << logTag << "] topology preflight FAILED, rank:" << rankId
-                         << " worldSize:" << rankSize);
+        SM_LOG_ERROR("[" << logTag << "] topology preflight FAILED, rank:" << rankId << " worldSize:" << rankSize);
         return SM_NO_RESOURCES;
     }
 

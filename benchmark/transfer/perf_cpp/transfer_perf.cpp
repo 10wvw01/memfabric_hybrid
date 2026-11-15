@@ -76,7 +76,7 @@ static inline std::string calculateRate(uint64_t data_bytes, double duration)
 
 static inline void init_warmup_data(char *&warmup_data, size_t length)
 {
-    const size_t STEP_SIZE = 4;
+    const size_t STEP_SIZE = sizeof(uint64_t);
     uint64_t *p;
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -99,7 +99,8 @@ int32_t trans_perf_test(smem_trans_t trans_handle, smem_shm_t shm_handle, int ra
 
     // malloc device mem
     aclError aclret = aclrtMalloc(&dev_addr, GVA_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_GOTO_ERR(aclret != ACL_ERROR_NONE, "failed to allocate device memory, ret:" << aclret, out);
+    ret = aclret;
+    CHECK_GOTO_ERR(ret, "failed to allocate device memory, ret:" << aclret, out);
 
     std::cout << "[" << rank_id << "]" << " malloc dev mem " << dev_addr << std::endl;
     /* gather peer addr */
@@ -125,15 +126,24 @@ int32_t trans_perf_test(smem_trans_t trans_handle, smem_shm_t shm_handle, int ra
         uint32_t batch_size = 32;
         std::string dstSessionId = "127.0.0.1:10001";
         dst_dev_addr = gather_addr[1];
-        CHECK_GOTO_ERR(!dst_dev_addr, "dev memory error", out);
+        if (dst_dev_addr == nullptr) {
+            ret = -1;
+            LOG_ERROR("dev memory is null, rank:" << rank_id);
+            goto out;
+        }
         std::cout << "[" << rank_id << "]" << " get dst dev addr " << dst_dev_addr << std::endl;
 
         /* init warmup data */
         warmup_data = (char *)malloc(GVA_SIZE * sizeof(char));
-        CHECK_GOTO_ERR(!warmup_data, "warmup data malloc failed", out);
+        if (warmup_data == nullptr) {
+            ret = -1;
+            LOG_ERROR("warmup data malloc failed, rank:" << rank_id);
+            goto out;
+        }
         std::cout << "Warmup Start" << std::endl;
         init_warmup_data(warmup_data, GVA_SIZE);
-        aclrtMemcpy(dev_addr, GVA_SIZE, warmup_data, GVA_SIZE, ACL_MEMCPY_HOST_TO_DEVICE);
+        ret = aclrtMemcpy(dev_addr, GVA_SIZE, warmup_data, GVA_SIZE, ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_GOTO_ERR(ret, "warmup copy failed, ret:" << ret << " rank:" << rank_id, out);
 
         // warmup
         ret = smem_trans_write(trans_handle, dev_addr, dstSessionId.c_str(), dst_dev_addr, base_block_size, 0);
@@ -242,7 +252,10 @@ int32_t trans_perf_test(smem_trans_t trans_handle, smem_shm_t shm_handle, int ra
         std::cout << separator << "Test End" << separator << std::endl;
     }
 
-    smem_shm_control_barrier(shm_handle);
+    ret = smem_shm_control_barrier(shm_handle);
+    if (ret != 0) {
+        LOG_ERROR("final barrier failed, ret:" << ret << " rank:" << rank_id);
+    }
 out:
     if (warmup_data) {
         free(warmup_data);
@@ -261,7 +274,7 @@ int32_t trans_test(int rank_id, int rank_size, int device_id, int use_sdma, std:
     smem_trans_t trans_handle;
     smem_shm_t shm_handle;
     std::string sessionId;
-    int32_t ret;
+    int32_t ret = -1;
 
     if (rank_id == 0) {
         ret = smem_create_config_store(ip_port.c_str(), SMEM_STORE_SKIP_RECOVER);
@@ -293,7 +306,11 @@ int32_t trans_test(int rank_id, int rank_size, int device_id, int use_sdma, std:
         return ret;
     }
     trans_handle = smem_trans_create(ip_port.c_str(), sessionId.c_str(), &config);
-    CHECK_GOTO_ERR(!trans_handle, "smem trans create failed, ret:" << " rank:" << rank_id, err1);
+    if (trans_handle == nullptr) {
+        LOG_ERROR("smem trans create failed, rank:" << rank_id);
+        ret = -1;
+        goto err1;
+    }
     std::cout << "[" << rank_id << "]" << " smem trans create done" << std::endl;
 
     (void)smem_shm_config_init(&config2);
@@ -303,12 +320,16 @@ int32_t trans_test(int rank_id, int rank_size, int device_id, int use_sdma, std:
     CHECK_GOTO_ERR(ret, "smem shmem init failed, ret:" << ret << " rank:" << rank_id, err2);
 
     shm_handle = smem_shm_create(0, rank_size, rank_id, GVA_SIZE, SMEMS_DATA_OP_MTE, 0, &shm_gva);
-    CHECK_GOTO_ERR((shm_handle == nullptr), "smem_shm_create failed, rank:" << rank_id, err3);
+    if (shm_handle == nullptr) {
+        LOG_ERROR("smem_shm_create failed, rank:" << rank_id);
+        ret = -1;
+        goto err3;
+    }
     std::cout << "[" << rank_id << "]" << " smem shmem create done" << std::endl;
 
     ret = smem_shm_control_barrier(shm_handle);
     CHECK_GOTO_ERR(ret, "barrier failed, ret:" << ret << " rank:" << rank_id, err4);
-    trans_perf_test(trans_handle, shm_handle, rank_id, TRANS_PERF_CONCURRENCY);
+    ret = trans_perf_test(trans_handle, shm_handle, rank_id, TRANS_PERF_CONCURRENCY);
 
 err4:
     smem_shm_destroy(shm_handle, 0);
@@ -318,7 +339,7 @@ err2:
     smem_trans_destroy(trans_handle, 0);
     smem_trans_uninit(0);
 err1:
-    return 0;
+    return ret;
 }
 
 /*
@@ -328,6 +349,10 @@ err1:
 
 int32_t main(int32_t argc, char *argv[])
 {
+    if (argc != 6) {
+        LOG_ERROR("usage: transfer_perf rank_size rank_id device_id use_sdma store_url");
+        return 1;
+    }
     int rank_size = atoi(argv[1]);
     int rank_id = atoi(argv[2]);
     int device_id = atoi(argv[3]);
@@ -343,19 +368,28 @@ int32_t main(int32_t argc, char *argv[])
     }
 
     /* init aclrt */
-    CHECK_ACL(aclInit(nullptr));
-    CHECK_ACL(aclrtSetDevice(device_id));
+    auto aclRet = aclInit(nullptr);
+    if (aclRet != ACL_ERROR_NONE) {
+        LOG_ERROR("aclInit failed, ret:" << aclRet);
+        return 1;
+    }
+    aclRet = aclrtSetDevice(device_id);
+    if (aclRet != ACL_ERROR_NONE) {
+        LOG_ERROR("aclrtSetDevice failed, device:" << device_id << " ret:" << aclRet);
+        aclFinalize();
+        return 1;
+    }
 
     const uint32_t LOG_LEVEL_WARNING = 2;
     smem_set_log_level(LOG_LEVEL_WARNING);
     auto ret = smem_init(0);
     CHECK_GOTO_ERR(ret, "smem init failed, ret:" << ret << " rank:" << rank_id, err1);
 
-    (void)trans_test(rank_id, rank_size, device_id, use_sdma, ipPort);
+    ret = trans_test(rank_id, rank_size, device_id, use_sdma, ipPort);
 
     smem_uninit();
 err1:
     CHECK_ACL(aclrtResetDevice(device_id));
     CHECK_ACL(aclFinalize());
-    return 0;
+    return ret == 0 ? 0 : 1;
 }

@@ -128,6 +128,9 @@ int32_t SmemTransEntry::Initialize()
 
     entityInfo_.u.session = workerUniqueId_;
     entityInfo_.u.session.reserved = config_.role;
+    if (hybm_get_soc_type() == HYBM_SOC_TYPE_310P && (config_.dataOpType & SMEMB_DATA_OP_SDMA) != 0U) {
+        return PublishTopologyRecord(store_, rankId_, config_.deviceId, "TRANS");
+    }
     return SM_OK;
 }
 
@@ -565,8 +568,8 @@ Result SmemTransEntry::RegisterLocalMemories(const std::vector<std::pair<const v
     for (auto &m : mm) {
         auto ret = RegisterOneMemory(m.first, m.second, flags);
         if (ret != 0) {
-            SM_LOG_ERROR("RegisterOneMemory failed, address:" << m.first << " size:" << m.second
-                                                              << " rank:" << rankId_ << " ret:" << ret);
+            SM_LOG_ERROR("RegisterOneMemory failed, address:" << m.first << " size:" << m.second << " rank:" << rankId_
+                                                              << " ret:" << ret);
             registedInfo_.clear();
             CleanupRegisteredSlices();
             return ret;
