@@ -366,7 +366,7 @@ SMEM_API void smem_shm_uninit(uint32_t flags)
 
 SMEM_API uint32_t smem_shm_query_support_data_operation(void)
 {
-    return SMEMS_DATA_OP_MTE | SMEMS_DATA_OP_SDMA | SMEMS_DATA_OP_RDMA;
+    return SMEMS_DATA_OP_MTE | SMEMS_DATA_OP_SDMA;
 }
 
 SMEM_API int32_t smem_shm_register_exit(smem_shm_t handle, void (*exit)(int))
