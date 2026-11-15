@@ -15,7 +15,7 @@
 
 #include <bitset>
 #include "hybm_mem_segment.h"
-#include "hybm_hal_vmm.h"
+#include "hybm_gva.h"
 #include "hybm_dev_legacy_segment.h"
 
 namespace ock {

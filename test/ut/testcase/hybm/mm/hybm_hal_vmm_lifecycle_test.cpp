@@ -3,7 +3,6 @@
 #include <limits>
 #include <cstring>
 #include <vector>
-#include "hybm_hal_vmm.h"
 #include "hybm_gva.h"
 #include "hybm.h"
 #include "hybm_common_include.h"
@@ -22,7 +21,7 @@
 
 namespace ock {
 namespace mf {
-int32_t Hybm310PInitMetaGva(uint16_t, void **, size_t, void **);
+int32_t HybmModernInitMetaGva(uint32_t, void **, size_t, void **);
 } // namespace mf
 } // namespace ock
 
@@ -32,6 +31,12 @@ namespace {
 constexpr uintptr_t ADDRESS = 0x280000000000;
 constexpr uint64_t SHARED = 0x123456789ABCDEULL;
 drv_mem_handle_t *const HANDLE = reinterpret_cast<drv_mem_handle_t *>(0x1234);
+
+AscendSocType testSoc = ASCEND_310P;
+AscendSocType TestSoc()
+{
+    return testSoc;
+}
 
 struct HalState {
     int translate{0}, reserve{0}, create{0}, fallback{0}, map{0}, access{0};
@@ -163,6 +168,8 @@ protected:
     {
         GlobalMockObject::reset();
         hal = {};
+        testSoc = ASCEND_310P;
+        MOCK_API(DlAclApi::GetAscendSocType).stubs().will(invoke(TestSoc));
         oldUser_ = MemSegment::deviceId_;
         oldPhysical_ = MemSegment::devicePhyId_;
         MemSegment::deviceId_ = 0;
@@ -222,7 +229,7 @@ protected:
 TEST_F(HybmHalVmmLifecycleTest, AllocateAndFreeUseOnlyHalAndDriverDevice)
 {
     HalVmmBuffer buffer;
-    ASSERT_EQ(Allocate310PHalVmm(7, 1, nullptr, buffer), BM_OK);
+    ASSERT_EQ(AllocateHalVmm(7, 1, nullptr, buffer), BM_OK);
     EXPECT_EQ(buffer.size, HYBM_LARGE_PAGE_SIZE);
     EXPECT_EQ(ReleaseHalVmm(buffer), BM_OK);
     EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create", "map", "access", "unmap", "release", "free"}));
@@ -234,7 +241,7 @@ TEST_F(HybmHalVmmLifecycleTest, OnlyOutOfMemoryFallsBackToDdr)
 {
     hal.create = HAL_OUT_OF_MEMORY_ERROR;
     HalVmmBuffer buffer;
-    ASSERT_EQ(Allocate310PHalVmm(7, HYBM_LARGE_PAGE_SIZE, nullptr, buffer), BM_OK);
+    ASSERT_EQ(AllocateHalVmm(7, HYBM_LARGE_PAGE_SIZE, nullptr, buffer), BM_OK);
     EXPECT_EQ(hal.memoryTypes, (std::vector<uint32_t>{MEM_P2P_DDR_TYPE, MEM_DDR_TYPE}));
     EXPECT_EQ(ReleaseHalVmm(buffer), BM_OK);
 }
@@ -243,7 +250,7 @@ TEST_F(HybmHalVmmLifecycleTest, OtherCreateErrorsDoNotRetry)
 {
     hal.create = 8;
     HalVmmBuffer buffer;
-    EXPECT_EQ(Allocate310PHalVmm(7, HYBM_LARGE_PAGE_SIZE, nullptr, buffer), 8);
+    EXPECT_EQ(AllocateHalVmm(7, HYBM_LARGE_PAGE_SIZE, nullptr, buffer), 8);
     EXPECT_EQ(hal.creates, 1);
     EXPECT_EQ(hal.order.back(), "free");
 }
@@ -252,7 +259,7 @@ TEST_F(HybmHalVmmLifecycleTest, BothAllocationTypesFailAndFreeReservedAddress)
 {
     hal.create = hal.fallback = HAL_OUT_OF_MEMORY_ERROR;
     HalVmmBuffer buffer;
-    EXPECT_EQ(Allocate310PHalVmm(7, HYBM_LARGE_PAGE_SIZE, nullptr, buffer), HAL_OUT_OF_MEMORY_ERROR);
+    EXPECT_EQ(AllocateHalVmm(7, HYBM_LARGE_PAGE_SIZE, nullptr, buffer), HAL_OUT_OF_MEMORY_ERROR);
     EXPECT_EQ(hal.creates, 2);
     EXPECT_EQ(hal.order.back(), "free");
     EXPECT_EQ(buffer.address, nullptr);
@@ -261,8 +268,8 @@ TEST_F(HybmHalVmmLifecycleTest, BothAllocationTypesFailAndFreeReservedAddress)
 TEST_F(HybmHalVmmLifecycleTest, InvalidSizeStopsBeforeReserve)
 {
     HalVmmBuffer buffer;
-    EXPECT_EQ(Allocate310PHalVmm(7, 0, nullptr, buffer), BM_INVALID_PARAM);
-    EXPECT_EQ(Allocate310PHalVmm(7, std::numeric_limits<size_t>::max(), nullptr, buffer), BM_INVALID_PARAM);
+    EXPECT_EQ(AllocateHalVmm(7, 0, nullptr, buffer), BM_INVALID_PARAM);
+    EXPECT_EQ(AllocateHalVmm(7, std::numeric_limits<size_t>::max(), nullptr, buffer), BM_INVALID_PARAM);
     EXPECT_TRUE(hal.order.empty());
 }
 
@@ -270,7 +277,7 @@ TEST_F(HybmHalVmmLifecycleTest, ReserveFailureDoesNotReleaseUnownedAddress)
 {
     hal.reserve = BM_ERROR;
     HalVmmBuffer buffer;
-    EXPECT_NE(Allocate310PHalVmm(7, 1, nullptr, buffer), BM_OK);
+    EXPECT_NE(AllocateHalVmm(7, 1, nullptr, buffer), BM_OK);
     EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve"}));
 }
 
@@ -278,7 +285,7 @@ TEST_F(HybmHalVmmLifecycleTest, ExpectedMetadataAddressMustMatch)
 {
     hal.wrongAddress = true;
     HalVmmBuffer buffer;
-    EXPECT_NE(Allocate310PHalVmm(7, 1, reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), buffer), BM_OK);
+    EXPECT_NE(AllocateHalVmm(7, 1, reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), buffer), BM_OK);
     EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "free"}));
 }
 
@@ -286,7 +293,7 @@ TEST_F(HybmHalVmmLifecycleTest, MapFailureReleasesHandleThenAddress)
 {
     hal.map = BM_ERROR;
     HalVmmBuffer buffer;
-    EXPECT_NE(Allocate310PHalVmm(7, 1, nullptr, buffer), BM_OK);
+    EXPECT_NE(AllocateHalVmm(7, 1, nullptr, buffer), BM_OK);
     EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create", "map", "release", "free"}));
 }
 
@@ -294,7 +301,7 @@ TEST_F(HybmHalVmmLifecycleTest, AccessFailureUnmapsBeforeReleasingHandle)
 {
     hal.access = BM_ERROR;
     HalVmmBuffer buffer;
-    EXPECT_NE(Allocate310PHalVmm(7, 1, nullptr, buffer), BM_OK);
+    EXPECT_NE(AllocateHalVmm(7, 1, nullptr, buffer), BM_OK);
     EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create", "map", "access", "unmap", "release", "free"}));
 }
 
@@ -440,7 +447,7 @@ TEST_F(HybmHalVmmLifecycleTest, CleanupMultipleImportsDoesNotInvalidateIteration
 TEST_F(HybmHalVmmLifecycleTest, MetadataUsesFixedAddressAndDriverPermissions)
 {
     void *address = nullptr, *handle = nullptr;
-    EXPECT_EQ(Hybm310PInitMetaGva(0, &address, HYBM_DEVICE_INFO_SIZE, &handle), BM_OK);
+    EXPECT_EQ(HybmModernInitMetaGva(7, &address, HYBM_DEVICE_INFO_SIZE, &handle), BM_OK);
     EXPECT_EQ(address, reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR));
     EXPECT_EQ(handle, HANDLE);
     EXPECT_TRUE(hal.contexts.empty());
@@ -479,7 +486,7 @@ TEST_F(HybmHalVmmLifecycleTest, NullCreatedHandleDoesNotReturnSuccess)
 {
     hal.nullHandle = true;
     HalVmmBuffer buffer;
-    EXPECT_NE(Allocate310PHalVmm(7, 1, nullptr, buffer), BM_OK);
+    EXPECT_NE(AllocateHalVmm(7, 1, nullptr, buffer), BM_OK);
     EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create", "free"}));
 }
 
@@ -558,4 +565,23 @@ TEST_F(HybmHalVmmLifecycleTest, MetadataReleaseFailureCanRetryWithoutDoubleUnmap
     hybm_uninit();
     EXPECT_FALSE(HybmHasInited());
     EXPECT_EQ(hal.order, (std::vector<std::string>{"unmap", "release", "release", "free"}));
+}
+
+TEST_F(HybmHalVmmLifecycleTest, SharedDeviceAllocationUsesHbmOn910B)
+{
+    testSoc = ASCEND_910B;
+    drv_mem_handle_t *handle = nullptr;
+    EXPECT_EQ(CreateHalMemory(7, HYBM_LARGE_PAGE_SIZE, &handle), BM_OK);
+    EXPECT_EQ(hal.memoryTypes, (std::vector<uint32_t>{MEM_HBM_TYPE}));
+    EXPECT_EQ(handle, HANDLE);
+}
+
+TEST_F(HybmHalVmmLifecycleTest, SharedDeviceAllocationDoesNotFallbackOn910B)
+{
+    testSoc = ASCEND_910B;
+    hal.create = HAL_OUT_OF_MEMORY_ERROR;
+    drv_mem_handle_t *handle = nullptr;
+    EXPECT_EQ(CreateHalMemory(7, HYBM_LARGE_PAGE_SIZE, &handle), HAL_OUT_OF_MEMORY_ERROR);
+    EXPECT_EQ(hal.creates, 1);
+    EXPECT_EQ(hal.memoryTypes, (std::vector<uint32_t>{MEM_HBM_TYPE}));
 }

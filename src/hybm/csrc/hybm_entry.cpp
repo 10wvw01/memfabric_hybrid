@@ -19,9 +19,8 @@
 #include "hybm_ptracer.h"
 #include "hybm_common_include.h"
 #include "hybm_vmm_handle_registry.h"
-#include "hybm_hal_vmm.h"
-#include "mf_env_define.h"
 #include "hybm_gva.h"
+#include "mf_env_define.h"
 #include "hybm_version.h"
 #include "hybm_stream_manager.h"
 #include "hybm_va_manager.h"
@@ -305,7 +304,7 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
             return nullptr;
         }
         HalVmmBuffer buffer;
-        if (Allocate310PHalVmm(driverDeviceId, size, nullptr, buffer) != BM_OK) {
+        if (AllocateHalVmm(driverDeviceId, size, nullptr, buffer) != BM_OK) {
             return nullptr;
         }
         VmmHandleRegistry::RegisterHal(buffer, deviceId);

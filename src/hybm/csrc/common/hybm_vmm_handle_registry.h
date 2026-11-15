@@ -4,7 +4,7 @@
 #include <mutex>
 #include <unordered_map>
 #include "dl_acl_api.h"
-#include "hybm_hal_vmm.h"
+#include "hybm_gva.h"
 
 namespace ock {
 namespace mf {

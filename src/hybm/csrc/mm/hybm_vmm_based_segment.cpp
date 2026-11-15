@@ -20,7 +20,7 @@
 #include "hybm_types.h"
 #include "hybm_va_manager.h"
 #include "hybm_numa_util.h"
-#include "hybm_hal_vmm.h"
+#include "hybm_gva.h"
 
 using namespace ock::mf;
 
@@ -216,15 +216,7 @@ Result HybmVmmBasedSegment::MallocFromHost(size_t size, uint32_t devId, drv_mem_
 
 Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept
 {
-    if (Is310PPath()) {
-        return Create310PHalMemory(devId, size, handle);
-    }
-    drv_mem_prop prop{MEM_DEV_SIDE, devId, 0, MEM_HUGE_PAGE_TYPE, MEM_HBM_TYPE, 0};
-    auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("HalMemCreate failed, devId:" << devId << " size:" << size << " ret:" << ret);
-    }
-    return ret;
+    return CreateHalMemory(devId, size, handle);
 }
 
 Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
