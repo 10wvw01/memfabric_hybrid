@@ -96,7 +96,7 @@ int32_t hybm_get_phy_chip_id(uint32_t deviceId);
 int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDeviceId);
 
 /**
- * @brief Allocate VMM-backed device buffer (aclrtMallocPhysical + aclrtMapMem).
+ * @brief Allocate a VMM device buffer. 310P uses HAL memory allocation and mapping.
  *        The returned pointer can be registered with TRANS mode for cross-card
  *        shareable handle export on 310P3.
  *

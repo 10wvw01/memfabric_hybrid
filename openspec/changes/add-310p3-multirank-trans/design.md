@@ -1,5 +1,9 @@
 ## Context
 
+> 内存后端更新：当前310P池、TRANS VMM缓冲区和SHMEM元数据使用HAL内存接口。
+> HAL导入保持本地上下文；本文中的ACL物理内存接口和导出端上下文切换属于早期实现记录。
+> 当前要求见仓库的 `openspec/specs/hybm/acl-vmm-hbm-pool/spec.md`。
+
 前序变更（`add-310p-2rank-vmm-pool`，已归档）建立了 310P 单卡双 die 2-rank HBM 池能力，使用独立 `HybmAclVmmSegment` 走 ACL VMM 路径。当前待提交变更将该能力扩展到多卡多 rank 场景，并补齐 TRANS 模式缺失能力。
 
 关键约束与实测事实（来自代码与注释）：

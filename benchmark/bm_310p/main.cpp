@@ -19,13 +19,13 @@
 
 static const uint64_t DEFAULT_HBM_POOL_SIZE = 2ULL << 30;  // 2GB
 static const uint64_t DEFAULT_DRAM_POOL_SIZE = 2ULL << 30; // 2GB
-static const uint64_t POOL_ALIGN_SIZE = 2ULL * 1024ULL * 1024ULL; // AclVmm 段要求 2M 对齐
+static const uint64_t POOL_ALIGN_SIZE = 2ULL * 1024ULL * 1024ULL; // HAL VMM 段要求 2M 对齐
 
 void PrintHelp()
 {
     std::cout << "usage: bm_perf_benchmark_310p [-h | --help]\n"
                  "               <command> [<option>] [<args>]\n\n"
-                 "310P(Ascend310P3) dual-pool BM bandwidth test (HBM AclVmm + DRAM HOST_SHM).\n"
+                 "310P(Ascend310P3) dual-pool BM bandwidth test (HBM HAL VMM + DRAM HOST_SHM).\n"
                  "-h, --help                  Displays help information.\n"
                  "-bw, bandwidth              Performs a bandwidth test.\n"
                  "    -t,  --type             Indicates the data copy type.\n"

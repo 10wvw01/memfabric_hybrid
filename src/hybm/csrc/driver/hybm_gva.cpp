@@ -17,9 +17,132 @@
 #include "dl_hal_api.h"
 #include "hybm_cmd.h"
 #include "hybm_gva.h"
+#include <limits>
 
 namespace ock {
 namespace mf {
+
+Result GetHalDeviceId(uint32_t userDeviceId, uint32_t &driverDeviceId)
+{
+    int32_t logical = -1;
+    auto ret = DlAclApi::RtGetLogicDevIdByUserDevId(static_cast<int32_t>(userDeviceId), &logical);
+    if (ret != BM_OK || logical < 0) {
+        BM_LOG_ERROR("HAL设备编号转换失败 user:" << userDeviceId << " driver:" << logical << " ret:" << ret);
+        return BM_DL_FUNCTION_FAILED;
+    }
+    driverDeviceId = static_cast<uint32_t>(logical);
+    return BM_OK;
+}
+
+Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle)
+{
+    const bool is310P = DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P;
+    drv_mem_prop prop{MEM_DEV_SIDE, driverDeviceId, 0, MEM_HUGE_PAGE_TYPE, is310P ? MEM_P2P_DDR_TYPE : MEM_HBM_TYPE, 0};
+    auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
+    if (is310P && ret == HAL_OUT_OF_MEMORY_ERROR) {
+        BM_LOG_INFO("310P P2P_DDR分配不足，改用DDR driver:" << driverDeviceId << " size:" << size);
+        prop.mem_type = MEM_DDR_TYPE;
+        ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
+    }
+    if (ret != BM_OK || (is310P && *handle == nullptr)) {
+        BM_LOG_ERROR("HalMemCreate失败 driver:" << driverDeviceId << " size:" << size << " ret:" << ret);
+        return ret != BM_OK ? ret : BM_DL_FUNCTION_FAILED;
+    }
+    return BM_OK;
+}
+
+Result SetHalVmmAccess(void *address, size_t size, uint32_t driverDeviceId)
+{
+    drv_mem_access_desc access{};
+    access.type = MEM_ACCESS_TYPE_READWRITE;
+    access.location.side = MEM_DEV_SIDE;
+    access.location.id = driverDeviceId;
+    auto ret = DlHalApi::HalMemSetAccess(address, size, &access, 1);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("HalMemSetAccess失败 driver:" << driverDeviceId << " address:" << address << " size:" << size
+                                                   << " ret:" << ret);
+    }
+    return ret;
+}
+
+Result ReleaseHalVmm(HalVmmBuffer &buffer)
+{
+    if (buffer.mapped) {
+        auto ret = DlHalApi::HalMemUnmap(buffer.address);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("HalMemUnmap失败 address:" << buffer.address << " ret:" << ret);
+            return ret;
+        }
+        buffer.mapped = false;
+    }
+    if (buffer.handle != nullptr) {
+        auto ret = DlHalApi::HalMemRelease(buffer.handle);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("HalMemRelease失败 handle:" << buffer.handle << " ret:" << ret);
+            return ret;
+        }
+        buffer.handle = nullptr;
+    }
+    if (buffer.address != nullptr) {
+        auto ret = DlHalApi::HalMemAddressFree(buffer.address);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("HalMemAddressFree失败 address:" << buffer.address << " ret:" << ret);
+            return ret;
+        }
+        buffer.address = nullptr;
+    }
+    buffer.size = 0;
+    return BM_OK;
+}
+
+Result ReserveHalVmm(size_t size, void *expected, HalVmmBuffer &buffer)
+{
+    if (size == 0 || size > std::numeric_limits<size_t>::max() - (HYBM_LARGE_PAGE_SIZE - 1) ||
+        buffer.address != nullptr || buffer.handle != nullptr) {
+        BM_LOG_ERROR("HAL VMM预留参数无效 size:" << size);
+        return BM_INVALID_PARAM;
+    }
+    buffer.size = (size + HYBM_LARGE_PAGE_SIZE - 1) & ~(HYBM_LARGE_PAGE_SIZE - 1);
+    auto ret = DlHalApi::HalMemAddressReserve(&buffer.address, buffer.size, 0, expected, 0);
+    if (ret != BM_OK || buffer.address == nullptr) {
+        BM_LOG_ERROR("HalMemAddressReserve失败 size:" << buffer.size << " expected:" << expected << " ret:" << ret);
+        buffer.address = nullptr;
+        return BM_DL_FUNCTION_FAILED;
+    }
+    if (expected != nullptr && buffer.address != expected) {
+        BM_LOG_ERROR("HAL预留地址不匹配 expected:" << expected << " actual:" << buffer.address);
+        (void)ReleaseHalVmm(buffer);
+        return BM_ERROR;
+    }
+    return BM_OK;
+}
+
+Result MapHalVmm(HalVmmBuffer &buffer, uint32_t driverDeviceId)
+{
+    auto ret = DlHalApi::HalMemMap(buffer.address, buffer.size, 0, buffer.handle, 0);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("HalMemMap失败 address:" << buffer.address << " ret:" << ret);
+        return ret;
+    }
+    buffer.mapped = true;
+    return SetHalVmmAccess(buffer.address, buffer.size, driverDeviceId);
+}
+
+Result AllocateHalVmm(uint32_t driverDeviceId, size_t size, void *expected, HalVmmBuffer &buffer)
+{
+    auto ret = ReserveHalVmm(size, expected, buffer);
+    if (ret != BM_OK) {
+        return ret;
+    }
+    ret = CreateHalMemory(driverDeviceId, buffer.size, &buffer.handle);
+    if (ret == BM_OK) {
+        ret = MapHalVmm(buffer, driverDeviceId);
+    }
+    if (ret != BM_OK) {
+        (void)ReleaseHalVmm(buffer);
+    }
+    return ret;
+}
 
 namespace {
 int32_t initedLogicDeviceId = -1;
@@ -30,148 +153,54 @@ int32_t HybmGetInitedLogicDeviceId()
     return initedLogicDeviceId; // logicDeviceId
 }
 
-int32_t HybmModernInitMetaGva(void **globalMemoryBase, size_t allocSize, void **allocHandle)
+int32_t HybmModernInitMetaGva(uint32_t driverDeviceId, void **globalMemoryBase, size_t allocSize, void **allocHandle)
 {
-    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
-        void *hintAddr = reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR);
-        void *va = nullptr;
-        auto ret = DlAclApi::AclrtReserveMemAddress(&va, allocSize, 0, hintAddr, 0);
-        if (ret != BM_OK || va == nullptr) {
-            BM_LOG_ERROR("310P3 AclrtReserveMemAddress failed, ret:" << ret << " size:" << allocSize << " hintAddr:0x"
-                                                                     << std::hex << hintAddr);
-            return BM_ERROR;
+    const bool is310P = DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P;
+    const uint64_t reserveBase = is310P ? HYBM_DEVICE_META_ADDR : SVM_END_ADDR - GB;
+    const size_t reserveSize = is310P ? allocSize : GB;
+    void *address = nullptr;
+    auto reserveOutput = is310P ? &address : globalMemoryBase;
+    auto ret = DlHalApi::HalMemAddressReserve(reserveOutput, reserveSize, 0, reinterpret_cast<void *>(reserveBase), 0);
+    if (ret != BM_OK || (is310P && address != reinterpret_cast<void *>(reserveBase))) {
+        BM_LOG_ERROR("元数据地址预留失败 driver:" << driverDeviceId << " expected:" << reserveBase
+                                                  << " actual:" << address << " ret:" << ret);
+        if (ret == BM_OK && address != nullptr) {
+            (void)DlHalApi::HalMemAddressFree(address);
         }
-        aclrtPhysicalMemProp prop{};
-        prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-        prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
-        prop.location.id = static_cast<uint32_t>(initedLogicDeviceId);
-        prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-        prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
-        aclrtDrvMemHandle aclHandle = nullptr;
-        ret = DlAclApi::AclrtMallocPhysical(&aclHandle, allocSize, &prop, 0);
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("310P3 AclrtMallocPhysical failed, ret:" << ret << " size:" << allocSize
-                                                                  << " logicDeviceId:" << initedLogicDeviceId);
-            DlAclApi::AclrtReleaseMemAddress(va);
-            return BM_ERROR;
-        }
-        ret = DlAclApi::AclrtMapMem(va, allocSize, 0, aclHandle, 0);
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("310P3 AclrtMapMem failed, ret:" << ret << " addr:0x" << std::hex << va
-                                                          << " logicDeviceId:" << std::dec << initedLogicDeviceId);
-            DlAclApi::AclrtFreePhysical(aclHandle);
-            DlAclApi::AclrtReleaseMemAddress(va);
-            return BM_ERROR;
-        }
-        *globalMemoryBase = va;
-        *(reinterpret_cast<aclrtDrvMemHandle *>(allocHandle)) = aclHandle;
-        BM_LOG_INFO("310P3 meta gva init success, addr:0x" << std::hex << va << " size:" << std::dec << allocSize);
-        return BM_OK;
-    }
-    drv_mem_handle_t **handle = (drv_mem_handle_t **)allocHandle;
-    uint64_t va = SVM_END_ADDR - GB;
-    auto ret = DlHalApi::HalMemAddressReserve(globalMemoryBase, GB, 0, reinterpret_cast<void *>(va), 0);
-    if (ret != 0) {
-        BM_LOG_ERROR("prepare virtual memory size(" << GB << ") failed. ret: " << ret);
         return BM_ERROR;
     }
-    drv_mem_prop memprop;
-    memprop.side = MEM_DEV_SIDE;
-    memprop.devid = initedLogicDeviceId;
-    memprop.module_id = 0;
-    memprop.pg_type = MEM_HUGE_PAGE_TYPE;
-    memprop.mem_type = MEM_HBM_TYPE;
-    memprop.reserve = 0;
-    ret = DlHalApi::HalMemCreate(handle, allocSize, &memprop, 0);
+    drv_mem_handle_t *handle = nullptr;
+    auto handleOutput = is310P ? &handle : reinterpret_cast<drv_mem_handle_t **>(allocHandle);
+    ret = CreateHalMemory(driverDeviceId, allocSize, handleOutput);
+    if (ret != BM_OK && !is310P) {
+        return BM_ERROR;
+    }
+    handle = *handleOutput;
+    bool mapped = false;
+    if (ret == BM_OK) {
+        ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, 0, handle, 0);
+        mapped = ret == BM_OK;
+    }
+    if (mapped && is310P) {
+        ret = SetHalVmmAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, driverDeviceId);
+    }
     if (ret != BM_OK) {
-        BM_LOG_ERROR("HalMemCreate failed: " << ret);
-        return BM_ERROR;
+        BM_LOG_ERROR("元数据内存初始化失败 driver:" << driverDeviceId << " size:" << allocSize << " ret:" << ret);
+        if (mapped) {
+            (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR));
+        }
+        if (handle != nullptr) {
+            (void)DlHalApi::HalMemRelease(handle);
+        }
+        if (is310P) {
+            (void)DlHalApi::HalMemAddressFree(address);
+        }
+        return is310P ? ret : BM_ERROR;
     }
-    ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, 0, *handle, 0);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("HalMemMap failed, ret: " << ret << " addr: 0x" << std::hex << HYBM_DEVICE_META_ADDR << " size: 0x"
-                                               << allocSize << " handle: " << *handle
-                                               << " devid: " << initedLogicDeviceId);
-        DlHalApi::HalMemRelease(*handle);
-        return BM_ERROR;
+    if (is310P) {
+        *globalMemoryBase = address;
+        *allocHandle = handle;
     }
-    return BM_OK;
-}
-
-/* 310P meta 区通过 ACL API 创建，与池段使用相同的内存后端。
- * 共用段(HybmVmmBasedSegment) 310P 路径同款 API 配方(ReserveMemAddress + MallocPhysical + MapMem)。
- * meta 区地址 HYBM_DEVICE_META_ADDR 是设备侧头文件(smem_shm_aicore_base_meta.h)
- * 硬编码的约定地址, 必须 expectPtr 精确命中, 偏移即失败。 */
-/* meta 区设备访问授权: AclVmm 映射默认仅 host 上下文可访问(H2D 拷贝通道走进程
- * 自有权限, 故 UpdateHybmDeviceInfo 写入"成功"), AICore 的 SMMU 翻译需要显式
- * SetAccess 授权才可读 —— 池段(HybmVmmBasedSegment 310P 路径)一直有
- * 这一步(池 GVA AICore 可读的前提), meta 区 310P 移植时遗漏, 导致设备侧 getter
- * 读零(smem_shm_get_global_rank 等失效)。 */
-static int32_t MetaSetDeviceAccess(uint16_t deviceId, size_t allocSize)
-{
-    aclrtMemAccessDesc acc{};
-    acc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
-    acc.location.id = deviceId;
-    acc.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-    auto ret = DlAclApi::AclrtMemSetAccess(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, &acc, 1);
-    if (ret != BM_OK) { // 授权失败
-        BM_LOG_ERROR("set meta device access failed, ret: " << ret << " addr: 0x" << std::hex
-                                                            << HYBM_DEVICE_META_ADDR << " size: 0x" << allocSize
-                                                            << " deviceId: " << deviceId);
-        return BM_ERROR;
-    }
-    return BM_OK;
-}
-
-int32_t Hybm310PInitMetaGva(uint16_t deviceId, void **globalMemoryBase, size_t allocSize, void **allocHandle)
-{
-    // 第一步: 在约定地址 HYBM_DEVICE_META_ADDR 预留 VA 窗口
-    auto ret = DlAclApi::AclrtReserveMemAddress(globalMemoryBase, allocSize, 0,
-                                                reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), 0);
-    if (ret != BM_OK) { // 预留失败
-        BM_LOG_ERROR("reserve meta va failed, ret: " << ret << " size: 0x" << std::hex << allocSize
-                                                     << " deviceId: " << deviceId);
-        return BM_ERROR;
-    }
-    // 基址须精确命中约定地址(设备侧头文件硬编码依赖, 偏移即失败)
-    if (*globalMemoryBase != reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR)) {
-        BM_LOG_ERROR("meta va base mismatch, got: 0x" << std::hex << *globalMemoryBase << " expect: 0x"
-                                                      << HYBM_DEVICE_META_ADDR << " deviceId: " << deviceId);
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
-        return BM_ERROR;
-    }
-    aclrtPhysicalMemProp prop{};
-    prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
-    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
-    prop.memAttr = static_cast<uint32_t>(aclrtMemAttr::ACL_MEM_P2P_HUGE);
-    prop.location.id = static_cast<uint32_t>(deviceId);
-    prop.location.type = aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE;
-    aclrtDrvMemHandle handle = nullptr;
-    // 第二步: 分配 meta 区物理页
-    ret = DlAclApi::AclrtMallocPhysical(&handle, allocSize, &prop, 0);
-    if (ret != BM_OK) { // 分配失败
-        BM_LOG_ERROR("malloc meta physical failed, ret: " << ret << " size: 0x" << std::hex << allocSize
-                                                          << " deviceId: " << deviceId);
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
-        return BM_ERROR;
-    }
-    // 第三步: 物理页映射到约定 VA(与 hybm_uninit 的 310P 分支对称)
-    ret = DlAclApi::AclrtMapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, 0, handle, 0);
-    if (ret != BM_OK) { // 映射失败
-        BM_LOG_ERROR("map meta va failed, ret: " << ret << " addr: 0x" << std::hex << HYBM_DEVICE_META_ADDR
-                                                 << " size: 0x" << allocSize << " deviceId: " << deviceId);
-        (void)DlAclApi::AclrtFreePhysical(handle);
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
-        return BM_ERROR;
-    }
-    // 第四步: 设备侧访问授权(AICore SMMU 可读, 与池段同款; 遗漏此步=设备侧 getter 读零)
-    if (MetaSetDeviceAccess(deviceId, allocSize) != BM_OK) {
-        (void)DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR));
-        (void)DlAclApi::AclrtFreePhysical(handle);
-        (void)DlAclApi::AclrtReleaseMemAddress(*globalMemoryBase);
-        return BM_ERROR;
-    }
-    *allocHandle = handle; // 交调用方保管(uninit 释放用)
     return BM_OK;
 }
 
@@ -228,11 +257,9 @@ int32_t hybm_init_hbm_gva(uint16_t deviceId, uint64_t flags, uint64_t &baseAddre
 
     void *globalMemoryBase = nullptr;
     size_t allocSize = HYBM_DEVICE_INFO_SIZE; // 申请meta空间
-    if (socType == AscendSocType::ASCEND_310P) { // 平台分派: 310P 分支(须先于 GVA V4 分支判断)
-        /* 310P: halMem* 不可用, 走 AclVmm 创建(判断须先于 GVA V4 分支) */
-        ret = Hybm310PInitMetaGva(deviceId, &globalMemoryBase, allocSize, allocHandle); // AclVmm 建链
-    } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
-        ret = HybmModernInitMetaGva(&globalMemoryBase, allocSize, allocHandle);
+    if (socType == AscendSocType::ASCEND_310P || socType == AscendSocType::ASCEND_950 ||
+        HybmGetGvaVersion() == HYBM_GVA_V4) {
+        ret = HybmModernInitMetaGva(initedLogicDeviceId, &globalMemoryBase, allocSize, allocHandle);
     } else {
         ret = HybmLegacyInitMetaGva(&globalMemoryBase, allocSize, flags);
     }

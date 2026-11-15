@@ -3,16 +3,16 @@
 ## 场景
 
 Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）上组建 2-rank BM 内存池：
-- **HBM 池**：每 rank 贡献 32MB LPDDR 设备内存，走 310P 专用 **ACL VMM** 链路
-  （`aclrtMallocPhysical` + shareable handle 导出 + die 对显式 SetContext 导入 + `aclrtMemcpyAsync` D2D）
+- **HBM 池**：每 rank 贡献 32MB LPDDR 设备内存，走 310P **HAL VMM** 链路
+  （HAL物理内存分配、64位共享句柄导入和映射，数据搬运使用 `aclrtMemcpyAsync` D2D）
 - **DRAM 池**：每 rank 贡献 32MB host 内存，走 **HOST_SHM**（同节点共享内存，纯 POSIX 链路）
 
 双池为两个独立 entity（HOST_SHM 要求纯 DRAM 池且禁与其他 opType 混用）。
 
 ## 目标
 
-- 验证 310P 识别（`ASCEND_310P`）→ `HybmAclVmmSegment`（HBM 段）→ `HostDataOpAclMemcpy`（拷贝算子）全链
-- 验证对称 GVA：两进程 `aclrtReserveMemAddress` 窗口基址一致（实测 0x12c140000000），
+- 验证 310P 识别（`ASCEND_310P`）→ `HybmVmmBasedSegment`（HBM 段）→ `HostDataOpAclMemcpy`（拷贝算子）全链
+- 验证对称 GVA：两进程通过 `halMemAddressReserve` 预留相同的窗口基址，
   `peer_rank_ptr` 纯算术寻址
 - 验证跨 die 数据路径：H2G（host→对端 HBM）、G2H（对端→host）、G2G（D2D async 跨 die）
 - 验证 DRAM 池 HOST_SHM 复用：H2GH/GH2H 跨 rank 校验
@@ -30,9 +30,8 @@ Atlas 300I Duo（Ascend310P3）单卡双 die（dev0/dev1）上组建 2-rank BM �
 ## 必要条件
 
 - Atlas 300I Duo（Ascend310P3）+ CANN ≥ 9.1（驱动 Innerversion V100R001C10+）
-- 310P HBM 池依赖的关键驱动行为（实测裁决，详见方案文档）：
-  `MallocPhysical` 需 `ACL_MEM_HANDLE_TYPE_NONE` + `ACL_MEM_P2P_HUGE`；
-  export 需 `ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION`（默认启用 PID 白名单会拒绝对端 import）
+- 310P HBM 池使用 HAL 的 `MEM_HANDLE_TYPE_NONE` 共享句柄，导出后设置
+  `SHR_HANDLE_NO_WLIST_ENABLE` 属性；导入和映射使用本端驱动设备编号，保持本端上下文
 - Python 版需 memfabric_hybrid wheel（pybind11 构建环境）；**C++ 版可直接源码编译运行**（见下）
 
 ## 验收标准

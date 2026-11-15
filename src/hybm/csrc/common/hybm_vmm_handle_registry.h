@@ -1,38 +1,29 @@
 #ifndef MEMFABRIC_HYBRID_VMM_HANDLE_REGISTRY_H
 #define MEMFABRIC_HYBRID_VMM_HANDLE_REGISTRY_H
 
-#include <cstdint>
 #include <mutex>
 #include <unordered_map>
-
 #include "dl_acl_api.h"
+#include "hybm_gva.h"
 
 namespace ock {
 namespace mf {
 
-/* Registry for VMM-backed device buffer handles.
- * Encapsulates the handle map + mutex so that both the entry layer
- * (hybm_alloc/free_vmm_buffer) and the mm layer (dev_user_legacy_segment)
- * share the same registry without cross-layer extern declarations. */
 class VmmHandleRegistry {
 public:
     struct Entry {
-        aclrtDrvMemHandle handle{nullptr};
+        HalVmmBuffer buffer;
         uint32_t deviceId{0};
+        bool useHal{false};
     };
 
-    /* Register a VMM buffer address → handle mapping. */
     static void Register(void *addr, aclrtDrvMemHandle handle, uint32_t deviceId);
+    static void RegisterHal(const HalVmmBuffer &buffer, uint32_t deviceId);
+    static Result Release(void *addr);
 
-    /* Unregister and retrieve the handle + deviceId for cleanup.
-     * Returns false if addr is not found. */
-    static bool Unregister(void *addr, aclrtDrvMemHandle &handle, uint32_t &deviceId);
-
-    /* Atomically look up and export a shareable handle for the VMM buffer
-     * at addr, under the registry lock. Prevents UAF by ensuring the handle
-     * is not freed by another thread during export.
-     * Returns 0 on success, -1 if not found, or ACL error code on export failure. */
-    static int32_t ExportShareableHandle(void *addr, uint64_t *shareableHandle);
+    // 查询、导出和释放共用同一把锁，导出过程中物理句柄保持有效。
+    // -1仅表示地址未注册；HAL已注册地址的导出失败返回BM_DL_FUNCTION_FAILED。
+    static int32_t ExportShareableHandle(void *addr, uint64_t *shareableHandle, size_t size = 0);
 
 private:
     static std::mutex mutex_;
@@ -41,5 +32,4 @@ private:
 
 } // namespace mf
 } // namespace ock
-
-#endif // MEMFABRIC_HYBRID_VMM_HANDLE_REGISTRY_H
+#endif

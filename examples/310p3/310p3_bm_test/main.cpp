@@ -2,7 +2,7 @@
  * 310P3 BM Functional Verification Demo
  *
  * BM 模式：rank 间 HBM/DRAM GVA 池，smem_bm_copy 通过 SDMA 跨 rank 传输。
- * 310P3 上 HBM segment 走 ACL VMM 路径（AclrtReserveMemAddress + AclrtMapMem），
+ * 310P3的HBM段使用HAL预留、分配、共享和映射，
  * 数据拷贝走 AclrtMemcpyAsync(D2D) + AclrtSynchronizeStream（sync D2D 不可用）。
  *
  * Tests:

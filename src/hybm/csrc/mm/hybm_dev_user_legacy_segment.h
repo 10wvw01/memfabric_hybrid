@@ -15,6 +15,7 @@
 
 #include <bitset>
 #include "hybm_mem_segment.h"
+#include "hybm_gva.h"
 #include "hybm_dev_legacy_segment.h"
 
 namespace ock {
@@ -103,10 +104,7 @@ private:
     void CleanupImportedVmm(const std::string &name) noexcept;
 
 private:
-    struct ImportedVmmInfo {
-        void *mappedVa{nullptr};
-        void *aclHandle{nullptr};
-    };
+    using ImportedVmmInfo = HalVmmBuffer;
     std::mutex mutex_;
     std::bitset<MAX_PEER_DEVICES> enablePeerDevices_;
     std::map<uint32_t, RegisterSlice> registerSlices_;

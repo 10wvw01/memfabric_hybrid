@@ -1,5 +1,9 @@
 ## 1. 共享 hybm 基础设施（ACL API 与定义）
 
+> 内存后端更新：当前310P池、TRANS VMM缓冲区和SHMEM元数据使用HAL内存接口。
+> HAL导入保持本地上下文；本文中的ACL物理内存接口和导出端上下文切换属于早期实现记录。
+> 当前要求见仓库的 `openspec/specs/hybm/acl-vmm-hbm-pool/spec.md`。
+
 - [x] 1.1 `hybm_define.h`：`UNIFIED_EXCHANGE_SEG_INFO_SIZE` 改 200；新增 `SOC_TYPE_310P=4` 常量、`D2dCopyMode` 枚举、`HybmPlatformCapability` 结构体与 `GetPlatformCapability`/`Is310PSupported` 内联函数——验证编译通过
 - [x] 1.2 `dl_acl_api.h`：重构 `aclrtPhysicalMemProp`（`allocationType`/`memAttr` 改 `uint32_t`）、`aclrtMemAccessDesc.flags` 改 `uint32_t`；新增 IPC 符号 typedef（`aclrtIpcMemGetExportKey`/`ImportByKey`/`Close`）与 P2P 符号（`DisablePeerAccess`/`CanAccessPeer`）；新增常量 `ACL_RT_IPC_MEM_*`/`ACL_ERROR_RT_DRV_INTERNAL_ERROR`/`ACL_RT_MEM_ACCESS_FLAGS_READWRITE`/`ACL_MEM_ALLOCATION_TYPE_PINNED`；移除 `AclrtMemSetPidToShareableHandle`——验证 `static_assert` 尺寸通过
 - [x] 1.3 `dl_acl_api.cpp`：新增符号 `DL_LOAD_SYM`/`DL_LOAD_SYM_OPTIONAL` 加载（IPC、P2P、Context）；`ParseAscendSocName` 合并入 `GetAscendSocType`（增加 "Ascend_310P" 匹配）；`CleanupLibrary` 置空新符号——验证 `hybm_init` 在有/无符号环境均不崩溃

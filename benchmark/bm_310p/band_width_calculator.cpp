@@ -23,7 +23,7 @@
 #include <cstdio>
 #include "band_width_calculator.h"
 
-const uint32_t POOL_ALIGN_SIZE = 2UL * 1024UL * 1024UL;  // AclVmm 段要求 2M 对齐
+const uint32_t POOL_ALIGN_SIZE = 2UL * 1024UL * 1024UL; // HAL VMM 段要求 2M 对齐
 const uint16_t BARRIOR_PORT = 21666U;
 constexpr int32_t DIRECTION_TYPE_NUM_MAX = static_cast<int32_t>(CopyType::ALL_DIRECTION);
 
@@ -304,7 +304,7 @@ void BandWidthCalculator::FinalizeAll(uint32_t deviceId, BarrierUtil *&barrier, 
 
 int32_t BandWidthCalculator::CreateAndJoinPools(uint32_t rankId)
 {
-    // HBM 池: SDMA op 位 -> 310P AclVmm 段 + aclrtMemcpy 算子(DRAM 参数必须为 0)
+    // HBM 池: SDMA op 位 -> 310P HAL VMM 段 + aclrtMemcpy 算子(DRAM 参数必须为 0)
     hbmHandle_ = smem_bm_create(0, 0, SMEMB_DATA_OP_SDMA, 0, cmdParam_.hbmPoolSize, 0);
     CHECK_RET_ERR((hbmHandle_ == nullptr), "smem_bm_create(HBM) failed, rank:" << rankId
                                                                           << " hbmPoolSize:" << cmdParam_.hbmPoolSize);
@@ -346,8 +346,7 @@ int32_t BandWidthCalculator::PrepareLocalMem(uint32_t rankId)
     CHECK_RET_ERR((dataPtr == nullptr), "malloc pattern buffer failed, len:" << len << " rank:" << rankId);
     GenerateData(dataPtr, static_cast<int32_t>(rankId), len);
 
-    // 注: 裸 host/device 指针无需 register_user_mem —— 各方向 copyType 显式钉住 local 侧
-    // 内存类型(TransToHybmDirection), 且 AclVmm 段不支持 RegisterMemory(对齐 07 示例不注册)
+    // 本例按拷贝方向指定本地内存类型，直接使用准备好的host/device缓冲区。
     auto ret = PrepareLocalHostMem(dataPtr, len);
     if (ret == 0) {
         ret = PrepareLocalDeviceMem(dataPtr, len);

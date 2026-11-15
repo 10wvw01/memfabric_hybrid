@@ -7,7 +7,7 @@ TBD - created by archiving change add-310p-bm-bw. Update Purpose after archive.
 
 ### Requirement: 双实体双池建池
 
-`bm_perf_benchmark_310p` SHALL 以两个独立 smem_bm 实体建池：entity0 = HBM 池（SDMA 位 opType，310P 走 AclVmm 段）、entity1 = DRAM 池（HOST_SHM）。HBM 池大小 SHALL 经 `-hbm-size`、DRAM 池经 `-dram-size` 指定（默认各 2GB），且 SHALL 校验 2MB 对齐（AclVmm 段 granularity）。池大小非法（非 2M 对齐、建池失败）SHALL 记录 ERROR 并失败退出。
+`bm_perf_benchmark_310p` SHALL 以两个独立 smem_bm 实体建池：entity0 = HBM 池（SDMA 位 opType，310P 走HAL内存段）、entity1 = DRAM 池（HOST_SHM）。HBM 池大小 SHALL 经 `-hbm-size`、DRAM 池经 `-dram-size` 指定（默认各 2GB），且 SHALL 校验 2MB 对齐（HAL大页粒度）。池大小非法（非 2M 对齐、建池失败）SHALL 记录 ERROR 并失败退出。
 
 #### Scenario: 双池默认建池
 
@@ -17,7 +17,7 @@ TBD - created by archiving change add-310p-bm-bw. Update Purpose after archive.
 #### Scenario: 大池 CLI 指定
 
 - **WHEN** 以 `-hbm-size 8589934592` 启动
-- **THEN** HBM 池 8GB 建池成功（触发核心 P2P→HBM_HUGE 回退），测试正常执行
+- **THEN** HBM 池 8GB 建池成功（触发核心 P2P_DDR→DDR回退），测试正常执行
 
 ### Requirement: 十方向按目的池路由
 

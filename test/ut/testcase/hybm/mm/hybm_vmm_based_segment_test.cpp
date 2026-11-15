@@ -601,3 +601,15 @@ TEST_F(HybmVmmBasedSegmentTest, ReleaseP2PSharedPeerWaitsForLastRemovedRank)
     EXPECT_EQ(disablePeerCalls, 1);
     EXPECT_TRUE(segment.p2pLeases_.empty());
 }
+
+TEST_F(HybmVmmBasedSegmentTest, Non310PFailedReleaseKeepsOriginalRecordRemoval)
+{
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_910C));
+    MOCKER_CPP(&DlAclApi::RtDisableP2P, ock::mf::Result(*)(uint32_t, uint32_t))
+        .expects(once())
+        .will(returnValue(BM_ERROR));
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    segment.p2pLeases_.insert(6);
+    segment.ReleaseP2PLeases();
+    EXPECT_TRUE(segment.p2pLeases_.empty());
+}

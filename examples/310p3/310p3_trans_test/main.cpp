@@ -1,15 +1,8 @@
 /*
  * 310P3 TRANS Mode Functional Verification
  *
- * TRANS 注册 hybm_alloc_vmm_buffer 分配的 VMM 设备内存，通过 config store 交换 IPC key，
- * 对端 import 后用 aclrtMemcpyAsync(D2D) 跨 rank 传输。
- *
- * 310P3 关键路径（与 910B 的差异）：
- *   - Export: AclrtIpcMemGetExportKey 替代 RtIpcSetMemoryName（DISABLE_PID_VALIDATION）
- *   - Import: AclrtIpcMemImportByKey 替代 RtIpcOpenMemory
- *     同卡 die 用 DEFAULT flag（不触发 P2P 前置检查，绕过 507899）
- *     跨卡用 ENABLE_PEER_ACCESS flag（自动建立双向 P2P）
- *   - CopyG2G: AclrtMemcpyAsync + AclrtSynchronizeStream（310P3 不支持 sync D2D）
+ * TRANS注册HAL分配的VMM设备内存，通过config store交换64位NONE共享句柄。
+ * 对端保持本地上下文完成HAL导入，读写通过aclrtMemcpyAsync及stream同步执行。
  *
  * Tests:
  *   1. register_mem -> sync write -> verify（串行 round-robin 避免并发写竞争）

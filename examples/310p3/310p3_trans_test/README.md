@@ -14,6 +14,13 @@
 | TestAsyncReadSubmit | 异步 read_submit + stream sync + verify（G2L） |
 | TestDeregister | deregister_mem 释放已注册内存 |
 
+## 内存后端
+
+`hybm_alloc_vmm_buffer`在310P上使用HAL大页分配和映射，注册表导出64位NONE共享句柄。
+TRANS按本端驱动逻辑设备编号执行HAL导入、映射和访问权限设置；同卡导入保持本地上下文。
+注销和缓冲区释放使用对应的HAL接口。ACL用于本地设备设置、stream和数据拷贝。
+普通非VMM用户内存继续使用现有IPC兼容分支。
+
 ## VA 交换
 
 各 rank 通过 `MPI_Allgather` 交换 `hybm_alloc_vmm_buffer` 返回的设备内存虚拟地址，
