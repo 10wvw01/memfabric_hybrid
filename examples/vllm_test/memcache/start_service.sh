@@ -148,7 +148,7 @@ VLLM_CMD="python3 -m vllm.entrypoints.cli.main serve $MODEL_PATH \
   --enforce-eager --enable-chunked-prefill \
   --mamba-ssm-cache-dtype float16 --mamba-cache-mode align \
   --additional-config '{\"enable_flashcomm1\":false,\"enable_flashcomm2_parallel_size\":0,\"enable_prefill_mc2\":false,\"enable_fused_mc2\":0,\"ascend_compilation_config\":{\"fuse_norm_quant\":false,\"enable_npugraph_ex\":false}}' \
-  --enable-prefix-caching \
+  --enable-prefix-caching --enable-prompt-tokens-details \
   --kv-transfer-config '{\"kv_connector\":\"AscendStoreConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"backend\":\"memcache\"}}'"
 
 if [[ "$DETACH" -eq 1 ]]; then

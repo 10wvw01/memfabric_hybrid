@@ -184,6 +184,10 @@ bash run_test.sh --memcache-dir /path/to/memcache --type bench --rank 2 --device
 | `--bench-input-len <N>` | bench: 输入 token 长度 | 1024 |
 | `--bench-output-len <N>` | bench: 输出 token 长度 | 32 |
 
+benchmark 服务启用 `--enable-prompt-tokens-details`，结果分别记录本地和外部缓存命中 token 数。
+cache-hit 轮在预热后清除本地 prefix cache，保留外部缓存；请求失败、缺少命中统计字段或外部命中为零时，
+benchmark 返回非零退出码，原始结果仍写入 JSON。
+
 ## 上游实现说明
 
 ### MemCache Python 绑定

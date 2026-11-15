@@ -554,6 +554,9 @@ run_bench() {
     local model_path="/home/models/Qwen3.6-35B-A3B-w8a8"
     local served_model_name="Qwen3.6-35B-A3B"
 
+    export VLLM_LOGGING_LEVEL=INFO
+    export VLLM_SERVER_DEV_MODE=1
+
     # Start MetaService + vLLM via start_service.sh
     log "[INFO] === Starting services (MetaService + vLLM) ==="
     bash "$PKG_DIR/start_service.sh" \
@@ -563,11 +566,8 @@ run_bench() {
         --gpu-mem-util "$GPU_MEM_UTIL" \
         --model "$model_path" \
         --served-model-name "$served_model_name" \
-        --memcache-dir "$MEMCACHE_DIR"
+        --memcache-dir "$MEMCACHE_DIR" || return $?
     log "[INFO] Services ready."
-
-    export VLLM_LOGGING_LEVEL=INFO
-    export VLLM_SERVER_DEV_MODE=1
 
     local bench_py="$PKG_DIR/cases/python/memcache/integration/simple_throughput_bench.py"
     local common_args="--host 127.0.0.1 --port $vllm_port --model $served_model_name \
@@ -582,13 +582,17 @@ run_bench() {
     set +e
     python3 "$bench_py" $common_args \
       --label memcache-miss --output-file "$miss_file" 2>&1 | { [[ -n "$LOG_FILE" ]] && tee -a "$LOG_FILE" || cat; }
+    local miss_exit=${PIPESTATUS[0]}
     set -e
+    [[ "$miss_exit" -eq 0 ]] || return "$miss_exit"
 
     log "[INFO] === Round 2/2: cache-hit (repeated prompts) ==="
     set +e
     python3 "$bench_py" $common_args --cache-test \
       --label memcache-hit --output-file "$hit_file" 2>&1 | { [[ -n "$LOG_FILE" ]] && tee -a "$LOG_FILE" || cat; }
+    local hit_exit=${PIPESTATUS[0]}
     set -e
+    [[ "$hit_exit" -eq 0 ]] || return "$hit_exit"
 
     log "[INFO] === MemCache hit benefit ==="
     python3 - "$miss_file" "$hit_file" <<'PY'
