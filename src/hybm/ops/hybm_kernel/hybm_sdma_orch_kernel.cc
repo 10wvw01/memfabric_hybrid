@@ -188,29 +188,43 @@ struct SqContext {
 
 int32_t cp1QueryProp(uint32_t devId, uint32_t sqId, uint32_t prop, uint32_t *v0, uint32_t *v1);
 
-// SQE 入环: 只写环 + 推进 shadow tail, 不敲铃(调用方统一 doorbell)。
-// 满环检查活查询 head 重算(hcomm LaunchTask 同款): shadow 回绕后对 epoch 入口 head 快照
-// 的模减会失明(used 恒小), 覆写固件未消费 SQE 造成邮件无声丢失(并发邮件丢失挂死（507014） 根因);
-// 活查询保证 used 始终以固件真实消费位置为基准。返回 0 成功; 1363=活查询超时环满。
+int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx);
+
+// SQE硬件提交队列保留一个空槽，用于区分空队列和满队列。
+// 等待硬件消费前先提交已有任务，避免当前批次尚未提交而无法前进。
+int32_t reserveSqeSpace(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, uint32_t count)
+{
+    if (count >= c->sqDepth) {
+        return 1363;
+    }
+    auto available = [c]() {
+        const uint32_t used = (c->sqTail >= c->sqHead) ? c->sqTail - c->sqHead : c->sqDepth - c->sqHead + c->sqTail;
+        return c->sqDepth - used - 1;
+    };
+    if (available() >= count) {
+        return 0;
+    }
+    if (c->sqTail == 0 || flushBatchDoorbell(p, c) != 0) {
+        return 1363;
+    }
+    for (uint32_t retry = 0; retry < kSqFullRetry; ++retry) {
+        usleep(kSqFullBackoffUs);
+        uint32_t liveHead = 0;
+        if (cp1QueryProp(p->devId, c->sqId, DRV_SQCQ_PROP_SQ_HEAD, &liveHead, nullptr) != 0) {
+            return 1363;
+        }
+        c->sqHead = liveHead;
+        if (available() >= count) {
+            return 0;
+        }
+    }
+    return 1363;
+}
+
 int32_t submitSqe(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, const uint8_t sqe[kSqeSize])
 {
-    uint32_t used = (c->sqTail >= c->sqHead) ? (c->sqTail - c->sqHead)
-                                             : (c->sqDepth - c->sqHead + c->sqTail);
-    if (c->sqDepth - used < 1) {
-        uint32_t retry = 0;
-        do { // 满环: 活查询固件 head 重算(非 epoch 快照), 1ms 退避, 上限 1s
-            usleep(kSqFullBackoffUs);
-            uint32_t liveHead = 0;
-            if (cp1QueryProp(p->devId, c->sqId, DRV_SQCQ_PROP_SQ_HEAD, &liveHead, nullptr) != 0) {
-                return 1363; // 错误码: head 活查询失败
-            }
-            c->sqHead = liveHead;
-            used = (c->sqTail >= c->sqHead) ? (c->sqTail - c->sqHead)
-                                            : (c->sqDepth - c->sqHead + c->sqTail);
-        } while (c->sqDepth - used < 1 && ++retry < kSqFullRetry);
-        if (c->sqDepth - used < 1) {
-            return 1363; // 错误码: 活查询后仍满(消费侧停摆)
-        }
+    if (reserveSqeSpace(p, c, 1) != 0) {
+        return 1363;
     }
     volatile uint8_t *slot = reinterpret_cast<volatile uint8_t *>(c->sqBase) +
                              static_cast<uint64_t>(c->sqTail) * kSqeSize;
@@ -352,6 +366,11 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
+    // 一条请求的4个任务和可能的占位任务整体预留，等待时的提交位置保持非零。
+    const uint32_t count = ((ctx->sqTail + 4) % ctx->sqDepth == 0) ? 5 : 4;
+    if (reserveSqeSpace(p, ctx, count) != 0) {
+        return 1360;
+    }
     /* 尾值防 0(v21, 并发邮件丢失挂死（507014） 修复): 本封四连若恰好使 shadow 尾落到 0, 该批 doorbell
      * 值为 0——固件将其当"空环"哨兵静默丢弃, SQE 完好在环但永不执行(实测确定性丢失邮件)。
      * 先插入一条无害占位 SQE(工作区 8B 自拷贝), 尾值落到 1; 小正值回绕形态实测安全。 */
