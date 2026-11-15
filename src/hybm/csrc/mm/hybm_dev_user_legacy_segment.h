@@ -99,6 +99,7 @@ private:
     Result ImportSliceInfo(const std::string &info, MemSlicePtr &remoteSlice) noexcept;
     static void RollbackIpcMemory(void *addresses[], uint32_t count);
     void RemoveSliceInfo(const uint32_t rankId) noexcept;
+    Result ImportVmmHandle(const UserHbmExportSliceInfo &sliceInfo, void *&handle) noexcept;
     Result ImportVmmSlice(const UserHbmExportSliceInfo &sliceInfo, void *&address) noexcept;
     void CleanupImportedVmm(const std::string &name) noexcept;
 

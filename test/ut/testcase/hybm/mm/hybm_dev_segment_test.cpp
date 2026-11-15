@@ -22,6 +22,10 @@
 #undef private
 #undef protected
 
+#include "dl_acl_api.h"
+
+#define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
+
 using namespace ock::mf;
 
 class HybmDevSegmentTest : public testing::Test {
@@ -521,4 +525,243 @@ TEST_F(HybmDevSegmentTest, HybmDevUserLegacySegment_ImportSliceInfo_SuccessNoHar
     const auto &stored = segment.importedSliceInfo_.at("slice_10_5");
     EXPECT_EQ(stored.gvaOffset, sliceInfo.gvaOffset);
     EXPECT_EQ(stored.rankId, 10U);
+}
+
+namespace {
+struct TransImportTestState {
+    int32_t peerUser{1};
+    int convertRet{BM_OK};
+    int switchRet{BM_OK};
+    int restoreRet{BM_OK};
+    int importRet{BM_OK};
+    int conversions{0};
+    int imports{0};
+    int frees{0};
+    bool nullHandle{false};
+    uint64_t ipcFlag{0};
+    std::vector<int32_t> devices;
+    std::vector<bool> forced;
+} transImportState;
+
+ock::mf::Result TransConvertPeer(int32_t, int32_t *userId)
+{
+    ++transImportState.conversions;
+    *userId = transImportState.peerUser;
+    return transImportState.convertRet;
+}
+
+ock::mf::Result TransSetDevice(int32_t device, bool force)
+{
+    transImportState.devices.push_back(device);
+    transImportState.forced.push_back(force);
+    return transImportState.devices.size() == 1 ? transImportState.switchRet : transImportState.restoreRet;
+}
+
+ock::mf::Result TransImportHandle(uint64_t shared, int32_t device, void **handle)
+{
+    EXPECT_EQ(shared, 0xABCDU);
+    EXPECT_EQ(device, MemSegment::deviceId_);
+    ++transImportState.imports;
+    *handle = transImportState.importRet == BM_OK && !transImportState.nullHandle ? reinterpret_cast<void *>(0x1234)
+                                                                                  : nullptr;
+    return transImportState.importRet;
+}
+
+ock::mf::Result TransFreeHandle(void *handle)
+{
+    EXPECT_EQ(handle, reinterpret_cast<void *>(0x1234));
+    ++transImportState.frees;
+    return BM_OK;
+}
+
+ock::mf::Result TransImportIpc(void **, const char *, uint64_t flag)
+{
+    transImportState.ipcFlag = flag;
+    return BM_ERROR;
+}
+} // namespace
+
+class HybmTransDeviceIdTest : public testing::Test {
+protected:
+    int originalUser_{-1};
+    int originalPhy_{-1};
+
+    void SetUp() override
+    {
+        GlobalMockObject::reset();
+        originalUser_ = MemSegment::deviceId_;
+        originalPhy_ = MemSegment::devicePhyId_;
+        MemSegment::deviceId_ = 0;
+        MemSegment::devicePhyId_ = 2;
+        transImportState = {};
+        MOCKER_CPP(&DlAclApi::AclrtGetLogicDevIdByPhyDevId, ock::mf::Result(*)(int32_t, int32_t *))
+            .stubs()
+            .will(invoke(TransConvertPeer));
+        MOCKER_CPP(&DlAclApi::AclrtSetDevice, ock::mf::Result(*)(int32_t, bool)).stubs().will(invoke(TransSetDevice));
+        MOCKER_CPP(&DlAclApi::AclrtMemImportFromShareableHandle, ock::mf::Result(*)(uint64_t, int32_t, void **))
+            .stubs()
+            .will(invoke(TransImportHandle));
+        MOCKER_CPP(&DlAclApi::AclrtFreePhysical, ock::mf::Result(*)(void *)).stubs().will(invoke(TransFreeHandle));
+    }
+
+    void TearDown() override
+    {
+        MemSegment::deviceId_ = originalUser_;
+        MemSegment::devicePhyId_ = originalPhy_;
+        GlobalMockObject::verify();
+        GlobalMockObject::reset();
+    }
+
+    UserHbmExportSliceInfo Info(uint32_t peerPhy = 3)
+    {
+        UserHbmExportSliceInfo info{};
+        info.rankId = 1;
+        info.devicePhyId = peerPhy;
+        info.shareableHandle = 0xABCD;
+        info.size = HYBM_LARGE_PAGE_SIZE;
+        strcpy(info.name, "trans-device-id-test");
+        return info;
+    }
+
+    void CheckIpcFlag(uint32_t peerPhy, uint64_t expected)
+    {
+        MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
+        MOCKER_CPP(&MemSegment::CanSdmaReaches, bool (*)(uint32_t, uint32_t, uint32_t)).stubs().will(returnValue(true));
+        MOCKER_CPP(&DlAclApi::AclrtIpcMemImportByKey, ock::mf::Result(*)(void **, const char *, uint64_t))
+            .stubs()
+            .will(invoke(TransImportIpc));
+        MemSegmentOptions options{};
+        options.rankCnt = 2;
+        options.dataOpType = HYBM_DOP_TYPE_SDMA;
+        HybmDevUserLegacySegment segment(options, 0);
+        auto info = Info(peerPhy);
+        info.shareableHandle = 0;
+        MemSlicePtr slice;
+        EXPECT_EQ(segment.ImportSliceInfo(std::string(reinterpret_cast<const char *>(&info), sizeof(info)), slice),
+                  BM_DL_FUNCTION_FAILED);
+        EXPECT_EQ(transImportState.ipcFlag, expected);
+    }
+};
+
+TEST_F(HybmTransDeviceIdTest, SameCardRemappingUsesOwnerUserDeviceAndRestoresLocal)
+{
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(), handle), BM_OK);
+    EXPECT_EQ(transImportState.devices, (std::vector<int32_t>{1, 0}));
+    EXPECT_EQ(transImportState.forced, (std::vector<bool>{true, false}));
+    EXPECT_EQ(transImportState.conversions, 1);
+    EXPECT_EQ(transImportState.imports, 1);
+    EXPECT_EQ(handle, reinterpret_cast<void *>(0x1234));
+}
+
+TEST_F(HybmTransDeviceIdTest, SameCardWithoutRemappingStillRestoresLocal)
+{
+    MemSegment::devicePhyId_ = 0;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(1), handle), BM_OK);
+    EXPECT_EQ(transImportState.devices, (std::vector<int32_t>{1, 0}));
+}
+
+TEST_F(HybmTransDeviceIdTest, CrossCardRemappingImportsInLocalContext)
+{
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(6), handle), BM_OK);
+    EXPECT_EQ(transImportState.conversions, 0);
+    EXPECT_TRUE(transImportState.devices.empty());
+    EXPECT_EQ(transImportState.imports, 1);
+}
+
+TEST_F(HybmTransDeviceIdTest, CrossCardDecisionUsesPhysicalInsteadOfUserDevice)
+{
+    MemSegment::deviceId_ = 1;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(0), handle), BM_OK);
+    EXPECT_TRUE(transImportState.devices.empty());
+    EXPECT_EQ(transImportState.conversions, 0);
+}
+
+TEST_F(HybmTransDeviceIdTest, TranslationFailureStopsBeforeSwitchAndImport)
+{
+    transImportState.convertRet = BM_ERROR;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(), handle), BM_DL_FUNCTION_FAILED);
+    EXPECT_TRUE(transImportState.devices.empty());
+    EXPECT_EQ(transImportState.imports, 0);
+}
+
+TEST_F(HybmTransDeviceIdTest, NegativeTranslatedDeviceStopsBeforeSwitchAndImport)
+{
+    transImportState.peerUser = -1;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(), handle), BM_DL_FUNCTION_FAILED);
+    EXPECT_TRUE(transImportState.devices.empty());
+    EXPECT_EQ(transImportState.imports, 0);
+}
+
+TEST_F(HybmTransDeviceIdTest, OwnerSwitchFailureStopsBeforeImport)
+{
+    transImportState.switchRet = BM_ERROR;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(), handle), BM_DL_FUNCTION_FAILED);
+    EXPECT_EQ(transImportState.devices, (std::vector<int32_t>{1}));
+    EXPECT_EQ(transImportState.imports, 0);
+}
+
+TEST_F(HybmTransDeviceIdTest, ImportFailureStillRestoresLocal)
+{
+    transImportState.importRet = BM_ERROR;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(), handle), BM_DL_FUNCTION_FAILED);
+    EXPECT_EQ(transImportState.devices, (std::vector<int32_t>{1, 0}));
+    EXPECT_EQ(transImportState.frees, 0);
+}
+
+TEST_F(HybmTransDeviceIdTest, RestoreFailureReleasesImportedHandleAndReturnsFailure)
+{
+    transImportState.restoreRet = BM_ERROR;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(), handle), BM_DL_FUNCTION_FAILED);
+    EXPECT_EQ(transImportState.devices, (std::vector<int32_t>{1, 0}));
+    EXPECT_EQ(transImportState.frees, 1);
+    EXPECT_EQ(handle, nullptr);
+}
+
+TEST_F(HybmTransDeviceIdTest, NullImportedHandleStillRestoresLocalAndFails)
+{
+    transImportState.nullHandle = true;
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.ImportVmmHandle(Info(), handle), BM_DL_FUNCTION_FAILED);
+    EXPECT_EQ(transImportState.devices, (std::vector<int32_t>{1, 0}));
+}
+
+TEST_F(HybmTransDeviceIdTest, IpcSameCardFlagUsesPhysicalDevices)
+{
+    CheckIpcFlag(3, ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT);
+}
+
+TEST_F(HybmTransDeviceIdTest, IpcCrossCardFlagUsesPhysicalDevices)
+{
+    MemSegment::deviceId_ = 1;
+    CheckIpcFlag(0, ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS);
+}
+
+TEST_F(HybmTransDeviceIdTest, LocalDeviceFailureStopsBeforeReserve)
+{
+    transImportState.switchRet = BM_ERROR;
+    MOCKER_CPP(&DlAclApi::AclrtReserveMemAddress, ock::mf::Result(*)(void **, size_t, size_t, void *, uint64_t))
+        .expects(never());
+    HybmDevUserLegacySegment segment(MemSegmentOptions{}, 0);
+    void *address = nullptr;
+    EXPECT_EQ(segment.ImportVmmSlice(Info(), address), BM_DL_FUNCTION_FAILED);
+    EXPECT_EQ(transImportState.imports, 0);
 }

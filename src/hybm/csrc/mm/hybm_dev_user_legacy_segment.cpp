@@ -525,7 +525,7 @@ Result HybmDevUserLegacySegment::ImportSliceInfo(const std::string &info, MemSli
         }
 
         if (is310P) {
-            bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), sliceInfo.devicePhyId);
+            bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(devicePhyId_), sliceInfo.devicePhyId);
             uint64_t importFlag =
                 sameCard ? ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT : ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS;
             ret = DlAclApi::AclrtIpcMemImportByKey(&address, sliceInfo.name, importFlag);
@@ -561,43 +561,67 @@ Result HybmDevUserLegacySegment::ImportSliceInfo(const std::string &info, MemSli
     return BM_OK;
 }
 
+Result HybmDevUserLegacySegment::ImportVmmHandle(const UserHbmExportSliceInfo &sliceInfo, void *&handle) noexcept
+{
+    const bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(devicePhyId_), sliceInfo.devicePhyId);
+    int32_t ownerUserId = deviceId_;
+    if (sameCard) {
+        auto ret = DlAclApi::AclrtGetLogicDevIdByPhyDevId(static_cast<int32_t>(sliceInfo.devicePhyId), &ownerUserId);
+        if (ret != BM_OK || ownerUserId < 0) {
+            BM_LOG_ERROR("TRANS导出端设备编号转换失败 ret:" << ret << " local_user:" << deviceId_ << " peer_phy:"
+                                                            << sliceInfo.devicePhyId << " peer_user:" << ownerUserId);
+            return BM_DL_FUNCTION_FAILED;
+        }
+        ret = DlAclApi::AclrtSetDevice(ownerUserId, true);
+        if (ret != BM_OK) {
+            BM_LOG_ERROR("TRANS切换导出端设备失败 ret:" << ret << " local_user:" << deviceId_ << " peer_phy:"
+                                                        << sliceInfo.devicePhyId << " peer_user:" << ownerUserId);
+            return BM_DL_FUNCTION_FAILED;
+        }
+    }
+    // 同卡导入需要导出端上下文，导入完成后在本端继续映射和访问。
+    auto ret = DlAclApi::AclrtMemImportFromShareableHandle(sliceInfo.shareableHandle, deviceId_, &handle);
+    if (sameCard) {
+        auto restoreRet = DlAclApi::AclrtSetDevice(deviceId_);
+        if (restoreRet != BM_OK) {
+            BM_LOG_ERROR("TRANS恢复本端设备失败 ret:" << restoreRet << " local_user:" << deviceId_ << " peer_phy:"
+                                                      << sliceInfo.devicePhyId << " import_ret:" << ret);
+            if (ret == BM_OK && handle != nullptr) {
+                DlAclApi::AclrtFreePhysical(handle);
+            }
+            handle = nullptr;
+            return BM_DL_FUNCTION_FAILED;
+        }
+    }
+    if (ret != BM_OK || handle == nullptr) {
+        BM_LOG_ERROR("AclrtMemImportFromShareableHandle failed, ret:"
+                     << ret << " rank:" << sliceInfo.rankId << " local_user:" << deviceId_ << " local_phy:"
+                     << devicePhyId_ << " peer_phy:" << sliceInfo.devicePhyId << " sameCard:" << sameCard);
+        return BM_DL_FUNCTION_FAILED;
+    }
+    return BM_OK;
+}
+
 Result HybmDevUserLegacySegment::ImportVmmSlice(const UserHbmExportSliceInfo &sliceInfo, void *&address) noexcept
 {
-    DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId_), true);
-
+    auto ret = DlAclApi::AclrtSetDevice(deviceId_, true);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("TRANS设置本端设备失败 ret:" << ret << " local_user:" << deviceId_);
+        return BM_DL_FUNCTION_FAILED;
+    }
     void *lva = nullptr;
-    auto ret = DlAclApi::AclrtReserveMemAddress(&lva, sliceInfo.size, 0, nullptr, 0);
+    ret = DlAclApi::AclrtReserveMemAddress(&lva, sliceInfo.size, 0, nullptr, 0);
     if (ret != 0 || lva == nullptr) {
         BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " rank:" << sliceInfo.rankId
                                                            << " size:" << sliceInfo.size);
         return BM_DL_FUNCTION_FAILED;
     }
 
-    bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(deviceId_), sliceInfo.devicePhyId);
-    if (sameCard) {
-        BM_LOG_INFO("310P3 VMM import same-card: SetDevice(exporter:" << sliceInfo.devicePhyId
-                                                                      << ") for rank:" << sliceInfo.rankId);
-        DlAclApi::AclrtSetDevice(static_cast<int32_t>(sliceInfo.devicePhyId), true);
-    }
-
-    int32_t canAccess = -1;
-    DlAclApi::AclrtDeviceCanAccessPeer(&canAccess, static_cast<int32_t>(deviceId_),
-                                       static_cast<int32_t>(sliceInfo.devicePhyId));
-    BM_LOG_INFO("310P3 VMM CanAccessPeer:" << canAccess << " local:" << deviceId_ << " peer:" << sliceInfo.devicePhyId
-                                           << " sameCard:" << sameCard);
-
     aclrtDrvMemHandle aclHandle = nullptr;
-    ret = DlAclApi::AclrtMemImportFromShareableHandle(sliceInfo.shareableHandle, static_cast<int32_t>(deviceId_),
-                                                      &aclHandle);
-    if (sameCard) {
-        DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId_));
-    }
-    if (ret != 0 || aclHandle == nullptr) {
-        BM_LOG_ERROR("AclrtMemImportFromShareableHandle failed, ret:" << ret << " rank:" << sliceInfo.rankId
-                                                                      << " deviceId:" << deviceId_
-                                                                      << " peerDevicePhyId:" << sliceInfo.devicePhyId);
+    ret = ImportVmmHandle(sliceInfo, aclHandle);
+    if (ret != BM_OK) {
         DlAclApi::AclrtReleaseMemAddress(lva);
-        return BM_DL_FUNCTION_FAILED;
+        return ret;
     }
 
     ret = DlAclApi::AclrtMapMem(lva, sliceInfo.size, 0, aclHandle, 0);
@@ -621,8 +645,8 @@ Result HybmDevUserLegacySegment::ImportVmmSlice(const UserHbmExportSliceInfo &sl
     registerAddrs_.insert(lva);
     address = lva;
 
-    BM_LOG_INFO("VMM import success, rank:" << sliceInfo.rankId << " lva:" << lva
-                                            << " sameCard:" << sameCard);
+    BM_LOG_INFO("VMM import success, rank:" << sliceInfo.rankId << " lva:" << lva << " local_phy:" << devicePhyId_
+                                            << " peer_phy:" << sliceInfo.devicePhyId);
     return BM_OK;
 }
 
