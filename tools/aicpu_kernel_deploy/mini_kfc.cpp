@@ -38,7 +38,7 @@
  *       → CP1 内 KFC handler dlopen 失败不报错、回退 dlsym(RTLD_DEFAULT) 命中 libc
  *       的 system() → param(host args 透传的命令串)成为其参数。零部署零上传。
  * 输出语义(重要, X9 实测勘正): "sync=N" = 命令退出码(0=成功, 非零→507018 形式回传);
- *       本工具 main 恒 return 0, 调用方必须解析 stdout 里的 sync= 判定结果。
+ *       本工具在 launch 或 sync 失败时返回非零退出码。
  * 安全告示: 本工具在设备 OS 内执行任意 shell 命令, 仅限开发/诊断环境使用,
  *       禁止随产品运行时分发(产品库内置部署仅执行固定命令串, 见 hybm_sdma_orchestrator.cpp)。
  * 用法: ./mini_kfc <dev> "<命令>"
@@ -88,7 +88,11 @@ int main(int argc, char **argv)
         return 1;
     }
     aclrtStream s = nullptr;
-    aclrtCreateStream(&s);
+    aclError streamRet = aclrtCreateStream(&s);
+    if (streamRet != ACL_SUCCESS) {
+        printf("[E] create stream ret=%d\n", (int)streamRet);
+        return 1;
+    }
     char buf[1024];
     strncpy(buf, cmd, 1023);
     buf[sizeof(buf) - 1] = '\0'; // strncpy 不保证终止, strlen 前必须显式补
@@ -101,7 +105,7 @@ int main(int argc, char **argv)
     }
     // 命令串作为 host args 透传 → CP1 内 system() 执行; 退出码经 stream sync 传回
     aclError r = aclrtLaunchKernelWithHostArgs(fh, 1, s, nullptr, buf, strlen(buf) + 1, nullptr, 0);
-    aclError sr = aclrtSynchronizeStream(s);
+    aclError sr = r == ACL_SUCCESS ? aclrtSynchronizeStream(s) : r;
     printf("cmd='%s' launch=%d sync=%d\n", cmd, (int)r, (int)sr);
-    return 0; // 恒 0, 结果看 stdout 的 sync=
+    return r == ACL_SUCCESS && sr == ACL_SUCCESS ? 0 : 1;
 }

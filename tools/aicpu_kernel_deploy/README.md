@@ -26,7 +26,7 @@ make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0   # 产物: deployer mini_kfc
   `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/` 并 `chmod 644`。
 - `mini_kfc`：KFC 通道（json 声明 `KFCKernel` + `functionName: "system"` + 不存在的
   `kernelSo` → CP1 内 handler dlopen 失败回退 `dlsym` 命中 libc `system()`），
-  host 一条 launch 即在设备 OS 内执行 shell 命令；结果看 stdout 的 `sync=`（0=成功）。
+  host 一条 launch 即在设备 OS 内执行 shell 命令；launch 或同步失败时返回非零退出码，stdout 同时打印 `launch=` 和 `sync=`。
 
 ## 手动部署链（kernel 三件套由 `src/hybm/ops` 的 `mf_sdma_orch_kernel` 目标产出）
 
@@ -44,8 +44,8 @@ sleep 22                                                                        
 ./mini_kfc 0 "cat /home/CustAiCpuUser/lib/libmf_sdma_orch.so.* > \
 /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so && chmod 644 \
 /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so"                  # 复制+授权
-./mini_kfc 0 "grep -q HybmSdmaOrchBatch \
-/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so"                  # 验证门(sync=0 即过)
+./mini_kfc 0 "grep -q HybmSdmaOrchEpoch \
+/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so"                  # 校验当前入口（退出码 0 表示通过）
 ```
 
 ## 运维纪律
