@@ -25,12 +25,12 @@ options:
 4. 进入重复测试流程：
     1. 使用acl接口申请内存，称为MemoryA
     2. 使用torch_npu创建2个tensor（随机浮点数），分别称为TensorA和TensorB
-    3. 如果开启 `--sync-create`，则对torch_npu当前stream进行同步流操作
+    3. 如果开启 `--sync-create` 或 `--same-stream`，则同步 torch_npu 当前流，确保张量创建任务已提交并完成
     4. 使用acl的异步拷贝接口将TensorA位置的数据拷贝至MemoryA并在同一个流上执行同步流操作
     5. 使用acl的异步拷贝接口将MemoryA位置的数据拷贝至TensorB并在同一个流上执行同步流操作
-    6. 对比TensorA的和与TensorB的和是否一致
+    6. 逐元素对比TensorA与TensorB是否完全一致
 5. 打印测试结果
-6. 释放资源并结束测试
+6. 释放资源并结束测试；比较失败或子进程异常时返回非零退出码
 
 使用示例：
 

@@ -58,7 +58,7 @@ python3 07_310p_die_pair_pool.py
 # 1. 仓库根构建: cmake -B build -DXPU_TYPE=NPU -DBUILD_PYTHON=OFF && cmake --build build -j
 # 2. 链接静态库编译本示例(INCLUDE 路径按仓库实际结构调整)
 CANN=/usr/local/Ascend/cann-9.1.0
-g++ -std=c++17 -w -o /tmp/p5_e2e 07_310p_die_pair_pool.cpp \
+g++ -std=c++17 -w -o /tmp/mf_310p_die_pair_pool 07_310p_die_pair_pool.cpp \
   -Wl,--start-group \
   build/src/smem/csrc/libmf_smem.a \
   build/src/hybm/csrc/libmf_hybm_core.a \
@@ -71,7 +71,7 @@ g++ -std=c++17 -w -o /tmp/p5_e2e 07_310p_die_pair_pool.cpp \
   -pthread -ldl
 export ASCEND_HOME_PATH=$CANN
 export LD_LIBRARY_PATH=$CANN/aarch64-linux/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common
-/tmp/p5_e2e 0 & /tmp/p5_e2e 1 & wait
+/tmp/mf_310p_die_pair_pool 0 & /tmp/mf_310p_die_pair_pool 1 & wait
 # 期望输出: 双方 "=== P5 rN DONE ==="
 ```
 
