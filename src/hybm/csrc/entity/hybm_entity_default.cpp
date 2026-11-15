@@ -1386,6 +1386,11 @@ hybm_data_op_type MemEntityDefault::CanReachDataOperators(uint32_t remoteRank) c
         supportDataOp |= (HYBM_DOP_TYPE_MTE | HYBM_DOP_TYPE_SDMA);
     }
 
+    if ((options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA) && remoteRank < options_.rankCount &&
+        SdmaReaches(remoteRank)) {
+        supportDataOp |= HYBM_DOP_TYPE_AIV_SDMA;
+    }
+
     if (options_.bmDataOpType & HYBM_DOP_TYPE_DEVICE_RDMA) {
         supportDataOp |= HYBM_DOP_TYPE_DEVICE_RDMA;
     }
