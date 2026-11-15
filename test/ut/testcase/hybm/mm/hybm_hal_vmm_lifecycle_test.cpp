@@ -585,3 +585,34 @@ TEST_F(HybmHalVmmLifecycleTest, SharedDeviceAllocationDoesNotFallbackOn910B)
     EXPECT_EQ(hal.creates, 1);
     EXPECT_EQ(hal.memoryTypes, (std::vector<uint32_t>{MEM_HBM_TYPE}));
 }
+
+TEST_F(HybmHalVmmLifecycleTest, Non310PMetadataKeepsOriginalReserveAddressHandling)
+{
+    testSoc = ASCEND_910B;
+    hal.wrongAddress = true;
+    void *address = nullptr, *handle = nullptr;
+    EXPECT_EQ(HybmModernInitMetaGva(7, &address, HYBM_DEVICE_INFO_SIZE, &handle), BM_OK);
+    EXPECT_NE(address, reinterpret_cast<void *>(SVM_END_ADDR - GB));
+    EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create", "map"}));
+}
+
+TEST_F(HybmHalVmmLifecycleTest, Non310PMetadataCreateFailureKeepsOriginalCleanup)
+{
+    testSoc = ASCEND_910B;
+    hal.create = 8;
+    void *address = nullptr, *handle = nullptr;
+    EXPECT_EQ(HybmModernInitMetaGva(7, &address, HYBM_DEVICE_INFO_SIZE, &handle), BM_ERROR);
+    EXPECT_NE(address, nullptr);
+    EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create"}));
+}
+
+TEST_F(HybmHalVmmLifecycleTest, Non310PMetadataMapFailureReleasesOnlyPhysicalHandle)
+{
+    testSoc = ASCEND_910B;
+    hal.map = 8;
+    void *address = nullptr, *handle = nullptr;
+    EXPECT_EQ(HybmModernInitMetaGva(7, &address, HYBM_DEVICE_INFO_SIZE, &handle), BM_ERROR);
+    EXPECT_NE(address, nullptr);
+    EXPECT_EQ(handle, HANDLE);
+    EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create", "map", "release"}));
+}

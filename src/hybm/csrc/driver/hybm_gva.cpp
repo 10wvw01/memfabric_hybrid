@@ -159,8 +159,9 @@ int32_t HybmModernInitMetaGva(uint32_t driverDeviceId, void **globalMemoryBase, 
     const uint64_t reserveBase = is310P ? HYBM_DEVICE_META_ADDR : SVM_END_ADDR - GB;
     const size_t reserveSize = is310P ? allocSize : GB;
     void *address = nullptr;
-    auto ret = DlHalApi::HalMemAddressReserve(&address, reserveSize, 0, reinterpret_cast<void *>(reserveBase), 0);
-    if (ret != BM_OK || address != reinterpret_cast<void *>(reserveBase)) {
+    auto reserveOutput = is310P ? &address : globalMemoryBase;
+    auto ret = DlHalApi::HalMemAddressReserve(reserveOutput, reserveSize, 0, reinterpret_cast<void *>(reserveBase), 0);
+    if (ret != BM_OK || (is310P && address != reinterpret_cast<void *>(reserveBase))) {
         BM_LOG_ERROR("元数据地址预留失败 driver:" << driverDeviceId << " expected:" << reserveBase
                                                   << " actual:" << address << " ret:" << ret);
         if (ret == BM_OK && address != nullptr) {
@@ -169,7 +170,12 @@ int32_t HybmModernInitMetaGva(uint32_t driverDeviceId, void **globalMemoryBase, 
         return BM_ERROR;
     }
     drv_mem_handle_t *handle = nullptr;
-    ret = CreateHalMemory(driverDeviceId, allocSize, &handle);
+    auto handleOutput = is310P ? &handle : reinterpret_cast<drv_mem_handle_t **>(allocHandle);
+    ret = CreateHalMemory(driverDeviceId, allocSize, handleOutput);
+    if (ret != BM_OK && !is310P) {
+        return BM_ERROR;
+    }
+    handle = *handleOutput;
     bool mapped = false;
     if (ret == BM_OK) {
         ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR), allocSize, 0, handle, 0);
@@ -186,11 +192,15 @@ int32_t HybmModernInitMetaGva(uint32_t driverDeviceId, void **globalMemoryBase, 
         if (handle != nullptr) {
             (void)DlHalApi::HalMemRelease(handle);
         }
-        (void)DlHalApi::HalMemAddressFree(address);
-        return ret;
+        if (is310P) {
+            (void)DlHalApi::HalMemAddressFree(address);
+        }
+        return is310P ? ret : BM_ERROR;
     }
-    *globalMemoryBase = address;
-    *allocHandle = handle;
+    if (is310P) {
+        *globalMemoryBase = address;
+        *allocHandle = handle;
+    }
     return BM_OK;
 }
 
