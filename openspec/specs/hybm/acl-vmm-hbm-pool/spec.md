@@ -1,122 +1,66 @@
 ## Purpose
 
-定义 Ascend 310P（单卡双 die）上通过 ACL VMM 接口创建与管理 2-rank HBM 内存池的行为契约：SOC 识别与段分派、段生命周期、跨进程/跨 die 导入导出、池内地址分类与可选符号容忍语义。
+定义310P设备池、TRANS VMM缓冲区和SHMEM元数据区的HAL内存生命周期。目录名保留既有引用。
 
 ## Requirements
 
-### Requirement: 310P SOC 识别与 HBM 段分派
+### Requirement: 310P内存后端与设备编号
 
-系统 SHALL 识别 soc 字符串包含 "Ascend310P" 的设备为 ASCEND_310P 类型。在 310P 设备上创建 HBM 内存池（SDMA 位 opType）时，系统 SHALL 使用 ACL 层 VMM 路径构建段，且该分派 SHALL 优先于 GVA 版本判断（310P 驱动版本被映射为 GVA V4 窗口时也不得落入 HAL 路径）。在 910B/910C/950 设备上，段分派与建池行为 SHALL 保持与引入本能力之前完全一致。
+310P HBM池 SHALL 由HybmVmmBasedSegment管理，TRANS SHALL 保持用户内存注册接口。
+两者及固定地址元数据区 SHALL 使用HAL预留、物理分配、映射、访问权限及释放。
+HAL参数 SHALL 使用由程序设备编号转换得到的驱动逻辑编号。物理编号用于拓扑判断和跨rank交换。
+ACL继续负责本地设备上下文、设备查询、stream、数据拷贝和设备P2P控制。
 
-#### Scenario: 310P 上创建 HBM 池
+#### Scenario: 可见设备重编号
 
-- **WHEN** 在 soc 字符串为 "Ascend310P3" 的设备上以 SDMA 位 opType 创建 HBM 内存池
-- **THEN** 建池成功，段经由 ACL VMM 路径构建（ReserveMemAddress/MallocPhysical/MapMem 链路）
+- **WHEN** 当前进程的设备0对应物理设备2
+- **THEN** HAL使用转换后的驱动逻辑编号；同卡判断使用物理编号
 
-#### Scenario: 非 310P 设备行为不变
+### Requirement: 物理内存类型及回退
 
-- **WHEN** 在 910B 或 910C/950 设备上创建 HBM 内存池
-- **THEN** 段分派结果与建池行为和引入本能力之前一致，无任何行为变化
+310P SHALL 使用MEM_HUGE_PAGE_TYPE与MEM_P2P_DDR_TYPE。
+仅当HalMemCreate返回6时 SHALL 以MEM_DDR_TYPE重试一次。
+其他错误 SHALL 记录设备编号、大小及返回码并返回失败。
 
-### Requirement: ACL VMM 可选符号缺失容忍
+#### Scenario: P2P分配不足
 
-系统 SHALL 以 OPTIONAL 方式动态加载 ACL VMM 相关的 `aclrt*` 符号。当宿主机器的 libascendcl.so 不导出这些符号（如 910B/950 环境）时，`hybm_init` SHALL 正常完成，仅记录 WARN 日志，对应函数指针保持空值；不得因符号缺失导致初始化失败或崩溃。
+- **WHEN** P2P_DDR分配返回6
+- **THEN** 使用DDR重试；重试失败时释放已预留的地址窗口
 
-#### Scenario: 符号缺失的机器上初始化
+### Requirement: 共享句柄与导入上下文
 
-- **WHEN** 在不导出 ACL VMM 符号的 CANN 环境上执行 `hybm_init`
-- **THEN** 初始化成功返回，仅出现符号加载 WARN 日志，进程不崩溃
+310P SHALL 使用64位NONE共享句柄，并设置既有跨进程共享属性。
+HBM池保留HostSdmaExportInfo布局；TRANS保留UserHbmExportSliceInfo布局及公共注册接口。
+HAL同卡与跨卡导入 SHALL 显式传入本端驱动逻辑编号，并保持当前线程的本地设备上下文。
 
-### Requirement: 段地址空间布局
+#### Scenario: 同卡导入
 
-在 310P 上创建 HBM 池时，系统 SHALL 以一次整窗预留（`rankCnt × maxSize`）方式获得虚拟地址窗口，并按 `base + rankIndex × maxSize` 的槽位布局安放各 rank 分片。池内地址的 GVA、DVA、HVA SHALL 为同一 VMM VA 值（地址直接可用，无需变换）。各 rank 分片的物理内存分配 SHALL 按 VMM granularity（实测 2MB）对齐。
+- **WHEN** 两个rank位于同卡不同die并导入HAL共享句柄
+- **THEN** 导入、映射及权限设置均在本端完成，数据比较通过
 
-#### Scenario: 整窗预留与槽位布局
+### Requirement: 地址窗口与元数据
 
-- **WHEN** 2-rank 各 8MB 建立 HBM 池
-- **THEN** 系统一次预留 16MB 窗口，rank0/rank1 分片分别位于 base 与 base+8MB，GVA==DVA==HVA
+HBM池 SHALL 按rankCnt乘maxSize预留窗口，并以rank槽位安放本地及导入分片。
+元数据区 SHALL 精确预留HYBM_DEVICE_META_ADDR并授予本端设备访问权限。
+本端分配只设置本端访问权限，对端在导入映射后设置自己的访问权限；设置失败时 SHALL 返回失败并释放映射。
+TRANS可以使用独立的本地映射地址，通过交换的地址与地址转换表访问对端。
+VMM映射范围按2MiB对齐，注册和拷贝仍受实际注册大小约束。
 
-### Requirement: 跨进程导出与导入
+### Requirement: 注册、导出与释放同步
 
-HBM 分片导出信息 SHALL 使用 magic `0xAABB1234FFFFEE05`（ACL VMM 段专用），序列化布局 192 字节；导出 SHALL 携带 gva、slotIndex、devId、pid、rankId、size 与 shareableHandle。导出 shareable handle 时 SHALL 固定携带 `ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION` 标志（关闭驱动级 PID 白名单，免去跨进程 pid 交换时序耦合）。
+VMM注册表 SHALL 在同一把锁内查询、导出或释放物理句柄。
+未注册地址与已注册地址的HAL导出失败 SHALL 分别返回对应状态。
+注册范围超过实际分配大小时 SHALL 返回失败。
+普通非VMM用户内存的IPC兼容分支保持其现有接口。
 
-对端导入时：同卡 die 对（devId 整除 2 相同）SHALL 采用显式上下文切换五步序列（在对端 die 上 CreateContext → SetCurrentContext → Import(本端 die) → SetDevice(本端 die) → DestroyContext）；跨卡场景 SHALL 在本进程上下文直接导入。导入地址 SHALL 取导出信息中的 gva（对称 GVA，双进程 ReserveMemAddress base 一致）。
+### Requirement: 失败清理与重试
 
-#### Scenario: 跨 die 导入
+TRANS缓冲区和元数据区的释放 SHALL 按解除映射、释放物理句柄、释放地址窗口的顺序进行。
+这两类资源的每一步释放成功后 SHALL 更新资源状态，后续重试从尚未完成的步骤继续。
+HAL导入失败 SHALL 释放地址预留；映射或权限设置失败 SHALL 释放已取得的导入资源。
+元数据释放失败时 SHALL 保留清理状态并允许重试，清理完成前拒绝重新初始化。
 
-- **WHEN** rank0（dev0）导出分片，rank1（dev1，同卡 die 对）执行 join 导入
-- **THEN** 五步上下文序列全部成功，导入地址等于 rank0 的 gva，随后跨 die D2D 拷贝逐字校验通过
+### Requirement: 其他型号兼容
 
-#### Scenario: 未知 magic 的导出块被正确识别
-
-- **WHEN** 传输层收到 magic 为 `0xAABB1234FFFFEE05` 的交换块
-- **THEN** 该块被识别为 HBM 分片并进入导入流程，不被静默跳过（避免后续读取错位断链）
-
-### Requirement: 导入幂等性
-
-同一 (rankId, sliceIndex) 的 shareable handle 重复导入时，系统 SHALL 幂等去重并返回成功，不得报错或产生重复映射。join 重试（对端尚未就绪导致的重复 join）SHALL 不因重复 import 而失败。
-
-#### Scenario: join 重试重复导入
-
-- **WHEN** 某 rank 因对端未就绪多次 join，导致对同一 shareableHandle 重复触发导入
-- **THEN** 后续导入被幂等去重，join 最终成功，无错误日志刷屏
-
-### Requirement: 池内地址分类
-
-对于已登记在本地分配表中的池内地址：本端分配的地址 SHALL 分类为 LOCAL 与 GLOBAL 双位（对称池内地址既可作拷贝源也可作目标）；导入的对端地址 SHALL 分类为单一 GLOBAL 位。该分类 SHALL 与既有 reservedMap 路径的语义保持一致，且对 910B 场景行为等价。
-
-#### Scenario: 本地池地址作拷贝源与目标
-
-- **WHEN** 用户对本端分配的 HBM 池地址发起 G2H 或 H2G 方向拷贝
-- **THEN** 地址被分类为 LOCAL|GLOBAL 双位，方向判定通过，拷贝正常执行
-
-### Requirement: 310P 设备信息查询容忍降级
-
-`hybm_init` 阶段的设备拓扑信息查询（SDID/SERVER_ID/SUPER_POD_ID）在 310P 上不被驱动支持（返回 207000）时，系统 SHALL 容忍降级：记录 WARN 日志并将对应字段置为无效值，初始化 SHALL 继续成功；跨 rank 可达性判定 SHALL 改由段导入映射状态决定，而非拓扑坐标。
-
-#### Scenario: 310P 初始化不因拓扑查询失败而失败
-
-- **WHEN** 在 310P 上执行 `hybm_init`，内部拓扑查询返回 207000
-- **THEN** 初始化成功，仅记录 WARN，后续建池与跨 die 导入可达性由段映射状态判定
-
-### Requirement: 段回收不产生内存错误
-
-段销毁与分片回收路径 SHALL 无 use-after-free：回收接口在移除容器内分片对象后不得再解引用该对象的成员。
-
-#### Scenario: 析构路径回收分片
-
-- **WHEN** 段析构时回收全部分片（容器为对象最后所有者）且以 ASAN 构建
-- **THEN** 无 use-after-free 报告，进程干净退出
-
-### Requirement: aclrtMemAttr 枚举与 CANN 严格对齐
-
-`dl_acl_api.h` 中本地声明的 `aclrtMemAttr` 枚举 SHALL 与构建目标 CANN 版本（9.1.0）`acl/acl_rt.h` 的编号严格一致（全量 18 项，0~17）。枚举值经 `aclrtMallocPhysical` 的 `aclrtPhysicalMemProp.memAttr` 直传驱动，本地自编号 SHALL 被禁止（错位会导致语义漂移：名为 P2P_HUGE 实发 HBM_HUGE）。枚举定义处 SHALL 以注释标明错位风险与实测教训。
-
-#### Scenario: 枚举值直传驱动语义正确
-
-- **WHEN** 以 `ACL_MEM_P2P_HUGE`（值 16）构造 memProp 调用 `AclrtMallocPhysical`
-- **THEN** 驱动收到值 16，从 P2P 分区分配；池 ≤4GB 时分配成功，>4GB（分区上限 ~4088MB）返回 207001
-
-#### Scenario: 非 310P 环境零影响
-
-- **WHEN** 在 910B/910C/950 环境加载 libascendcl.so
-- **THEN** 枚举仅为本头文件类型声明，不影响宿主 CANN 行为
-
-### Requirement: 物理分配 P2P_HUGE 到 HBM_HUGE 回退
-
-HBM 池物理分配（`MallocPhysicalWithFallback`）SHALL 先以 `ACL_MEM_P2P_HUGE` 申请；当且仅当返回码精确等于 207001（RT_ERROR_DRV_OUT_MEMORY，P2P 分区 OOM）时，SHALL 记录含 rankId、size、ret 的 WARN 日志并以 `ACL_HBM_MEM_HUGE`（AI 主池，~42GB）重试一次。其他错误码（如 100000 参数错、207000）SHALL 不回退、直接失败并在根因处记录 ERROR。回退按单次分配调用（每 slice）判定，`smem_bm` 建池为一次性整池分配，一个池的物理来源 SHALL 全 P2P 或全 HBM_HUGE，不混合。
-
-#### Scenario: 大池触发回退
-
-- **WHEN** 2-rank 各建 8GB/32GB HBM 池（超过 P2P 分区 ~4088MB 上限）
-- **THEN** 双 rank 各打印一条 P2P partition exhausted WARN 后 HBM_HUGE 整池分配成功，建池/join/十方向拷贝校验全部通过
-
-#### Scenario: 非分区 OOM 错误不回退
-
-- **WHEN** `AclrtMallocPhysical(P2P_HUGE)` 返回 207001 以外的错误码
-- **THEN** 不触发回退，错误逐层上抛（hybm_acl_vmm_segment 根因处已记录 ERROR）
-
-#### Scenario: HBM_HUGE 也失败时最终失败
-
-- **WHEN** 回退后 `AclrtMallocPhysical(HBM_HUGE)` 仍失败（如 AI 主池余量不足）
-- **THEN** `MallocPhysicalWithFallback` 记录含 rankId/size/ret 的 ERROR 并返回失败，建池失败链路各层均记录日志
+其他SOC的内存后端及P2P释放失败处理保持原行为。
+ACL VMM兼容符号仍可选加载；310P HAL内存流程不调用这些物理内存接口。

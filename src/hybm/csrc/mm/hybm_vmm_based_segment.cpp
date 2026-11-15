@@ -20,6 +20,7 @@
 #include "hybm_types.h"
 #include "hybm_va_manager.h"
 #include "hybm_numa_util.h"
+#include "hybm_hal_vmm.h"
 
 using namespace ock::mf;
 
@@ -215,16 +216,11 @@ Result HybmVmmBasedSegment::MallocFromHost(size_t size, uint32_t devId, drv_mem_
 
 Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept
 {
-    const bool is310P = Is310PPath();
-    drv_mem_prop prop{MEM_DEV_SIDE, devId, 0, MEM_HUGE_PAGE_TYPE,
-                      is310P ? MEM_P2P_DDR_TYPE : MEM_HBM_TYPE, 0};
-    auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
-    if (is310P && ret == HAL_OUT_OF_MEMORY_ERROR) {
-        BM_LOG_WARN("HalMemCreate(P2P_DDR) exhausted, retry DDR, devId:"
-                    << devId << " size:" << size << " ret:" << ret);
-        prop.mem_type = MEM_DDR_TYPE;
-        ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
+    if (Is310PPath()) {
+        return Create310PHalMemory(devId, size, handle);
     }
+    drv_mem_prop prop{MEM_DEV_SIDE, devId, 0, MEM_HUGE_PAGE_TYPE, MEM_HBM_TYPE, 0};
+    auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
     if (ret != BM_OK) {
         BM_LOG_ERROR("HalMemCreate failed, devId:" << devId << " size:" << size << " ret:" << ret);
     }
@@ -267,22 +263,6 @@ Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
                 << info.rankId << " superPodId:" << info.superPodId << " serverId:" << info.serverId
                 << " devId:" << info.devicePhyId << " segType:" << options_.segType << " size:" << info.size);
     exportMap_[slice->index_] = exInfo;
-    return BM_OK;
-}
-
-// HAL uses driver logical device ids, including when ACL visible devices are renumbered.
-static Result FillHalAccessDesc(drv_mem_access_desc &desc, uint32_t userDevId, uint32_t rankId)
-{
-    int32_t logicDevId = -1;
-    auto ret = DlAclApi::RtGetLogicDevIdByUserDevId(static_cast<int32_t>(userDevId), &logicDevId);
-    if (ret != BM_OK || logicDevId < 0) {
-        BM_LOG_ERROR("Translate HAL access device failed, userDevId:" << userDevId << " rank:" << rankId
-                                                                 << " ret:" << ret << " logicDevId:" << logicDevId);
-        return BM_DL_FUNCTION_FAILED;
-    }
-    desc.type = MEM_ACCESS_TYPE_READWRITE;
-    desc.location.side = MEM_DEV_SIDE;
-    desc.location.id = static_cast<uint32_t>(logicDevId);
     return BM_OK;
 }
 
@@ -364,48 +344,17 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         return BM_DL_FUNCTION_FAILED;
     }
     if (Is310PPath() && options_.segType == HYBM_MST_HBM) {
-        /* 310P3: SetAccess(RW) on local HBM for all peer devices (cross-card).
-         * Same-card peers share the P2P domain and don't need SetAccess.
-         * deviceId equals rankId on 310P3 Duo, so rankCnt is the total device count. */
-        for (uint32_t dev = 0; dev < options_.rankCnt; dev++) {
-            if (dev == static_cast<uint32_t>(deviceId_)) {
-                continue;
-            }
-            if (IsSamePhysicalCard(dev, static_cast<uint32_t>(deviceId_))) {
-                continue;
-            }
-            drv_mem_access_desc desc{};
-            /* 换算失败即终止: 回退/跳过=把显性报错变成无声的错误授权 */
-            auto faRet = FillHalAccessDesc(desc, dev, options_.rankId);
-            if (faRet != BM_OK) {
-                (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
-                ReleaseHandle(handle);
-                slices_.erase(slice->index_);
-                return faRet;
-            }
-            auto saRet = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &desc, 1);
-            if (saRet != BM_OK) {
-                BM_LOG_WARN("HalMemSetAccess(RW) dev:" << dev << " failed:" << saRet << " addr:0x" << std::hex
-                                                         << allocAddr << std::dec << " segType:" << options_.segType
-                                                         << " rankId:" << options_.rankId);
-            }
-        }
-        /* Also set for local device */
-        drv_mem_access_desc localDesc{};
-        auto faRet = FillHalAccessDesc(localDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
-        if (faRet != BM_OK) {
+        // 对端在导入映射后设置自己的访问权限，本端分配只授权本端驱动设备。
+        ret = SetHalVmmAccess(reinterpret_cast<void *>(allocAddr), size, logicDeviceId_);
+        if (ret != BM_OK) {
             (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
             ReleaseHandle(handle);
+            HybmVaManager::GetInstance().RemoveOneVaInfo(allocAddr, HVM_DVA);
+            exportMap_.erase(slice->index_);
             slices_.erase(slice->index_);
-            return faRet;
-        }
-        auto saRet = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(allocAddr), size, &localDesc, 1);
-        if (saRet != BM_OK) {
-            BM_LOG_WARN("HalMemSetAccess(RW) local dev failed:" << saRet << " addr:0x" << std::hex << allocAddr
-                                                                  << std::dec << " segType:" << options_.segType
-                                                                  << " rankId:" << options_.rankId);
-        } else {
-            BM_LOG_DEBUG("310P3 SetAccess(RW) for all devices OK, addr:0x" << std::hex << allocAddr);
+            allocatedSize_ -= size;
+            slice.reset();
+            return ret;
         }
     }
     if (options_.segType == HYBM_MST_DRAM && options_.shared && (options_.flags & HYBM_FLAG_DRAM_MAP_HOST_VA) != 0) {
@@ -609,16 +558,9 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
             devicePhyId_ != static_cast<int>(info.devicePhyId) &&
             CanLocalHostReaches(info.superPodId, info.serverId, info.devicePhyId)) {
             if (Is310PPath()) {
-                /* 310P3: same-card ctx trick is applied in Mmap; cross-card P2P must be explicitly enabled.
-                 * 15_peer_needed measured cross-card must be bidirectionally EnablePeerAccess (one direction fails
-                 * with 507899); p3_store_repro/04_vmm_cross only verified host-copy paths can succeed without EPA
-                 * — device-side access (AICPU/STARS SQE) without EPA gets devmm page fault
-                 * (EX09 4-rank real-machine test: cross-card epoch mail write faults at peer reserved area).
-                 * Each rank enables toward all cross-card peers of its imports, naturally forming bidirectionality. */
+                // HAL同卡导入保持本地上下文；跨卡设备访问另行启用P2P。
                 if (IsSameCard(info.devicePhyId)) {
-                    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 Import: rank:" << info.rankId
-                                         << " sameCard:true (deviceId:" << deviceId_ << "/2 == peer:"
-                                         << info.devicePhyId << "/2) — ctx trick will be applied in Mmap");
+                    BM_LOG_INFO("310P HAL同卡导入 local_phy:" << devicePhyId_ << " peer_phy:" << info.devicePhyId);
                 } else if (p2pLeases_.find(static_cast<int32_t>(info.devicePhyId)) == p2pLeases_.end()) {
                     auto epRet = EnableRemotePeerAccess(info.devicePhyId);
                     if (epRet != BM_OK) {
@@ -715,14 +657,6 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
                          << " devId:" << std::dec << deviceId_
                          << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
                          << " peerDevicePhyId:" << im.devicePhyId);
-    /* Check P2P accessibility before import */
-    {
-        int32_t canAccess = -1;
-        auto canRet = DlAclApi::AclrtDeviceCanAccessPeer(&canAccess, deviceId_, static_cast<int32_t>(im.devicePhyId));
-        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 CanAccessPeer: ret:" << canRet
-                             << " canAccess:" << canAccess << " local:" << deviceId_
-                             << " peer:" << im.devicePhyId << " sameCard:" << sameCard);
-    }
     drv_mem_handle_t *halHandle = nullptr;
     auto ret = DlHalApi::HalMemImportFromShareableHandle(shareable, logicDeviceId_, &halHandle);
     BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step2: HalMemImportFromShareableHandle"
@@ -748,22 +682,16 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
         ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
         return BM_ERROR;
     }
-    /* SetAccess on imported VA for local device */
-    drv_mem_access_desc impDesc{};
-    auto faRet = FillHalAccessDesc(impDesc, static_cast<uint32_t>(deviceId_), options_.rankId);
-    if (faRet != BM_OK) {
-        BM_LOG_ERROR("FillHalAccessDesc(imported) failed, ret:" << faRet << " rankId:" << options_.rankId
-                                                                << " remoteRank:" << im.rankId
-                                                                << " va:" << VaToStr(lva));
+    uint32_t driver = 0;
+    ret = GetHalDeviceId(static_cast<uint32_t>(deviceId_), driver);
+    if (ret == BM_OK) {
+        ret = SetHalVmmAccess(reinterpret_cast<void *>(lva), im.size, driver);
+    }
+    if (ret != BM_OK) {
         (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(lva));
         ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
+        mapHandle = nullptr;
         return BM_ERROR;
-    }
-    auto saRet = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(lva), im.size, &impDesc, 1);
-    if (saRet != BM_OK) {
-        BM_LOG_WARN("[rank " << options_.rankId << "] HalMemSetAccess on imported VA failed:" << saRet
-                             << " rank:" << im.rankId << " va:" << VaToStr(lva) << " size:" << im.size
-                             << " segType:" << options_.segType);
     }
     return BM_OK;
 }

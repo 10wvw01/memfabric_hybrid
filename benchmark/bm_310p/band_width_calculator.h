@@ -25,7 +25,7 @@
 #include "smem_bm.h"
 
 /* 310P(Ascend310P3) 单卡双 die 2-rank 专用 BM 双池带宽测试:
- * HBM 池(SDMA op 位 -> HybmAclVmmSegment + aclrtMemcpy 算子) 与
+ * HBM 池(SDMA op 位 -> HybmVmmBasedSegment + aclrtMemcpy 算子) 与
  * DRAM 池(HOST_SHM -> HybmHostShmSegment) 为两个独立 entity,
  * 10 个拷贝方向按"目的池类型"路由到对应 entity 执行。
  */
@@ -137,7 +137,7 @@ private:
     bool isMaster_ = false;
     void *localDram_ = nullptr;
     void *localHbm_ = nullptr;
-    smem_bm_t hbmHandle_ = nullptr;   // entity 0: HBM 池(SDMA op 位, 310P AclVmm 链路)
+    smem_bm_t hbmHandle_ = nullptr;   // entity 0: HBM 池(SDMA op 位, 310P HAL VMM 链路)
     smem_bm_t dramHandle_ = nullptr;  // entity 1: DRAM 池(HOST_SHM, 独立 entity)
     bool localHostPinned_ = false;    // localDram_ 为 aclrtMallocHost pinned(SVM VA, 按 DEVICE 分类)
 };

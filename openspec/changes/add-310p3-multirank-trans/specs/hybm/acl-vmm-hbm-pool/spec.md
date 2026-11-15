@@ -1,5 +1,9 @@
 ## ADDED Requirements
 
+> 内存后端更新：当前310P池、TRANS VMM缓冲区和SHMEM元数据使用HAL内存接口。
+> HAL导入保持本地上下文；本文中的ACL物理内存接口和导出端上下文切换属于早期实现记录。
+> 当前要求见仓库的 `openspec/specs/hybm/acl-vmm-hbm-pool/spec.md`。
+
 ### Requirement: 拓扑前置检查与 P2P 槽位预算
 
 310P3 HBM 池 Join 前 SHALL 执行拓扑前置检查：各 rank 通过 store 发布拓扑记录（rankId:devId:phyChipId），超时等待全部 rank 记录就绪后计算每卡跨卡 P2P 入站槽位需求（每卡 devId/2 为卡索引，跨卡连接数 = 2×(N-2)，N 为 rank 总数）。当任一卡槽位需求超过 8（310P3 Duo HAL 约束）时，SHALL 返回 `SM_NO_RESOURCES` 并记录含 poolId、rankId、worldSize、cardId、required、limit 的 ERROR 日志，不执行任何导入。槽位预算可通过时 SHALL 返回成功并记录 PASS 日志。非 310P3 设备、非 SDMA 位 opType、`maxHBMSize == 0` 的池 SHALL 跳过前置检查直接返回成功。前置检查超时时间 SHALL 取 `controlOperationTimeout`。

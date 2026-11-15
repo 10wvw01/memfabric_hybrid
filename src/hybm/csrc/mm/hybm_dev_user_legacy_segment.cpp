@@ -110,11 +110,8 @@ Result HybmDevUserLegacySegment::RegisterMemory(const void *addr, uint64_t size,
     uint64_t shareableHandle = 0;
 
     if (is310P) {
-        /* atomically look up + export VMM handle under lock to prevent UAF:
-         * if we returned a handle copy and used it outside the lock, another
-         * thread could call hybm_free_vmm_buffer which erases the entry and
-         * calls AclrtFreePhysical on the same handle */
-        auto exportRet = VmmHandleRegistry::ExportShareableHandle(const_cast<void *>(addr), &shareableHandle);
+        // 注册表在锁内导出HAL共享句柄，导出期间禁止释放物理内存。
+        auto exportRet = VmmHandleRegistry::ExportShareableHandle(const_cast<void *>(addr), &shareableHandle, size);
         if (exportRet == 0 && shareableHandle != 0) {
             BM_LOG_INFO("VMM export shareable handle, addr:0x" << std::hex << addr << " size:" << size);
         } else if (exportRet == -1) {
@@ -561,92 +558,38 @@ Result HybmDevUserLegacySegment::ImportSliceInfo(const std::string &info, MemSli
     return BM_OK;
 }
 
-Result HybmDevUserLegacySegment::ImportVmmHandle(const UserHbmExportSliceInfo &sliceInfo, void *&handle) noexcept
-{
-    const bool sameCard = IsSamePhysicalCard(static_cast<uint32_t>(devicePhyId_), sliceInfo.devicePhyId);
-    int32_t ownerUserId = deviceId_;
-    if (sameCard) {
-        auto ret = DlAclApi::AclrtGetLogicDevIdByPhyDevId(static_cast<int32_t>(sliceInfo.devicePhyId), &ownerUserId);
-        if (ret != BM_OK || ownerUserId < 0) {
-            BM_LOG_ERROR("TRANS导出端设备编号转换失败 ret:" << ret << " local_user:" << deviceId_ << " peer_phy:"
-                                                            << sliceInfo.devicePhyId << " peer_user:" << ownerUserId);
-            return BM_DL_FUNCTION_FAILED;
-        }
-        ret = DlAclApi::AclrtSetDevice(ownerUserId, true);
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("TRANS切换导出端设备失败 ret:" << ret << " local_user:" << deviceId_ << " peer_phy:"
-                                                        << sliceInfo.devicePhyId << " peer_user:" << ownerUserId);
-            return BM_DL_FUNCTION_FAILED;
-        }
-    }
-    // 同卡导入需要导出端上下文，导入完成后在本端继续映射和访问。
-    auto ret = DlAclApi::AclrtMemImportFromShareableHandle(sliceInfo.shareableHandle, deviceId_, &handle);
-    if (sameCard) {
-        auto restoreRet = DlAclApi::AclrtSetDevice(deviceId_);
-        if (restoreRet != BM_OK) {
-            BM_LOG_ERROR("TRANS恢复本端设备失败 ret:" << restoreRet << " local_user:" << deviceId_ << " peer_phy:"
-                                                      << sliceInfo.devicePhyId << " import_ret:" << ret);
-            if (ret == BM_OK && handle != nullptr) {
-                DlAclApi::AclrtFreePhysical(handle);
-            }
-            handle = nullptr;
-            return BM_DL_FUNCTION_FAILED;
-        }
-    }
-    if (ret != BM_OK || handle == nullptr) {
-        BM_LOG_ERROR("AclrtMemImportFromShareableHandle failed, ret:"
-                     << ret << " rank:" << sliceInfo.rankId << " local_user:" << deviceId_ << " local_phy:"
-                     << devicePhyId_ << " peer_phy:" << sliceInfo.devicePhyId << " sameCard:" << sameCard);
-        return BM_DL_FUNCTION_FAILED;
-    }
-    return BM_OK;
-}
-
 Result HybmDevUserLegacySegment::ImportVmmSlice(const UserHbmExportSliceInfo &sliceInfo, void *&address) noexcept
 {
-    auto ret = DlAclApi::AclrtSetDevice(deviceId_, true);
+    uint32_t driverDeviceId = 0;
+    auto ret = GetHalDeviceId(static_cast<uint32_t>(deviceId_), driverDeviceId);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("TRANS设置本端设备失败 ret:" << ret << " local_user:" << deviceId_);
-        return BM_DL_FUNCTION_FAILED;
-    }
-    void *lva = nullptr;
-    ret = DlAclApi::AclrtReserveMemAddress(&lva, sliceInfo.size, 0, nullptr, 0);
-    if (ret != 0 || lva == nullptr) {
-        BM_LOG_ERROR("AclrtReserveMemAddress failed, ret:" << ret << " rank:" << sliceInfo.rankId
-                                                           << " size:" << sliceInfo.size);
-        return BM_DL_FUNCTION_FAILED;
-    }
-
-    aclrtDrvMemHandle aclHandle = nullptr;
-    ret = ImportVmmHandle(sliceInfo, aclHandle);
-    if (ret != BM_OK) {
-        DlAclApi::AclrtReleaseMemAddress(lva);
         return ret;
     }
-
-    ret = DlAclApi::AclrtMapMem(lva, sliceInfo.size, 0, aclHandle, 0);
-    if (ret != 0) {
-        BM_LOG_ERROR("AclrtMapMem failed, ret:" << ret << " rank:" << sliceInfo.rankId << " lva:" << lva);
-        DlAclApi::AclrtFreePhysical(aclHandle);
-        DlAclApi::AclrtReleaseMemAddress(lva);
+    HalVmmBuffer buffer;
+    ret = ReserveHalVmm(sliceInfo.size, nullptr, buffer);
+    if (ret != BM_OK) {
+        return ret;
+    }
+    ret = DlHalApi::HalMemImportFromShareableHandle(sliceInfo.shareableHandle, driverDeviceId, &buffer.handle);
+    if (ret != BM_OK || buffer.handle == nullptr) {
+        BM_LOG_ERROR("TRANS HAL导入失败 ret:" << ret << " rank:" << sliceInfo.rankId << " local_driver:"
+                                              << driverDeviceId << " peer_phy:" << sliceInfo.devicePhyId);
+        // 失败的导入调用没有交付可释放的物理句柄。
+        buffer.handle = nullptr;
+        (void)ReleaseHalVmm(buffer);
         return BM_DL_FUNCTION_FAILED;
     }
-
-    aclrtMemAccessDesc impDesc{ACL_RT_MEM_ACCESS_FLAGS_READWRITE,
-                               {static_cast<uint32_t>(deviceId_), aclrtMemLocationType::ACL_MEM_LOCATION_TYPE_DEVICE},
-                               {}};
-    auto saRet = DlAclApi::AclrtMemSetAccess(lva, sliceInfo.size, &impDesc, 1);
-    if (saRet != 0) {
-        BM_LOG_WARN("AclrtMemSetAccess failed:" << saRet << " (non-fatal) rank:" << sliceInfo.rankId);
+    ret = MapHalVmm(buffer, driverDeviceId);
+    if (ret != BM_OK) {
+        (void)ReleaseHalVmm(buffer);
+        return ret;
     }
-
-    std::string nameKey(sliceInfo.name);
-    importedVmmInfo_[nameKey] = ImportedVmmInfo{lva, aclHandle};
-    registerAddrs_.insert(lva);
-    address = lva;
-
-    BM_LOG_INFO("VMM import success, rank:" << sliceInfo.rankId << " lva:" << lva << " local_phy:" << devicePhyId_
-                                            << " peer_phy:" << sliceInfo.devicePhyId);
+    importedVmmInfo_[sliceInfo.name] = buffer;
+    registerAddrs_.insert(buffer.address);
+    address = buffer.address;
+    BM_LOG_INFO("TRANS HAL导入成功 rank:" << sliceInfo.rankId << " local_user:" << deviceId_
+                                          << " local_driver:" << driverDeviceId << " peer_phy:" << sliceInfo.devicePhyId
+                                          << " address:" << address << " size:" << buffer.size);
     return BM_OK;
 }
 
@@ -656,27 +599,28 @@ void HybmDevUserLegacySegment::CleanupImportedVmm(const std::string &name) noexc
     if (it == importedVmmInfo_.end()) {
         return;
     }
-    auto &vmm = it->second;
-    if (vmm.mappedVa != nullptr) {
-        DlAclApi::AclrtUnmapMem(vmm.mappedVa);
+    auto address = it->second.address;
+    auto ret = ReleaseHalVmm(it->second);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("TRANS HAL导入资源释放失败 name:" << name << " ret:" << ret);
+        return;
     }
-    if (vmm.aclHandle != nullptr) {
-        DlAclApi::AclrtFreePhysical(vmm.aclHandle);
-    }
-    if (vmm.mappedVa != nullptr) {
-        DlAclApi::AclrtReleaseMemAddress(vmm.mappedVa);
-    }
-    BM_LOG_INFO("CleanupImportedVmm, name:" << name << " va:" << vmm.mappedVa);
+    registerAddrs_.erase(address);
+    BM_LOG_INFO("TRANS HAL导入资源已释放 name:" << name);
     importedVmmInfo_.erase(it);
 }
 
 void HybmDevUserLegacySegment::CloseMemory() noexcept
 {
     bool is310P = (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P);
-    for (auto &kv : importedVmmInfo_) {
-        CleanupImportedVmm(kv.first);
+    for (auto it = importedVmmInfo_.begin(); it != importedVmmInfo_.end();) {
+        auto current = it++;
+        CleanupImportedVmm(current->first);
     }
-    importedVmmInfo_.clear();
+    if (!importedVmmInfo_.empty()) {
+        BM_LOG_ERROR("TRANS HAL导入资源尚未释放 count:" << importedVmmInfo_.size());
+        return;
+    }
     for (auto &addr : registerAddrs_) {
         if (is310P) {
             BM_LOG_WARN("310P3 ACL IPC does not track imported addr, skip close");

@@ -3,11 +3,11 @@
 基于 `benchmark/bm`（通用版）复制改造，**仅适用于 Atlas 300I Duo（Ascend310P3）单卡双 die 2-rank 场景**：
 
 - **双实体双池**（对齐 `examples/memory_pool/01_basic/07_310p_die_pair_pool`，310P 上单实体双池不可建）：
-  - HBM 池：`SMEMB_DATA_OP_SDMA` op 位 → `HybmAclVmmSegment`（ACL VMM shareable handle + die 对导入）+ `HostDataOpAclMemcpy` 算子
+  - HBM 池：`SMEMB_DATA_OP_SDMA` op 位 → `HybmVmmBasedSegment`（HAL分配、64位NONE共享句柄及本端导入）+ `HostDataOpAclMemcpy` 算子
   - DRAM 池：`SMEMB_DATA_OP_HOST_SHM` → `HybmHostShmSegment`（同节点 POSIX 共享内存）
 - 10 个方向按 **目的池类型** 路由实体：HBM 池方向（H2D/H2RD/D2RD/RD2D/RD2H）走 HBM 实体，
   DRAM 池方向（D2H/H2RH/D2RH/RH2D/RH2H）走 DRAM 实体
-- HBM 物理分配支持 **P2P_HUGE → HBM_HUGE 自动回退**（310P P2P 分区上限 ~4088MB，见
+- HBM 物理分配支持 **MEM_P2P_DDR_TYPE → MEM_DDR_TYPE 自动回退**（310P P2P 分区上限 ~4088MB，见
   `310p-2rank-bm-bw-测试计划.md` F1/F2）
 
 ## 前置条件

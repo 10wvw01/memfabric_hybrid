@@ -1,5 +1,9 @@
 ## Why
 
+> 内存后端更新：当前310P池、TRANS VMM缓冲区和SHMEM元数据使用HAL内存接口。
+> HAL导入保持本地上下文；本文中的ACL物理内存接口和导出端上下文切换属于早期实现记录。
+> 当前要求见仓库的 `openspec/specs/hybm/acl-vmm-hbm-pool/spec.md`。
+
 310P3（Ascend 310P3，Atlas 300I Duo）此前仅支持 2-rank HBM 池（单卡双 die），且 TRANS 模式缺乏拓扑前置检查与内存反注册能力。随着多卡多 rank 场景需求出现，需要：(1) 在 BM 和 TRANS 两种模式下引入 P2P 槽位预算拓扑前置检查，防止超限导致建池/注册后才发现 P2P 不可用；(2) 将 310P HBM 段从 `HybmAclVmmSegment` 迁移到 `HybmVmmBasedSegment` 统一路径，支持跨卡 P2P 导入；(3) 补齐 TRANS 模式的 `SMEM_TRANS_BOTH` 角色支持、内存反注册、310P 量化拷贝拒绝等能力。
 
 ## What Changes

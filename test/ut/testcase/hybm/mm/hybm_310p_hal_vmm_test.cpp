@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <mockcpp/mockcpp.hpp>
 
-#define private public
+#define private   public
 #define protected public
 #include "hybm_vmm_based_segment.h"
 #undef protected
@@ -14,11 +14,11 @@
 #define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
 using namespace ock::mf;
 
-namespace
-{
+namespace {
 constexpr uint64_t SHARED_HANDLE = 0x123456789abcdef0ULL;
 constexpr uint64_t IMPORT_ADDRESS = 0x280040000000ULL;
 int attributeResult = BM_OK;
+int accessResult = BM_OK;
 int mapResult = BM_OK;
 int importResult = BM_OK;
 int translateResult = BM_OK;
@@ -51,7 +51,8 @@ int ImportHandle(uint64_t shareable, uint32_t device, drv_mem_handle_t **handle)
     EXPECT_EQ(shareable, SHARED_HANDLE);
     EXPECT_EQ(device, 7U);
     EXPECT_EQ(lastContext, -1);
-    if (importResult == BM_OK) *handle = reinterpret_cast<drv_mem_handle_t *>(0x1234);
+    if (importResult == BM_OK)
+        *handle = reinterpret_cast<drv_mem_handle_t *>(0x1234);
     return importResult;
 }
 
@@ -60,6 +61,12 @@ int TranslateDevice(int32_t device, int32_t *logic)
     EXPECT_EQ(device, 0);
     *logic = 7;
     return translateResult;
+}
+
+int CreateLocal(drv_mem_handle_t **handle, size_t, drv_mem_prop *, uint64_t)
+{
+    *handle = reinterpret_cast<drv_mem_handle_t *>(0x1234);
+    return BM_OK;
 }
 
 int MapImported(void *address, size_t size, size_t offset, drv_mem_handle_t *, uint64_t flags)
@@ -78,12 +85,13 @@ int SetImportedAccess(void *address, size_t, drv_mem_access_desc *desc, size_t c
     EXPECT_EQ(desc->location.id, 7U);
     EXPECT_EQ(desc->location.side, MEM_DEV_SIDE);
     EXPECT_EQ(desc->type, MEM_ACCESS_TYPE_READWRITE);
-    return BM_OK;
+    return accessResult;
 }
 
 int ReleaseImported(drv_mem_handle_t *)
 {
-    if (translateResult != BM_OK) EXPECT_EQ(unmapCount, 1U);
+    if (translateResult != BM_OK)
+        EXPECT_EQ(unmapCount, 1U);
     ++releaseCount;
     return BM_OK;
 }
@@ -93,10 +101,9 @@ int UnmapImported(void *)
     ++unmapCount;
     return BM_OK;
 }
-}
+} // namespace
 
-class Hybm310PHalVmmTest : public testing::Test
-{
+class Hybm310PHalVmmTest : public testing::Test {
 protected:
     int savedDevice = 0, savedLogic = 0, savedPhysical = 0;
 
@@ -110,12 +117,12 @@ protected:
         MemSegment::deviceId_ = 0;
         MemSegment::logicDeviceId_ = 7;
         MemSegment::devicePhyId_ = 4;
-        attributeResult = mapResult = importResult = translateResult = BM_OK;
+        attributeResult = mapResult = importResult = translateResult = accessResult = BM_OK;
         releaseCount = unmapCount = 0;
         lastContext = -1;
         MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
-        MOCKER_CPP(&DlHalApi::HalMemRelease, int(*)(drv_mem_handle_t *)).stubs().will(invoke(ReleaseImported));
-        MOCKER_CPP(&DlHalApi::HalMemUnmap, int(*)(void *)).stubs().will(invoke(UnmapImported));
+        MOCKER_CPP(&DlHalApi::HalMemRelease, int (*)(drv_mem_handle_t *)).stubs().will(invoke(ReleaseImported));
+        MOCKER_CPP(&DlHalApi::HalMemUnmap, int (*)(void *)).stubs().will(invoke(UnmapImported));
     }
 
     void TearDown() override
@@ -130,15 +137,18 @@ protected:
 
     MemSlicePtr PrepareExport(HybmVmmBasedSegment &segment)
     {
-        auto slice = std::make_shared<MemSlice>(0, HYBM_MEM_TYPE_DEVICE, MEM_PT_TYPE_GVM,
-                                               IMPORT_ADDRESS, IMPORT_ADDRESS, HYBM_LARGE_PAGE_SIZE);
+        auto slice = std::make_shared<MemSlice>(0, HYBM_MEM_TYPE_DEVICE, MEM_PT_TYPE_GVM, IMPORT_ADDRESS,
+                                                IMPORT_ADDRESS, HYBM_LARGE_PAGE_SIZE);
         EXPECT_EQ(HybmVaManager::GetInstance().AddVaInfo(
-            {IMPORT_ADDRESS, IMPORT_ADDRESS, IMPORT_ADDRESS, HYBM_LARGE_PAGE_SIZE, HYBM_MEM_TYPE_DEVICE}, 0), BM_OK);
+                      {IMPORT_ADDRESS, IMPORT_ADDRESS, IMPORT_ADDRESS, HYBM_LARGE_PAGE_SIZE, HYBM_MEM_TYPE_DEVICE}, 0),
+                  BM_OK);
         segment.slices_.emplace(0, MemSliceStatus(slice, reinterpret_cast<void *>(0x1234)));
-        MOCKER_CPP(&DlHalApi::HalMemExportToShareableHandle, int(*)(drv_mem_handle_t *, uint64_t *))
-            .stubs().will(invoke(ExportHandle));
-        MOCKER_CPP(&DlHalApi::HalMemShareHandleSetAttribute, int(*)(uint64_t, ShareHandleAttrType, ShareHandleAttr))
-            .stubs().will(invoke(SetAttribute));
+        MOCKER_CPP(&DlHalApi::HalMemExportToShareableHandle, int (*)(drv_mem_handle_t *, uint64_t *))
+            .stubs()
+            .will(invoke(ExportHandle));
+        MOCKER_CPP(&DlHalApi::HalMemShareHandleSetAttribute, int (*)(uint64_t, ShareHandleAttrType, ShareHandleAttr))
+            .stubs()
+            .will(invoke(SetAttribute));
         return slice;
     }
 
@@ -152,15 +162,20 @@ protected:
         std::memcpy(info.shareHandle.share_info, &SHARED_HANDLE, sizeof(SHARED_HANDLE));
         MOCKER_CPP(&DlAclApi::AclrtSetDevice, ock::mf::Result(*)(int32_t, bool)).stubs().will(invoke(SetContext));
         MOCKER_CPP(&DlAclApi::AclrtDeviceCanAccessPeer, ock::mf::Result(*)(int32_t *, int32_t, int32_t))
-            .stubs().will(returnValue(BM_OK));
+            .stubs()
+            .will(returnValue(BM_OK));
         MOCKER_CPP(&DlAclApi::RtGetLogicDevIdByUserDevId, ock::mf::Result(*)(int32_t, int32_t *))
-            .stubs().will(invoke(TranslateDevice));
-        MOCKER_CPP(&DlHalApi::HalMemImportFromShareableHandle, int(*)(uint64_t, uint32_t, drv_mem_handle_t **))
-            .stubs().will(invoke(ImportHandle));
-        MOCKER_CPP(&DlHalApi::HalMemMap, int(*)(void *, size_t, size_t, drv_mem_handle_t *, uint64_t))
-            .stubs().will(invoke(MapImported));
-        MOCKER_CPP(&DlHalApi::HalMemSetAccess, int(*)(void *, size_t, drv_mem_access_desc *, size_t))
-            .stubs().will(invoke(SetImportedAccess));
+            .stubs()
+            .will(invoke(TranslateDevice));
+        MOCKER_CPP(&DlHalApi::HalMemImportFromShareableHandle, int (*)(uint64_t, uint32_t, drv_mem_handle_t **))
+            .stubs()
+            .will(invoke(ImportHandle));
+        MOCKER_CPP(&DlHalApi::HalMemMap, int (*)(void *, size_t, size_t, drv_mem_handle_t *, uint64_t))
+            .stubs()
+            .will(invoke(MapImported));
+        MOCKER_CPP(&DlHalApi::HalMemSetAccess, int (*)(void *, size_t, drv_mem_access_desc *, size_t))
+            .stubs()
+            .will(invoke(SetImportedAccess));
         return info;
     }
 };
@@ -246,4 +261,47 @@ TEST_F(Hybm310PHalVmmTest, MissingUint64SymbolsReturnUnloaded)
     EXPECT_EQ(DlHalApi::HalMemImportFromShareableHandle(shareable, 7, &handle), BM_UNDER_API_UNLOAD);
     DlHalApi::pHalMemExportToShareableHandle = exportFn;
     DlHalApi::pHalMemImportFromShareableHandle = importFn;
+}
+
+TEST_F(Hybm310PHalVmmTest, AccessFailureUnmapsAndReleasesImportedHandle)
+{
+    auto info = PrepareImport();
+    accessResult = BM_ERROR;
+    HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
+    void *handle = nullptr;
+    EXPECT_EQ(segment.MmapImport310P(info, IMPORT_ADDRESS, handle), BM_ERROR);
+    EXPECT_EQ(unmapCount, 1U);
+    EXPECT_EQ(releaseCount, 1U);
+    EXPECT_EQ(handle, nullptr);
+}
+
+TEST_F(Hybm310PHalVmmTest, LocalPoolAccessFailureRollsBackAllocation)
+{
+    PrepareImport();
+    accessResult = BM_ERROR;
+    MemSegmentOptions options{};
+    options.rankCnt = 1;
+    options.maxSize = HYBM_LARGE_PAGE_SIZE;
+    options.segType = HYBM_MST_HBM;
+    HybmVmmBasedSegment segment(options, 0);
+    segment.localVirtualAddress_ = reinterpret_cast<uint8_t *>(IMPORT_ADDRESS);
+    segment.globalVirtualAddress_ = reinterpret_cast<uint8_t *>(IMPORT_ADDRESS);
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreateLocal));
+    MOCKER_CPP(&DlHalApi::HalMemExportToShareableHandle, int (*)(drv_mem_handle_t *, uint64_t *))
+        .stubs()
+        .will(invoke(ExportHandle));
+    MOCKER_CPP(&DlHalApi::HalMemShareHandleSetAttribute, int (*)(uint64_t, ShareHandleAttrType, ShareHandleAttr))
+        .stubs()
+        .will(invoke(SetAttribute));
+    MemSlicePtr slice;
+    EXPECT_EQ(segment.AllocLocalMemory(HYBM_LARGE_PAGE_SIZE, slice), BM_ERROR);
+    EXPECT_EQ(unmapCount, 1U);
+    EXPECT_EQ(releaseCount, 1U);
+    EXPECT_EQ(segment.allocatedSize_, 0U);
+    EXPECT_TRUE(segment.slices_.empty());
+    EXPECT_TRUE(segment.exportMap_.empty());
+    EXPECT_EQ(slice, nullptr);
+    segment.localVirtualAddress_ = segment.globalVirtualAddress_ = nullptr;
 }

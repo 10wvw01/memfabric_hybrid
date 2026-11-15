@@ -15,6 +15,7 @@
 
 #include <bitset>
 #include "hybm_mem_segment.h"
+#include "hybm_hal_vmm.h"
 #include "hybm_dev_legacy_segment.h"
 
 namespace ock {
@@ -99,15 +100,11 @@ private:
     Result ImportSliceInfo(const std::string &info, MemSlicePtr &remoteSlice) noexcept;
     static void RollbackIpcMemory(void *addresses[], uint32_t count);
     void RemoveSliceInfo(const uint32_t rankId) noexcept;
-    Result ImportVmmHandle(const UserHbmExportSliceInfo &sliceInfo, void *&handle) noexcept;
     Result ImportVmmSlice(const UserHbmExportSliceInfo &sliceInfo, void *&address) noexcept;
     void CleanupImportedVmm(const std::string &name) noexcept;
 
 private:
-    struct ImportedVmmInfo {
-        void *mappedVa{nullptr};
-        void *aclHandle{nullptr};
-    };
+    using ImportedVmmInfo = HalVmmBuffer;
     std::mutex mutex_;
     std::bitset<MAX_PEER_DEVICES> enablePeerDevices_;
     std::map<uint32_t, RegisterSlice> registerSlices_;

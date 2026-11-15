@@ -4,8 +4,8 @@
 """310P Duo 单卡双 die 2-rank HBM+DRAM 双池示例(Python 版, 需 memfabric_hybrid wheel)
 
 与 06/03 号示例不同点:
-- 仅适用于 Atlas 300I Duo(Ascend310P3), HBM 池走 310P 专用 ACL VMM 链路
-  (MallocPhysical + shareable handle + die 对 SetContext 导入 + aclrtMemcpyAsync D2D)
+- 仅适用于 Atlas 300I Duo(Ascend310P3), HBM 池走 310P 专用 HAL VMM 链路
+  (HAL物理内存与64位共享句柄、本端导入和映射，aclrtMemcpyAsync D2D搬运)
 - world_size=2 固定映射 dev0/dev1(同一张卡的两个 die)
 - 双池: HBM 池(SDMA op 位) + DRAM 池(HOST_SHM), 两个独立 entity
 """
@@ -38,7 +38,7 @@ def _rank_main(rank: int, joined: mp.Barrier, written: mp.Barrier):
     cfg.start_store = rank == 0
     bm.initialize(STORE_URL, WORLD_SIZE, dev, cfg)
 
-    # HBM 池: SDMA op 位 -> 310P 上自动路由到 AclVmm 段 + aclrtMemcpy 算子
+    # HBM 池: SDMA op 位 -> 310P 上自动路由到 HAL VMM 段 + aclrtMemcpy 算子
     hbm = bm.create2(
         id=0,
         local_dram_size=0,

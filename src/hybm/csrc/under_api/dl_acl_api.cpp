@@ -165,7 +165,7 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
                          "aclrtGetLogicDevIdByPhyDevId");
     DL_LOAD_SYM(pRtMemcpyAsync, rtMemcpyAsyncFunc, rtHandle, "rtMemcpyAsyncWithoutCheckKind");
 
-    /* ACL VMM 符号集(310P 内存池): OPTIONAL 加载, 910B/950 环境缺失不阻塞 */
+    /* ACL VMM兼容符号按需加载；310P物理内存流程使用HAL接口 */
     DL_LOAD_SYM_OPTIONAL(pAclrtMallocPhysical, aclrtMallocPhysicalFunc, rtHandle, "aclrtMallocPhysical");
     DL_LOAD_SYM_OPTIONAL(pAclrtFreePhysical, aclrtFreePhysicalFunc, rtHandle, "aclrtFreePhysical");
     DL_LOAD_SYM_OPTIONAL(pAclrtReserveMemAddress, aclrtReserveMemAddressFunc, rtHandle, "aclrtReserveMemAddress");

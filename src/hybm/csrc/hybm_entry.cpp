@@ -19,6 +19,7 @@
 #include "hybm_ptracer.h"
 #include "hybm_common_include.h"
 #include "hybm_vmm_handle_registry.h"
+#include "hybm_hal_vmm.h"
 #include "mf_env_define.h"
 #include "hybm_gva.h"
 #include "hybm_version.h"
@@ -36,6 +37,8 @@ uint64_t g_baseAddr = 0ULL;
 int64_t initialized = 0;
 int32_t initedDeviceId = -1;
 void *g_allocHandle = nullptr;
+HalVmmBuffer g_metaHalBuffer;
+bool g_metaCleanupPending = false;
 
 std::mutex initMutex;
 } // namespace
@@ -79,6 +82,10 @@ static inline Result hybm_load_library()
 HYBM_API int32_t hybm_init(uint16_t deviceId, uint64_t flags)
 {
     std::unique_lock<std::mutex> lockGuard{initMutex};
+    if (g_metaCleanupPending) {
+        BM_LOG_ERROR("310P元数据清理尚未完成，请先重试hybm_uninit");
+        return BM_ERROR;
+    }
     if (initialized > 0) {
         if (initedDeviceId != deviceId) {
             BM_LOG_ERROR("this deviceId(" << deviceId << ") is not equal to the deviceId(" << initedDeviceId
@@ -131,50 +138,39 @@ HYBM_API void hybm_uninit()
         return;
     }
 
-    ptracer_uninit();
+    if (!g_metaCleanupPending) {
+        ptracer_uninit();
+    }
     auto socType = DlAclApi::GetAscendSocType();
-    if (socType == AscendSocType::ASCEND_310P) { // 平台分派: 310P 分支(先于 GVA V4 分支)
-        /* 310P: 与 Hybm310PInitMetaGva 对称的 AclVmm 释放路径 */
-        if (g_baseAddr != 0) { // meta 区已建立才需要释放
-            // 解除 meta 区固定约定 VA 上的映射(建链时 AclrtMapMem 的逆操作)
-            auto ret = DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(HYBM_DEVICE_META_ADDR));
-            // 记录解除映射结果(失败也继续清理, 尽力而为)
-            BM_LOG_INFO("unmap meta info res: " << ret);
-            if (g_allocHandle != nullptr) { // 物理内存句柄存在才释放
-                // 释放 meta 区背后的物理页(建链时 AclrtMallocPhysical 的逆操作)
-                ret = DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
-                g_allocHandle = nullptr; // 置空句柄防重复释放
-                BM_LOG_INFO("free meta physical res: " << ret); // 记录物理页释放结果
+    if (socType == AscendSocType::ASCEND_310P) {
+        if (g_baseAddr != 0) {
+            if (g_metaHalBuffer.address == nullptr) {
+                g_metaHalBuffer = {reinterpret_cast<void *>(g_baseAddr),
+                                   reinterpret_cast<drv_mem_handle_t *>(g_allocHandle), HYBM_DEVICE_INFO_SIZE, true};
             }
-            // 释放预留的 meta VA 窗口(建链时 AclrtReserveMemAddress 的逆操作)
-            ret = DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
-            BM_LOG_INFO("release meta va res: " << ret);  // 记录 VA 窗口释放结果
-            g_baseAddr = 0ULL;                            // 清零标记 meta 区已完全释放
+            auto ret = ReleaseHalVmm(g_metaHalBuffer);
+            g_baseAddr = reinterpret_cast<uint64_t>(g_metaHalBuffer.address);
+            g_allocHandle = g_metaHalBuffer.handle;
+            if (ret != BM_OK) {
+                BM_LOG_ERROR("310P HAL元数据释放失败 ret:" << ret);
+                g_metaCleanupPending = true;
+                initialized = 1;
+                return;
+            }
         }
+        g_metaCleanupPending = false;
     } else if ((socType == AscendSocType::ASCEND_950) || (HybmGetGvaVersion() == HYBM_GVA_V4)) {
         if (g_baseAddr != 0) {
-            if (socType == AscendSocType::ASCEND_310P) {
-                auto unmapRet = DlAclApi::AclrtUnmapMem(reinterpret_cast<void *>(g_baseAddr));
-                BM_LOG_INFO("310P unmap meta res: " << unmapRet);
-                if (g_allocHandle != nullptr) {
-                    auto freeRet = DlAclApi::AclrtFreePhysical(reinterpret_cast<aclrtDrvMemHandle>(g_allocHandle));
-                    g_allocHandle = nullptr;
-                    BM_LOG_INFO("310P free physical res: " << freeRet);
-                }
-                auto releaseRet = DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(g_baseAddr));
-                BM_LOG_INFO("310P release mem addr res: " << releaseRet);
-            } else {
-                auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
-                BM_LOG_INFO("unmap meta info res: " << ret);
-                if (g_allocHandle != nullptr) {
-                    ret = DlHalApi::HalMemRelease((drv_mem_handle_t *)g_allocHandle);
-                    g_allocHandle = nullptr;
-                    BM_LOG_INFO("release meta memory handle res: " << ret);
-                }
-                ret = DlHalApi::HalMemAddressFree(reinterpret_cast<void *>(g_baseAddr));
-                BM_LOG_INFO("free meta memory res: " << ret);
+            auto ret = DlHalApi::HalMemUnmap(reinterpret_cast<void *>(g_baseAddr));
+            BM_LOG_INFO("unmap meta info res: " << ret);
+            if (g_allocHandle != nullptr) {
+                ret = DlHalApi::HalMemRelease((drv_mem_handle_t *)g_allocHandle);
+                g_allocHandle = nullptr;
+                BM_LOG_INFO("release meta memory handle res: " << ret);
             }
-            g_baseAddr = 0ULL;
+            ret = DlHalApi::HalMemAddressFree(reinterpret_cast<void *>(g_baseAddr));
+            BM_LOG_INFO("free meta memory res: " << ret);
+            g_baseAddr = 0;
         }
     } else {
         if (g_baseAddr != 0) {
@@ -303,6 +299,20 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
         return nullptr;
     }
 
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+        uint32_t driverDeviceId = 0;
+        if (GetHalDeviceId(deviceId, driverDeviceId) != BM_OK) {
+            return nullptr;
+        }
+        HalVmmBuffer buffer;
+        if (Allocate310PHalVmm(driverDeviceId, size, nullptr, buffer) != BM_OK) {
+            return nullptr;
+        }
+        VmmHandleRegistry::RegisterHal(buffer, deviceId);
+        BM_LOG_INFO("310P HAL TRANS buffer ready user:" << deviceId << " driver:" << driverDeviceId
+                                                        << " address:" << buffer.address << " size:" << buffer.size);
+        return buffer.address;
+    }
     aclrtPhysicalMemProp prop{};
     prop.handleType = aclrtMemHandleType::ACL_MEM_HANDLE_TYPE_NONE;
     prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
@@ -384,20 +394,8 @@ HYBM_API void hybm_free_vmm_buffer(void *addr, size_t size)
         return;
     }
 
-    aclrtDrvMemHandle handle = nullptr;
-    uint32_t deviceId = 0;
-    if (!VmmHandleRegistry::Unregister(addr, handle, deviceId)) {
-        BM_LOG_WARN("hybm_free_vmm_buffer: addr not found in registry, addr:" << addr);
-        return;
+    auto ret = VmmHandleRegistry::Release(addr);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("VMM缓冲区释放失败 address:" << addr << " ret:" << ret);
     }
-
-    auto setRet = DlAclApi::AclrtSetDevice(static_cast<int32_t>(deviceId), true);
-    if (setRet != 0) {
-        BM_LOG_ERROR("hybm_free_vmm_buffer AclrtSetDevice failed, ret:" << setRet << " deviceId:" << deviceId);
-    }
-    auto unmapRet = DlAclApi::AclrtUnmapMem(addr);
-    auto releaseRet = DlAclApi::AclrtReleaseMemAddress(addr);
-    auto freeRet = DlAclApi::AclrtFreePhysical(handle);
-    BM_LOG_INFO("hybm_free_vmm_buffer done, addr:" << addr << " handle:" << handle << " unmapRet:" << unmapRet
-                                                   << " releaseRet:" << releaseRet << " freeRet:" << freeRet);
 }

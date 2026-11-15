@@ -12,7 +12,7 @@
 
 /*
  * P5 实机端到端验收: 310P 单卡双 die(dev0/dev1) 2-rank BM 双池
- * HBM 池(SDMA 位 -> HybmAclVmmSegment + HostDataOpAclMemcpy) +
+ * HBM 池(SDMA 位 -> HybmVmmBasedSegment HAL内存 + HostDataOpAclMemcpy) +
  * DRAM 池(HOST_SHM -> HybmHostShmSegment)
  * 校验流: HBM 池 H2G(peer) -> G2H(own) 读回; G2G peer->own 读回; DRAM 池 H2GH/GH2H
  * 用法: ./p5_e2e 0 &  ./p5_e2e 1 &  wait
@@ -165,7 +165,7 @@ int main(int argc, char *argv[])
     (void)snprintf(buf, sizeof(buf), "smem_bm_init");
     Step("smem_bm_init", smem_bm_init(STORE_URL, 2, static_cast<uint16_t>(g_rank), &cfg));
 
-    /* ---- HBM 池(SDMA 位 -> 310P AclVmm 链路) ---- */
+    /* ---- HBM 池(SDMA 位 -> 310P HAL VMM 链路) ---- */
     smem_bm_create_option_t hbmOpt{};
     hbmOpt.maxHbmSize = HBM_POOL_SIZE;
     hbmOpt.localHBMSize = HBM_POOL_SIZE;

@@ -1,5 +1,9 @@
 # Memfabric 310p duo 内存池化方案
 
+> 内存后端更新：当前310P池、TRANS VMM缓冲区和SHMEM元数据使用HAL内存接口。
+> HAL导入保持本地上下文；本文中的ACL物理内存接口和导出端上下文切换属于早期实现记录。
+> 当前要求见仓库的 `openspec/specs/hybm/acl-vmm-hbm-pool/spec.md`。
+
 ## 硬件环境
 
 **硬件**：Atlas 300I Duo (310P3)
