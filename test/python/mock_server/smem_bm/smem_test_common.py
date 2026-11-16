@@ -21,7 +21,7 @@ class TestClient:
         return response
 
     def init_smem_bm(self):
-        return self.execute("init_smem_bm")
+        return int(self.execute("init_smem_bm"))
 
     def close_smem_bm(self):
         return self.execute("close_smem_bm")
