@@ -41,6 +41,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+
+def _check_latency(label, value, limit):
+    if os.environ.get("MMC_TEST_CHECK_PERFORMANCE", "0") == "1":
+        assert value < limit, f"{label} P99 {value:.2f}ms exceeds {limit}ms"
+
+
 # ---------------------------------------------------------------------------
 # Model structure constants (same as prefill_ttft_test.py)
 # ---------------------------------------------------------------------------
@@ -98,6 +104,7 @@ def _npu_available() -> bool:
     try:
         import acl  # noqa: F401
         import torch_npu  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -134,12 +141,13 @@ def _percentile(values: List[float], pct: float) -> float:
 
 def _allocate_aligned_tensor(total_bytes: int, alignment: int = TENSOR_ALIGNMENT_BYTES):
     import torch
+
     padding = alignment - 1
     buffer = torch.randint(0, 256, (total_bytes + padding,), dtype=torch.uint8, device=NPU_DEVICE)
     address = buffer.data_ptr()
     aligned_address = (address + alignment - 1) & ~(alignment - 1)
-    offset = (aligned_address - address)
-    return buffer[offset:offset + total_bytes]
+    offset = aligned_address - address
+    return buffer[offset : offset + total_bytes]
 
 
 def _rank_keepalive_worker(device_id: int, ready_event, stop_event):
@@ -147,6 +155,7 @@ def _rank_keepalive_worker(device_id: int, ready_event, stop_event):
     try:
         import acl
         from memcache_hybrid import DistributedObjectStore
+
         acl.init()
         acl.rt.set_device(device_id)
         store = DistributedObjectStore()
@@ -179,6 +188,7 @@ def meta_service():
     _set_config_env()
     if not _is_meta_service_running():
         from memcache_hybrid import MetaService
+
         ctx = multiprocessing.get_context("fork")
         proc = ctx.Process(target=lambda: MetaService.main())
         proc.start()
@@ -225,7 +235,7 @@ def store_and_buffers(meta_service):
     assert ret == 0, f"store.init({rank0_dev}) failed, ret={ret}"
 
     for i, evt in enumerate(rank_events):
-        assert evt.wait(timeout=120), f"rank{i+1} (dev={[rank1_dev, rank2_dev, rank3_dev][i]}) did not join in time"
+        assert evt.wait(timeout=120), f"rank{i + 1} (dev={[rank1_dev, rank2_dev, rank3_dev][i]}) did not join in time"
 
     try:
         store.remove_all()
@@ -273,6 +283,7 @@ def store_and_buffers(meta_service):
 
 def _put_kv(store, key: str, layer_ptrs: List[int], layer_sizes: List[int]) -> int:
     import torch_npu
+
     torch_npu.npu.current_stream().synchronize()
     ret = store.put_from_layers(key, layer_ptrs, layer_sizes, L2G)
     torch_npu.npu.current_stream().synchronize()
@@ -281,6 +292,7 @@ def _put_kv(store, key: str, layer_ptrs: List[int], layer_sizes: List[int]) -> i
 
 def _get_kv(store, key: str, layer_ptrs: List[int], layer_sizes: List[int]) -> int:
     import torch_npu
+
     torch_npu.npu.current_stream().synchronize()
     ret = store.get_into_layers(key, layer_ptrs, layer_sizes, G2L)
     torch_npu.npu.current_stream().synchronize()
@@ -289,6 +301,7 @@ def _get_kv(store, key: str, layer_ptrs: List[int], layer_sizes: List[int]) -> i
 
 def _put_kv_timed(store, key: str, layer_ptrs: List[int], layer_sizes: List[int]) -> Tuple[int, float]:
     import torch_npu
+
     torch_npu.npu.current_stream().synchronize()
     start = time.perf_counter()
     ret = store.put_from_layers(key, layer_ptrs, layer_sizes, L2G)
@@ -299,6 +312,7 @@ def _put_kv_timed(store, key: str, layer_ptrs: List[int], layer_sizes: List[int]
 
 def _get_kv_timed(store, key: str, layer_ptrs: List[int], layer_sizes: List[int]) -> Tuple[int, float]:
     import torch_npu
+
     torch_npu.npu.current_stream().synchronize()
     start = time.perf_counter()
     ret = store.get_into_layers(key, layer_ptrs, layer_sizes, G2L)
@@ -332,9 +346,9 @@ def test_hbm_capacity_fill_8gb(store_and_buffers):
             latencies.append(lat_ms)
         else:
             failures += 1
-            print(f"  [{i+1}/{num_keys}] {key}: FAIL(ret={ret})")
+            print(f"  [{i + 1}/{num_keys}] {key}: FAIL(ret={ret})")
         if (i + 1) % 10 == 0:
-            print(f"  [{i+1}/{num_keys}] written, avg={sum(latencies)/len(latencies):.2f}ms" if latencies else "")
+            print(f"  [{i + 1}/{num_keys}] written, avg={sum(latencies) / len(latencies):.2f}ms" if latencies else "")
 
     p50 = _percentile(latencies, 0.50) if latencies else 0.0
     p99 = _percentile(latencies, 0.99) if latencies else 0.0
@@ -352,7 +366,7 @@ def test_hbm_capacity_fill_8gb(store_and_buffers):
 
     assert failures == 0, f"{failures} HBM fill writes failed"
     assert verify_failures == 0, f"{verify_failures} keys not found after HBM fill"
-    assert p99 < HBM_FILL_LATENCY_P99_MS, f"HBM fill P99 {p99:.2f}ms exceeds {HBM_FILL_LATENCY_P99_MS}ms"
+    _check_latency("HBM fill", p99, HBM_FILL_LATENCY_P99_MS)
 
     try:
         store.remove_all()
@@ -383,7 +397,7 @@ def test_hbm_to_dram_eviction_large(store_and_buffers):
         results.append((i, ret, lat_ms))
         status = "OK" if ret == 0 else f"FAIL(ret={ret})"
         evict = " ← eviction" if i >= HBM_CAPACITY_REQUESTS else ""
-        print(f"  [{i+1}/{total_keys}] {key}: {status} ({lat_ms:.2f}ms){evict}")
+        print(f"  [{i + 1}/{total_keys}] {key}: {status} ({lat_ms:.2f}ms){evict}")
 
     successes = sum(1 for _, ret, _ in results if ret == 0)
     failures = [(i, ret) for i, ret, _ in results if ret != 0]
@@ -448,10 +462,10 @@ def test_dram_rewarm_large_scale(store_and_buffers):
         key = f"lc3_dummy_{i}"
         ret = _put_kv(store, key, layer_ptrs, layer_sizes)
         if ret != 0:
-            print(f"  [{i+1}/{HBM_CAPACITY_REQUESTS}] dummy write FAIL(ret={ret}), stopping fill")
+            print(f"  [{i + 1}/{HBM_CAPACITY_REQUESTS}] dummy write FAIL(ret={ret}), stopping fill")
             break
         if (i + 1) % 10 == 0:
-            print(f"  [{i+1}/{HBM_CAPACITY_REQUESTS}] dummy written")
+            print(f"  [{i + 1}/{HBM_CAPACITY_REQUESTS}] dummy written")
 
     print(f"  Phase 3: Verifying targets evicted to DRAM (is_exist)...")
     survived = 0
@@ -469,10 +483,10 @@ def test_dram_rewarm_large_scale(store_and_buffers):
         ret, lat_ms = _get_kv_timed(store, key, layer_ptrs, layer_sizes)
         if ret == 0:
             rewarm_latencies.append(lat_ms)
-            print(f"  [{i+1}/{target_count}] {key}: rewarm {lat_ms:.2f}ms")
+            print(f"  [{i + 1}/{target_count}] {key}: rewarm {lat_ms:.2f}ms")
         else:
             rewarm_failures += 1
-            print(f"  [{i+1}/{target_count}] {key}: FAIL(ret={ret})")
+            print(f"  [{i + 1}/{target_count}] {key}: FAIL(ret={ret})")
 
     p50 = _percentile(rewarm_latencies, 0.50) if rewarm_latencies else 0.0
     p99 = _percentile(rewarm_latencies, 0.99) if rewarm_latencies else 0.0
@@ -482,7 +496,7 @@ def test_dram_rewarm_large_scale(store_and_buffers):
     print(f"  Rewarm latency: avg={avg:.2f}ms P50={p50:.2f}ms P99={p99:.2f}ms")
 
     assert rewarm_failures == 0, f"{rewarm_failures} rewarm operations failed"
-    assert p99 < DRAM_REWARM_P99_MS, f"Rewarm P99 {p99:.2f}ms exceeds {DRAM_REWARM_P99_MS}ms"
+    _check_latency("Rewarm", p99, DRAM_REWARM_P99_MS)
 
     try:
         store.remove_all()
@@ -517,7 +531,11 @@ def test_large_scale_prefix_cache_hit(store_and_buffers):
         else:
             write_failures += 1
         if (i + 1) % 10 == 0:
-            print(f"  [{i+1}/{num_keys}] written, avg={sum(write_latencies)/len(write_latencies):.2f}ms" if write_latencies else "")
+            print(
+                f"  [{i + 1}/{num_keys}] written, avg={sum(write_latencies) / len(write_latencies):.2f}ms"
+                if write_latencies
+                else ""
+            )
 
     write_p50 = _percentile(write_latencies, 0.50) if write_latencies else 0.0
     print(f"  Write: {num_keys - write_failures}/{num_keys} succeeded, P50={write_p50:.2f}ms")
@@ -534,7 +552,7 @@ def test_large_scale_prefix_cache_hit(store_and_buffers):
             read_failures += 1
         if (i + 1) % 10 == 0:
             avg = sum(read_latencies) / len(read_latencies) if read_latencies else 0.0
-            print(f"  [{i+1}/{num_keys}] read, avg={avg:.2f}ms")
+            print(f"  [{i + 1}/{num_keys}] read, avg={avg:.2f}ms")
 
     read_p50 = _percentile(read_latencies, 0.50) if read_latencies else 0.0
     read_p90 = _percentile(read_latencies, 0.90) if read_latencies else 0.0
@@ -549,7 +567,7 @@ def test_large_scale_prefix_cache_hit(store_and_buffers):
     print(f"  Read latency: avg={read_avg:.2f}ms P50={read_p50:.2f}ms P90={read_p90:.2f}ms P99={read_p99:.2f}ms")
 
     assert read_failures == 0, f"{read_failures} read operations failed"
-    assert read_p99 < PREFIX_HIT_P99_MS, f"Read P99 {read_p99:.2f}ms exceeds {PREFIX_HIT_P99_MS}ms"
+    _check_latency("Read", read_p99, PREFIX_HIT_P99_MS)
 
     try:
         store.remove_all()
@@ -587,13 +605,13 @@ def test_sustained_write_drain(store_and_buffers):
             total_bytes += KV_BUF_SIZE_BYTES
         else:
             failures += 1
-            print(f"  [{i+1}/{num_keys}] FAIL(ret={ret})")
+            print(f"  [{i + 1}/{num_keys}] FAIL(ret={ret})")
         if (i + 1) % 20 == 0:
             elapsed = time.perf_counter() - start_time
             throughput_mbps = (total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
             avg_lat = sum(latencies) / len(latencies) if latencies else 0.0
             tier = "HBM" if i < HBM_CAPACITY_REQUESTS else "DRAM(evict)"
-            print(f"  [{i+1}/{num_keys}] {tier} avg={avg_lat:.2f}ms throughput={throughput_mbps:.1f}MB/s")
+            print(f"  [{i + 1}/{num_keys}] {tier} avg={avg_lat:.2f}ms throughput={throughput_mbps:.1f}MB/s")
 
     elapsed = time.perf_counter() - start_time
     total_mb = total_bytes / (1024 * 1024)

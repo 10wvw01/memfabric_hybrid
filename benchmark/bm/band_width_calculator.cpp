@@ -157,26 +157,46 @@ int32_t BandWidthCalculator::MultiProcessExecute()
                                cmdParam_.worldRankSize, pipes[i][1]);
             LOG_INFO("subprocess (" << i << ") exited.");
             if (ret != 0) {
-                std::exit(1);
+                _exit(1);
             }
-            std::exit(0);
+            _exit(0);
         } else {
             // main process
             close(pipes[i][1]);
         }
     }
 
-    int status[RANK_SIZE_MAX];
-    for (uint32_t i = 0; i < cmdParam_.localRankSize; ++i) {
-        waitpid(pids[i], &status[i], 0);
-        if (WIFEXITED(status[i]) && WEXITSTATUS(status[i]) != 0) {
-            LOG_INFO("subprocess exit error: " << i);
-        } else if (WIFSIGNALED(status[i])) {
-            LOG_INFO("subprocess (" << i << ") terminated by signal: " << WTERMSIG(status[i]));
-            if (WCOREDUMP(status[i])) {
-                LOG_INFO("subprocess (" << i << ") dumped core.");
-            }
+    std::set<pid_t> remaining(pids, pids + cmdParam_.localRankSize);
+    bool failed = false;
+    while (!remaining.empty()) {
+        int status = 0;
+        pid_t child = waitpid(-1, &status, 0);
+        if (child < 0 && errno == EINTR) {
+            continue;
         }
+        if (child < 0) {
+            LOG_ERROR("waitpid failed, errno:" << errno);
+            failed = true;
+            break;
+        }
+        remaining.erase(child);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            LOG_ERROR("subprocess failed, pid:" << child << " status:" << status);
+            failed = true;
+            break;
+        }
+    }
+    if (failed) {
+        for (auto child : remaining) {
+            kill(child, SIGKILL);
+        }
+        for (auto child : remaining) {
+            while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {}
+        }
+        for (uint32_t i = 0; i < cmdParam_.localRankSize; ++i) {
+            close(pipes[i][0]);
+        }
+        return 1;
     }
 
     std::vector<BwTestResult> resultVec;
@@ -201,6 +221,18 @@ int32_t BandWidthCalculator::MultiProcessExecute()
         close(pipes[i][0]);
     }
     PrintResult(resultVec);
+    const size_t directions = cmdParam_.type == CopyType::ALL_DIRECTION ? DIRECTION_TYPE_NUM_MAX : 1;
+    if (resultVec.size() != directions * cmdParam_.localRankSize) {
+        LOG_ERROR("incomplete results, received:" << resultVec.size()
+                                                  << " expected:" << directions * cmdParam_.localRankSize);
+        return 1;
+    }
+    for (const auto &result : resultVec) {
+        if (result.wrongNum != 0) {
+            LOG_ERROR("data check failed, rank:" << result.rankId << " wrongNum:" << result.wrongNum);
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -430,7 +462,11 @@ int32_t BandWidthCalculator::Execute(uint32_t deviceId, uint32_t rankId, uint32_
         uint32_t numaflag = HYBM_BIND_NUMA_AUTO_AFFINITY_FLAG;
         flags |= (performanceFlag | numaflag);
     }
-    smem_bm_t handle = smem_bm_create(0, 0, cmdParam_.opType, GVA_SIZE, GVA_SIZE, flags);
+    constexpr uint64_t poolAlignment = 2ULL * 1024 * 1024;
+    uint64_t dataSize = static_cast<uint64_t>(cmdParam_.batchSize) * cmdParam_.copySize;
+    CHECK_RET_ERR(dataSize == 0 || dataSize > GVA_SIZE, "invalid transfer bytes:" << dataSize);
+    uint64_t poolSize = (dataSize + poolAlignment - 1) / poolAlignment * poolAlignment;
+    smem_bm_t handle = smem_bm_create(0, 0, cmdParam_.opType, poolSize, poolSize, flags);
     CHECK_RET_ERR((handle == nullptr), "smem_bm_create failed, rank:" << rankId);
 
     ret = smem_bm_join(handle, 0);
@@ -458,7 +494,7 @@ int32_t BandWidthCalculator::Execute(uint32_t deviceId, uint32_t rankId, uint32_
     }
     smem_bm_destroy(handle);
     FinalizeAll(deviceId, barrier, &stream);
-    return 0;
+    return ret;
 }
 
 int32_t BandWidthCalculator::BandWidthCalculation(BarrierUtil *barrier, smem_bm_t handle, uint32_t rankId,
