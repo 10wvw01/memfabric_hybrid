@@ -12,7 +12,7 @@
 
 import logging
 import time
-import os
+import shutil
 import re
 import multiprocessing as mp
 import torch
@@ -40,20 +40,14 @@ class TensorCopyTest:
         self.use_same_stream = use_same_stream
         self.result_pipe = result_pipe
 
-    @staticmethod
-    def tensor_sum(tensor):
-        if tensor is None:
-            return 0
-        ret = torch.sum(tensor, dtype=torch.float32)
-        return ret.item()
-
     def create_tensor(self) -> torch.Tensor:
         tensor = torch.rand(
             size=(1, 1, self.copy_size // 2),
             dtype=torch.float16,
             device=torch.device("npu"),
         )
-        if self.sync_after_create:
+        # Torch may still hold producer tasks in its host queue when ACL submits the copy.
+        if self.sync_after_create or self.use_same_stream:
             npu.current_stream().synchronize()
 
         return tensor
@@ -91,10 +85,7 @@ class TensorCopyTest:
         self.copy_d2d(ptr, tensor1.data_ptr(), stream)
         self.copy_d2d(tensor2.data_ptr(), ptr, stream)
 
-        origin_value = self.tensor_sum(tensor1)
-        copied_value = self.tensor_sum(tensor2)
-
-        equals = origin_value == copied_value
+        equals = torch.equal(tensor1, tensor2)
 
         del tensor1
         del tensor2
@@ -131,6 +122,8 @@ class TensorCopyTest:
             end_barrier.wait()
 
             print(f"[task{self.task_id}] test result: {count=} {mismatch=}")
+            if mismatch:
+                raise RuntimeError(f"copy comparison failed, {mismatch=}, {count=}")
             time.sleep(0.1)
             print(f"[task{self.task_id}] acl reset device...")
             ret = acl.rt.reset_device(self.device_id)
@@ -143,6 +136,10 @@ class TensorCopyTest:
 
         except Exception as e:
             logging.error(f"[task{self.task_id}] test run failed: {e}")
+            begin_barrier.abort()
+            end_barrier.abort()
+            self.result_pipe.put(None)
+            raise
 
 
 def byte_size(size):
@@ -166,7 +163,7 @@ def byte_size(size):
 
 def print_result(parallel, begin_barrier, end_barrier, queue: mp.Queue):
     interval = 0.1
-    sz = os.get_terminal_size()
+    sz = shutil.get_terminal_size(fallback=(100, 40))
     print_width = ((sz.columns // 50) * 50) or 100
     line = 0
     last = time.monotonic()
@@ -274,3 +271,4 @@ if __name__ == "__main__":
     plist.append(mp.Process(target=print_result, args=(args.parallel, begin_barrier, end_barrier, queue)))
     [p.start() for p in plist]
     [p.join() for p in plist]
+    raise SystemExit(1 if any(p.exitcode != 0 for p in plist) else 0)
