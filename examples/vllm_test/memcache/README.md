@@ -276,7 +276,7 @@ vLLM 集成测试度量: 全链路 TTFT（含网络 + prefill + KV Cache + outpu
 
 ### 大容量测试
 
-以下为历史测试模式，尚未完成本次 0.24 迁移回归。`large_capacity_vllm_test.py` 仍使用旧参数 `--prefix-match-unit` 和关闭本地 prefix cache 的配置，当前请使用 `--type integration` 验证。
+大容量模型测试沿用 vLLM 0.24 的本地前缀缓存和外部缓存隔离方式。
 
 大容量测试（`--type largecap`）使用 3GB HBM + 10GB DRAM（4-rank, TP=4），
 专门验证 HBM→DRAM eviction、DRAM rewarm、大规模 prefix cache hit 等大容量场景，
@@ -364,3 +364,30 @@ TTFT 以首个实际 token 的 SSE 响应计时，支持仅有 token ID 的特�
     PYTEST_ADDOPTS="-k 'test_eviction_aware_mixed_4rank and 30pct'" \
       bash run_test.sh --memcache-dir /path/to/memcache --type largecap --suite integration \
       --device-ids 0,1,2,3 --skip-clean --log
+
+### 驱逐后的混合命中验证
+
+`test_eviction_aware_mixed_4rank` 单独使用每 rank 1GiB HBM，DRAM 容量沿用配置文件。
+输入经当前模型的分词器构造为4096个 token 的可读文档，开头包含每条不同的校验短语，
+末尾要求复述该短语。首次输入会先检查 HBM 命中与未命中输出一致。
+预填充最多64条不同输入，限时10分钟，并等待驱逐计数增加、DRAM 使用量增加，
+以及至少一条输入对应的全部缓存块在四个 rank 上均处于 DRAM 可读状态。
+随后混合30%或70%的重复请求和新请求，每次 DRAM 命中前核对缓存位置，
+检查本地命中为零、外部命中符合预期，并将生成的8个 token 与首次未命中输出逐个比较。
+HTTP/SSE 请求须完整结束，时延只作为结果输出。
+
+    PYTEST_ADDOPTS="-k test_eviction_aware_mixed_4rank" \
+      bash run_test.sh --memcache-dir /path/to/memcache --type largecap --suite integration \
+      --device-ids 0,1,2,3 --skip-clean --log
+
+共享设备时可设置 `MMC_TEST_MAX_USED_MEMORY_RATIO` 调整启动前允许的已用显存比例，
+取值在0与1之间，默认0.25；例如0.65。连续三次采样均满足条件才启动，
+运行前按模型权重、每 rank KV 缓存和 MemCache 池确认剩余容量。
+共用设备的 largecap 测试应将入口及子进程放入独立 PID/IPC 命名空间，并使用独立的 /dev/shm。
+显式设置 `--kv-cache-memory-bytes` 后，`--gpu-memory-utilization` 不控制KV缓存容量。
+
+不使用 NPU 的用例判定回归：
+
+    python3 -m pytest cases/python/memcache/integration/eviction_checks_test.py \
+      cases/python/memcache/integration/vllm_http_test.py \
+      cases/python/memcache/integration/runner_test.py -q
