@@ -34,12 +34,12 @@ Result GetHalDeviceId(uint32_t userDeviceId, uint32_t &driverDeviceId)
     return BM_OK;
 }
 
-Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle)
+Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle, bool allowDdrFallback)
 {
     const bool is310P = DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P;
     drv_mem_prop prop{MEM_DEV_SIDE, driverDeviceId, 0, MEM_HUGE_PAGE_TYPE, is310P ? MEM_P2P_DDR_TYPE : MEM_HBM_TYPE, 0};
     auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
-    if (is310P && ret == HAL_OUT_OF_MEMORY_ERROR) {
+    if (is310P && ret == HAL_OUT_OF_MEMORY_ERROR && allowDdrFallback) {
         BM_LOG_INFO("310P P2P_DDR分配不足，改用DDR driver:" << driverDeviceId << " size:" << size);
         prop.mem_type = MEM_DDR_TYPE;
         ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
@@ -204,7 +204,8 @@ int32_t HybmModernInitMetaGva(uint32_t driverDeviceId, void **globalMemoryBase, 
     return BM_OK;
 }
 
-int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags){
+int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags)
+{
     auto ret = drv::HalGvaReserveMemory((uint64_t *)globalMemoryBase, allocSize, initedLogicDeviceId, flags);
     if (ret != 0 || reinterpret_cast<uint64_t>(*globalMemoryBase) != (SVM_END_ADDR - GB)) {
         if (ret == 0 && *globalMemoryBase != nullptr) {

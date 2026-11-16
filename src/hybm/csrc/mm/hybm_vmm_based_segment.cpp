@@ -91,14 +91,14 @@ Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
     }
     auto reserveGvaSize = options_.enable56BitsGva ? totalVirtualSize_ : totalLvaSize;
     auto &manager = HybmVaManager::GetInstance();
-    auto gvaInfo = manager.AllocReserveGva(options_.rankId, reserveGvaSize, totalLvaSize,
-                                          mem_type, options_.enable56BitsGva);
+    auto gvaInfo =
+        manager.AllocReserveGva(options_.rankId, reserveGvaSize, totalLvaSize, mem_type, options_.enable56BitsGva);
     BM_ASSERT_LOG_AND_RETURN(gvaInfo.va[HVM_GVA] > 0, "No free VA window, rank:" << options_.rankId, BM_ERROR);
     auto expected = reinterpret_cast<void *>(gvaInfo.va[HVM_DVA]);
     auto ret = DlHalApi::HalMemAddressReserve(&base, totalLvaSize, 0, expected, MEM_RSV_TYPE_REMOTE_MAP);
     if (ret != BM_OK || base != expected) {
-        BM_LOG_ERROR("Reserve VA failed, rank:" << options_.rankId << " expected:" << expected
-                                               << " returned:" << base << " size:" << totalLvaSize << " ret:" << ret);
+        BM_LOG_ERROR("Reserve VA failed, rank:" << options_.rankId << " expected:" << expected << " returned:" << base
+                                                << " size:" << totalLvaSize << " ret:" << ret);
         if (ret == BM_OK && base != nullptr) {
             (void)DlHalApi::HalMemAddressFree(base);
         }
@@ -216,13 +216,19 @@ Result HybmVmmBasedSegment::MallocFromHost(size_t size, uint32_t devId, drv_mem_
 
 Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept
 {
-    return CreateHalMemory(devId, size, handle);
+    const bool allowDdrFallback = options_.rankCnt <= 2;
+    auto ret = CreateHalMemory(devId, size, handle, allowDdrFallback);
+    if (Is310PPath() && !allowDdrFallback && ret == HAL_OUT_OF_MEMORY_ERROR) {
+        BM_LOG_ERROR("310P BM设备池P2P_DDR内存不足，超过2个rank不支持回退普通设备DDR rank:"
+                     << options_.rankId << " rankCnt:" << options_.rankCnt << " device:" << devId << " size:" << size
+                     << " ret:" << ret);
+    }
+    return ret;
 }
 
 Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
 {
-    auto localVirtualBase =
-        localVirtualAddress_ + (options_.enable56BitsGva ? 0 : options_.maxSize * options_.rankId);
+    auto localVirtualBase = localVirtualAddress_ + (options_.enable56BitsGva ? 0 : options_.maxSize * options_.rankId);
     auto globalVirtualBase = globalVirtualAddress_ + options_.maxSize * options_.rankId;
     auto allocAddr = reinterpret_cast<uint64_t>(localVirtualBase + allocatedSize_);
     auto gva = reinterpret_cast<uint64_t>(globalVirtualBase + allocatedSize_);
@@ -270,8 +276,7 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
     if (size == 0) {
         return MallocEmptySlice(slice);
     }
-    auto localVirtualBase =
-        localVirtualAddress_ + (options_.enable56BitsGva ? 0 : options_.maxSize * options_.rankId);
+    auto localVirtualBase = localVirtualAddress_ + (options_.enable56BitsGva ? 0 : options_.maxSize * options_.rankId);
     auto globalVirtualBase = globalVirtualAddress_ + options_.maxSize * options_.rankId;
     auto allocAddr = reinterpret_cast<uint64_t>(localVirtualBase + allocatedSize_);
     auto gva = reinterpret_cast<uint64_t>(globalVirtualBase + allocatedSize_);
@@ -356,8 +361,8 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         desc[0].type = MEM_ACCESS_TYPE_READWRITE;
         ret = DlHalApi::HalMemSetAccess(reinterpret_cast<void *>(allocAddr), size, desc, 1);
         if (ret != BM_OK) {
-            BM_LOG_ERROR("HalMemSetAccess failed: " << ret << " addr:0x" << std::hex << allocAddr
-                                                    << " size:" << size << " segType:" << options_.segType);
+            BM_LOG_ERROR("HalMemSetAccess failed: " << ret << " addr:0x" << std::hex << allocAddr << " size:" << size
+                                                    << " segType:" << options_.segType);
             /* unmap before releasing handle to avoid dangling mapping */
             DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
             ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
@@ -441,8 +446,8 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
 
     if (Is310PPath()) {
         uint64_t shareable = 0U;
-        ret = DlHalApi::HalMemExportToShareableHandle(
-            reinterpret_cast<drv_mem_handle_t *>(pos->second.handle), &shareable);
+        ret = DlHalApi::HalMemExportToShareableHandle(reinterpret_cast<drv_mem_handle_t *>(pos->second.handle),
+                                                      &shareable);
         BM_VALIDATE_RETURN(ret == BM_OK, "HAL export failed, rank:" << options_.rankId << " ret:" << ret,
                            BM_DL_FUNCTION_FAILED);
         // Preserve the existing cross-process sharing policy and uint64_t wire handle.
@@ -546,6 +551,14 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
             BM_LOG_ERROR("import info(" << i << ") magic(" << info.magic << ") invalid.");
             return BM_INVALID_PARAM;
         }
+        if (Is310PPath() && options_.shared && options_.rankCnt == 2 && info.rankId != options_.rankId &&
+            (!CanLocalHostReaches(info.superPodId, info.serverId, info.devicePhyId) || !IsSameCard(info.devicePhyId) ||
+             devicePhyId_ == static_cast<int>(info.devicePhyId))) {
+            BM_LOG_ERROR("310P BM双rank仅支持同卡两个不同die rank:" << options_.rankId << " local_phy:" << devicePhyId_
+                                                                    << " peer_rank:" << info.rankId
+                                                                    << " peer_phy:" << info.devicePhyId);
+            return BM_NOT_SUPPORTED;
+        }
         if (options_.shared && options_.segType == HYBM_MST_HBM && info.rankId != options_.rankId &&
             devicePhyId_ != static_cast<int>(info.devicePhyId) &&
             CanLocalHostReaches(info.superPodId, info.serverId, info.devicePhyId)) {
@@ -556,9 +569,9 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
                 } else if (p2pLeases_.find(static_cast<int32_t>(info.devicePhyId)) == p2pLeases_.end()) {
                     auto epRet = EnableRemotePeerAccess(info.devicePhyId);
                     if (epRet != BM_OK) {
-                        BM_LOG_ERROR("310P3 cross-card enable peer access failed, ret:" << epRet
-                                    << " local_user:" << deviceId_ << " remote_phy:" << info.devicePhyId
-                                    << " remoteRank:" << info.rankId); // Root cause: ret/local device/peer rank
+                        BM_LOG_ERROR("310P3 cross-card enable peer access failed, ret:"
+                                     << epRet << " local_user:" << deviceId_ << " remote_phy:" << info.devicePhyId
+                                     << " remoteRank:" << info.rankId); // Root cause: ret/local device/peer rank
                         return epRet;
                     }
                     p2pLeases_.insert(static_cast<int32_t>(info.devicePhyId));
@@ -608,9 +621,8 @@ uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
         const uint64_t windowBase = reinterpret_cast<uint64_t>(localVirtualAddress_);
         const uint64_t windowEnd = windowBase + totalVirtualSize_;
         if (im.gva < windowBase || im.gva + im.size > windowEnd) {
-            BM_LOG_ERROR("310P import gva out of window, rank:" << im.rankId << " gva:" << VaToStr(im.gva)
-                                                                << " size:" << im.size
-                                                                << " windowBase:" << VaToStr(windowBase)
+            BM_LOG_ERROR("310P import gva out of window, rank:" << im.rankId << " gva:" << VaToStr(im.gva) << " size:"
+                                                                << im.size << " windowBase:" << VaToStr(windowBase)
                                                                 << " windowEnd:" << VaToStr(windowEnd));
             return 0;
         }
@@ -645,9 +657,8 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
     uint64_t shareable = 0;
     memcpy(&shareable, im.shareHandle.share_info, sizeof(shareable));
     bool sameCard = IsSameCard(im.devicePhyId);
-    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step1: rank:" << im.rankId
-                         << " devId:" << std::dec << deviceId_
-                         << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
+    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step1: rank:" << im.rankId << " devId:" << std::dec
+                         << deviceId_ << " sameCard:" << sameCard << " myDevicePhyId:" << devicePhyId_
                          << " peerDevicePhyId:" << im.devicePhyId);
     drv_mem_handle_t *halHandle = nullptr;
     auto ret = DlHalApi::HalMemImportFromShareableHandle(shareable, logicDeviceId_, &halHandle);
@@ -656,8 +667,8 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
                          << " deviceId:" << deviceId_);
     if (ret != BM_OK || halHandle == nullptr) {
         BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
-                              << " sameCard:" << sameCard
-                              << " deviceId:" << deviceId_ << " segType:" << options_.segType);
+                              << " sameCard:" << sameCard << " deviceId:" << deviceId_
+                              << " segType:" << options_.segType);
         /* do NOT pre-release lva here: it stays in reservedLva_ and will be
          * released by UnReserveMemorySpace. Pre-releasing causes double-free. */
         return BM_ERROR;
@@ -665,12 +676,11 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
     mapHandle = halHandle;
     ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(lva), im.size, 0,
                               reinterpret_cast<drv_mem_handle_t *>(mapHandle), 0);
-    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step3: HalMemMap ret:" << ret
-                         << " rank:" << im.rankId << " lva:" << VaToStr(lva) << " size:" << im.size);
+    BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 import step3: HalMemMap ret:" << ret << " rank:" << im.rankId
+                         << " lva:" << VaToStr(lva) << " size:" << im.size);
     if (ret != BM_OK) {
         BM_LOG_ERROR("[rank " << options_.rankId << "] HalMemMap failed:" << ret << " rank:" << im.rankId
-                              << " va:" << VaToStr(lva) << " size:" << im.size
-                              << " segType:" << options_.segType);
+                              << " va:" << VaToStr(lva) << " size:" << im.size << " segType:" << options_.segType);
         ReleaseHandle(reinterpret_cast<drv_mem_handle_t *>(mapHandle));
         return BM_ERROR;
     }

@@ -9,6 +9,7 @@
 
 #include "dl_acl_api.h"
 #include "hybm_va_manager.h"
+#include "hybm_ex_info_transfer.h"
 #include <cstring>
 
 #define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
@@ -304,4 +305,25 @@ TEST_F(Hybm310PHalVmmTest, LocalPoolAccessFailureRollsBackAllocation)
     EXPECT_TRUE(segment.exportMap_.empty());
     EXPECT_EQ(slice, nullptr);
     segment.localVirtualAddress_ = segment.globalVirtualAddress_ = nullptr;
+}
+
+TEST_F(Hybm310PHalVmmTest, TwoRanksRejectCrossCardBeforePeerEnable)
+{
+    MemSegmentOptions options{};
+    options.segType = HYBM_MST_HBM;
+    options.shared = true;
+    options.rankCnt = 2;
+    HybmVmmBasedSegment segment(options, 0);
+    HostSdmaExportInfo info{};
+    info.magic = VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
+    info.devicePhyId = 6;
+    info.rankId = 1;
+    info.size = HYBM_LARGE_PAGE_SIZE;
+    info.serverId = MemSegment::serverId_;
+    info.superPodId = MemSegment::superPodId_;
+    std::string encoded;
+    ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Serialize(info, encoded), BM_OK);
+    MOCKER_CPP(&MemSegment::EnableRemotePeerAccess, ock::mf::Result(*)(int32_t)).expects(never());
+    EXPECT_EQ(segment.Import({encoded}, nullptr), BM_NOT_SUPPORTED);
+    EXPECT_TRUE(segment.imports_.empty());
 }

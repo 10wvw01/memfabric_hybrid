@@ -355,7 +355,7 @@ TEST_F(HybmVmmBasedSegmentTest, Destroy_NoCrash)
 /* 310P 工厂分派: 统一路由到共用类(差异由类内 Is310PPath 分支处理, 专用段已删除) */
 TEST_F(HybmVmmBasedSegmentTest, CreateDispatchesToVmmBasedFor310P)
 {
-    MOCKER_CPP(&ock::mf::MemSegment::InitDeviceInfo, int32_t (*)(int32_t)).stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&ock::mf::MemSegment::InitDeviceInfo, int32_t(*)(int32_t)).stubs().will(returnValue(BM_OK));
     MemSegment::socType_ = AscendSocType::ASCEND_310P;
     MemSegmentOptions opt{};
     opt.segType = HYBM_MST_HBM;
@@ -372,12 +372,11 @@ TEST_F(HybmVmmBasedSegmentTest, CreateDispatchesToVmmBasedFor310P)
 namespace {
 void MockRemoteWindowReservation()
 {
-    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs()
-        .will(returnValue(AscendSocType::ASCEND_310P));
-    MOCKER_CPP(&DlHalApi::HalMemAddressReserve, int(*)(void **, size_t, size_t, void *, uint64_t))
-        .stubs().will(invoke(ReserveAddressForTest));
-    MOCKER_CPP(&DlHalApi::HalMemAddressFree, int(*)(void *))
-        .stubs().will(invoke(ReleaseAddressForTest));
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER_CPP(&DlHalApi::HalMemAddressReserve, int (*)(void **, size_t, size_t, void *, uint64_t))
+        .stubs()
+        .will(invoke(ReserveAddressForTest));
+    MOCKER_CPP(&DlHalApi::HalMemAddressFree, int (*)(void *)).stubs().will(invoke(ReleaseAddressForTest));
 }
 MemSegmentOptions SmallHbmPool(uint32_t ranks)
 {
@@ -388,7 +387,7 @@ MemSegmentOptions SmallHbmPool(uint32_t ranks)
     options.size = HYBM_LARGE_PAGE_SIZE;
     return options;
 }
-}
+} // namespace
 
 TEST_F(HybmVmmBasedSegmentTest, ReserveUsesHalRemoteWindowAndGiBAlignmentOn310P)
 {
@@ -450,8 +449,9 @@ TEST_F(HybmVmmBasedSegmentTest, RemotePoolsUseDistinctWindowsAndReuseReleasedWin
 TEST_F(HybmVmmBasedSegmentTest, Malloc310PUsesDriverP2pDdr)
 {
     MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
-    MOCKER_CPP(&DlHalApi::HalMemCreate, int(*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
-        .stubs().will(invoke(CreatePhysicalFor310P));
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreatePhysicalFor310P));
     HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
     drv_mem_handle_t *handle = nullptr;
     EXPECT_EQ(segment.MallocFromDevice(HYBM_LARGE_PAGE_SIZE, 7, &handle), BM_OK);
@@ -463,8 +463,9 @@ TEST_F(HybmVmmBasedSegmentTest, Malloc310PUsesDriverP2pDdr)
 TEST_F(HybmVmmBasedSegmentTest, Malloc310PFallsBackOnDriverOutOfMemory)
 {
     MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
-    MOCKER_CPP(&DlHalApi::HalMemCreate, int(*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
-        .stubs().will(invoke(CreatePhysicalFor310P));
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreatePhysicalFor310P));
     firstCreateResult = HAL_OUT_OF_MEMORY_ERROR;
     HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
     drv_mem_handle_t *handle = nullptr;
@@ -477,8 +478,9 @@ TEST_F(HybmVmmBasedSegmentTest, Malloc310PFallsBackOnDriverOutOfMemory)
 TEST_F(HybmVmmBasedSegmentTest, Malloc310PDoesNotRetryOtherDriverErrors)
 {
     MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
-    MOCKER_CPP(&DlHalApi::HalMemCreate, int(*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
-        .stubs().will(invoke(CreatePhysicalFor310P));
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreatePhysicalFor310P));
     firstCreateResult = BM_INVALID_PARAM;
     HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
     drv_mem_handle_t *handle = nullptr;
@@ -490,8 +492,9 @@ TEST_F(HybmVmmBasedSegmentTest, Malloc310PDoesNotRetryOtherDriverErrors)
 TEST_F(HybmVmmBasedSegmentTest, Malloc310PPropagatesFallbackFailure)
 {
     MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
-    MOCKER_CPP(&DlHalApi::HalMemCreate, int(*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
-        .stubs().will(invoke(CreatePhysicalFor310P));
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreatePhysicalFor310P));
     firstCreateResult = HAL_OUT_OF_MEMORY_ERROR;
     secondCreateResult = BM_ERROR;
     HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
@@ -505,8 +508,9 @@ TEST_F(HybmVmmBasedSegmentTest, Malloc310PPropagatesFallbackFailure)
 TEST_F(HybmVmmBasedSegmentTest, MallocNon310PKeepsHbmAndDoesNotUseDdrFallback)
 {
     MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_910C));
-    MOCKER_CPP(&DlHalApi::HalMemCreate, int(*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
-        .stubs().will(invoke(CreatePhysicalFor310P));
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreatePhysicalFor310P));
     firstCreateResult = HAL_OUT_OF_MEMORY_ERROR;
     HybmVmmBasedSegment segment(MemSegmentOptions{}, 0);
     drv_mem_handle_t *handle = nullptr;
@@ -612,4 +616,40 @@ TEST_F(HybmVmmBasedSegmentTest, Non310PFailedReleaseKeepsOriginalRecordRemoval)
     segment.p2pLeases_.insert(6);
     segment.ReleaseP2PLeases();
     EXPECT_TRUE(segment.p2pLeases_.empty());
+}
+
+TEST_F(HybmVmmBasedSegmentTest, Malloc310PFourRanksDoesNotFallbackOnOutOfMemory)
+{
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreatePhysicalFor310P));
+    firstCreateResult = HAL_OUT_OF_MEMORY_ERROR;
+    MemSegmentOptions options{};
+    options.rankCnt = 4;
+    HybmVmmBasedSegment segment(options, 0);
+    drv_mem_handle_t *handle = nullptr;
+    EXPECT_EQ(segment.MallocFromDevice(HYBM_LARGE_PAGE_SIZE, 7, &handle), HAL_OUT_OF_MEMORY_ERROR);
+    EXPECT_EQ(createCallCount, 1U);
+    EXPECT_EQ(createdMemTypes[0], MEM_P2P_DDR_TYPE);
+}
+
+TEST_F(HybmVmmBasedSegmentTest, Malloc310POneAndTwoRanksAllowDdrFallback)
+{
+    MOCKER_CPP(&DlAclApi::GetAscendSocType, AscendSocType(*)()).stubs().will(returnValue(ASCEND_310P));
+    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, const drv_mem_prop *, uint64_t))
+        .stubs()
+        .will(invoke(CreatePhysicalFor310P));
+    for (uint32_t count : {1U, 2U}) {
+        createCallCount = 0;
+        firstCreateResult = HAL_OUT_OF_MEMORY_ERROR;
+        MemSegmentOptions options{};
+        options.rankCnt = count;
+        HybmVmmBasedSegment segment(options, 0);
+        drv_mem_handle_t *handle = nullptr;
+        EXPECT_EQ(segment.MallocFromDevice(HYBM_LARGE_PAGE_SIZE, 7, &handle), BM_OK);
+        EXPECT_EQ(createCallCount, 2U);
+        EXPECT_EQ(createdMemTypes[0], MEM_P2P_DDR_TYPE);
+        EXPECT_EQ(createdMemTypes[1], MEM_DDR_TYPE);
+    }
 }
