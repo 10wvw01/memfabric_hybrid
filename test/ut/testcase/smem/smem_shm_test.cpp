@@ -528,11 +528,12 @@ TEST_F(SmemShmTest, smem_shm_atomic_alloc_value_success)
     smem_shm_uninit(0);
 }
 
-// smem_shm_query_support_data_operation: 返回值应包含 MTE 能力
+// SHMEM 支持类型查询包含已支持的 SDMA。
 TEST_F(SmemShmTest, smem_shm_query_support_data_operation_basic)
 {
     uint32_t ops = smem_shm_query_support_data_operation();
     EXPECT_NE(ops & SMEMS_DATA_OP_MTE, 0u);
+    EXPECT_NE(ops & SMEMS_DATA_OP_SDMA, 0u);
 }
 
 // smem_shm_global_exit: 覆盖空句柄、非法句柄、正常广播的分支

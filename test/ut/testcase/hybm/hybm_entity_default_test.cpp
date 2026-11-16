@@ -1598,6 +1598,28 @@ TEST_F(HybmEntityDefaultTest, CanReachDataOperators_WithSdmaNoSegment)
     EXPECT_EQ(opType, HYBM_DOP_TYPE_DEFAULT);
 }
 
+TEST_F(HybmEntityDefaultTest, CanReachDataOperators_WithAivSdma)
+{
+    ock::mf::MemEntityDefault entity(TEST_DEVICE_ID_CAN_REACH_SDMA);
+    entity.options_.rankCount = TEST_RANK_COUNT_2;
+    entity.options_.bmDataOpType = static_cast<hybm_data_op_type>(HYBM_DOP_TYPE_MTE | HYBM_DOP_TYPE_AIV_SDMA);
+    MOCKER_CPP(&ock::mf::MemEntityDefault::SdmaReaches, bool (*)(const ock::mf::MemEntityDefault *, uint32_t))
+        .stubs()
+        .will(returnValue(true));
+
+    EXPECT_EQ(entity.CanReachDataOperators(TEST_RANK_1), HYBM_DOP_TYPE_AIV_SDMA);
+    EXPECT_EQ(entity.CanReachDataOperators(TEST_RANK_COUNT_2), HYBM_DOP_TYPE_DEFAULT);
+}
+
+TEST_F(HybmEntityDefaultTest, CanReachDataOperators_WithAivSdmaNoSegment)
+{
+    ock::mf::MemEntityDefault entity(TEST_DEVICE_ID_CAN_REACH_SDMA);
+    entity.options_.rankCount = TEST_RANK_COUNT_2;
+    entity.options_.bmDataOpType = HYBM_DOP_TYPE_AIV_SDMA;
+
+    EXPECT_EQ(entity.CanReachDataOperators(TEST_RANK_1), HYBM_DOP_TYPE_DEFAULT);
+}
+
 TEST_F(HybmEntityDefaultTest, CanReachDataOperators_WithDeviceRdma)
 {
     ock::mf::MemEntityDefault entity(TEST_DEVICE_ID_CAN_REACH_DEVICE_RDMA);
