@@ -328,3 +328,39 @@ TTFT 以首个实际 token 的 SSE 响应计时，支持仅有 token ID 的特�
 `verify.sh` 核对当前版本、Python 包加载路径、MemCache wheel、已安装 MemFabric 运行库和 MetaService 构建产物。
 仅同步源码的记录写入 `retest_logs/source_revisions.json`，不会替代完整构建后的部署记录。
 测试结果引用该记录中的提交号，分支更新后重新部署、验证并运行测试。
+
+
+### 模型测试内存预算
+
+集成测试、大容量模型测试和 benchmark 默认每 rank 使用 2 GiB KV cache，
+通过 vLLM 的 --kv-cache-memory-bytes 固定缓存预算，给模型权重及运行时工作区留出空间。
+可设置 MMC_TEST_KV_CACHE_MEMORY_BYTES 调整；需要覆盖较大缓存容量时按设备可用内存设置。
+纯 DRAM 用例复用主集成的请求成功、外部缓存命中校验，使用独立的纯 DRAM 配置。
+服务切换时先等待本轮子进程退出，再连续三次确认目标设备显存已降至空闲水平。
+
+入口参数及错误状态回归：
+
+    python3 -m pytest cases/python/memcache/integration/runner_test.py -q
+
+
+大容量模型测试使用共同的 HTTP/SSE 响应校验，确认生成 token 后记录 TTFT；
+命中场景检查外部缓存指标，时延和吞吐作为运行结果输出。
+
+单项回归可用 PYTEST_ADDOPTS 选择用例，例如在已部署环境中只检查大容量全 miss：
+
+    PYTEST_ADDOPTS="-k test_large_cap_overhead_4rank" \
+      bash run_test.sh --memcache-dir /path/to/memcache --type largecap --suite integration \
+      --device-ids 0,1,2,3 --skip-clean --log
+
+大容量存储工作负载默认检查操作返回值、键存在性和读写成功率，并输出时延。
+如需同时按原有 P99 门限检查性能，可设置 MMC_TEST_CHECK_PERFORMANCE=1。
+
+
+310P 运行模型时，如 torch_npu 的 aclrtMallocPhysical 返回 507899，
+可设置 PYTORCH_NPU_ALLOC_CONF=expandable_segments:False 关闭 PyTorch 可扩展内存段，
+再通过相同入口运行，并保留原始服务日志。例如只运行大容量 30% 混合命中用例：
+
+    PYTORCH_NPU_ALLOC_CONF=expandable_segments:False \
+    PYTEST_ADDOPTS="-k 'test_eviction_aware_mixed_4rank and 30pct'" \
+      bash run_test.sh --memcache-dir /path/to/memcache --type largecap --suite integration \
+      --device-ids 0,1,2,3 --skip-clean --log

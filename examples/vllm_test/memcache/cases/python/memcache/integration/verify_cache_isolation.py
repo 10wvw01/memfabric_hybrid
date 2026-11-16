@@ -52,6 +52,7 @@ KV_TRANSFER_CONFIG_MEMCACHE = json.dumps(
 
 def build_prompt_ids(num_tokens, seed=1):
     import random
+
     rng = random.Random(seed)
     return [rng.randrange(VOCAB_SIZE) for _ in range(num_tokens)]
 
@@ -76,6 +77,7 @@ def start_meta_service(memcache_dir):
     try:
         import memcache_hybrid
         import memfabric_hybrid
+
         for pkg in (memcache_hybrid, memfabric_hybrid):
             pkg_lib = os.path.join(os.path.dirname(pkg.__file__), "lib")
             if os.path.isdir(pkg_lib):
@@ -84,8 +86,7 @@ def start_meta_service(memcache_dir):
         pass
     if lib_dirs:
         env["LD_LIBRARY_PATH"] = ":".join(lib_dirs) + ":" + env.get("LD_LIBRARY_PATH", "")
-    subprocess.Popen([meta_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
-                      start_new_session=True)
+    subprocess.Popen([meta_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
     for _ in range(10):
         if is_port_listening(META_SERVICE_PORT):
             print("[INFO] MetaService started")
@@ -95,26 +96,49 @@ def start_meta_service(memcache_dir):
 
 
 def stop_meta_service():
-    subprocess.run("pkill -9 -f 'mmc_meta_service'", shell=True, timeout=5,
-                   capture_output=True)
+    subprocess.run("pkill -9 -f 'mmc_meta_service'", shell=True, timeout=5, capture_output=True)
     time.sleep(1)
 
 
 def start_vllm(device_ids, tp_size, memcache_dir):
     cmd = [
-        "vllm", "serve", DEFAULT_MODEL_PATH,
-        "--host", "127.0.0.1", "--port", str(VLLM_PORT),
-        "--tensor-parallel-size", str(tp_size),
-        "--quantization", "ascend",
-        "--served-model-name", DEFAULT_SERVED_MODEL_NAME,
-        "--trust-remote-code", "--dtype", "float16",
-        "--max-num-seqs", "10", "--max-num-batched-tokens", "4096",
-        "--max-model-len", "8192", "--gpu-memory-utilization", "0.80",
-        "--enforce-eager", "--enable-chunked-prefill",
-        "--mamba-ssm-cache-dtype", "float16", "--mamba-cache-mode", "align",
-        "--additional-config", ADDITIONAL_CONFIG_JSON,
+        "vllm",
+        "serve",
+        DEFAULT_MODEL_PATH,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(VLLM_PORT),
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--quantization",
+        "ascend",
+        "--served-model-name",
+        DEFAULT_SERVED_MODEL_NAME,
+        "--trust-remote-code",
+        "--dtype",
+        "float16",
+        "--max-num-seqs",
+        "10",
+        "--max-num-batched-tokens",
+        "4096",
+        "--max-model-len",
+        "8192",
+        "--gpu-memory-utilization",
+        "0.80",
+        "--kv-cache-memory-bytes",
+        os.environ.get("MMC_TEST_KV_CACHE_MEMORY_BYTES", "2147483648"),
+        "--enforce-eager",
+        "--enable-chunked-prefill",
+        "--mamba-ssm-cache-dtype",
+        "float16",
+        "--mamba-cache-mode",
+        "align",
+        "--additional-config",
+        ADDITIONAL_CONFIG_JSON,
         "--enable-prefix-caching",
-        "--kv-transfer-config", KV_TRANSFER_CONFIG_MEMCACHE,
+        "--kv-transfer-config",
+        KV_TRANSFER_CONFIG_MEMCACHE,
     ]
     env = os.environ.copy()
     env["ASCEND_RT_VISIBLE_DEVICES"] = device_ids
@@ -125,6 +149,7 @@ def start_vllm(device_ids, tp_size, memcache_dir):
     try:
         import memcache_hybrid
         import memfabric_hybrid
+
         for pkg in (memcache_hybrid, memfabric_hybrid):
             pkg_lib = os.path.join(os.path.dirname(pkg.__file__), "lib")
             if os.path.isdir(pkg_lib):
@@ -169,14 +194,16 @@ def stop_vllm(proc):
 
 
 def measure_ttft(prompt_ids):
-    body = json.dumps({
-        "model": DEFAULT_SERVED_MODEL_NAME,
-        "prompt": prompt_ids,
-        "max_tokens": 1,
-        "stream": True,
-        "temperature": 0,
-        "ignore_eos": True,
-    })
+    body = json.dumps(
+        {
+            "model": DEFAULT_SERVED_MODEL_NAME,
+            "prompt": prompt_ids,
+            "max_tokens": 1,
+            "stream": True,
+            "temperature": 0,
+            "ignore_eos": True,
+        }
+    )
     conn = http.client.HTTPConnection("127.0.0.1", VLLM_PORT, timeout=120)
     try:
         start = time.perf_counter()
@@ -235,7 +262,7 @@ def main():
         print("\n[INFO] Warmup (2 requests)...")
         for i in range(2):
             t = measure_ttft(warmup_prompt)
-            print(f"  warmup {i+1}: TTFT={t:.2f}ms")
+            print(f"  warmup {i + 1}: TTFT={t:.2f}ms")
 
         print("\n===== Scenario A: Full miss (unique prompt) =====")
         ttft_a = measure_ttft(prompt)
@@ -259,7 +286,7 @@ def main():
             reset_local_prefix_cache()
             time.sleep(0.5)
             t = measure_ttft(prompt)
-            print(f"  repeat C-{i+1}: TTFT={t:.2f}ms")
+            print(f"  repeat C-{i + 1}: TTFT={t:.2f}ms")
 
         print("\n===== Scenario C2: MemCache hit (reset + pollute local cache first) =====")
         reset_local_prefix_cache()
@@ -284,9 +311,9 @@ def main():
         print(f"  B (local hit)             = {ttft_b:.2f}ms")
         print(f"  C (MemCache hit, reset)   = {ttft_c:.2f}ms")
         print(f"  D (both cleared, full)    = {ttft_d:.2f}ms")
-        print(f"  C/B ratio                 = {ttft_c/ttft_b:.2f}x")
-        print(f"  C/A ratio                 = {ttft_c/ttft_a:.2f}x")
-        print(f"  D/A ratio                 = {ttft_d/ttft_a:.2f}x")
+        print(f"  C/B ratio                 = {ttft_c / ttft_b:.2f}x")
+        print(f"  C/A ratio                 = {ttft_c / ttft_a:.2f}x")
+        print(f"  D/A ratio                 = {ttft_d / ttft_a:.2f}x")
 
         if ttft_d > ttft_c * 1.5:
             print("\n  [PASS] D >> C: reset_external=true cleared MemCache, proving C was MemCache hit")

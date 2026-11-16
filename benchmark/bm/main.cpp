@@ -276,13 +276,14 @@ void ParseCmdBw(int argc, char *argv[], BwTestParam &opts)
     CheckCmdBw(opts);
 }
 
-void RunBwTest(BwTestParam &opts)
+int RunBwTest(BwTestParam &opts)
 {
     BandWidthCalculator bwCalculator(opts);
     auto ret = bwCalculator.MultiProcessExecute();
     if (ret != 0) {
         LOG_ERROR("bandwidth test failed.");
     }
+    return ret;
 }
 
 int main(int32_t argc, char *argv[])
@@ -299,7 +300,9 @@ int main(int32_t argc, char *argv[])
     } else if (cmd == "-bw" || cmd == "--bandwidth") {
         BwTestParam opts;
         ParseCmdBw(argc, argv, opts);
-        RunBwTest(opts);
+        if (RunBwTest(opts) != 0) {
+            return 1;
+        }
     } else {
         ExitWithError("unknown command: " + cmd);
     }

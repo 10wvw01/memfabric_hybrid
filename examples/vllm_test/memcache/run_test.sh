@@ -538,7 +538,9 @@ run_largecap_integration() {
         log "[INFO] Starting large-capacity vLLM integration tests..."
         run_pytest "$test_file" -v -s -m rank4
     fi
+    local test_exit=$?
     pkill -9 -f 'VLLM::' 2>/dev/null || true
+    return "$test_exit"
 }
 
 # ============================================================================
@@ -562,6 +564,7 @@ run_bench() {
     bash "$PKG_DIR/start_service.sh" \
         --device-ids "$DEVICE_IDS" \
         --tp "$MMC_TEST_TENSOR_PARALLEL_SIZE" \
+        --config "$MMC_LOCAL_CONFIG_PATH" \
         --port "$vllm_port" \
         --gpu-mem-util "$GPU_MEM_UTIL" \
         --model "$model_path" \

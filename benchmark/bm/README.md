@@ -107,3 +107,12 @@ bash script/build_and_pack_run.sh --build_mode RELEASE --build_python ON --xpu_t
   nodeA: ./bm_perf_benchmark -bw -ot device_uboe -t all -s 2097152 -ws 8 -lrs 4 -rs 0 -d 2 -ip tcp://x.x.x.x:8570
   nodeB: ./bm_perf_benchmark -bw -ot device_uboe -t all -s 2097152 -ws 8 -lrs 4 -rs 4 -d 4 -ip tcp://x.x.x.x:8570
   ```
+
+### 内存池与异常退出回归
+
+内存池按 batchSize × copySize 向上对齐到 2 MiB，最大搬运量为 4 GiB。
+某个 rank 失败时，父进程结束其余 rank 并返回失败。
+
+编译后可运行父进程错误传播及等待退出回归。故障注入发生在 ACL 初始化和设备设置阶段：
+
+    python3 benchmark/bm/test_exit_status.py --binary build/benchmark/bm/bm_perf_benchmark -v

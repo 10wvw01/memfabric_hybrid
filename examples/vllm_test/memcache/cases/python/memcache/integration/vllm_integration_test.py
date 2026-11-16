@@ -294,7 +294,9 @@ class VLLMBenchmark:
                 child.kill()
             except psutil.NoSuchProcess:
                 pass
-        psutil.wait_procs(alive, timeout=5)
+        _, survivors = psutil.wait_procs(alive, timeout=30)
+        if survivors:
+            raise RuntimeError(f"vLLM children did not exit: {[child.pid for child in survivors]}")
         self._owned_children = {}
 
     def stop_vllm(self):
@@ -345,6 +347,8 @@ class VLLMBenchmark:
             "8192",
             "--gpu-memory-utilization",
             os.environ.get("MMC_TEST_GPU_MEM_UTIL", "0.80"),
+            "--kv-cache-memory-bytes",
+            os.environ.get("MMC_TEST_KV_CACHE_MEMORY_BYTES", "2147483648"),
             "--enforce-eager",
             "--enable-chunked-prefill",
             "--mamba-ssm-cache-dtype",
@@ -363,6 +367,7 @@ class VLLMBenchmark:
         device_ids = {int(device) for device in self._device_ids.split(",")}
         deadline = time.monotonic() + timeout
         pattern = re.compile(r"^\|\s*\d+\s+(\d+)\s*\|.*\|\s*\d+\s+(\d+)\s*/\s*(\d+)\s*\|")
+        idle_samples = 0
         while time.monotonic() < deadline:
             result = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, timeout=15, check=True)
             memory = {}
@@ -374,7 +379,8 @@ class VLLMBenchmark:
                         memory[device] = (used, total)
             if set(memory) != device_ids:
                 raise RuntimeError(f"npu-smi did not report memory for devices {sorted(device_ids)}: {memory}")
-            if all(used <= total * 0.25 for used, total in memory.values()):
+            idle_samples = idle_samples + 1 if all(used <= total * 0.25 for used, total in memory.values()) else 0
+            if idle_samples >= 3:
                 return
             time.sleep(2)
         raise RuntimeError(f"NPU memory did not return to an idle level: {memory}")
@@ -530,25 +536,27 @@ class VLLMBenchmark:
             conn.close()
 
     def reset_local_prefix_cache(self):
-        # A completed HTTP response may precede final request cleanup in the engine.
-        time.sleep(0.2)
         offset = os.path.getsize(self._log_path)
-        conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=30)
-        try:
-            conn.request("POST", "/reset_prefix_cache?reset_external=false")
-            resp = conn.getresponse()
-            payload = resp.read()
-            if resp.status != 200:
-                raise RuntimeError(f"local prefix reset failed: HTTP {resp.status}: {payload!r}")
-        finally:
-            conn.close()
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            with open(self._log_path, "rb") as log_file:
-                log_file.seek(offset)
-                if b"Successfully reset prefix cache" in log_file.read():
-                    return
-            time.sleep(0.1)
+            conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=30)
+            try:
+                conn.request("POST", "/reset_prefix_cache?reset_external=false")
+                resp = conn.getresponse()
+                payload = resp.read()
+                if resp.status != 200:
+                    raise RuntimeError(f"local prefix reset failed: HTTP {resp.status}: {payload!r}")
+            finally:
+                conn.close()
+            # vLLM 0.24 returns HTTP 200 even while blocks still prevent reset.
+            # Retry after request cleanup, retaining the engine acknowledgement.
+            for _ in range(5):
+                with open(self._log_path, "rb") as log_file:
+                    log_file.seek(offset)
+                    if b"Successfully reset prefix cache" in log_file.read():
+                        return
+                time.sleep(0.1)
+            time.sleep(0.5)
         raise RuntimeError("Engine did not confirm local prefix cache reset")
 
     def cache_hit_counts(self, include_queries: bool = False) -> tuple[float, ...]:
@@ -837,7 +845,6 @@ def test_full_miss_baseline(benchmark):
     )
 
 
-
 # ---------------------------------------------------------------------------
 # 2. 50% hit rate
 # ---------------------------------------------------------------------------
@@ -1034,7 +1041,6 @@ def test_full_miss_baseline_1rank(benchmark):
     )
 
 
-
 @pytest.mark.rank1
 def test_50pct_hit_1rank(benchmark):
     """1-rank (TP=1): 50% cache hit rate."""
@@ -1212,7 +1218,6 @@ def test_full_miss_baseline_4rank(benchmark):
         f"  MemCache P50={memcache_p50:.2f}ms P99={memcache_result['p99_ms']:.2f}ms\n"
         f"  Overhead={overhead:.2%}"
     )
-
 
 
 @pytest.mark.rank4
@@ -1454,8 +1459,10 @@ def _native_prefix_half_hits(benchmark):
         if expected_repeat:
             repeated.append(sample)
     return {
-        "hit": _native_prefix_stats(hits), "miss": _native_prefix_stats(misses),
-        "all": _native_prefix_stats(all_samples), "repeated": _native_prefix_stats(repeated),
+        "hit": _native_prefix_stats(hits),
+        "miss": _native_prefix_stats(misses),
+        "all": _native_prefix_stats(all_samples),
+        "repeated": _native_prefix_stats(repeated),
         "expected_repeated_requests": hit_count,
         "observed_hit_requests": len(hits),
     }
@@ -1499,8 +1506,9 @@ def test_native_prefix_cache_benchmark(native_benchmark):
     for i in range(WARMUP_REQUESTS):
         _native_prefix_sample(bench, _build_prompt_ids(PROMPT_TOKENS, seed=10_000_000 + i), False)
     bench.reset_local_prefix_cache()
-    misses = [_native_prefix_sample(bench, _build_prompt_ids(PROMPT_TOKENS, seed=i), False)
-              for i in range(MEASURED_REQUESTS)]
+    misses = [
+        _native_prefix_sample(bench, _build_prompt_ids(PROMPT_TOKENS, seed=i), False) for i in range(MEASURED_REQUESTS)
+    ]
     results = {
         "model": bench._served_model_name,
         "tp": bench._tensor_parallel_size,

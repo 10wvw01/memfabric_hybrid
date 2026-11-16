@@ -14,7 +14,7 @@
 #   --model <PATH>              model path (default: /workspace/models/Qwen3.6-35B-A3B-w8a8)
 #   --served-model-name <NAME>  served model name (default: Qwen3.6-35B-A3B)
 #   --memcache-dir <DIR>        memcache repo dir (default: /workspace/memcache-v121-test)
-#   --config <PATH>             MMC_LOCAL_CONFIG_PATH (default: cases/config/mmc-local-integration.conf)
+#   --config <PATH>             MMC_LOCAL_CONFIG_PATH (default: selected by --tp)
 #   --detach                    run services detached with setsid (survives shell exit)
 #   --meta-only                 start only MetaService (skip vLLM)
 #   --help                      show help
@@ -43,7 +43,7 @@ GPU_MEM_UTIL="0.80"
 MODEL_PATH="/workspace/models/Qwen3.6-35B-A3B-w8a8"
 SERVED_MODEL_NAME="Qwen3.6-35B-A3B"
 MEMCACHE_DIR="/workspace/memcache-v121-test"
-LOCAL_CONFIG="$PKG_DIR/cases/config/mmc-local-integration.conf"
+LOCAL_CONFIG="${MMC_LOCAL_CONFIG_PATH:-}"
 DETACH=0
 META_ONLY=0
 
@@ -63,6 +63,23 @@ while [[ $# -gt 0 ]]; do
         *) echo "[ERROR] 未知参数: $1"; exit 1 ;;
     esac
 done
+
+if [[ -z "$LOCAL_CONFIG" ]]; then
+    case "$TP_SIZE" in
+        1) LOCAL_CONFIG="$PKG_DIR/cases/config/mmc-local-integration-1rank.conf" ;;
+        2) LOCAL_CONFIG="$PKG_DIR/cases/config/mmc-local-integration.conf" ;;
+        4) LOCAL_CONFIG="$PKG_DIR/cases/config/mmc-local-integration-4rank.conf" ;;
+        *) echo "[ERROR] TP=$TP_SIZE 需要通过 --config 指定配置"; exit 1 ;;
+    esac
+fi
+CONFIG_WORLD_SIZE=$(awk -F= '
+    /^[[:space:]]*ock[.]mmc[.]local_service[.]world_size[[:space:]]*=/ {
+        sub(/#.*/, "", $2); gsub(/[[:space:]]/, "", $2); print $2
+    }' "$LOCAL_CONFIG")
+if [[ "$CONFIG_WORLD_SIZE" != "$TP_SIZE" ]]; then
+    echo "[ERROR] TP=$TP_SIZE 与配置 world_size=$CONFIG_WORLD_SIZE 不一致: $LOCAL_CONFIG"
+    exit 1
+fi
 
 # ============================================================================
 # Environment setup
@@ -145,6 +162,7 @@ VLLM_CMD="python3 -m vllm.entrypoints.cli.main serve $MODEL_PATH \
   --served-model-name $SERVED_MODEL_NAME --trust-remote-code \
   --dtype float16 --max-num-seqs 10 --max-num-batched-tokens 4096 \
   --max-model-len 8192 --gpu-memory-utilization $GPU_MEM_UTIL \
+  --kv-cache-memory-bytes \"${MMC_TEST_KV_CACHE_MEMORY_BYTES:-2147483648}\" \
   --enforce-eager --enable-chunked-prefill \
   --mamba-ssm-cache-dtype float16 --mamba-cache-mode align \
   --additional-config '{\"enable_flashcomm1\":false,\"enable_flashcomm2_parallel_size\":0,\"enable_prefill_mc2\":false,\"enable_fused_mc2\":0,\"ascend_compilation_config\":{\"fuse_norm_quant\":false,\"enable_npugraph_ex\":false}}' \
