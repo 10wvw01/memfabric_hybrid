@@ -10,9 +10,9 @@
 # MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-"""Large-capacity vLLM integration tests (8GB HBM + 20GB DRAM, TP=4).
+"""Large-capacity vLLM integration tests (TP=4).
 
-Tests how large-capacity MemCache (8GB HBM + 20GB DRAM per rank) affects
+Tests how configured MemCache HBM and DRAM pools affect
 vLLM end-to-end TTFT under various cache-hit patterns. The large capacity
 allows more KV cache entries to be retained, reducing eviction and improving
 cache hit rates compared to the 1GB+1GB baseline.
@@ -21,7 +21,7 @@ Test scenarios:
 
   LC-L3-1  Large-capacity overhead      — MemCache vs Baseline TTFT (8GB+20GB)
   LC-L3-2  Large-scale cache hit         — 40-key pre-populate, then 100% hit
-  LC-L3-3  Eviction-aware mixed workload — pre-populate 30 keys (exceeds HBM),
+  LC-L3-3  Eviction-aware mixed workload — fill a 1GiB/rank HBM pool until DRAM residency is verified,
                                              then 30% / 70% hit rate mix
   LC-L3-4  Throughput bench              — sustained load with large cache
 
@@ -42,7 +42,7 @@ After each test scenario, cache statistics are printed showing both vLLM
 prefix cache hit rate and MemCache (external) prefix cache hit rate, parsed
 from vLLM's periodic engine metrics log.
 
-Requires: Ascend NPU + CANN, vLLM-Ascend, MetaService, 8GB HBM + 20GB DRAM config.
+Requires: Ascend NPU + CANN, vLLM-Ascend and an isolated MetaService.
 """
 
 import json
@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from integration import eviction_checks
 from integration.vllm_integration_test import VLLMBenchmark as BaseVLLMBenchmark
 
 # ---------------------------------------------------------------------------
@@ -78,7 +79,7 @@ LARGE_MISS_SEED_BASE = 9000
 
 EVICT_HIT_RATE = 0.3
 EVICT_HIGH_HIT_RATE = 0.7
-EVICT_PREPOP_COUNT = 30
+EVICT_PREPOP_COUNT = 64
 
 VOCAB_SIZE = 151936
 
@@ -486,86 +487,99 @@ def test_large_scale_cache_hit_4rank(benchmark):
         benchmark.stop_vllm()
 
 
-# ---------------------------------------------------------------------------
-# LC-L3-3: Eviction-aware mixed workload — pre-populate 30 keys (exceeds HBM),
-#           then mix hit/miss at 30% and 70% rates
-# ---------------------------------------------------------------------------
+def _prefill_for_eviction(benchmark):
+    initial = eviction_checks.meta_summary()
+    assert not eviction_checks.all_keys(), "Eviction scenario requires an empty MemCache"
+    samples = []
+    deadline = time.monotonic() + 600
+    for index in range(EVICT_PREPOP_COUNT):
+        assert time.monotonic() < deadline, f"Eviction prefill timed out: {eviction_checks.meta_summary()}"
+        seed = LARGE_PREPOP_SEED_BASE + 1000 + index
+        prompt = eviction_checks.eviction_prompt(benchmark._model_path, seed, PROMPT_TOKENS)
+        before = eviction_checks.all_keys()
+        _, tokens = eviction_checks.checked_completion(benchmark, prompt, False)
+        keys = eviction_checks.wait_saved_keys(before, benchmark._tensor_parallel_size)
+        if index == 0:
+            _, hbm_tokens = eviction_checks.checked_completion(benchmark, prompt, True)
+            assert hbm_tokens == tokens, f"Unstable HBM reference: expected={tokens}, actual={hbm_tokens}"
+        samples.append({"prompt": prompt, "tokens": tokens, "keys": keys, "seed": seed})
+        summary = eviction_checks.meta_summary()
+        print(f"  pre-populate {index + 1}/{EVICT_PREPOP_COUNT}: {summary}")
+        if summary["evict"] > initial["evict"] and summary["dram_used"] > 0:
+            candidates = eviction_checks.dram_candidates(samples, benchmark._tensor_parallel_size)
+            if candidates:
+                return candidates, len(samples), summary
+    candidates = eviction_checks.wait_dram_candidates(samples, benchmark._tensor_parallel_size, initial["evict"])
+    return candidates, len(samples), eviction_checks.meta_summary()
+
+
+def _measure_evicted_mixed(benchmark, candidates, hit_count):
+    requests = [(candidates[index % len(candidates)], True) for index in range(hit_count)]
+    requests += [
+        (
+            {
+                "prompt": eviction_checks.eviction_prompt(
+                    benchmark._model_path, LARGE_MISS_SEED_BASE + index, PROMPT_TOKENS
+                )
+            },
+            False,
+        )
+        for index in range(MEASURED_REQUESTS - hit_count)
+    ]
+    random.Random(42).shuffle(requests)
+    latencies, verified_hits = [], 0
+    for index, (sample, expected_hit) in enumerate(requests):
+        if expected_hit:
+            metadata = eviction_checks.query_keys(sample["keys"])
+            assert eviction_checks.readable(metadata, benchmark._tensor_parallel_size, "DRAM"), metadata
+        ttft, tokens = eviction_checks.checked_completion(benchmark, sample["prompt"], expected_hit)
+        if expected_hit:
+            assert tokens == sample["tokens"], (
+                f"DRAM hit output differs from miss reference: seed={sample.get('seed')}, "
+                f"expected={sample['tokens']}, actual={tokens}"
+            )
+            verified_hits += 1
+        latencies.append(ttft)
+        print(f"  measured {index + 1}/{MEASURED_REQUESTS}: TTFT={ttft:.2f}ms, external={expected_hit}")
+    assert verified_hits == hit_count
+    return latencies, verified_hits
+
+
 @pytest.mark.rank4
 @pytest.mark.parametrize(
     "hit_rate",
     [EVICT_HIT_RATE, EVICT_HIGH_HIT_RATE],
-    ids=[f"{int(r * 100)}pct" for r in [EVICT_HIT_RATE, EVICT_HIGH_HIT_RATE]],
+    ids=[f"{int(rate * 100)}pct" for rate in [EVICT_HIT_RATE, EVICT_HIGH_HIT_RATE]],
 )
-def test_eviction_aware_mixed_4rank(benchmark, hit_rate):
-    try:
-        print(f"\n===== [LargeCap] Eviction-aware mixed ({hit_rate:.0%} hit) =====")
-        benchmark.start_vllm_with_memcache()
-
-        warmup_prompt = _build_prompt_ids(PROMPT_TOKENS, seed=99)
-        for i in range(WARMUP_REQUESTS):
-            benchmark.measure_e2e_ttft_ms(warmup_prompt)
-            print(f"  warmup {i + 1}/{WARMUP_REQUESTS} done")
-
-        num_requests = MEASURED_REQUESTS
-        hit_count = round(hit_rate * num_requests)
-        miss_count = num_requests - hit_count
-
-        hit_seeds = [LARGE_PREPOP_SEED_BASE + 1000 + i for i in range(EVICT_PREPOP_COUNT)]
-        print(f"  Pre-populating {EVICT_PREPOP_COUNT} keys (exceeds HBM, triggers eviction to DRAM)...")
-        for i, seed in enumerate(hit_seeds[:EVICT_PREPOP_COUNT]):
-            prompt = _build_prompt_ids(PROMPT_TOKENS, seed=seed)
-            benchmark.measure_e2e_ttft_ms(prompt)
-            if (i + 1) % 10 == 0:
-                print(f"  pre-populate {i + 1}/{EVICT_PREPOP_COUNT} done")
-
-        time.sleep(1)
-
-        miss_seeds = [LARGE_MISS_SEED_BASE + i for i in range(miss_count)]
-        requests = []
-        for i in range(hit_count):
-            seed = hit_seeds[i % EVICT_PREPOP_COUNT]
-            requests.append((_build_prompt_ids(PROMPT_TOKENS, seed=seed), True))
-        for seed in miss_seeds:
-            requests.append((_build_prompt_ids(PROMPT_TOKENS, seed=seed), False))
-
-        rng = random.Random(42)
-        rng.shuffle(requests)
-
-        print(f"  Measuring {num_requests} mixed requests (hit={hit_count}, miss={miss_count})...")
-        all_latencies: List[float] = []
-        hit_latencies: List[float] = []
-        miss_latencies: List[float] = []
-        for i, (prompt, is_expected_hit) in enumerate(requests):
-            ttft = benchmark.measure_request_with_cache_source(prompt, is_expected_hit)
-            all_latencies.append(ttft)
-            if is_expected_hit:
-                hit_latencies.append(ttft)
-            else:
-                miss_latencies.append(ttft)
-            label = "hit " if is_expected_hit else "miss"
-            print(f"  measured {i + 1}/{num_requests}: TTFT={ttft:.2f}ms ({label})")
-
-        all_avg = sum(all_latencies) / len(all_latencies)
-        hit_avg = sum(hit_latencies) / len(hit_latencies) if hit_latencies else 0.0
-        hit_p50 = _percentile(hit_latencies, 0.50) if hit_latencies else 0.0
-        miss_avg = sum(miss_latencies) / len(miss_latencies) if miss_latencies else 0.0
-        miss_p50 = _percentile(miss_latencies, 0.50) if miss_latencies else 0.0
-        actual_hit_count = len(hit_latencies)
-        improvement = (miss_avg - all_avg) / miss_avg if miss_avg > 0 else 0.0
-
-        print(
-            f"\n===== [LargeCap] Eviction-aware mixed ({hit_rate:.0%}) result =====\n"
-            f"  Pre-populated: {EVICT_PREPOP_COUNT} keys (HBM eviction triggered)\n"
-            f"  Expected hit/total: {hit_count}/{num_requests} ({hit_rate:.0%})\n"
-            f"  Verified external hits: {actual_hit_count}/{hit_count}\n"
-            f"  All   avg={all_avg:.2f}ms\n"
-            f"  Hit   avg={hit_avg:.2f}ms P50={hit_p50:.2f}ms (count={len(hit_latencies)})\n"
-            f"  Miss  avg={miss_avg:.2f}ms P50={miss_p50:.2f}ms (count={len(miss_latencies)})\n"
-            f"  Improvement: {improvement:.2%}"
+def test_eviction_aware_mixed_4rank(benchmark, tmp_path, monkeypatch, record_property, hit_rate):
+    assert benchmark._tensor_parallel_size == 4, "Eviction scenario requires TP=4"
+    config_path = os.environ["MMC_LOCAL_CONFIG_PATH"]
+    with open(config_path) as source:
+        config, count = re.subn(
+            r"(?m)^ock\.mmc\.local_service\.hbm\.size\s*=.*$",
+            "ock.mmc.local_service.hbm.size = 1GB",
+            source.read(),
         )
-
-        benchmark.print_cache_stats(f"LC-L3-3 {hit_rate:.0%}")
-
+    assert count == 1, f"Expected one HBM pool size in {config_path}"
+    eviction_config = tmp_path / "mmc-local-eviction-4rank.conf"
+    eviction_config.write_text(config)
+    monkeypatch.setenv("MMC_LOCAL_CONFIG_PATH", str(eviction_config))
+    try:
+        benchmark.start_vllm_with_memcache()
+        candidates, prefilled, summary = _prefill_for_eviction(benchmark)
+        print(f"  DRAM eviction verified: {summary}, complete prompts={len(candidates)}")
+        hit_count = round(hit_rate * MEASURED_REQUESTS)
+        record_property("eviction_summary", json.dumps(summary))
+        record_property("dram_prompts", len(candidates))
+        record_property("prefilled_requests", prefilled)
+        latencies, verified_hits = _measure_evicted_mixed(benchmark, candidates, hit_count)
+        record_property("verified_external_hits", verified_hits)
+        print(
+            f"\n===== [LargeCap] Verified DRAM mixed ({hit_rate:.0%}) =====\n"
+            f"  Pre-populated requests: {prefilled}, DRAM prompts: {len(candidates)}\n"
+            f"  Verified external hits and matching output: {verified_hits}/{MEASURED_REQUESTS}\n"
+            f"  Average TTFT={sum(latencies) / len(latencies):.2f}ms"
+        )
     finally:
         benchmark.stop_vllm()
 
