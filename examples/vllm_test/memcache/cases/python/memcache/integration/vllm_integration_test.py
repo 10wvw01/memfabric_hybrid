@@ -367,6 +367,9 @@ class VLLMBenchmark:
         device_ids = {int(device) for device in self._device_ids.split(",")}
         deadline = time.monotonic() + timeout
         pattern = re.compile(r"^\|\s*\d+\s+(\d+)\s*\|.*\|\s*\d+\s+(\d+)\s*/\s*(\d+)\s*\|")
+        max_used_ratio = float(os.environ.get("MMC_TEST_MAX_USED_MEMORY_RATIO", "0.25"))
+        if not 0 < max_used_ratio < 1:
+            raise ValueError("MMC_TEST_MAX_USED_MEMORY_RATIO must be between 0 and 1")
         idle_samples = 0
         while time.monotonic() < deadline:
             result = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, timeout=15, check=True)
@@ -379,7 +382,9 @@ class VLLMBenchmark:
                         memory[device] = (used, total)
             if set(memory) != device_ids:
                 raise RuntimeError(f"npu-smi did not report memory for devices {sorted(device_ids)}: {memory}")
-            idle_samples = idle_samples + 1 if all(used <= total * 0.25 for used, total in memory.values()) else 0
+            idle_samples = (
+                idle_samples + 1 if all(used <= total * max_used_ratio for used, total in memory.values()) else 0
+            )
             if idle_samples >= 3:
                 return
             time.sleep(2)
