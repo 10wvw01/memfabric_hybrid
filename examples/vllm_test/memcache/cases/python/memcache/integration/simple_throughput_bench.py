@@ -4,6 +4,7 @@
 import argparse
 import json
 import random
+import re
 import time
 import threading
 from collections import defaultdict
@@ -19,13 +20,15 @@ def generate_prompt(num_tokens, seed):
 
 
 def send_request(url, model, prompt, max_tokens, timeout=120):
-    payload = json.dumps({
-        "model": model,
-        "prompt": prompt,
-        "max_tokens": max_tokens,
-        "temperature": 0,
-        "ignore_eos": True,
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "ignore_eos": True,
+        }
+    ).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     t0 = time.perf_counter()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -36,8 +39,9 @@ def send_request(url, model, prompt, max_tokens, timeout=120):
     prompt_tokens = usage.get("prompt_tokens", len(prompt))
     cached_tokens = 0
     ptd = usage.get("prompt_tokens_details")
-    if ptd:
-        cached_tokens = ptd.get("cached_tokens", 0) or 0
+    if ptd is None:
+        raise RuntimeError("response has no prompt_tokens_details; enable --enable-prompt-tokens-details")
+    cached_tokens = ptd.get("cached_tokens", 0) or 0
     return {
         "latency_ms": (t1 - t0) * 1000,
         "ttft_ms": (t1 - t0) * 1000,
@@ -58,31 +62,58 @@ def percentile(sorted_list, p):
 
 
 def reset_prefix_cache(host, port):
-    try:
-        reset_url = f"http://{host}:{port}/reset_prefix_cache"
-        req = urllib.request.Request(reset_url, method="POST")
-        urllib.request.urlopen(req, timeout=10)
-        print("[INFO] vLLM prefix cache reset")
-    except Exception as e:
-        print(f"[INFO] prefix cache reset not available: {e}")
+    reset_url = f"http://{host}:{port}/reset_prefix_cache?reset_external=false"
+    req = urllib.request.Request(reset_url, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as response:
+        response.read()
+    print("[INFO] Local prefix cache reset; external cache retained")
 
 
-def run_benchmark(url, model, input_len, output_len, num_prompts, request_rate, num_warmups,
-                  cache_test=False, warmup_delay=3.0, host=None, port=None):
+def cache_hit_counts(host, port):
+    with urllib.request.urlopen(f"http://{host}:{port}/metrics", timeout=30) as response:
+        payload = response.read().decode()
+    counts = {}
+    for name in ["prefix_cache_hits_total", "external_prefix_cache_hits_total"]:
+        pattern = rf"^vllm:{name}(?:\{{[^}}]*\}})?\s+(\S+)"
+        samples = re.findall(pattern, payload, re.MULTILINE)
+        if not samples:
+            raise RuntimeError(f"cache metric is missing: {name}")
+        counts[name] = sum(float(value) for value in samples)
+    return counts
+
+
+def run_benchmark(
+    url,
+    model,
+    input_len,
+    output_len,
+    num_prompts,
+    request_rate,
+    num_warmups,
+    cache_test=False,
+    warmup_delay=3.0,
+    host=None,
+    port=None,
+):
     mode = "cache-hit (repeated prompts)" if cache_test else "all-miss (unique prompts)"
     print(f"\n[INFO] Mode: {mode}")
     print(f"[INFO] Warmup: {num_warmups} requests...")
     for i in range(num_warmups):
-        warmup_seed = 1000 if cache_test else -(i + 1)
+        warmup_seed = 1000 if cache_test else num_prompts + i + 1
         prompt = generate_prompt(input_len, seed=warmup_seed)
         send_request(url, model, prompt, output_len)
         if warmup_delay > 0:
             time.sleep(warmup_delay)
     print(f"[INFO] Warmup done")
+    if cache_test:
+        time.sleep(0.2)
+        reset_prefix_cache(host, port)
+    before_hits = cache_hit_counts(host, port)
 
     print(f"[INFO] Benchmark: {num_prompts} requests at {request_rate} req/s...")
     interval = 1.0 / request_rate
     results = []
+    failed_requests = 0
     start_time = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=num_prompts) as pool:
@@ -103,12 +134,21 @@ def run_benchmark(url, model, input_len, output_len, num_prompts, request_rate, 
                 results.append(result)
                 if (i + 1) % 10 == 0:
                     cached = result.get("cached_tokens", 0)
-                    print(f"  [{i+1}/{num_prompts}] latency={result['latency_ms']:.0f}ms cached={cached}")
+                    print(f"  [{i + 1}/{num_prompts}] latency={result['latency_ms']:.0f}ms cached={cached}")
             except Exception as e:
+                failed_requests += 1
                 print(f"  [ERROR] request {i}: {e}")
-                results.append({"latency_ms": 0, "ttft_ms": 0, "prompt_tokens": 0,
-                                "completion_tokens": 0, "total_tokens": 0,
-                                "cached_tokens": 0, "cache_hit": False})
+                results.append(
+                    {
+                        "latency_ms": 0,
+                        "ttft_ms": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "cached_tokens": 0,
+                        "cache_hit": False,
+                    }
+                )
 
     total_time = time.perf_counter() - start_time
 
@@ -119,7 +159,18 @@ def run_benchmark(url, model, input_len, output_len, num_prompts, request_rate, 
     total_cached = sum(r["cached_tokens"] for r in results)
     cache_hits = sum(1 for r in results if r.get("cache_hit", False))
 
+    deadline = time.monotonic() + 20
+    while True:
+        after_hits = cache_hit_counts(host, port)
+        external_hits = after_hits["external_prefix_cache_hits_total"] - before_hits["external_prefix_cache_hits_total"]
+        if not cache_test or external_hits > 0 or time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    local_hits = after_hits["prefix_cache_hits_total"] - before_hits["prefix_cache_hits_total"]
     summary = {
+        "failed_requests": failed_requests,
+        "local_hit_tokens": local_hits,
+        "external_hit_tokens": external_hits,
         "total_time_s": total_time,
         "num_requests": len(results),
         "request_throughput": len(results) / total_time,
@@ -150,8 +201,11 @@ def run_benchmark(url, model, input_len, output_len, num_prompts, request_rate, 
     print(f"  P50 latency:          {summary['p50_latency_ms']:.0f}ms")
     print(f"  P90 latency:          {summary['p90_latency_ms']:.0f}ms")
     print(f"  P99 latency:          {summary['p99_latency_ms']:.0f}ms")
-    print(f"  Cache hit count:      {cache_hits}/{len(results)} ({summary['cache_hit_rate']*100:.1f}%)")
-    print(f"  Cached tokens:        {total_cached}/{total_input} ({summary['cache_token_rate']*100:.1f}%)")
+    print(f"  Failed requests:      {failed_requests}")
+    print(f"  Local hit tokens:     {local_hits}")
+    print(f"  External hit tokens:  {external_hits}")
+    print(f"  Cache hit count:      {cache_hits}/{len(results)} ({summary['cache_hit_rate'] * 100:.1f}%)")
+    print(f"  Cached tokens:        {total_cached}/{total_input} ({summary['cache_token_rate'] * 100:.1f}%)")
 
     return summary
 
@@ -166,12 +220,15 @@ def main():
     parser.add_argument("--num-prompts", type=int, default=100)
     parser.add_argument("--request-rate", type=float, default=10)
     parser.add_argument("--num-warmups", type=int, default=5)
-    parser.add_argument("--warmup-delay", type=float, default=3.0,
-                        help="Seconds to wait after each warmup request for async KV save to complete")
+    parser.add_argument(
+        "--warmup-delay",
+        type=float,
+        default=3.0,
+        help="Seconds to wait after each warmup request for async KV save to complete",
+    )
     parser.add_argument("--label", default="bench")
     parser.add_argument("--output-file", default="")
-    parser.add_argument("--cache-test", action="store_true",
-                        help="Send repeated prompts to test cache hit rate")
+    parser.add_argument("--cache-test", action="store_true", help="Send repeated prompts to test cache hit rate")
     args = parser.parse_args()
 
     url = f"http://{args.host}:{args.port}/v1/completions"
@@ -181,12 +238,17 @@ def main():
     print(f"[INFO] Prompts: {args.num_prompts}, Rate: {args.request_rate} req/s")
 
     result = run_benchmark(
-        url, args.model,
-        args.input_len, args.output_len,
-        args.num_prompts, args.request_rate, args.num_warmups,
+        url,
+        args.model,
+        args.input_len,
+        args.output_len,
+        args.num_prompts,
+        args.request_rate,
+        args.num_warmups,
         cache_test=args.cache_test,
         warmup_delay=args.warmup_delay,
-        host=args.host, port=args.port,
+        host=args.host,
+        port=args.port,
     )
 
     result["label"] = args.label
@@ -194,6 +256,10 @@ def main():
         with open(args.output_file, "w") as f:
             json.dump(result, f, indent=2)
         print(f"[INFO] Saved to {args.output_file}")
+    if result["failed_requests"]:
+        raise RuntimeError(f"benchmark requests failed: {result['failed_requests']}")
+    if args.cache_test and result["external_hit_tokens"] <= 0:
+        raise RuntimeError("cache-hit round completed without external prefix cache hits")
 
 
 if __name__ == "__main__":
