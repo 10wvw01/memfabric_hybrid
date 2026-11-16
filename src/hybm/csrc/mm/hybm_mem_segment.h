@@ -33,6 +33,7 @@ using MemSegmentPtr = std::shared_ptr<MemSegment>;
 struct MemSliceStatus {
     MemSlicePtr slice;
     void *handle;
+    bool sameCardOnly{false};
 
     explicit MemSliceStatus(MemSlicePtr s) noexcept : slice{std::move(s)}, handle(nullptr) {}
     MemSliceStatus(MemSlicePtr s, void *h) noexcept : slice{std::move(s)}, handle(h) {}

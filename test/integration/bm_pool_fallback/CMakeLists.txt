@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.12)
+project(bm_pool_fallback LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(MF_OUTPUT "" CACHE PATH "MemFabric output directory")
+set(CANN_HOME "$ENV{ASCEND_HOME_PATH}" CACHE PATH "CANN installation directory")
+if(NOT EXISTS "${MF_OUTPUT}/smem/lib64/libmf_smem.so")
+    message(FATAL_ERROR "Set MF_OUTPUT to the MemFabric output directory")
+endif()
+add_executable(pool_worker pool_worker.cpp)
+target_include_directories(pool_worker PRIVATE "${MF_OUTPUT}/smem/include/host")
+target_link_libraries(pool_worker PRIVATE
+    "${MF_OUTPUT}/smem/lib64/libmf_smem.so"
+    "${MF_OUTPUT}/hybm/lib64/libmf_hybm_core.so")
+set_target_properties(pool_worker PROPERTIES BUILD_RPATH "${MF_OUTPUT}/smem/lib64")
+add_library(p2p_oom_injector SHARED p2p_oom_injector.c)
+target_include_directories(p2p_oom_injector PRIVATE "${CANN_HOME}/include/driver")
+target_link_libraries(p2p_oom_injector PRIVATE dl)

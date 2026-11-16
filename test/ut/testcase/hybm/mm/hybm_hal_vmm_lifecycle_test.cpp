@@ -616,3 +616,31 @@ TEST_F(HybmHalVmmLifecycleTest, Non310PMetadataMapFailureReleasesOnlyPhysicalHan
     EXPECT_EQ(handle, HANDLE);
     EXPECT_EQ(hal.order, (std::vector<std::string>{"reserve", "create", "map", "release"}));
 }
+
+TEST_F(HybmHalVmmLifecycleTest, AllocationReportsDdrSharingRequirement)
+{
+    hal.create = HAL_OUT_OF_MEMORY_ERROR;
+    drv_mem_handle_t *handle = nullptr;
+    bool sameCardOnly = false;
+    EXPECT_EQ(CreateHalMemory(7, HYBM_LARGE_PAGE_SIZE, &handle, &sameCardOnly), BM_OK);
+    EXPECT_TRUE(sameCardOnly);
+    EXPECT_EQ(hal.memoryTypes, (std::vector<uint32_t>{MEM_P2P_DDR_TYPE, MEM_DDR_TYPE}));
+}
+
+TEST_F(HybmHalVmmLifecycleTest, P2pAllocationClearsSameCardRequirement)
+{
+    drv_mem_handle_t *handle = nullptr;
+    bool sameCardOnly = true;
+    EXPECT_EQ(CreateHalMemory(7, HYBM_LARGE_PAGE_SIZE, &handle, &sameCardOnly), BM_OK);
+    EXPECT_FALSE(sameCardOnly);
+}
+
+TEST_F(HybmHalVmmLifecycleTest, FailedAllocationDoesNotPublishDdrRequirement)
+{
+    hal.create = 8;
+    drv_mem_handle_t *handle = nullptr;
+    bool sameCardOnly = true;
+    EXPECT_EQ(CreateHalMemory(7, HYBM_LARGE_PAGE_SIZE, &handle, &sameCardOnly), 8);
+    EXPECT_FALSE(sameCardOnly);
+    EXPECT_EQ(hal.creates, 1);
+}

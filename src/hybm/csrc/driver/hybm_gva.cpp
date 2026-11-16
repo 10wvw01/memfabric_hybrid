@@ -34,8 +34,11 @@ Result GetHalDeviceId(uint32_t userDeviceId, uint32_t &driverDeviceId)
     return BM_OK;
 }
 
-Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle)
+Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle, bool *sameCardOnly)
 {
+    if (sameCardOnly != nullptr) {
+        *sameCardOnly = false;
+    }
     const bool is310P = DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P;
     drv_mem_prop prop{MEM_DEV_SIDE, driverDeviceId, 0, MEM_HUGE_PAGE_TYPE, is310P ? MEM_P2P_DDR_TYPE : MEM_HBM_TYPE, 0};
     auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
@@ -47,6 +50,9 @@ Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **
     if (ret != BM_OK || (is310P && *handle == nullptr)) {
         BM_LOG_ERROR("HalMemCreate失败 driver:" << driverDeviceId << " size:" << size << " ret:" << ret);
         return ret != BM_OK ? ret : BM_DL_FUNCTION_FAILED;
+    }
+    if (sameCardOnly != nullptr) {
+        *sameCardOnly = is310P && prop.mem_type == MEM_DDR_TYPE;
     }
     return BM_OK;
 }
@@ -204,7 +210,8 @@ int32_t HybmModernInitMetaGva(uint32_t driverDeviceId, void **globalMemoryBase, 
     return BM_OK;
 }
 
-int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags){
+int32_t HybmLegacyInitMetaGva(void **globalMemoryBase, size_t allocSize, uint64_t flags)
+{
     auto ret = drv::HalGvaReserveMemory((uint64_t *)globalMemoryBase, allocSize, initedLogicDeviceId, flags);
     if (ret != 0 || reinterpret_cast<uint64_t>(*globalMemoryBase) != (SVM_END_ADDR - GB)) {
         if (ret == 0 && *globalMemoryBase != nullptr) {

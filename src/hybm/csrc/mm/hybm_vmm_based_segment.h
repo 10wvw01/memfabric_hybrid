@@ -35,7 +35,7 @@ struct HostSdmaExportInfo {
     uint64_t size{0};
     uint32_t physicalChipId{0};
     uint32_t deviceUserId{0};
-    MemShareHandle shareHandle;
+    MemShareHandle shareHandle{};
 }; // 200B
 
 static_assert(sizeof(HostSdmaExportInfo) == UNIFIED_EXCHANGE_SEG_INFO_SIZE,
@@ -75,7 +75,9 @@ private:
     Result ExportInner(const MemSlicePtr &slice, MemShareHandle &sHandle) noexcept;
     Result MallocEmptySlice(MemSlicePtr &slice) noexcept;
     Result MallocFromHost(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept;
-    Result MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept;
+    Result MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle,
+                            bool *sameCardOnly = nullptr) noexcept;
+    Result Validate310PSharing(const std::vector<std::string> &allExInfo) const noexcept;
     Result HalMemCreateAdapterFromHost(size_t size, drv_mem_handle_t **handle, drv_mem_prop prop);
     uint64_t ReserveLva(const HostSdmaExportInfo &im);
     Result MmapImport310P(const HostSdmaExportInfo &im, uint64_t lva, void *&mapHandle) noexcept;
