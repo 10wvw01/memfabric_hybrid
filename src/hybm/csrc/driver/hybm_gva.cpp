@@ -34,15 +34,12 @@ Result GetHalDeviceId(uint32_t userDeviceId, uint32_t &driverDeviceId)
     return BM_OK;
 }
 
-Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle, bool *sameCardOnly)
+Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle, bool allowDdrFallback)
 {
-    if (sameCardOnly != nullptr) {
-        *sameCardOnly = false;
-    }
     const bool is310P = DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P;
     drv_mem_prop prop{MEM_DEV_SIDE, driverDeviceId, 0, MEM_HUGE_PAGE_TYPE, is310P ? MEM_P2P_DDR_TYPE : MEM_HBM_TYPE, 0};
     auto ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
-    if (is310P && ret == HAL_OUT_OF_MEMORY_ERROR) {
+    if (is310P && ret == HAL_OUT_OF_MEMORY_ERROR && allowDdrFallback) {
         BM_LOG_INFO("310P P2P_DDR分配不足，改用DDR driver:" << driverDeviceId << " size:" << size);
         prop.mem_type = MEM_DDR_TYPE;
         ret = DlHalApi::HalMemCreate(handle, size, &prop, 0);
@@ -50,9 +47,6 @@ Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **
     if (ret != BM_OK || (is310P && *handle == nullptr)) {
         BM_LOG_ERROR("HalMemCreate失败 driver:" << driverDeviceId << " size:" << size << " ret:" << ret);
         return ret != BM_OK ? ret : BM_DL_FUNCTION_FAILED;
-    }
-    if (sameCardOnly != nullptr) {
-        *sameCardOnly = is310P && prop.mem_type == MEM_DDR_TYPE;
     }
     return BM_OK;
 }

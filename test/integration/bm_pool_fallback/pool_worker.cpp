@@ -83,7 +83,7 @@ smem_bm_t CreatePool(bool dram, uint64_t bytes)
 int Run(int argc, char **argv)
 {
     if (argc != 9) {
-        std::fprintf(stderr, "usage: worker rank world device store hbm|dram bytes success|reject workdir\n");
+        std::fprintf(stderr, "usage: worker rank world device store hbm|dram bytes success|alloc-reject workdir\n");
         return 2;
     }
     rankId = std::stoi(argv[1]);
@@ -91,7 +91,7 @@ int Run(int argc, char **argv)
     int device = std::stoi(argv[3]);
     bool dram = std::strcmp(argv[5], "dram") == 0;
     uint64_t bytes = std::stoull(argv[6]);
-    bool reject = std::strcmp(argv[7], "reject") == 0;
+    bool reject = std::strcmp(argv[7], "alloc-reject") == 0;
     smem_bm_config_t config{};
     smem_bm_config_init(&config);
     config.startConfigStoreServer = rankId == 0;
@@ -105,18 +105,28 @@ int Run(int argc, char **argv)
         return 1;
     }
     auto pool = CreatePool(dram, bytes);
+    std::printf("CREATE_RESULT rank=%d ok=%d\n", rankId, pool != nullptr);
     if (pool == nullptr) {
-        std::fprintf(stderr, "rank %d: pool creation failed\n", rankId);
-        return 1;
+        std::ofstream(std::string(argv[8]) + "/failed-" + std::to_string(rankId)).put('1');
     }
     if (!FinishTogether(argv[8], "created")) {
         return 1;
     }
+    if (reject) {
+        for (int rank = 0; rank < worldSize; ++rank) {
+            if (access((std::string(argv[8]) + "/failed-" + std::to_string(rank)).c_str(), F_OK) == 0) {
+                return 0;
+            }
+        }
+        std::fprintf(stderr, "rank %d: expected pool creation failure\n", rankId);
+        return 1;
+    }
+    if (pool == nullptr) {
+        std::fprintf(stderr, "rank %d: pool creation failed\n", rankId);
+        return 1;
+    }
     ret = smem_bm_join(pool, 0);
     std::printf("JOIN_RESULT rank=%d ret=%d\n", rankId, ret);
-    if (reject) {
-        return FinishTogether(argv[8], "joined") ? 0 : 1;
-    }
     if (ret != 0 || !FinishTogether(argv[8], "joined")) {
         return 1;
     }
@@ -134,6 +144,6 @@ int main(int argc, char **argv)
 {
     int result = Run(argc, argv);
     std::fflush(nullptr);
-    // CANN在进程退出后回收失败join的资源；跳过全局析构，保留join的测试结果。
+    // CANN在进程退出后回收本进程持有的资源；跳过全局析构，保留测试结果。
     _exit(result);
 }

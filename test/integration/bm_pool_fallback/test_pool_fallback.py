@@ -52,7 +52,7 @@ class PoolFallbackTest(unittest.TestCase):
                     f"tcp://127.0.0.1:{port}",
                     "dram" if dram else "hbm",
                     str(size),
-                    "reject" if reject else "success",
+                    "alloc-reject" if reject else "success",
                     str(directory),
                 ]
                 processes.append(
@@ -76,40 +76,44 @@ class PoolFallbackTest(unittest.TestCase):
         self.check_logs(logs, len(devices), reject, inject, log_dir)
 
     def check_logs(self, logs, ranks, reject, inject, log_dir):
-        results = re.findall(r"JOIN_RESULT rank=(\d+) ret=(-?\d+)", logs)
-        self.assertEqual(len(results), ranks, str(log_dir))
+        creates = re.findall(r"CREATE_RESULT rank=(\d+) ok=(\d+)", logs)
+        self.assertEqual(len(creates), ranks, str(log_dir))
         if reject:
-            self.assertTrue(any(int(ret) != 0 for _, ret in results), str(log_dir))
-            self.assertIn("310P设备池跨卡共享被拒绝", logs)
-            exports = {
-                shared: (device, kind)
-                for shared, device, kind in re.findall(r"TEST_HAL_EXPORT shared=(\d+) device=(\d+) type=(\d+)", logs)
-            }
-            for shared, device in re.findall(r"TEST_HAL_IMPORT shared=(\d+) device=(\d+)", logs):
-                self.assertIn(shared, exports, str(log_dir))
-                source, kind = exports[shared]
-                if int(source) // 2 != int(device) // 2:
-                    self.assertEqual(int(kind), 3, str(log_dir))
+            self.assertTrue(any(int(ok) == 0 for _, ok in creates), str(log_dir))
+            self.assertIn("超过2个rank不支持回退普通设备DDR", logs)
+            self.assertNotIn("JOIN_RESULT", logs)
+            self.assertNotRegex(logs, r"TEST_POOL_CREATE [^\n]*type=1 ")
         else:
+            self.assertTrue(all(int(ok) == 1 for _, ok in creates), str(log_dir))
+            results = re.findall(r"JOIN_RESULT rank=(\d+) ret=(-?\d+)", logs)
+            self.assertEqual(len(results), ranks, str(log_dir))
             self.assertTrue(all(int(ret) == 0 for _, ret in results), str(log_dir))
             self.assertEqual(logs.count("COPY_OK"), ranks, str(log_dir))
+            if inject is not None or "4g_ddr" in self.id():
+                self.assertRegex(logs, r"TEST_POOL_CREATE [^\n]*type=1 ret=0")
         if inject is not None:
             self.assertIn("INJECT_P2P_OOM", logs)
 
+    def test_single_rank_4g_ddr(self):
+        self.run_pool([0], 4 << 30)
+
+    def test_single_rank_injected_fallback(self):
+        self.run_pool([0], 64 << 20, inject="all")
+
+    def test_four_rank_4g_allocation_rejected(self):
+        self.run_pool([0, 1, 2, 3], 4 << 30, reject=True)
+
+    def test_four_rank_injected_allocation_rejected(self):
+        self.run_pool([0, 1, 2, 3], 64 << 20, reject=True, inject="all")
+
     def test_same_card_4g_ddr(self):
         self.run_pool([0, 1], 4 << 30)
-
-    def test_cross_card_4g_rejected(self):
-        self.run_pool([0, 2], 4 << 30, reject=True)
 
     def test_four_rank_3g_p2p(self):
         self.run_pool([0, 1, 2, 3], 3 << 30)
 
     def test_same_card_injected_fallback(self):
         self.run_pool([0, 1], 64 << 20, inject="all")
-
-    def test_cross_card_injected_fallback_rejected(self):
-        self.run_pool([0, 2], 64 << 20, reject=True, inject="all")
 
     def test_four_rank_mixed_allocation_rejected(self):
         self.run_pool([0, 1, 2, 3], 64 << 20, reject=True, inject=0)

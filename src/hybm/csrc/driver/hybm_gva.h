@@ -28,7 +28,7 @@ struct HalVmmBuffer {
 };
 
 Result GetHalDeviceId(uint32_t userDeviceId, uint32_t &driverDeviceId);
-Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle, bool *sameCardOnly = nullptr);
+Result CreateHalMemory(uint32_t driverDeviceId, size_t size, drv_mem_handle_t **handle, bool allowDdrFallback = true);
 Result SetHalVmmAccess(void *address, size_t size, uint32_t driverDeviceId);
 Result ReserveHalVmm(size_t size, void *expected, HalVmmBuffer &buffer);
 Result MapHalVmm(HalVmmBuffer &buffer, uint32_t driverDeviceId);

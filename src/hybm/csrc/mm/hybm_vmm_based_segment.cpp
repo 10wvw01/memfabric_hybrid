@@ -13,7 +13,6 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <bitset>
-#include <algorithm>
 
 #include "hybm_ex_info_transfer.h"
 #include "hybm_vmm_based_segment.h"
@@ -24,24 +23,6 @@
 #include "hybm_gva.h"
 
 using namespace ock::mf;
-
-namespace {
-// 310P HAL只使用前8字节作为共享句柄，后续字段记录普通设备DDR的同卡共享要求。
-struct Share310PInfo {
-    uint64_t handle;
-    uint32_t magic;
-    uint32_t sameCardOnly;
-};
-constexpr uint32_t SHARE_310P_INFO_MAGIC = 0x4d463350U;
-static_assert(sizeof(Share310PInfo) <= sizeof(MemShareHandle));
-
-bool RequiresSameCard(const HostSdmaExportInfo &info)
-{
-    Share310PInfo shared{};
-    std::memcpy(&shared, info.shareHandle.share_info, sizeof(shared));
-    return shared.magic != SHARE_310P_INFO_MAGIC || shared.sameCardOnly != 0U;
-}
-} // namespace
 
 HybmVmmBasedSegment::~HybmVmmBasedSegment()
 {
@@ -233,10 +214,16 @@ Result HybmVmmBasedSegment::MallocFromHost(size_t size, uint32_t devId, drv_mem_
     return ret;
 }
 
-Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle,
-                                             bool *sameCardOnly) noexcept
+Result HybmVmmBasedSegment::MallocFromDevice(size_t size, uint32_t devId, drv_mem_handle_t **handle) noexcept
 {
-    return CreateHalMemory(devId, size, handle, sameCardOnly);
+    const bool allowDdrFallback = options_.rankCnt <= 2;
+    auto ret = CreateHalMemory(devId, size, handle, allowDdrFallback);
+    if (Is310PPath() && !allowDdrFallback && ret == HAL_OUT_OF_MEMORY_ERROR) {
+        BM_LOG_ERROR("310P BM设备池P2P_DDR内存不足，超过2个rank不支持回退普通设备DDR rank:"
+                     << options_.rankId << " rankCnt:" << options_.rankCnt << " device:" << devId << " size:" << size
+                     << " ret:" << ret);
+    }
+    return ret;
 }
 
 Result HybmVmmBasedSegment::MallocEmptySlice(MemSlicePtr &slice) noexcept
@@ -295,10 +282,9 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
     auto gva = reinterpret_cast<uint64_t>(globalVirtualBase + allocatedSize_);
     drv_mem_handle_t *handle = nullptr;
     Result ret = BM_OK;
-    bool sameCardOnly = false;
     switch (options_.segType) {
         case HYBM_MST_HBM:
-            ret = MallocFromDevice(size, logicDeviceId_, &handle, &sameCardOnly);
+            ret = MallocFromDevice(size, logicDeviceId_, &handle);
             break;
         case HYBM_MST_DRAM:
             ret = MallocFromHost(size, logicDeviceId_, &handle);
@@ -317,7 +303,6 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
     slice = std::make_shared<MemSlice>(sliceCount_++, memType, MEM_PT_TYPE_GVM, gva, allocAddr, size);
     BM_ASSERT_LOG_AND_RETURN(slice != nullptr, "slice is nullptr", BM_MALLOC_FAILED);
     slices_.emplace(slice->index_, MemSliceStatus(slice, reinterpret_cast<void *>(handle)));
-    slices_.at(slice->index_).sameCardOnly = sameCardOnly;
     auto type = options_.segType == HYBM_MST_HBM ? HYBM_MEM_TYPE_DEVICE : HYBM_MEM_TYPE_HOST;
     ret =
         HybmVaManager::GetInstance().AddVaInfo({gva, slice->vAddress_, slice->vAddress_, size, type}, options_.rankId);
@@ -470,8 +455,8 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
         ret = DlHalApi::HalMemShareHandleSetAttribute(shareable, SHR_HANDLE_ATTR_NO_WLIST_IN_SERVER, attr);
         BM_VALIDATE_RETURN(ret == BM_OK, "HAL handle attribute failed, rank:" << options_.rankId << " ret:" << ret,
                            BM_DL_FUNCTION_FAILED);
-        Share310PInfo shared{shareable, SHARE_310P_INFO_MAGIC, pos->second.sameCardOnly ? 1U : 0U};
-        std::memcpy(info.shareHandle.share_info, &shared, sizeof(shared));
+        /* Store shareable handle (uint64_t) in the first 8 bytes of MemShareHandle */
+        memcpy(info.shareHandle.share_info, &shareable, sizeof(shareable));
     } else {
         ret = DlHalApi::HalMemExport(reinterpret_cast<drv_mem_handle_t *>(pos->second.handle), MEM_HANDLE_TYPE_FABRIC,
                                      0, &info.shareHandle);
@@ -542,47 +527,8 @@ Result HybmVmmBasedSegment::GetExportSliceSize(size_t &size) noexcept
     return BM_OK;
 }
 
-Result HybmVmmBasedSegment::Validate310PSharing(const std::vector<std::string> &allExInfo) const noexcept
-{
-    if (!Is310PPath() || !options_.shared || options_.segType != HYBM_MST_HBM) {
-        return BM_OK;
-    }
-    bool sameCardOnly =
-        std::any_of(slices_.begin(), slices_.end(), [](const auto &slice) { return slice.second.sameCardOnly; });
-    bool crossCard = false;
-    auto collect = [&](const HostSdmaExportInfo &info) {
-        if (info.magic == VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC && info.size > 0 &&
-            CanLocalHostReaches(info.superPodId, info.serverId, info.devicePhyId)) {
-            sameCardOnly = sameCardOnly || RequiresSameCard(info);
-            crossCard = crossCard || !IsSameCard(info.devicePhyId);
-        }
-    };
-    for (const auto &info : imports_) {
-        collect(info);
-    }
-    for (const auto &encoded : allExInfo) {
-        HostSdmaExportInfo info{};
-        auto ret = LiteralExInfoTranslater<HostSdmaExportInfo>{}.Deserialize(encoded, info);
-        if (ret != BM_OK) {
-            BM_LOG_ERROR("310P共享内存描述符解析失败 rank:" << options_.rankId << " ret:" << ret);
-            return BM_INVALID_PARAM;
-        }
-        collect(info);
-    }
-    if (sameCardOnly && crossCard) {
-        BM_LOG_ERROR("310P设备池跨卡共享被拒绝 rank:" << options_.rankId << " devicePhyId:" << devicePhyId_
-                                                      << " 普通DDR及未标注能力的描述符仅支持同卡共享");
-        return BM_NOT_SUPPORTED;
-    }
-    return BM_OK;
-}
-
 Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, void *addresses[]) noexcept
 {
-    auto sharingRet = Validate310PSharing(allExInfo);
-    if (sharingRet != BM_OK) {
-        return sharingRet;
-    }
     LiteralExInfoTranslater<HostSdmaExportInfo> translator;
     uint64_t exportMagic = (options_.segType == HYBM_MST_DRAM) ? VMM_BASE_DRAM_SLICE_EXPORT_INFO_MAGIC
                                                                : VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
@@ -604,6 +550,14 @@ Result HybmVmmBasedSegment::Import(const std::vector<std::string> &allExInfo, vo
         if (info.magic != exportMagic) {
             BM_LOG_ERROR("import info(" << i << ") magic(" << info.magic << ") invalid.");
             return BM_INVALID_PARAM;
+        }
+        if (Is310PPath() && options_.shared && options_.rankCnt == 2 && info.rankId != options_.rankId &&
+            (!CanLocalHostReaches(info.superPodId, info.serverId, info.devicePhyId) || !IsSameCard(info.devicePhyId) ||
+             devicePhyId_ == static_cast<int>(info.devicePhyId))) {
+            BM_LOG_ERROR("310P BM双rank仅支持同卡两个不同die rank:" << options_.rankId << " local_phy:" << devicePhyId_
+                                                                    << " peer_rank:" << info.rankId
+                                                                    << " peer_phy:" << info.devicePhyId);
+            return BM_NOT_SUPPORTED;
         }
         if (options_.shared && options_.segType == HYBM_MST_HBM && info.rankId != options_.rankId &&
             devicePhyId_ != static_cast<int>(info.devicePhyId) &&

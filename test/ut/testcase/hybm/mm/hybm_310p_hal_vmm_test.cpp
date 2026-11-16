@@ -107,7 +107,6 @@ int UnmapImported(void *)
 class Hybm310PHalVmmTest : public testing::Test {
 protected:
     int savedDevice = 0, savedLogic = 0, savedPhysical = 0;
-    uint32_t savedServer = 0, savedSuperPod = 0;
 
     void SetUp() override
     {
@@ -116,9 +115,6 @@ protected:
         savedDevice = MemSegment::deviceId_;
         savedLogic = MemSegment::logicDeviceId_;
         savedPhysical = MemSegment::devicePhyId_;
-        savedServer = MemSegment::serverId_;
-        savedSuperPod = MemSegment::superPodId_;
-        MemSegment::serverId_ = MemSegment::superPodId_ = 0;
         MemSegment::deviceId_ = 0;
         MemSegment::logicDeviceId_ = 7;
         MemSegment::devicePhyId_ = 4;
@@ -137,8 +133,6 @@ protected:
         MemSegment::deviceId_ = savedDevice;
         MemSegment::logicDeviceId_ = savedLogic;
         MemSegment::devicePhyId_ = savedPhysical;
-        MemSegment::serverId_ = savedServer;
-        MemSegment::superPodId_ = savedSuperPod;
         HybmVaManager::GetInstance().ClearAll();
     }
 
@@ -313,7 +307,7 @@ TEST_F(Hybm310PHalVmmTest, LocalPoolAccessFailureRollsBackAllocation)
     segment.localVirtualAddress_ = segment.globalVirtualAddress_ = nullptr;
 }
 
-TEST_F(Hybm310PHalVmmTest, LocalDdrExportRejectsCrossCardBeforeImport)
+TEST_F(Hybm310PHalVmmTest, TwoRanksRejectCrossCardBeforePeerEnable)
 {
     MemSegmentOptions options{};
     options.segType = HYBM_MST_HBM;
@@ -325,169 +319,11 @@ TEST_F(Hybm310PHalVmmTest, LocalDdrExportRejectsCrossCardBeforeImport)
     info.devicePhyId = 6;
     info.rankId = 1;
     info.size = HYBM_LARGE_PAGE_SIZE;
-    const uint32_t sharing[] = {0x4d463350U, 1U};
-    std::memcpy(info.shareHandle.share_info, &SHARED_HANDLE, sizeof(SHARED_HANDLE));
-    std::memcpy(info.shareHandle.share_info + sizeof(SHARED_HANDLE), sharing, sizeof(sharing));
+    info.serverId = MemSegment::serverId_;
+    info.superPodId = MemSegment::superPodId_;
     std::string encoded;
     ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Serialize(info, encoded), BM_OK);
-    MOCKER_CPP(&MemSegment::EnableRemotePeerAccess, ock::mf::Result(*)(int32_t)).stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&MemSegment::EnableRemotePeerAccess, ock::mf::Result(*)(int32_t)).expects(never());
     EXPECT_EQ(segment.Import({encoded}, nullptr), BM_NOT_SUPPORTED);
     EXPECT_TRUE(segment.imports_.empty());
-    segment.p2pLeases_.clear();
-}
-
-namespace {
-std::string PoolInfo(uint32_t device, uint32_t rank, bool sameCardOnly)
-{
-    HostSdmaExportInfo info{};
-    info.magic = VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
-    info.devicePhyId = device;
-    info.rankId = rank;
-    info.size = HYBM_LARGE_PAGE_SIZE;
-    const uint32_t sharing[] = {0x4d463350U, sameCardOnly ? 1U : 0U};
-    std::memcpy(info.shareHandle.share_info, &SHARED_HANDLE, sizeof(SHARED_HANDLE));
-    std::memcpy(info.shareHandle.share_info + sizeof(SHARED_HANDLE), sharing, sizeof(sharing));
-    std::string encoded;
-    EXPECT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Serialize(info, encoded), BM_OK);
-    return encoded;
-}
-
-MemSegmentOptions SharingOptions()
-{
-    MemSegmentOptions options{};
-    options.segType = HYBM_MST_HBM;
-    options.shared = true;
-    options.rankCnt = 4;
-    return options;
-}
-
-int CreateFallback(drv_mem_handle_t **handle, size_t, drv_mem_prop *prop, uint64_t)
-{
-    if (prop->mem_type == MEM_P2P_DDR_TYPE) {
-        return HAL_OUT_OF_MEMORY_ERROR;
-    }
-    *handle = reinterpret_cast<drv_mem_handle_t *>(0x1234);
-    return BM_OK;
-}
-} // namespace
-
-TEST_F(Hybm310PHalVmmTest, LocalDdrExportAllowsSameCard)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    EXPECT_EQ(segment.Import({PoolInfo(5, 1, true)}, nullptr), BM_OK);
-    ASSERT_EQ(segment.imports_.size(), 1U);
-    EXPECT_TRUE(segment.p2pLeases_.empty());
-}
-
-TEST_F(Hybm310PHalVmmTest, MixedGroupRejectsDdrBeforeAnyPeerEnable)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    MOCKER_CPP(&MemSegment::EnableRemotePeerAccess, ock::mf::Result(*)(int32_t)).expects(never());
-    EXPECT_EQ(segment.Import({PoolInfo(5, 1, true), PoolInfo(6, 2, false)}, nullptr), BM_NOT_SUPPORTED);
-    EXPECT_TRUE(segment.imports_.empty());
-}
-
-TEST_F(Hybm310PHalVmmTest, FourRankP2pGroupKeepsCrossCardImports)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    MOCKER_CPP(&MemSegment::EnableRemotePeerAccess, ock::mf::Result(*)(int32_t)).stubs().will(returnValue(BM_OK));
-    EXPECT_EQ(segment.Import({PoolInfo(5, 1, false), PoolInfo(6, 2, false), PoolInfo(7, 3, false)}, nullptr), BM_OK);
-    EXPECT_EQ(segment.imports_.size(), 3U);
-    EXPECT_EQ(segment.p2pLeases_.size(), 2U);
-    segment.p2pLeases_.clear();
-}
-
-TEST_F(Hybm310PHalVmmTest, ExistingLocalDdrImportRejectsLaterCrossCardPeer)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    EXPECT_EQ(segment.Import({PoolInfo(5, 1, true)}, nullptr), BM_OK);
-    EXPECT_EQ(segment.Import({PoolInfo(6, 2, false)}, nullptr), BM_NOT_SUPPORTED);
-    EXPECT_EQ(segment.imports_.size(), 1U);
-}
-
-TEST_F(Hybm310PHalVmmTest, MalformedSharingDescriptorPreservesImportedState)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    EXPECT_EQ(segment.Import({"invalid"}, nullptr), BM_INVALID_PARAM);
-    EXPECT_TRUE(segment.imports_.empty());
-}
-
-TEST_F(Hybm310PHalVmmTest, DramSharingDoesNotUseDeviceDdrRestriction)
-{
-    auto options = SharingOptions();
-    options.segType = HYBM_MST_DRAM;
-    HybmVmmBasedSegment segment(options, 0);
-    EXPECT_EQ(segment.Validate310PSharing({PoolInfo(6, 1, true)}), BM_OK);
-}
-
-TEST_F(Hybm310PHalVmmTest, FallbackAllocationPublishesSameCardRequirement)
-{
-    PrepareImport();
-    auto options = SharingOptions();
-    options.maxSize = HYBM_LARGE_PAGE_SIZE;
-    HybmVmmBasedSegment segment(options, 0);
-    segment.localVirtualAddress_ = reinterpret_cast<uint8_t *>(IMPORT_ADDRESS);
-    segment.globalVirtualAddress_ = reinterpret_cast<uint8_t *>(IMPORT_ADDRESS);
-    MOCKER_CPP(&DlHalApi::HalMemCreate, int (*)(drv_mem_handle_t **, size_t, drv_mem_prop *, uint64_t))
-        .stubs()
-        .will(invoke(CreateFallback));
-    MOCKER_CPP(&DlHalApi::HalMemExportToShareableHandle, int (*)(drv_mem_handle_t *, uint64_t *))
-        .stubs()
-        .will(invoke(ExportHandle));
-    MOCKER_CPP(&DlHalApi::HalMemShareHandleSetAttribute, int (*)(uint64_t, ShareHandleAttrType, ShareHandleAttr))
-        .stubs()
-        .will(invoke(SetAttribute));
-    MemSlicePtr slice;
-    ASSERT_EQ(segment.AllocLocalMemory(HYBM_LARGE_PAGE_SIZE, slice), BM_OK);
-    EXPECT_TRUE(segment.slices_.at(slice->index_).sameCardOnly);
-    HostSdmaExportInfo output{};
-    ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Deserialize(segment.exportMap_.at(slice->index_), output),
-              BM_OK);
-    uint64_t shared = 0;
-    uint32_t sharing[2]{};
-    std::memcpy(&shared, output.shareHandle.share_info, sizeof(shared));
-    std::memcpy(sharing, output.shareHandle.share_info + sizeof(shared), sizeof(sharing));
-    EXPECT_EQ(shared, SHARED_HANDLE);
-    EXPECT_EQ(sharing[0], 0x4d463350U);
-    EXPECT_EQ(sharing[1], 1U);
-    EXPECT_EQ(segment.Validate310PSharing({PoolInfo(6, 1, false)}), BM_NOT_SUPPORTED);
-    EXPECT_EQ(segment.ReleaseSliceMemory(slice), BM_OK);
-    segment.localVirtualAddress_ = segment.globalVirtualAddress_ = nullptr;
-}
-
-TEST_F(Hybm310PHalVmmTest, UnknownSharingCapabilityOnlyAllowsSameCard)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    HostSdmaExportInfo info{};
-    info.magic = VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
-    info.devicePhyId = 5;
-    info.size = HYBM_LARGE_PAGE_SIZE;
-    std::string encoded;
-    ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Serialize(info, encoded), BM_OK);
-    EXPECT_EQ(segment.Validate310PSharing({encoded}), BM_OK);
-    info.devicePhyId = 6;
-    ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Serialize(info, encoded), BM_OK);
-    EXPECT_EQ(segment.Validate310PSharing({encoded}), BM_NOT_SUPPORTED);
-}
-
-TEST_F(Hybm310PHalVmmTest, EmptySliceDoesNotRestrictPeerSharing)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    HostSdmaExportInfo info{};
-    info.magic = VMM_BASE_HBM_SLICE_EXPORT_INFO_MAGIC;
-    info.devicePhyId = 6;
-    std::string encoded;
-    ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Serialize(info, encoded), BM_OK);
-    EXPECT_EQ(segment.Validate310PSharing({encoded}), BM_OK);
-}
-
-TEST_F(Hybm310PHalVmmTest, OtherHostDoesNotUseLocalHalSharingPolicy)
-{
-    HybmVmmBasedSegment segment(SharingOptions(), 0);
-    HostSdmaExportInfo info{};
-    ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Deserialize(PoolInfo(6, 1, true), info), BM_OK);
-    info.serverId = 1;
-    std::string encoded;
-    ASSERT_EQ(LiteralExInfoTranslater<HostSdmaExportInfo>{}.Serialize(info, encoded), BM_OK);
-    EXPECT_EQ(segment.Validate310PSharing({encoded}), BM_OK);
 }
