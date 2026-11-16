@@ -68,6 +68,13 @@ echo
 echo "Starting rank 0 (sender)..."
 python transfer_performance.py --rank-id 0 --store-url "$STORE_URL" --num-threads "$NUM_THREADS" --data-op-type "$DATA_OP_TYPE" --npu-id "$NPU_ID_0" &
 RANK0_PID=$!
+cleanup() {
+    if kill -0 "$RANK0_PID" 2>/dev/null; then
+        kill "$RANK0_PID" 2>/dev/null || true
+        wait "$RANK0_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 # Wait a moment for rank 0 to initialize and create config store
 sleep 5

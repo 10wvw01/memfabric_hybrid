@@ -17,6 +17,7 @@ import time
 import argparse
 import threading
 import itertools
+import multiprocessing
 import torch
 import memfabric_hybrid as mf
 from memfabric_hybrid import TransferEngine, create_config_store, set_log_level, shm, initialize, uninitialize
@@ -335,4 +336,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # CANN creates a Manager after NPU initialization; start it without inherited runtime threads.
+    multiprocessing.set_start_method("spawn", force=True)
     sys.exit(main())

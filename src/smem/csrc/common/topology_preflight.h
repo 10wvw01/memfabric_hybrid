@@ -23,6 +23,9 @@
 namespace ock {
 namespace smem {
 
+// TRANS 创建时发布本端拓扑，供接收方注册内存时检查。
+Result PublishTopologyRecord(StorePtr &store, uint32_t rankId, uint32_t devId, const std::string &logTag);
+
 /* Shared topology preflight helper for BM and TRANS modes.
  * Publishes rankId:devId to the store, gathers all ranks' records,
  * and checks the per-card P2P slot budget.
@@ -35,8 +38,8 @@ namespace smem {
  * @param logTag     prefix for log messages (e.g. "BM" or "TRANS")
  * @return SM_OK on success, SM_NO_RESOURCES if P2P slots exceeded, SM_ERROR on failure
  */
-Result CheckTopologyP2PSlots(StorePtr &store, uint32_t rankId, uint32_t devId, uint32_t rankSize,
-                             int64_t timeoutMs, const std::string &logTag);
+Result CheckTopologyP2PSlots(StorePtr &store, uint32_t rankId, uint32_t devId, uint32_t rankSize, int64_t timeoutMs,
+                             const std::string &logTag);
 
 } // namespace smem
 } // namespace ock
