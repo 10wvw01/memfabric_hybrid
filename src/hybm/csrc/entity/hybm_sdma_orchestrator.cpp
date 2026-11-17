@@ -51,7 +51,6 @@ constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁
 constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
 /* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 须在本卡设备上部署) */
 constexpr char HYBM_SDMA_ORCH_DEV_SEARCH_DIR[] = "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device";
-constexpr char HYBM_SDMA_ORCH_CUST_DEV_DIR[] = "/home/CustAiCpuUser/lib"; /* CUST 迁移设备侧落盘目录 */
 constexpr char HYBM_SDMA_ORCH_DEPLOY_LOCK[] = "/tmp/.mf_sdma_orch_deploy.lock"; /* 部署互斥锁(host 侧) */
 constexpr uint32_t HYBM_SDMA_ORCH_DEPLOY_RETRY = 5;   /* 复制/校验重试次数(迁移异步完成裕量) */
 constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 512; /* KFC 命令缓冲尺寸(命令为受控常量拼接) */
@@ -407,13 +406,7 @@ Result SdmaOrchestrator::MigrateViaCustChannel(const std::string &dir, uint64_t 
         BM_LOG_ERROR("cust json not accessible, path: " << custJson);
         return BM_FILE_NOT_ACCESS;
     }
-    /* 迁移前清残留(防历史/对端残留与本轮迁移文件拼接; flock 已保证无并发迁移) */
-    const std::string cleanCmd = "rm -f " + std::string(HYBM_SDMA_ORCH_CUST_DEV_DIR) + "/" +
-                                 HYBM_SDMA_ORCH_CUST_SO + ".*";
-    if (KfcExec(cleanCmd) != BM_OK) {
-        BM_LOG_ERROR("deploy clean residue failed, devId: " << devId_);
-        return BM_ERROR;
-    }
+    // CANN 会复用已迁移的文件；文件生命周期由 CANN 管理，重试时保留迁移源。
     aclrtBinaryLoadOption loadOption{};
     loadOption.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
     loadOption.value.cpuKernelMode = 1; /* mode=1: H2D 迁移通道(CUSTAICPUKernel 专用), 本身不落盘 */
@@ -530,8 +523,9 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
 
 Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize)
 {
-    // 复制源: 迁移落盘文件(裸 glob——不匹配时 cat 快速失败, 禁用可展开为空的 $() 形态防 stdin 挂死)
-    const std::string src = std::string(HYBM_SDMA_ORCH_CUST_DEV_DIR) + "/" + HYBM_SDMA_ORCH_CUST_SO + ".*";
+    // 当前进程的专属链接指向 CANN 实际迁移文件，避免混用其他进程的 SO。
+    const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*_" +
+                            std::to_string(getpid()) + "/" + HYBM_SDMA_ORCH_CUST_SO;
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
     const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
     /* 完整性校验: 入口符号存在 + 精确尺寸一致(防截断/拼接; 设备侧工具极简——实测可用

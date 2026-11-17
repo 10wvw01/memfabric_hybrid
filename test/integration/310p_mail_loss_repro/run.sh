@@ -106,7 +106,7 @@ build_example()
     echo "[run.sh] 编译完成: $EX_BIN"
 }
 
-# 选择版本号最大的 AICPU kernel 启动配置。
+# 使用固定名称的 AICPU kernel 启动配置。
 find_launch_json()
 {
     if [ -f "$KERNEL_DIR/libmf_sdma_orch_launch.json" ]; then

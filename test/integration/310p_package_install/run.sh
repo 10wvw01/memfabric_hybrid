@@ -28,6 +28,9 @@ for mode in run wheel; do
     if [[ "$mode" == run ]]; then
         bash "$RUN_PACKAGE" --install-path="$LOG_DIR/run-install" > "$LOG_DIR/install-run.log" 2>&1
         source "$LOG_DIR/run-install/memfabric_hybrid/set_env.sh"
+        for asset in libmf_sdma_orch.so libmf_sdma_orch.json libmf_sdma_orch_launch.json; do
+            test -s "$MEMFABRIC_HYBRID_HOME_PATH/aarch64-linux/hybm/aicpu_kernel/$asset"
+        done
         include="$MEMFABRIC_HYBRID_HOME_PATH/include"
         host="$include/smem/host"
         device="$include/smem/device"

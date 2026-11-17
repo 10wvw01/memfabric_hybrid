@@ -33,7 +33,7 @@ EX09_DEVICE_BASE=0 EX09_TOTAL_GENS=10000 EX09_CHUNKS=4 \
 
 脚本会编译测试程序；缺少主库静态库时先构建主库。测试程序写入
 `/tmp/mf_mail_loss_repro`，同一容器内应顺序执行该测试，避免并发覆盖编译产物。
-AICPU kernel 启动配置从当前仓库的构建目录中选择版本号最大的
+AICPU kernel 启动配置使用当前仓库构建目录中的
 `libmf_sdma_orch_launch.json`。
 
 也可以分开编译和运行：
