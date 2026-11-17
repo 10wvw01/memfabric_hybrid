@@ -113,10 +113,12 @@ stream创建、同步、销毁或运行状态读取失败，以及进度超时�
 
 ## 退出码回归测试
 
-先按上面的步骤编译测试程序，在已加载CANN环境且设备0/1可用时运行：
+先按上面的步骤编译测试程序，在已加载CANN环境且设备2/3可用时运行：
 
 ```bash
+unset ASCEND_RT_VISIBLE_DEVICES
 python3 test/integration/310p_mail_loss_repro/test_exit_status.py \
+  --device-base 2 \
   --binary /tmp/mf_mail_loss_repro \
   --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json
 ```
@@ -125,6 +127,11 @@ python3 test/integration/310p_mail_loss_repro/test_exit_status.py \
 检查内容包括stream错误、状态读取失败、进度超时、中断、完成轮数和计数不符，
 以及单个rank失败时能否结束MPI任务。正常完成和零轮运行作为对照。
 运行需要C编译器，日志可通过 --log-dir 指定目录保存。
+
+设备起始索引也可通过EX09_DEVICE_BASE设置，--device-base优先。脚本保留
+ASCEND_RT_VISIBLE_DEVICES，设备索引按该变量指定的可见设备列表解释。
+默认选择设备0/1；选择当前容器的设备2/3时，先清除不需要的可见性映射。
+每个MPI任务限时45秒，超时仍判为失败；指定--log-dir时保存该项输出、退出码及超时标记。
 
 ## 相关代码
 

@@ -24,8 +24,14 @@ mini_kfc 可查询指定设备上的文件；deployer 用于单独排查 CUST �
 两个工具仅用于开发诊断，保持在产品安装包外。
 
 CUST 迁移 JSON 的基名与 SO 配对。`BinaryLoadFromFile(cpuMode=1)` 配合
-`BinaryGetFunction` 触发迁移，设备落盘路径为
-`/home/CustAiCpuUser/lib/libmf_sdma_orch.so.*`，迁移句柄需保持有效。
+`BinaryGetFunction` 触发迁移。当前进程通过以下设备侧链接读取 SO：
+
+`/home/CustAiCpuUser/cust_aicpu_<dieId>_<vfId>_<hostPid>/libmf_sdma_orch.so`
+
+其中 dieId 为卡内 die 编号，hostPid 为执行迁移的主机进程号；该链接指向 CANN
+管理的迁移文件。查询和复制须使用当前 die、当前进程的链接，并保持迁移进程及
+句柄存活。使用 deployer 时，hostPid 可从后台进程的 $! 获取。
+mini_kfc 可用 grep -q HybmSdmaOrchEpoch 检查该链接指向的文件内容。
 随后通过 KFC 在设备 OS 中复制到 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`。
 
 ## 回退与审计
