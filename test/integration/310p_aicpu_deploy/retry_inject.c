@@ -8,7 +8,8 @@ static void *(*real_lookup)(void *, const char *);
 static int (*launch)(void *, uint32_t, void *, const void *, const void *, size_t, void *, uint32_t);
 static int fail_launch(void *a, uint32_t b, void *c, const void *d, const void *e, size_t f, void *g, uint32_t h)
 {
-    if (getenv("TEST_DEPLOY_CHANNEL_FAIL")) {
+    if (getenv("TEST_DEPLOY_CHANNEL_FAIL") ||
+        (getenv("TEST_DEPLOY_VERIFY_FAIL") && e && !strncmp((const char *)e, "grep -q HybmSdmaOrchEpoch ", 24))) {
         fprintf(stderr, "INJECT KFC launch failure\n");
         return 507000;
     }

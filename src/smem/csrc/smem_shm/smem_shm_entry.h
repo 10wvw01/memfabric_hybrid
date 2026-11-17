@@ -35,7 +35,7 @@ struct ShmEntryInitStep {
 
 class SmemShmEntry : public SmReferable {
 public:
-    explicit SmemShmEntry(uint32_t id, uint64_t generation = 0);
+    explicit SmemShmEntry(uint32_t id);
     ~SmemShmEntry() override;
 
     int32_t Initialize(hybm_options &options);
@@ -78,7 +78,6 @@ private:
 
     bool inited_ = false;
     const uint32_t id_;
-    const uint64_t generation_; // 同一池 ID 的创建轮次，隔离失败尝试的同步数据
     uint32_t localRank_ = UINT32_MAX;
     hybm_entity_t entity_ = nullptr;
     void *gva_ = nullptr;

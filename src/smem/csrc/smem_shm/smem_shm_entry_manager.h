@@ -48,7 +48,6 @@ private:
     std::mutex entryMutex_;
     std::map<uintptr_t, SmemShmEntryPtr> ptr2EntryMap_; /* lookup entry by ptr */
     std::map<uint32_t, SmemShmEntryPtr> entryIdMap_;    /* deduplicate entry by id */
-    std::map<uint32_t, uint64_t> createGenerations_;    // entryMutex_ 保护，各池 ID 独立计数
     smem_shm_config_t config_{};
     uint16_t deviceId_ = 0;
     bool inited_ = false;

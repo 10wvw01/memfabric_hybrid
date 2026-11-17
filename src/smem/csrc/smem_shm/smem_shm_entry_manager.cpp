@@ -68,10 +68,8 @@ Result SmemShmEntryManager::CreateEntryById(uint32_t id, SmemShmEntryPtr &entry 
     }
 
     /* create new shm entry */
-    auto tmpEntry = SmMakeRef<SmemShmEntry>(id, createGenerations_[id]);
+    auto tmpEntry = SmMakeRef<SmemShmEntry>(id);
     SM_ASSERT_RETURN(tmpEntry != nullptr, SM_NEW_OBJECT_FAILED);
-
-    ++createGenerations_[id];
 
     /* add into set and map */
     entryIdMap_.emplace(id, tmpEntry);
