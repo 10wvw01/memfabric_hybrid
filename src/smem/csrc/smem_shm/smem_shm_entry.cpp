@@ -20,7 +20,8 @@
 namespace ock {
 namespace smem {
 
-SmemShmEntry::SmemShmEntry(uint32_t id) : id_{id}, entity_{nullptr}, gva_{nullptr}
+SmemShmEntry::SmemShmEntry(uint32_t id, uint64_t generation)
+    : id_{id}, generation_{generation}, entity_{nullptr}, gva_{nullptr}
 {
     (void)smem_shm_config_init(&extraConfig_);
 
@@ -82,7 +83,7 @@ Result SmemShmEntry::CreateGlobalTeam(uint32_t rankSize, uint32_t rankId)
     SM_VALIDATE_RETURN(client != nullptr, "GetStoreClient failed (store not initialized), shmId: " << id_,
                        SM_INVALID_PARAM);
 
-    std::string prefix = "SHM_(" + std::to_string(id_) + ")_";
+    std::string prefix = "SHM_(" + std::to_string(id_) + ")_" + std::to_string(generation_) + "_";
     StorePtr store = StoreFactory::PrefixStore(client, prefix);
     SM_VALIDATE_RETURN(store != nullptr, "PrefixStore failed, prefix: " << prefix << " shmId: " << id_, SM_ERROR);
 

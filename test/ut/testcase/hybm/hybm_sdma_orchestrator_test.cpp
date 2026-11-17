@@ -142,6 +142,33 @@ TEST_F(SdmaDeployTest, CleanupRemovesOnlyOwnedDeviceFile)
     EXPECT_EQ(commands.size(), 1U);
 }
 
+TEST_F(SdmaDeployTest, RetryPreservesCustFilesAndCopiesThroughCurrentProcessLink)
+{
+    char path[] = "/tmp/mf_cust_retry_XXXXXX";
+    ASSERT_NE(mkdtemp(path), nullptr);
+    const std::string dir = path;
+    std::ofstream(dir + "/libmf_sdma_orch.so") << "kernel bytes";
+    std::ofstream(dir + "/libmf_sdma_orch.json") << "{}";
+    MockChannel();
+    MOCKER(DlAclApi::AclrtBinaryLoadFromFile).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtBinaryGetFunction).stubs().will(returnValue(BM_OK));
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        uint64_t size = 0;
+        ASSERT_EQ(prep.MigrateViaCustChannel(dir, size), BM_OK);
+        EXPECT_EQ(size, 12U);
+    }
+    EXPECT_TRUE(commands.empty());
+    prep.dieId_ = 1;
+    ASSERT_EQ(prep.CopyToSearchPath("libmf_sdma_orch_retry.so", 12), BM_OK);
+    ASSERT_EQ(commands.size(), 2U);
+    EXPECT_NE(commands[0].find("cust_aicpu_1_*_" + std::to_string(getpid()) + "/libmf_sdma_orch.so"),
+              std::string::npos);
+    EXPECT_EQ(commands[0].find("/home/CustAiCpuUser/lib/libmf_sdma_orch.so.*"), std::string::npos);
+    unlink((dir + "/libmf_sdma_orch.so").c_str());
+    unlink((dir + "/libmf_sdma_orch.json").c_str());
+    rmdir(dir.c_str());
+}
+
 TEST_F(SdmaDeployTest, CleanupPreservesUnownedFiles)
 {
     MockChannel();

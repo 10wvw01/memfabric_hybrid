@@ -313,3 +313,18 @@ TEST_F(SmemShmEntryManagerTest, Instance_Singleton_SameInstance)
     auto &mgr2 = SmemShmEntryManager::Instance();
     EXPECT_EQ(&mgr1, &mgr2);
 }
+
+TEST_F(SmemShmEntryManagerTest, RecreatedIdUsesNewGenerationAndOtherIdsAreIndependent)
+{
+    auto &mgr = SmemShmEntryManager::Instance();
+    SmemShmEntryPtr first, retry, other;
+    ASSERT_EQ(mgr.CreateEntryById(101, first), SM_OK);
+    const auto generation = first->generation_;
+    ASSERT_EQ(mgr.RemoveEntryByPtr(reinterpret_cast<uintptr_t>(first.Get())), SM_OK);
+    ASSERT_EQ(mgr.CreateEntryById(101, retry), SM_OK);
+    EXPECT_EQ(retry->generation_, generation + 1);
+    const auto otherGeneration = mgr.createGenerations_[102];
+    ASSERT_EQ(mgr.CreateEntryById(102, other), SM_OK);
+    EXPECT_EQ(other->generation_, otherGeneration);
+    EXPECT_EQ(mgr.createGenerations_[101], generation + 2);
+}

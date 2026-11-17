@@ -33,3 +33,10 @@ CUST 迁移 JSON 的基名与 SO 配对。`BinaryLoadFromFile(cpuMode=1)` 配合
 回退代码提交并重新构建、部署主库与 AICPU 三份产物，可恢复原有部署流程。
 修复仅删除本次生成并完成归属标记的设备文件。排查时保存部署日志及目标文件路径；
 检查首次自动部署、后续重新部署、部署失败返回和释放后的文件状态。
+
+CUST 的迁移文件由 CANN 管理。复制时使用当前进程的
+`/home/CustAiCpuUser/cust_aicpu_<die>_*_<pid>/libmf_sdma_orch.so` 链接，
+避免删除 CANN 复用的迁移源文件或拼接其他进程的内容。
+同一池 ID 的每次创建使用独立轮次的配置存储前缀，隔离失败创建留下的集合通信数据。
+该修复的回归测试入口为 `test/integration/310p_aicpu_deploy/run_retry.sh`。
+回退相关提交并重新构建主库，可恢复原有迁移源和同步键处理；测试日志记录首次失败和重试结果。
