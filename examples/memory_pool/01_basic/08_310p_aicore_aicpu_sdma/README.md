@@ -48,7 +48,7 @@ gva 首参；高频路径 `smem_shm_sdma_reserved(gva)` 预计算 + `_at` 变体
   （编译需 `-DOMPI_SKIP_MPICXX`）；自装 4.1.5：`/usr/local/openmpi` 全套）
 - 协同编排 kernel 三件套（`libmf_sdma_orch.so` + `libmf_sdma_orch.json` +
   `libmf_sdma_orch_launch.json`）位于 launch json 同目录（构建目录或安装前缀）——
-  **初始化自动部署**：设备侧缺失时库内自动完成 CUST 迁移落盘 + CP1 搜索路径就位 +
+  **初始化自动部署**：建池时库内自动完成 CUST 迁移落盘 + CP1 搜索路径就位 +
   完整性校验（符号+尺寸），无需手工部署；手动/诊断部署链见
   `tools/aicpu_kernel_deploy/`（预部署与通道排查用）
 - 环境变量（均可选）：`MF_SDMA_ORCH_JSON` 显式指定 launch json（缺省依次自动发现：
