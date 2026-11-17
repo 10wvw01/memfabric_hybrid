@@ -27,7 +27,14 @@
 #include <cstddef>      // offsetof
 #include <vector>
 
-#include "hybm_sdma_orchestrator.h" // 被测单例(public 接口: Acquire/Ready/GetRefCountForTest/Release)
+#include <fstream>
+#include <sstream>
+#include <mockcpp/mockcpp.hpp>
+#include "dl_acl_api.h"
+#include "hybm_common_include.h"
+#define private public
+#include "hybm_sdma_orchestrator.h" // 被测单例
+#undef private
 
 #include "hybm_big_mem.h" // 被测 C API 声明(hybm_sdma_*)
 #include "hybm_define.h"  // BM_OK/BM_INVALID_PARAM 等错误码
@@ -37,6 +44,111 @@
 
 namespace ock { // MemFabric 总命名空间
 namespace mf {  // hybm 引擎子命名空间
+
+#define MOCKER_CPP(api, TT) MOCKCPP_NS::mockAPI(#api, reinterpret_cast<TT>(api))
+
+class SdmaDeployTest : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        char path[] = "/tmp/mf_deploy_test_XXXXXX";
+        int fd = mkstemp(path);
+        ASSERT_GE(fd, 0);
+        close(fd);
+        input = path;
+        std::ofstream(input) << R"({"HybmSdmaOrchEpoch":{"opInfo":{"kernelSo":"libmf_sdma_orch.so"}}})";
+        commands.clear();
+    }
+    void TearDown() override
+    {
+        GlobalMockObject::verify();
+        unlink(input.c_str());
+        unlink(runtime.c_str());
+    }
+    static int32_t Capture(SdmaOrchestrator *, const std::string &cmd, bool)
+    {
+        commands.push_back(cmd);
+        return BM_OK;
+    }
+    void MockChannel()
+    {
+        MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &, bool))
+            .stubs()
+            .will(invoke(Capture));
+    }
+    SdmaOrchestrator prep;
+    std::string input;
+    std::string runtime;
+    static std::vector<std::string> commands;
+};
+std::vector<std::string> SdmaDeployTest::commands;
+
+TEST_F(SdmaDeployTest, GeneratesSeparateNamesWithoutManualVersion)
+{
+    ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
+    const auto firstName = prep.deviceSoName_;
+    std::ifstream file(runtime);
+    const std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    EXPECT_NE(json.find(firstName), std::string::npos);
+    EXPECT_EQ(json.find("libmf_sdma_orch.so"), std::string::npos);
+    unlink(runtime.c_str());
+    ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
+    EXPECT_NE(firstName, prep.deviceSoName_);
+    EXPECT_FALSE(prep.deviceSoOwned_);
+}
+
+TEST_F(SdmaDeployTest, RejectsMissingAndUnsafeKernelName)
+{
+    for (const auto &value : {"{}", "{\"kernelSo\":\"../bad.so\"}", "{\"kernelSo\":\"a;bad.so\"}"}) {
+        std::ofstream(input) << value;
+        EXPECT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_INVALID_PARAM);
+        EXPECT_TRUE(runtime.empty());
+    }
+}
+
+TEST_F(SdmaDeployTest, ChannelFailureDoesNotAssumePredeployment)
+{
+    ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
+    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &, bool))
+        .stubs()
+        .will(returnValue(BM_ERROR));
+    EXPECT_EQ(prep.DeployOrchestratorKernel("/missing", runtime), BM_ERROR);
+    EXPECT_FALSE(prep.deviceSoOwned_);
+}
+
+TEST_F(SdmaDeployTest, MissingHostArtifactFailsBeforeCopy)
+{
+    ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
+    MockChannel();
+    EXPECT_EQ(prep.DeployOrchestratorKernel("/missing", runtime), BM_FILE_NOT_ACCESS);
+    ASSERT_EQ(commands.size(), 1U);
+    EXPECT_EQ(commands[0].find("test ! -e "), 0U);
+    EXPECT_FALSE(prep.deviceSoOwned_);
+}
+
+TEST_F(SdmaDeployTest, CleanupRemovesOnlyOwnedDeviceFile)
+{
+    MockChannel();
+    prep.launchStream_ = reinterpret_cast<void *>(1);
+    prep.deviceSoName_ = "libmf_sdma_orch_test.so";
+    prep.deviceSoOwned_ = true;
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    prep.Cleanup();
+    ASSERT_EQ(commands.size(), 1U);
+    EXPECT_EQ(commands[0], "rm -f /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_test.so");
+    EXPECT_TRUE(prep.deviceSoName_.empty());
+    EXPECT_FALSE(prep.deviceSoOwned_);
+    prep.Cleanup();
+    EXPECT_EQ(commands.size(), 1U);
+}
+
+TEST_F(SdmaDeployTest, CleanupPreservesUnownedFiles)
+{
+    MockChannel();
+    prep.deviceSoName_ = "libmf_sdma_orch_preexisting.so";
+    prep.Cleanup();
+    EXPECT_TRUE(commands.empty());
+}
 
 /* 用例 1: Acquire 在资源缺失环境(UT stub)必然失败, 且失败后状态干净可重试 */
 TEST(SdmaOrchestratorTest, AcquireFailsCleanlyAndRetriable)
@@ -170,8 +282,6 @@ TEST(SdmaOrchestratorTest, V9ResidentInvariants)
     /* launch attr 超时: 必须 0(永不超时)——有限值到达即把任务标记为 507017 超时,
      * StopEpoch 的 sync 提前返回不等 kernel 退出; attr 缺省为默认超时 ≈6.4s 同样误杀 */
     EXPECT_EQ(HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S, 0U);
-    /* 契约版本单调递增(部署链按文件名缓存刷新, 禁止回退); v32=48 队列对齐 hcomm */
-    EXPECT_GE(HYBM_SDMA_ORCH_KVER, 32U);
 }
 
 /* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; 仅存 host API) */

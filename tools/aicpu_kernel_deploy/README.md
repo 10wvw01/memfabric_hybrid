@@ -1,63 +1,35 @@
-# tools/aicpu_kernel_deploy — 310P CP1 部署链工具（手动/诊断用）
+# 310P AICPU 部署诊断工具
 
-> **定位**：把自定义 AICPU kernel `.so` 放进设备 CP1 搜索路径
-> （`/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`）的手动部署与诊断工具。
-> **产品库初始化已内置自动部署**（`src/hybm/csrc/entity/hybm_sdma_orchestrator.cpp`，
-> 首次加载失败时自动走迁移+就位+校验），常规使用**无需本工具**；
-> 本工具用于预部署、部署链排查、以及非产品 kernel 的手动落盘。
+SHMEM SDMA 建池时由产品库自动部署 AICPU kernel。构建产物使用固定名称：
+`libmf_sdma_orch.so`、`libmf_sdma_orch.json`、`libmf_sdma_orch_launch.json`。
+三份文件需要位于同一目录，可通过 `MF_SDMA_ORCH_JSON` 指定 launch JSON。
 
-`deployer` 的入口函数名经参数传入（默认 `HybmSdmaOrchEpoch`，与产品 json 一致）。
+`smem_shm_init` 初始化配置存储和设备；`smem_shm_create` 选择 SDMA 后触发部署。
+每次首次 Acquire 生成独立的临时加载名称，先确认设备目标文件缺失，再通过 CUST
+迁移 SO，复制到 CP1 搜索目录并检查入口名和文件大小，最后加载并启动。
+临时加载名称由运行时生成，使用者无需维护版本号。已有部署文件不会被当作本次
+部署成功的依据；CP1 加载缓存按本次独立名称区分。
 
-## 构建
+最后一个引用释放时，库先停止 kernel，再删除本次创建的设备文件。
+其他进程及历史部署文件保持原样。异常退出可能留下临时设备文件，后续进程使用
+新的名称完成部署。设备通道失败或部署失败会返回错误。
 
-```bash
-make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0   # 产物: deployer mini_kfc
-```
+部署日志包含 `automatic deploy begin`、`kernel deployed to CP1 search path`、
+`automatic deploy file removed` 和具体设备路径，可用于核对缺失、复制、清理过程。
 
-## 机制（为什么需要"迁移+复制"两步）
+## 手动诊断
 
-- `deployer`：`aclrtBinaryLoadFromFile(cpuMode=1)` 本身不落盘，`aclrtBinaryGetFunction`
-  才触发 CUST 迁移通道把 `.so` 写到设备 `/home/CustAiCpuUser/lib/<so>.<devId>.<vfId>.<pid>`；
-  **迁移进程退出会触发清理链延迟删除设备侧文件**（故需保活）。
-- **json 基名配对（实测约束）**：CUST 加载器要求 json 文件基名与 `.so` 同名
-  （异名 `load ret=107000`，即使内容与 `.so` 逐字节一致）；部署 json 须命名为
-  `<soname>.json`（如 `libmf_wd_probe.json` 配 `libmf_wd_probe.so`）。
-- CUST 落盘路径不在 CP1 搜索路径内，须由 `mini_kfc` 在设备 OS 内复制到
-  `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/` 并 `chmod 644`。
-- `mini_kfc`：KFC 通道（json 声明 `KFCKernel` + `functionName: "system"` + 不存在的
-  `kernelSo` → CP1 内 handler dlopen 失败回退 `dlsym` 命中 libc `system()`），
-  host 一条 launch 即在设备 OS 内执行 shell 命令；launch 或同步失败时返回非零退出码，stdout 同时打印 `launch=` 和 `sync=`。
+`make ASCEND_HOME_PATH=<CANN目录>` 构建 deployer 和 mini_kfc。
+mini_kfc 可查询指定设备上的文件；deployer 用于单独排查 CUST 迁移通道。
+两个工具仅用于开发诊断，保持在产品安装包外。
 
-## 手动部署链（kernel 三件套由 `src/hybm/ops` 的 `mf_sdma_orch_kernel` 目标产出）
+CUST 迁移 JSON 的基名与 SO 配对。`BinaryLoadFromFile(cpuMode=1)` 配合
+`BinaryGetFunction` 触发迁移，设备落盘路径为
+`/home/CustAiCpuUser/lib/libmf_sdma_orch.so.*`，迁移句柄需保持有效。
+随后通过 KFC 在设备 OS 中复制到 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`。
 
-前置：`libmf_sdma_orch.so`（kernel 本体）+ `libmf_sdma_orch.json`（CUST 迁移 json）+
-`libmf_sdma_orch_v9.json`（launch json），三者同目录（主构建产物
-`<build>/src/hybm/ops/hybm_kernel/`、独立构建产物 `<build-kernel>/hybm_kernel/`，
-或安装前缀 `<prefix>/hybm/aicpu_kernel/`）。
+## 回退与审计
 
-```bash
-cd tools/aicpu_kernel_deploy && make
-KERNEL_DIR=<上述三件套所在目录>
-./mini_kfc 0 "rm -f /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch*"   # 清旧版
-(./deployer 0 $KERNEL_DIR/libmf_sdma_orch.json 300 > /tmp/deploy.log 2>&1 &)            # 迁移+保活
-sleep 22                                                                                  # 迁移完成裕量
-./mini_kfc 0 "cat /home/CustAiCpuUser/lib/libmf_sdma_orch.so.* > \
-/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so && chmod 644 \
-/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so"                  # 复制+授权
-./mini_kfc 0 "grep -q HybmSdmaOrchEpoch \
-/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_v9.so"                  # 校验当前入口（退出码 0 表示通过）
-```
-
-## 运维纪律
-
-- **保活语义**：`deployer` 退出后清理链会（延迟）删除设备侧文件——300 秒保活期内须完成
-  验证门与正式运行；到期后重跑本链即可。
-- **版本切换**：设备侧文件名带版本（`libmf_sdma_orch_v9.so`），换版本=新文件名，
-  CP1 dlopen 缓存自然失效（KVER 递增即缓存破坏）。
-- **同卡双 die 共享设备 OS 文件系统**：dev0 上部署对 dev1 同样生效。
-
-## 安全告示
-
-`mini_kfc` 在设备 OS 内执行任意 shell 命令，**仅限开发/诊断环境使用，禁止随产品
-运行时分发**。产品库内置的自动部署只执行固定格式的复制/校验命令串（路径与文件名
-均为受控常量），见 `hybm_sdma_orchestrator.cpp` 的 `KfcExec`。
+回退代码提交并重新构建、部署主库与 AICPU 三份产物，可恢复原有部署流程。
+修复仅删除本次生成并完成归属标记的设备文件。排查时保存部署日志及目标文件路径；
+检查首次自动部署、后续重新部署、部署失败返回和释放后的文件状态。

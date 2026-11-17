@@ -29,7 +29,7 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.2.1
 ```
 
 脚本会编译测试程序，缺少主库静态库时先构建主库。
-AICPU kernel启动配置从当前构建目录中选择版本号最大的libmf_sdma_orch_v*.json。
+AICPU kernel启动配置使用当前构建目录中的libmf_sdma_orch_launch.json。
 测试程序写入/tmp/mf_310p_sdma_stability，同一容器内应顺序运行，避免并发覆盖产物。
 
 ## 运行
@@ -70,7 +70,7 @@ STRESS_ROUNDS使用正整数，默认30000。TEST_DEVICE_BASE默认0，
 ```bash
 python3 test/integration/310p_sdma_stability/test_exit_status.py \
   --binary /tmp/mf_310p_sdma_stability \
-  --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v32.json
+  --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json
 ```
 
 脚本执行7轮真实收发，并通过临时预加载库改变host收到的接口返回值或抽样数据。

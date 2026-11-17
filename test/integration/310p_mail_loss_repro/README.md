@@ -34,7 +34,7 @@ EX09_DEVICE_BASE=0 EX09_TOTAL_GENS=10000 EX09_CHUNKS=4 \
 脚本会编译测试程序；缺少主库静态库时先构建主库。测试程序写入
 `/tmp/mf_mail_loss_repro`，同一容器内应顺序执行该测试，避免并发覆盖编译产物。
 AICPU kernel 启动配置从当前仓库的构建目录中选择版本号最大的
-`libmf_sdma_orch_v*.json`。
+`libmf_sdma_orch_launch.json`。
 
 也可以分开编译和运行：
 
@@ -118,7 +118,7 @@ stream创建、同步、销毁或运行状态读取失败，以及进度超时�
 ```bash
 python3 test/integration/310p_mail_loss_repro/test_exit_status.py \
   --binary /tmp/mf_mail_loss_repro \
-  --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_v32.json
+  --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json
 ```
 
 脚本会执行真实收发，并通过临时预加载库改变host收到的接口返回值或状态快照。

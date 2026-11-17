@@ -109,10 +109,12 @@ build_example()
     echo "[run.sh] 编译完成: $EX_BIN"
 }
 
-# ---------- 定位 launch json(取版本号最高的一件, 免随 KVER 手工同步) ----------
+# ---------- 定位 launch json(固定构建产物名称) ----------
 find_launch_json()
 {
-    ls -v "$KERNEL_DIR"/libmf_sdma_orch_v*.json 2>/dev/null | tail -n 1 || true
+    if [ -f "$KERNEL_DIR/libmf_sdma_orch_launch.json" ]; then
+        echo "$KERNEL_DIR/libmf_sdma_orch_launch.json"
+    fi
 }
 
 # ---------- 运行(设备侧零手工部署: 建池时库内自动迁移+校验) ----------
@@ -121,7 +123,7 @@ run_example()
     local json # launch json 绝对路径(为空表示主构建未产出)
     json="$(find_launch_json)"
     if [ -z "$json" ]; then
-        echo "FAIL: 未找到 launch json(先完成主构建): $KERNEL_DIR/libmf_sdma_orch_v*.json"
+        echo "FAIL: 未找到 launch json(先完成主构建): $KERNEL_DIR/libmf_sdma_orch_launch.json"
         exit 1
     fi
     if [ ! -x "$EX_BIN" ]; then

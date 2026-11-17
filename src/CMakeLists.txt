@@ -13,11 +13,6 @@ add_compile_options(-Wunused-variable -Wunused-value -Wcast-align)
 add_compile_options(-fpermissive -Wno-error)
 add_compile_options(-Wcast-qual -Winvalid-pch -Wwrite-strings -Wsign-compare -Wfloat-equal -Wextra -Wno-deprecated-declarations)
 
-# 310P sdma orchestrator 设备侧版本号(提前声明: hybm/csrc 的缺省 json 名经编译宏引用,
-# 而 hybmm_objects 的求值早于 hybm/ops/hybm_kernel 的同名 CACHE set;
-# hybm/ops/hybm_kernel 处亦有 set, CACHE 幂等不冲突)
-set(MF_SDMA_ORCH_KVER "32" CACHE STRING "310P sdma orchestrator kernel device-side version (CP1 dlopen cache busting)")
-
 add_subdirectory(acc_links/csrc)
 add_subdirectory(util/csrc/ptracer)
 add_subdirectory(smem/csrc/config_store)
@@ -27,7 +22,7 @@ add_subdirectory(acc_offload/csrc)
 
 # ---- AICPU 编排 kernel(随主构建一并产出, 免独立构建步骤) ----
 # 产物: <build>/src/hybm/ops/hybm_kernel/{libmf_sdma_orch.so, libmf_sdma_orch.json,
-#       libmf_sdma_orch_v4.json} + A3 血统 libcann_hybm_kernel.*(安装至
+#       libmf_sdma_orch_launch.json} + A3 血统 libcann_hybm_kernel.*(安装至
 #       ${TARGET_INSTALL_DIR}/hybm/aicpu_kernel/, 与运行时安装前缀发现路径一致)
 # 门控: 仅 NPU 构建; CANN 交叉工具链(hcc)缺失时优雅跳过(如无 CANN 的 CI 环境),
 #       不阻断主库构建

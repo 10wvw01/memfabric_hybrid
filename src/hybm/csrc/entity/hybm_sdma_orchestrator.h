@@ -106,9 +106,10 @@ private:
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
+    Result PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson);
     Result LoadOrchestratorKernel();       /* json 解析 + 部署探测 + 自动部署后加载 */
     Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
-    Result DeployOrchestratorKernel(const std::string &launchJsonPath, const std::string &dst); /* 自动部署 */
+    Result DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath); /* 自动部署 */
     Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
     Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
     /* KFC 通道执行一条设备 OS 命令; probe=true 时"文件缺失"退出码降级为 INFO(首轮探测预期, 仅部署链内部使用) */
@@ -119,6 +120,8 @@ private:
     void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
     void Cleanup();                        /* 逆序清理(锁内, 归零时) */
 
+    std::string deviceSoName_;      // 本次加载专用的设备文件名
+    bool deviceSoOwned_{false};     // 仅清理本次部署创建的文件
     std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行(ready_/workspace_ 另以原子保护) */
     uint32_t refCount_{0};          /* 引用计数(entity 池级) */
     bool configured_{false};        /* 保留区已配置 + 搬运 kernel 已下发(ConfigureOrch 一次绑定) */
