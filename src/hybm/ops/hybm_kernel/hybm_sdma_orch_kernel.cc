@@ -55,8 +55,7 @@
  * 同队列 FIFO 保证 ⓪②③ 晚于 ① 落地; 对端 AICore 经 smem_shm_sdma_wait 按序消费。
  *
  * SQE 64B 配方为 STARS V2 布局(hcomm AddOneMemcpySqeV2 逐字段比对+真机校验);
- * 配方与固件强耦合: 改动必须实机验证并 bump MF_SDMA_ORCH_KVER 重部署
- * (CP1 按文件名 dlopen 缓存, 同名不重载)。
+ * 配方与固件强耦合，改动须实机验证。设备加载名称由运行时自动生成。
  */
 
 #include <cstdint>

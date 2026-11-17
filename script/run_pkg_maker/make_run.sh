@@ -75,6 +75,12 @@ cp "${OUTPUT_DIR}"/smem/lib64/* ${PKG_DIR}/"${ARCH_OS}"/lib64
 # hybm
 cp -r "${OUTPUT_DIR}"/hybm/include/* ${PKG_DIR}/include/hybm/
 cp "${OUTPUT_DIR}"/hybm/lib64/libmf_hybm_core.so ${PKG_DIR}/"${ARCH_OS}"/lib64/
+if [ "${XPU_TYPE}" = "NPU" ] && [ -f "${OUTPUT_DIR}/hybm/aicpu_kernel/libmf_sdma_orch.so" ]; then
+    mkdir -p "${PKG_DIR}/${ARCH_OS}/hybm/aicpu_kernel"
+    for asset in libmf_sdma_orch.so libmf_sdma_orch.json libmf_sdma_orch_launch.json; do
+        cp "${OUTPUT_DIR}/hybm/aicpu_kernel/${asset}" "${PKG_DIR}/${ARCH_OS}/hybm/aicpu_kernel/"
+    done
+fi
 cp -r "${PROJECT_DIR}"/src/hybm/csrc/copy_extend ${PKG_DIR}
 # accoffload extend source (AscendC kernel + torch_npu adapter), compiled at install time
 mkdir -p ${PKG_DIR}/accoffload_operators

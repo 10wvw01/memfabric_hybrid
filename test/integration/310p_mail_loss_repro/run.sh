@@ -106,10 +106,12 @@ build_example()
     echo "[run.sh] 编译完成: $EX_BIN"
 }
 
-# 选择版本号最大的 AICPU kernel 启动配置。
+# 使用固定名称的 AICPU kernel 启动配置。
 find_launch_json()
 {
-    ls -v "$KERNEL_DIR"/libmf_sdma_orch_v*.json 2>/dev/null | tail -n 1 || true
+    if [ -f "$KERNEL_DIR/libmf_sdma_orch_launch.json" ]; then
+        echo "$KERNEL_DIR/libmf_sdma_orch_launch.json"
+    fi
 }
 
 # 两个 rank 分别使用 base 和 base+1 指定的设备。
@@ -118,7 +120,7 @@ run_example()
     local json
     json="$(find_launch_json)"
     if [ -z "$json" ]; then
-        echo "ERROR: 未找到 launch json(先完成主构建): $KERNEL_DIR/libmf_sdma_orch_v*.json"
+        echo "ERROR: 未找到 launch json(先完成主构建): $KERNEL_DIR/libmf_sdma_orch_launch.json"
         exit 1
     fi
     if [ ! -x "$EX_BIN" ]; then
