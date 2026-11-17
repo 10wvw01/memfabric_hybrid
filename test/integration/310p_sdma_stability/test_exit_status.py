@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""检查310P SDMA稳定性测试的错误退出，固定使用设备0/1。
+"""检查310P SDMA稳定性测试的错误退出。
 
 需要加载CANN环境，并提供编译后的测试程序和AICPU kernel启动配置。
 通过临时预加载库改变host收到的接口返回值，检查失败时的退出码。
@@ -129,9 +129,10 @@ class StabilityExitStatusTest(unittest.TestCase):
 
     def run_case(self, mode, expected, rank=None):
         env = os.environ.copy()
-        for name in ("ASCEND_RT_VISIBLE_DEVICES", "DEVICE_ID", "STABILITY_TEST_RANK"):
+        for name in ("DEVICE_ID", "STABILITY_TEST_RANK", "STABILITY_TEST_MODE"):
             env.pop(name, None)
         env.update(
+            TEST_DEVICE_BASE=str(ARGS.device_base),
             STRESS_ROUNDS="7",
             MF_SDMA_ORCH_JSON=str(ARGS.kernel_json),
             MF_SDMA_ORCH_EPOCH_BUDGET_S="1",
@@ -143,13 +144,24 @@ class StabilityExitStatusTest(unittest.TestCase):
             env["STABILITY_TEST_RANK"] = str(rank)
         command = ["mpirun"] + (["--allow-run-as-root"] if os.geteuid() == 0 else [])
         command += ["-np", "2", str(ARGS.binary)]
-        returncode, output = self.execute_mpi(command, env)
+        returncode, output, timed_out = self.execute_mpi(command, env)
         if ARGS.log_dir:
             label = mode + ("_rank" + str(rank) if rank is not None else "")
             (ARGS.log_dir / (label + ".log")).write_text(output)
             (ARGS.log_dir / (label + ".json")).write_text(
-                json.dumps({"exit": returncode, "mode": mode, "rank": rank}, indent=2)
+                json.dumps(
+                    {
+                        "exit": returncode,
+                        "mode": mode,
+                        "rank": rank,
+                        "timed_out": timed_out,
+                        "device_base": ARGS.device_base,
+                        "visible_devices": env.get("ASCEND_RT_VISIBLE_DEVICES"),
+                    },
+                    indent=2,
+                )
             )
+        self.assertFalse(timed_out, "MPI任务未在45秒内结束\n" + output)
         self.assertEqual(returncode, expected, output)
         if expected == 0:
             for rank_id in (0, 1):
@@ -165,17 +177,18 @@ class StabilityExitStatusTest(unittest.TestCase):
             text=True,
             start_new_session=True,
         )
+        timed_out = False
         try:
             output, _ = process.communicate(timeout=45)
         except subprocess.TimeoutExpired:
+            timed_out = True
             os.killpg(process.pid, signal.SIGTERM)
             try:
                 output, _ = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 output, _ = process.communicate()
-            self.fail("MPI任务未在45秒内结束\n" + output)
-        return process.returncode, output
+        return process.returncode, output, timed_out
 
     def test_stream_creation_failure(self):
         self.run_case("create_error", 1)
@@ -219,7 +232,15 @@ if __name__ == "__main__":
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--kernel-json", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path)
+    parser.add_argument(
+        "--device-base",
+        type=int,
+        default=os.environ.get("TEST_DEVICE_BASE", "0"),
+        help="rank 0的设备索引，rank 1使用下一索引；默认读取TEST_DEVICE_BASE，未设置时为0",
+    )
     ARGS, remaining = parser.parse_known_args()
+    if not 0 <= ARGS.device_base < 65535:
+        parser.error("--device-base须在0到65534之间")
     ARGS.binary = ARGS.binary.resolve(strict=True)
     ARGS.kernel_json = ARGS.kernel_json.resolve(strict=True)
     if ARGS.log_dir:

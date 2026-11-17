@@ -65,10 +65,12 @@ STRESS_ROUNDS使用正整数，默认30000。TEST_DEVICE_BASE默认0，
 
 ## 错误退出回归测试
 
-编译后，在同样的CANN环境和设备条件下运行：
+编译后，在同样的CANN环境下选择空闲的同卡两个die，例如设备2/3：
 
 ```bash
+unset ASCEND_RT_VISIBLE_DEVICES
 python3 test/integration/310p_sdma_stability/test_exit_status.py \
+  --device-base 2 \
   --binary /tmp/mf_310p_sdma_stability \
   --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json
 ```
@@ -78,6 +80,11 @@ python3 test/integration/310p_sdma_stability/test_exit_status.py \
 单个rank失败后的任务退出，以及正常完成对照。
 
 运行需要C编译器，可通过--log-dir指定日志目录。
+
+设备起始索引也可通过TEST_DEVICE_BASE设置，--device-base优先。脚本保留
+ASCEND_RT_VISIBLE_DEVICES，设备索引按该变量指定的可见设备列表解释。
+默认选择设备0/1；选择当前容器的设备2/3时，先清除不需要的可见性映射。
+每个MPI任务限时45秒，超时仍判为失败；指定--log-dir时保存该项输出、退出码及超时标记。
 
 ## 相关代码
 

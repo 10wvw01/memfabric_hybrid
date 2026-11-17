@@ -37,7 +37,7 @@
  * 入口名经参数传入(默认 HybmSdmaOrchEpoch, 与产品 json functionName 一致)。
  * 机制: aclrtBinaryLoadFromFile(cpuMode=1) 本身不落盘 —— aclrtBinaryGetFunction 才触发
  *       CopySoAndNameToCurrentDevice → batchLoadsoFrombuf → 设备写
- *       /home/CustAiCpuUser/lib/<so名>.<devId>.<vfId>.<hostPid>;
+ *       /home/CustAiCpuUser/cust_aicpu_<dieId>_<vfId>_<hostPid>/<so名> 专属链接;
  *       随后 sleep 保活(迁移进程退出会触发清理链延迟删除设备侧文件)。
  * 说明: 产品库初始化已内置自动部署(见 hybm_sdma_orchestrator.cpp); 本工具用于
  *       预部署、部署链排查与库外 kernel 的手动落盘。
