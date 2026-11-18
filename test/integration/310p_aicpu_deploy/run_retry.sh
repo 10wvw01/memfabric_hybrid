@@ -7,7 +7,7 @@ mkdir -p "$LOG_DIR"
 LOG_DIR="$(realpath "$LOG_DIR")"
 KERNEL_DIR="$ROOT/build/src/hybm/ops/hybm_kernel"
 export LD_LIBRARY_PATH="$ROOT/build/src/smem/csrc:$ROOT/build/src/hybm/csrc:$ASCEND_HOME_PATH/lib64:${LD_LIBRARY_PATH:-}"
-unset ASCEND_RT_VISIBLE_DEVICES MF_SDMA_ORCH_DIR
+unset ASCEND_RT_VISIBLE_DEVICES
 read -r -a mpi_compile <<< "$("${MPI_CXX:-mpicxx}" --showme:compile)"
 read -r -a mpi_link <<< "$("${MPI_CXX:-mpicxx}" --showme:link)"
 cd "$LOG_DIR"
@@ -39,7 +39,7 @@ for mode in missing-so invalid-json channel verify; do
     launch_task()
     {
         timeout --kill-after=10s 180s "${mpi_run[@]}" -np 2 bash -c '
-            export MF_SDMA_ORCH_JSON="$TEST_CASE_DIR/rank$OMPI_COMM_WORLD_RANK/libmf_sdma_orch_launch.json"
+            export MF_SDMA_ORCH_DIR="$TEST_CASE_DIR/rank$OMPI_COMM_WORLD_RANK"
             if [[ ( "$TEST_CASE_MODE" == channel || "$TEST_CASE_MODE" == verify ) && "$EXPECT_FAILURE" == 1 ]]; then
                 export LD_PRELOAD="$RETRY_INJECTOR${LD_PRELOAD:+:$LD_PRELOAD}"
                 if [[ "$OMPI_COMM_WORLD_RANK" == 0 ]]; then

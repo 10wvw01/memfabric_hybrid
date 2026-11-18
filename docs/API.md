@@ -854,7 +854,7 @@ SMEM_SHM_SDMA_OP_ADD_FP32，按浮点逐元素执行 dst += src。get 仅支持 
 08 示例展示设备内往返与批量 NBI；09 示例展示主机栅栏确认源就绪后的四 rank get allreduce。
 部署时公开头、Host 库及 AICPU kernel 使用同一次构建的产物；建池会核对 kernel 协议标识。
 设置 MF_SDMA_ORCH_DIR 可递归查找同一子目录中的编排 SO、迁移 JSON 和 launch JSON；
-缺失或发现多套完整产物时初始化失败。未设置时沿用 MF_SDMA_ORCH_JSON 和自动发现。
+缺失或发现多套完整产物时初始化失败。未设置时依次从库安装目录、当前目录自动发现。
 环境变量见 docs/environment_variables.md。
 
 > [!CAUTION] 注意

@@ -185,10 +185,12 @@ protected:
         char path[] = "/tmp/mf_artifact_dir_XXXXXX";
         ASSERT_NE(mkdtemp(path), nullptr);
         root = path;
+        originalDirectory = std::filesystem::current_path();
     }
     void TearDown() override
     {
         std::error_code error;
+        std::filesystem::current_path(originalDirectory, error);
         std::filesystem::remove_all(root, error);
     }
     std::filesystem::path CreateArtifacts(const std::string &relative)
@@ -203,13 +205,14 @@ protected:
     }
     SdmaOrchestrator prep;
     std::filesystem::path root;
+    std::filesystem::path originalDirectory;
 };
 
 TEST_F(SdmaArtifactDirectoryTest, FindsArtifactsInNestedDirectory)
 {
     const auto directory = CreateArtifacts("install tree/aarch64-linux/hybm/aicpu_kernel");
     std::string json;
-    ASSERT_EQ(prep.ResolveOrchestratorJson(root.string(), "", json), BM_OK);
+    ASSERT_EQ(prep.ResolveOrchestratorJson(root.string(), json), BM_OK);
     EXPECT_EQ(json, (directory / "libmf_sdma_orch_launch.json").string());
 }
 
@@ -219,11 +222,11 @@ TEST_F(SdmaArtifactDirectoryTest, AcceptsArtifactDirectoryAndRootSymlink)
     const auto alias = root / "latest";
     std::filesystem::create_directory_symlink(directory, alias);
     std::string json;
-    ASSERT_EQ(prep.ResolveOrchestratorJson(directory.string(), "", json), BM_OK);
+    ASSERT_EQ(prep.ResolveOrchestratorJson(directory.string(), json), BM_OK);
     EXPECT_EQ(json, (directory / "libmf_sdma_orch_launch.json").string());
-    ASSERT_EQ(prep.ResolveOrchestratorJson(alias.string(), "", json), BM_OK);
+    ASSERT_EQ(prep.ResolveOrchestratorJson(alias.string(), json), BM_OK);
     EXPECT_EQ(json, (directory / "libmf_sdma_orch_launch.json").string());
-    ASSERT_EQ(prep.ResolveOrchestratorJson(root.string(), "", json), BM_OK);
+    ASSERT_EQ(prep.ResolveOrchestratorJson(root.string(), json), BM_OK);
     EXPECT_EQ(json, (directory / "libmf_sdma_orch_launch.json").string());
 }
 
@@ -234,7 +237,7 @@ TEST_F(SdmaArtifactDirectoryTest, MissingFilesRejectInitializationPath)
         const auto directory = CreateArtifacts(name);
         std::filesystem::remove(directory / name);
         std::string json = "stale result";
-        EXPECT_EQ(prep.ResolveOrchestratorJson(directory.string(), "", json), BM_FILE_NOT_ACCESS) << name;
+        EXPECT_EQ(prep.ResolveOrchestratorJson(directory.string(), json), BM_FILE_NOT_ACCESS) << name;
         EXPECT_TRUE(json.empty());
     }
 }
@@ -244,9 +247,9 @@ TEST_F(SdmaArtifactDirectoryTest, RejectsEmptyMissingAndFileDirectories)
     const auto file = root / "file";
     std::ofstream(file) << "not a directory";
     std::string json;
-    EXPECT_EQ(prep.ResolveOrchestratorJson(root.string(), "", json), BM_FILE_NOT_ACCESS);
-    EXPECT_EQ(prep.ResolveOrchestratorJson((root / "missing").string(), "", json), BM_FILE_NOT_ACCESS);
-    EXPECT_EQ(prep.ResolveOrchestratorJson(file.string(), "", json), BM_FILE_NOT_ACCESS);
+    EXPECT_EQ(prep.ResolveOrchestratorJson(root.string(), json), BM_FILE_NOT_ACCESS);
+    EXPECT_EQ(prep.ResolveOrchestratorJson((root / "missing").string(), json), BM_FILE_NOT_ACCESS);
+    EXPECT_EQ(prep.ResolveOrchestratorJson(file.string(), json), BM_FILE_NOT_ACCESS);
 }
 
 TEST_F(SdmaArtifactDirectoryTest, RejectsMultipleCompleteArtifactDirectories)
@@ -254,23 +257,26 @@ TEST_F(SdmaArtifactDirectoryTest, RejectsMultipleCompleteArtifactDirectories)
     CreateArtifacts("version1/kernel");
     CreateArtifacts("version2/kernel");
     std::string json;
-    EXPECT_EQ(prep.ResolveOrchestratorJson(root.string(), "", json), BM_FILE_NOT_ACCESS);
+    EXPECT_EQ(prep.ResolveOrchestratorJson(root.string(), json), BM_FILE_NOT_ACCESS);
     EXPECT_TRUE(json.empty());
 }
 
-TEST_F(SdmaArtifactDirectoryTest, DirectoryTakesPriorityWithoutFallbackToExplicitJson)
+TEST_F(SdmaArtifactDirectoryTest, ExplicitDirectoryDoesNotFallbackToCurrentDirectory)
 {
     const auto directory = CreateArtifacts("kernel");
-    const auto explicitJson = root / "explicit.json";
-    std::ofstream(explicitJson) << "{}";
+    std::filesystem::current_path(directory);
     std::string json;
-    ASSERT_EQ(prep.ResolveOrchestratorJson(root.string(), explicitJson.string(), json), BM_OK);
-    EXPECT_EQ(json, (directory / "libmf_sdma_orch_launch.json").string());
-    EXPECT_EQ(prep.ResolveOrchestratorJson((root / "missing").string(), explicitJson.string(), json),
-              BM_FILE_NOT_ACCESS);
+    EXPECT_EQ(prep.ResolveOrchestratorJson((root / "missing").string(), json), BM_FILE_NOT_ACCESS);
     EXPECT_TRUE(json.empty());
-    ASSERT_EQ(prep.ResolveOrchestratorJson("", explicitJson.string(), json), BM_OK);
-    EXPECT_EQ(json, explicitJson.string());
+}
+
+TEST_F(SdmaArtifactDirectoryTest, UnconfiguredDirectoryFindsCurrentDirectoryArtifacts)
+{
+    const auto directory = CreateArtifacts("kernel");
+    std::filesystem::current_path(directory);
+    std::string json;
+    ASSERT_EQ(prep.ResolveOrchestratorJson("", json), BM_OK);
+    EXPECT_EQ(json, (directory / "libmf_sdma_orch_launch.json").string());
 }
 
 TEST_F(SdmaArtifactDirectoryTest, RejectsDirectoryInPlaceOfKernelFile)
@@ -280,7 +286,7 @@ TEST_F(SdmaArtifactDirectoryTest, RejectsDirectoryInPlaceOfKernelFile)
     std::filesystem::remove(kernel);
     std::filesystem::create_directory(kernel);
     std::string json;
-    EXPECT_EQ(prep.ResolveOrchestratorJson(root.string(), "", json), BM_FILE_NOT_ACCESS);
+    EXPECT_EQ(prep.ResolveOrchestratorJson(root.string(), json), BM_FILE_NOT_ACCESS);
 }
 
 /* 用例 1: Acquire 在资源缺失环境(UT stub)必然失败, 且失败后状态干净可重试 */

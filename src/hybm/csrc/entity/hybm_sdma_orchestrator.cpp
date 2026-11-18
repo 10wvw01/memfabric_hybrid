@@ -335,21 +335,20 @@ static Result FindOrchestratorJson(const std::string &directory, std::string &js
     return BM_OK;
 }
 
-Result SdmaOrchestrator::ResolveOrchestratorJson(const std::string &directory, const std::string &explicitJson,
-                                                std::string &jsonPath)
+Result SdmaOrchestrator::ResolveOrchestratorJson(const std::string &directory, std::string &jsonPath)
 {
     jsonPath.clear();
     if (!directory.empty()) {
         return FindOrchestratorJson(directory, jsonPath);
     }
-    std::string candidate = explicitJson.empty() ? FindInstalledJson() : explicitJson;
+    std::string candidate = FindInstalledJson();
     if (candidate.empty()) {
         candidate = HYBM_SDMA_ORCH_DEFAULT_JSON;
     }
     char resolved[PATH_MAX] = {0};
     if (realpath(candidate.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) {
         BM_LOG_ERROR("sdma orchestrator json not accessible: " << candidate
-                     << " (set MF_SDMA_ORCH_DIR or MF_SDMA_ORCH_JSON)");
+                     << " (set MF_SDMA_ORCH_DIR)");
         return BM_FILE_NOT_ACCESS;
     }
     jsonPath = resolved;
@@ -359,7 +358,7 @@ Result SdmaOrchestrator::ResolveOrchestratorJson(const std::string &directory, c
 Result SdmaOrchestrator::LoadOrchestratorKernel()
 {
     std::string jsonPath;
-    auto ret = ResolveOrchestratorJson(env::MF_SDMA_ORCH_DIR, env::MF_SDMA_ORCH_JSON, jsonPath);
+    auto ret = ResolveOrchestratorJson(env::MF_SDMA_ORCH_DIR, jsonPath);
     if (ret != BM_OK) {
         return ret;
     }

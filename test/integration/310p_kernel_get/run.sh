@@ -9,7 +9,7 @@ echo "Logs: $LOG_DIR"
 RUN_PACKAGE="${RUN_PACKAGE:-$ROOT/output/memfabric_hybrid-$(tr -d '[:space:]' < "$ROOT/VERSION")_linux_aarch64.run}"
 python3 -m venv --system-site-packages "$LOG_DIR/venv"
 export PATH="$LOG_DIR/venv/bin:$PATH"
-unset PYTHONPATH MF_SDMA_ORCH_DIR MF_SDMA_ORCH_JSON MEMFABRIC_HYBRID_HOME_PATH MEMFABRIC_HYBRID_EXTEND_LIB_PATH
+unset PYTHONPATH MF_SDMA_ORCH_DIR MEMFABRIC_HYBRID_HOME_PATH MEMFABRIC_HYBRID_EXTEND_LIB_PATH
 bash "$RUN_PACKAGE" --install-path="$LOG_DIR/install" > "$LOG_DIR/install.log" 2>&1
 source "$LOG_DIR/install/memfabric_hybrid/set_env.sh"
 include="$MEMFABRIC_HYBRID_HOME_PATH/include"

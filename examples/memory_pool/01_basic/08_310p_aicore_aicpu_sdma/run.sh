@@ -109,31 +109,17 @@ build_example()
     echo "[run.sh] 编译完成: $EX_BIN"
 }
 
-# ---------- 定位 launch json(固定构建产物名称) ----------
-find_launch_json()
-{
-    if [ -f "$KERNEL_DIR/libmf_sdma_orch_launch.json" ]; then
-        echo "$KERNEL_DIR/libmf_sdma_orch_launch.json"
-    fi
-}
-
 # ---------- 运行(设备侧零手工部署: 建池时库内自动迁移+校验) ----------
 run_example()
 {
-    local json # launch json 绝对路径(为空表示主构建未产出)
-    json="$(find_launch_json)"
-    if [ -z "$json" ]; then
-        echo "FAIL: 未找到 launch json(先完成主构建): $KERNEL_DIR/libmf_sdma_orch_launch.json"
-        exit 1
-    fi
     if [ ! -x "$EX_BIN" ]; then
         echo "FAIL: 示例未编译(先跑 bash run.sh 或 bash run.sh --build-only): $EX_BIN"
         exit 1
     fi
-    export MF_SDMA_ORCH_JSON="$json" # 显式指定 launch json(免依赖 CWD 与安装前缀发现)
+    export MF_SDMA_ORCH_DIR="${MF_SDMA_ORCH_DIR:-$KERNEL_DIR}"
     export LD_LIBRARY_PATH="$CANN_LIB:$MPI_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" # 运行期库搜索路径
     echo "[run.sh] 运行: $MPI_RUN -np 2 $EX_BIN"
-    echo "[run.sh] launch json: $json"
+    echo "[run.sh] AICPU产物目录: $MF_SDMA_ORCH_DIR"
     if [ "$(id -u)" -eq 0 ]; then # root 用户需显式放行
         exec "$MPI_RUN" --allow-run-as-root -np 2 "$EX_BIN"
     fi
