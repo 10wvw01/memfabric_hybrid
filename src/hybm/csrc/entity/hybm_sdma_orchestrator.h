@@ -109,6 +109,7 @@ private:
     Result PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson);
     Result LoadOrchestratorKernel();       /* json 解析 + 部署探测 + 自动部署后加载 */
     Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
+    Result PreloadKernel(); /* 普通短任务将同一 SO 预载到 CP1 全局符号空间 */
     Result DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath); /* 自动部署 */
     Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
     Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
@@ -139,6 +140,7 @@ private:
     aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
     aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchEpoch 函数句柄 */
     aclrtBinHandle custBinHandle_{nullptr}; /* CUST 迁移句柄(保活: 持至进程退出) */
+    aclrtBinHandle preloadBinHandle_{nullptr}; /* CP1 短预载入口句柄，保活同一 SO */
     aclrtFuncHandle kfcFuncHandle_{nullptr}; /* KFC 通道句柄缓存(首次装载后复用, 免每次部署重装) */
     std::atomic<bool> ready_{false};       /* 就绪标志(原子: 无锁读与锁内写并发) */
     std::atomic<uint64_t> workspace_{0};   /* 工作区设备地址(原子: 同上) */

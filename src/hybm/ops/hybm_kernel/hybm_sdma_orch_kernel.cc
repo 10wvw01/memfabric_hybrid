@@ -485,6 +485,13 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
 }
 } // namespace
 
+// A short ordinary AICPU task loads this SO into CP1 before KFC resolves
+// the resident entry through the process-global symbol table.
+extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchLoad(void *)
+{
+    return 0;
+}
+
 // kernel 入口: 按序消费请求环邮件(诊断模式跑到停止/错误; 正常模式到点自退)。
 // 返回 0 正常退出(停止); 1 错误退出(诊断见 result)。
 extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(void *args)

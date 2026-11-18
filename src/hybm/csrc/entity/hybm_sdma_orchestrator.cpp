@@ -46,6 +46,7 @@ constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;       /* 单 block(kernel 状态机单线程语义) */
 constexpr uint32_t HYBM_SDMA_ORCH_KFC_TIMEOUT_S = 25;  /* KFC 设备 shell 命令超时(部署链专用) */
 constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费 kernel 入口符号 */
+constexpr char HYBM_SDMA_ORCH_PRELOAD_FUNC[] = "HybmSdmaOrchLoad";
 constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_launch.json";
 constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
 constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
@@ -384,11 +385,64 @@ Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &kernelDir, 
     if (ret != BM_OK) {
         return ret;
     }
+    ret = PreloadKernel();
+    if (ret != BM_OK) {
+        return ret;
+    }
     ret = TryLoadKernel(launchJsonPath);
     if (ret != BM_OK) {
         BM_LOG_ERROR("kernel load failed after automatic deploy, ret: " << ret << " devId: " << devId_);
     }
     return ret;
+}
+
+Result SdmaOrchestrator::PreloadKernel()
+{
+    const std::string entry = HYBM_SDMA_ORCH_PRELOAD_FUNC;
+    const std::string content = "{\"" + entry + "\":{\"opInfo\":{\"opKernelLib\":\"AICPUKernel\","
+        "\"kernelSo\":\"" + deviceSoName_ + "\",\"functionName\":\"" + entry + "\"}}}";
+    std::string path = "/tmp/mf_preload_" + std::to_string(getpid()) + "_XXXXXX.json";
+    const int fd = mkstemps(&path[0], 5);
+    if (fd < 0) {
+        BM_LOG_ERROR("create preload json failed, errno: " << errno);
+        return BM_FILE_NOT_ACCESS;
+    }
+    const bool written = write(fd, content.data(), content.size()) == static_cast<ssize_t>(content.size());
+    const int closeRet = close(fd);
+    if (!written || closeRet != 0) {
+        (void)unlink(path.c_str());
+        return BM_FILE_NOT_ACCESS;
+    }
+    aclrtBinaryLoadOption option{};
+    option.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
+    option.value.cpuKernelMode = 0;
+    aclrtBinaryLoadOptions options{};
+    options.options = &option;
+    options.numOpt = 1;
+    auto ret = DlAclApi::AclrtBinaryLoadFromFile(path.c_str(), &options, &preloadBinHandle_);
+    (void)unlink(path.c_str());
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("CP1 preload binary load failed, ret: " << ret);
+        return ret;
+    }
+    aclrtFuncHandle function = nullptr;
+    ret = DlAclApi::AclrtBinaryGetFunction(preloadBinHandle_, entry.c_str(), &function);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("CP1 preload get function failed, ret: " << ret);
+        return ret;
+    }
+    uint64_t unused = 0;
+    ret = DlAclApi::AclrtLaunchKernelWithHostArgs(function, 1, launchStream_, nullptr,
+                                                &unused, sizeof(unused), nullptr, 0);
+    if (ret == BM_OK) {
+        ret = DlAclApi::AclrtSynchronizeStream(launchStream_);
+    }
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("CP1 preload execution failed, ret: " << ret << " so: " << deviceSoName_);
+        return ret;
+    }
+    BM_LOG_INFO("CP1 preload completed, devId: " << devId_ << " so: " << deviceSoName_);
+    return BM_OK;
 }
 
 Result SdmaOrchestrator::MigrateViaCustChannel(const std::string &dir, uint64_t &soSize)
@@ -842,6 +896,7 @@ void SdmaOrchestrator::Cleanup()
     binHandle_ = nullptr;
     funcHandle_ = nullptr;
     custBinHandle_ = nullptr;
+    preloadBinHandle_ = nullptr;
     refCount_ = 0;
     sqId_ = 0;
     streamId_ = 0;
