@@ -732,12 +732,25 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
         BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ACL import step2: ret:" << ret
                              << " handle:" << aclHandle << " rank:" << im.rankId << " deviceId:" << deviceId_);
         if (ret != BM_OK || aclHandle == nullptr) {
-            BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 ACL import failed:" << ret << " rank:" << im.rankId
-                                  << " sameCard:" << sameCard << " deviceId:" << deviceId_
-                                  << " segType:" << options_.segType);
-            /* lva stays in reservedLva_ (released by UnReserveMemorySpace);
-             * pre-releasing causes double-free. */
-            return BM_ERROR;
+            /* 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR) with a valid handle on
+             * the same card: the import runs the P2P-enable ioctl internally
+             * and the kernel driver rejects P2P between same-card dies
+             * (shared PCIe) -- MemSegment::EnableRemotePeerAccess documents
+             * exactly this and treats it as safe to ignore. Same verdict
+             * here: the handle is still returned, continue with map+grant.
+             * Anything else (or no handle) is a real failure. */
+            bool sameCardP2PRejected = (ret == ACL_ERROR_RT_DRV_INTERNAL_ERROR) && aclHandle != nullptr && sameCard;
+            if (sameCardP2PRejected) {
+                BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ACL import: same-card cross-die P2P rejected "
+                                                     "(507899), safe to ignore, rank:" << im.rankId);
+            } else {
+                BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 ACL import failed:" << ret << " rank:" << im.rankId
+                                      << " sameCard:" << sameCard << " deviceId:" << deviceId_
+                                      << " segType:" << options_.segType);
+                /* lva stays in reservedLva_ (released by UnReserveMemorySpace);
+                 * pre-releasing causes double-free. */
+                return BM_ERROR;
+            }
         }
         halHandle = reinterpret_cast<drv_mem_handle_t *>(aclHandle);
     } else {
