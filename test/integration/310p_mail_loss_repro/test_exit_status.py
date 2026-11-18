@@ -142,6 +142,7 @@ class MailLossExitStatusTest(unittest.TestCase):
 
     def run_case(self, mode, expected, gens=7, rank=None):
         env = os.environ.copy()
+        env.pop("MF_SDMA_ORCH_DIR", None)
         env.pop("EX09_TEST_RANK", None)
         env.pop("EX09_TEST_MODE", None)
         env.update(

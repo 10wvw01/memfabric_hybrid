@@ -7,7 +7,7 @@ mkdir -p "$LOG_DIR"
 LOG_DIR="$(realpath "$LOG_DIR")"
 KERNEL_DIR="$ROOT/build/src/hybm/ops/hybm_kernel"
 export LD_LIBRARY_PATH="$ROOT/build/src/smem/csrc:$ROOT/build/src/hybm/csrc:$ASCEND_HOME_PATH/lib64:${LD_LIBRARY_PATH:-}"
-unset ASCEND_RT_VISIBLE_DEVICES
+unset ASCEND_RT_VISIBLE_DEVICES MF_SDMA_ORCH_DIR
 read -r -a mpi_compile <<< "$("${MPI_CXX:-mpicxx}" --showme:compile)"
 read -r -a mpi_link <<< "$("${MPI_CXX:-mpicxx}" --showme:link)"
 cd "$LOG_DIR"

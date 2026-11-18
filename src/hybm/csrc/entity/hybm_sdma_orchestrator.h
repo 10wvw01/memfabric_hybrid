@@ -107,6 +107,8 @@ private:
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
     Result PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson);
+    static Result ResolveOrchestratorJson(const std::string &directory, const std::string &explicitJson,
+                                          std::string &jsonPath);
     Result LoadOrchestratorKernel();       /* json 解析 + 部署探测 + 自动部署后加载 */
     Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
     Result DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath); /* 自动部署 */

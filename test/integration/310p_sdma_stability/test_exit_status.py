@@ -129,6 +129,7 @@ class StabilityExitStatusTest(unittest.TestCase):
 
     def run_case(self, mode, expected, rank=None):
         env = os.environ.copy()
+        env.pop("MF_SDMA_ORCH_DIR", None)
         for name in ("DEVICE_ID", "STABILITY_TEST_RANK", "STABILITY_TEST_MODE"):
             env.pop(name, None)
         env.update(
