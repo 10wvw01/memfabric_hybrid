@@ -675,12 +675,29 @@ Result HybmVmmBasedSegment::MmapImport310P(const HostSdmaExportInfo &im, uint64_
                          << " ret:" << ret << " handle:" << halHandle << " rank:" << im.rankId
                          << " deviceId:" << deviceId_);
     if (ret != BM_OK || halHandle == nullptr) {
-        BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " rank:" << im.rankId
-                              << " sameCard:" << sameCard << " deviceId:" << deviceId_
-                              << " segType:" << options_.segType);
-        /* do NOT pre-release lva here: it stays in reservedLva_ and will be
-         * released by UnReserveMemorySpace. Pre-releasing causes double-free. */
-        return BM_ERROR;
+        /* 42 = DRV_ERROR_PROCESS_EXIT: the HAL export recorded the exporting
+         * process's CONTAINER pid; the driver checks that pid in the HOST
+         * namespace and does not find it. Probe the ACL path on the same
+         * wire handle: the ACL runtime records the HOST pid (it knows
+         * RtDeviceGetBareTgid), which is what the driver-side check wants.
+         * If the ACL import succeeds, the two wire formats are compatible
+         * and the export must switch to AclrtMemExportToShareableHandle;
+         * if it fails, the formats differ and the whole 310P segment path
+         * moves to the ACL VMM chain (hybm_alloc_vmm_buffer). */
+        aclrtDrvMemHandle aclHandle = nullptr;
+        auto aclRet = DlAclApi::AclrtMemImportFromShareableHandle(shareable, logicDeviceId_, &aclHandle);
+        BM_LOG_INFO("[rank " << options_.rankId << "] 310P3 ACL import fallback: ret:" << aclRet
+                             << " handle:" << aclHandle << " shareable:" << shareable);
+        if (aclRet == BM_OK && aclHandle != nullptr) {
+            halHandle = reinterpret_cast<drv_mem_handle_t *>(aclHandle);
+        } else {
+            BM_LOG_ERROR("[rank " << options_.rankId << "] 310P3 import failed:" << ret << " aclRet:" << aclRet
+                                  << " rank:" << im.rankId << " sameCard:" << sameCard
+                                  << " deviceId:" << deviceId_ << " segType:" << options_.segType);
+            /* do NOT pre-release lva here: it stays in reservedLva_ and will be
+             * released by UnReserveMemorySpace. Pre-releasing causes double-free. */
+            return BM_ERROR;
+        }
     }
     mapHandle = halHandle;
     ret = DlHalApi::HalMemMap(reinterpret_cast<void *>(lva), im.size, 0,
