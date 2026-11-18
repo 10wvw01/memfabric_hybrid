@@ -122,29 +122,174 @@ TEST_F(SdmaSqCapacityTest, QueueWithSpaceDoesNotPublishEarly)
     EXPECT_EQ(context.sqTail, 7U);
 }
 
-TEST_F(SdmaSqCapacityTest, WholeRequestReservesSpaceBeforeWritingDescriptors)
+TEST_F(SdmaSqCapacityTest, WholeTransferReservesSpaceBeforeWritingDescriptors)
 {
-    context.sqTail = 4;
-    nextHead = 4;
+    context.sqTail = 6;
+    nextHead = 6;
     ock::mf::HybmSdmaReqMail mail{};
-    EXPECT_EQ(issueMailSqes(&param, &context, 0, 0, mail, 0, 0, 0, 0, 0), 0);
+    EXPECT_EQ(issueMailSqes(&param, &context, 0, 0, mail, 0, 0, 0), 0);
     EXPECT_EQ(configCount, 1U);
-    EXPECT_EQ(publishedTail, 4U);
+    EXPECT_EQ(publishedTail, 6U);
     EXPECT_EQ(queryCount, 1U);
     EXPECT_EQ(context.sqTail, 1U);
 }
 
-TEST_F(SdmaSqCapacityTest, PendingReceiveNotificationSurvivesQueueWrap)
+TEST_F(SdmaSqCapacityTest, PendingTransfersSurviveQueueWrap)
 {
     replayHardware = true;
-    context.sqTail = 4;
-    for (uint16_t task = 0; task < 4; ++task) {
+    context.sqTail = 6;
+    for (uint16_t task = 0; task < 6; ++task)
         std::memcpy(ring.data() + task * kSqeSize + 6, &task, 2);
-    }
     ock::mf::HybmSdmaReqMail mail{};
-    ASSERT_EQ(issueMailSqes(&param, &context, 0, 10, mail, 0, 0, 0, 0, 0), 0);
+    ASSERT_EQ(issueMailSqes(&param, &context, 0, 10, mail, 0, 0, 0), 0);
     ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
-    EXPECT_EQ(executedTasks, (std::vector<uint16_t>{0, 1, 2, 3, 14, 10, 11, 12, 13}));
+    EXPECT_EQ(executedTasks, (std::vector<uint16_t>{0, 1, 2, 3, 4, 5, 12, 10, 11}));
+}
+
+class SdmaDirectionTest : public SdmaSqCapacityTest {
+protected:
+    std::vector<uint64_t> reserved = std::vector<uint64_t>(SMEM_SHM_SDMA_RESERVED / sizeof(uint64_t), 0);
+    void SetUp() override
+    {
+        SdmaSqCapacityTest::SetUp();
+        param.rank = 0;
+        param.symSize = 64UL * 1024UL * 1024UL;
+        param.physSize = param.symSize;
+        param.poolBaseGva = 0x100000000ULL;
+        param.resBase = reinterpret_cast<uint64_t>(reserved.data());
+        context.sqTail = 0;
+        context.sqHead = 0;
+    }
+
+    void SetMail(bool isGet, uint64_t imm = 0)
+    {
+        auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(
+            param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+        const uint64_t local = param.poolBaseGva + 4096;
+        const uint64_t remote = param.poolBaseGva + param.symSize + 8192;
+        *mail = {isGet ? remote : local, isGet ? local : remote, (80 * 1024) | (1ULL << 63), imm};
+    }
+
+    uint64_t DescriptorAddress(uint32_t descriptor, uint32_t offset)
+    {
+        uint64_t value = 0;
+        std::memcpy(&value, ring.data() + descriptor * kSqeSize + offset, sizeof(value));
+        return value;
+    }
+};
+
+TEST_F(SdmaDirectionTest, GetUsesRemoteSourceAndLocalCompletion)
+{
+    SetMail(true);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(DescriptorAddress(0, 32), param.poolBaseGva + param.symSize + 8192);
+    EXPECT_EQ(DescriptorAddress(0, 40), param.poolBaseGva + 4096);
+    EXPECT_EQ(DescriptorAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_REQ_HEAD), 1U);
+}
+
+TEST_F(SdmaDirectionTest, PutRetainsRemoteDestinationAndAddOpcode)
+{
+    SetMail(false, (0x5244ULL << 48) | (0x02ULL << 40));
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(DescriptorAddress(0, 32), param.poolBaseGva + 4096);
+    EXPECT_EQ(DescriptorAddress(0, 40), param.poolBaseGva + param.symSize + 8192);
+    EXPECT_EQ(ring[16], 0x02);
+    EXPECT_EQ(context.sqTail, 2U);
+}
+
+TEST_F(SdmaDirectionTest, GetSupportsOrdinaryLocalDeviceMemory)
+{
+    SetMail(true);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->dst = 0x200000000ULL;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(DescriptorAddress(0, 40), 0x200000000ULL);
+}
+
+TEST_F(SdmaDirectionTest, PutSupportsOrdinaryLocalDeviceMemory)
+{
+    SetMail(false);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->src = 0x200000000ULL;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(DescriptorAddress(0, 32), 0x200000000ULL);
+}
+
+TEST_F(SdmaDirectionTest, GetRejectsAddBeforeSubmittingDescriptors)
+{
+    SetMail(true, (0x5244ULL << 48) | (0x02ULL << 40));
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+    EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaDirectionTest, RejectsRequestsWhoseEndpointsDoNotMatchTheQueue)
+{
+    SetMail(false);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->src += param.symSize;
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+    EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaDirectionTest, TransferPutUsesTwoDescriptorsAndNoArrival)
+{
+    SetMail(false);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->len |= 1ULL << 63;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(DescriptorAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+}
+
+TEST_F(SdmaDirectionTest, RejectsUndefinedLengthBitsAndReservedRange)
+{
+    SetMail(true);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->len |= 1ULL << 40;
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1331);
+    SetMail(true);
+    mail->src = param.poolBaseGva + param.symSize + param.physSize - SMEM_SHM_SDMA_RESERVED;
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+    EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaDirectionTest, UnmarkedRequestsRejected)
+{
+    SetMail(true);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->len &= UINT32_MAX;
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1334);
+    SetMail(false);
+    mail->len &= UINT32_MAX;
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1334);
+    EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaSqCapacityTest, TransferPairPadsZeroTailAndKeepsCompletionLast)
+{
+    context.sqTail = 6;
+    context.sqHead = 5;
+    ock::mf::HybmSdmaReqMail mail{0x1000, 0x2000, 4, 0};
+    ASSERT_EQ(issueMailSqes(&param, &context, 0, 7, mail, 0x3000, 0x4000, 0), 0);
+    EXPECT_EQ(context.sqTail, 1U);
+    uint64_t target = 0;
+    std::memcpy(&target, ring.data() + 40, 8);
+    EXPECT_EQ(target, 0x4000U);
+}
+
+TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
+{
+    const uint64_t seq = SMEM_SHM_SDMA_RS_STAGE_SLOTS;
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING +
+        (seq % SMEM_SHM_SDMA_RS_REQ_SLOTS) * sizeof(ock::mf::HybmSdmaReqMail));
+    *mail = {param.poolBaseGva + 4096, param.poolBaseGva + param.symSize + 8192, (1ULL << 63) | 4, 0};
+    const uint64_t stage = param.resBase + SMEM_SHM_SDMA_RS_STAGE;
+    storeCell(stage, 99);
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, seq), 1366);
+    EXPECT_EQ(loadCell(stage), 99U);
+    EXPECT_EQ(context.sqTail, 0U);
 }
 
 #else

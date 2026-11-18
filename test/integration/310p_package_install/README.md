@@ -6,7 +6,9 @@
 2. 创建独立环境，执行 `python -m pip install --no-deps --force-reinstall` 安装指定 wheel。
 
 两条路径分别导入 Python 包和扩展、通过 Python SHMEM API 建池、调用 AICore 测试算子，
-双 die 双向传输 128 KiB，默认执行 100 轮并逐字检查接收数据，最后释放内存池。
+双 die 通过同步 Get 互读 128 KiB，默认执行 100 轮并逐字检查数据，最后释放内存池。
+每轮先准备本端源数据，Python SHMEM 栅栏确认双方源就绪，再调用 Get；
+完成校验后的栅栏保护下一轮源缓冲复用。
 测试取消 MF_SDMA_ORCH_JSON，检查自动发现配置和 AICPU 部署、清理日志。
 同时校验导入包、扩展位于对应测试虚拟环境，且已安装三份 AICPU 产物。
 

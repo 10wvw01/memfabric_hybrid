@@ -53,7 +53,10 @@ def main():
     library = ctypes.CDLL(args.library)
     library.run_round.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_uint]
     library.run_round.restype = ctypes.c_int
+    library.prepare_round.argtypes = library.run_round.argtypes
+    library.prepare_round.restype = ctypes.c_int
     for iteration in range(rounds):
+        check(library.prepare_round(pool.gva, args.rank, 131072, iteration), "prepare_round")
         check(pool.barrier(), "barrier before")
         check(library.run_round(pool.gva, args.rank, 131072, iteration), "run_round")
         check(pool.barrier(), "barrier after")

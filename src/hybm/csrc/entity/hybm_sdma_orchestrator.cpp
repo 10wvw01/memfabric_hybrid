@@ -610,6 +610,21 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
         DestroyEpochResources();
         return ret;
     }
+    epochLaunched_ = true;
+    HybmSdmaOrchResult capability{};
+    for (uint32_t attempt = 0; attempt < 200; ++attempt) {
+        ret = DlAclApi::AclrtMemcpy(&capability, sizeof(capability),
+            reinterpret_cast<void *>(epochParam_.resultAddr), sizeof(capability), ACL_MEMCPY_DEVICE_TO_HOST);
+        if (ret != BM_OK || capability.magic != 0) { break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (ret != BM_OK || capability.magic != HYBM_SDMA_ORCH_RESULT_MAGIC ||
+        capability.exitReason != HYBM_SDMA_ORCH_EXIT_RUNNING) {
+        BM_LOG_ERROR("SDMA kernel protocol handshake failed, magic: " << capability.magic
+            << " expected: " << HYBM_SDMA_ORCH_RESULT_MAGIC << " ret: " << ret << " devId: " << devId_);
+        StopEpoch();
+        return BM_ERROR;
+    }
     configured_ = true; // 首轮已在设备运行
     epochLaunched_ = true;
     if (budgetS != HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT) {
