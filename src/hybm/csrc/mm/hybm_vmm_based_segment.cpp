@@ -95,21 +95,18 @@ Result HybmVmmBasedSegment::ReserveMemorySpace(void **address) noexcept
         manager.AllocReserveGva(options_.rankId, reserveGvaSize, totalLvaSize, mem_type, options_.enable56BitsGva);
     BM_ASSERT_LOG_AND_RETURN(gvaInfo.va[HVM_GVA] > 0, "No free VA window, rank:" << options_.rankId, BM_ERROR);
     auto expected = reinterpret_cast<void *>(gvaInfo.va[HVM_DVA]);
-    Result ret;
-    if (UseAclBackend()) {
-        ret = DlAclApi::AclrtReserveMemAddress(&base, totalLvaSize, 0, expected, 0);
-    } else {
-        ret = DlHalApi::HalMemAddressReserve(&base, totalLvaSize, 0, expected, MEM_RSV_TYPE_REMOTE_MAP);
-    }
+    /* VA reservations stay in the HAL family: the 0x2800 GVM window (the
+     * symmetric-pool arithmetic base) is only reservable through the HAL
+     * REMOTE_MAP flag -- AclrtReserveMemAddress rejects that range with
+     * 507899 (f8). The PHYSICAL handles (malloc/map/export/import) run in
+     * the ACL family for the host-pid translation; the two layers meet at
+     * map time, which the driver realizes as the same backing ioctl. */
+    auto ret = DlHalApi::HalMemAddressReserve(&base, totalLvaSize, 0, expected, MEM_RSV_TYPE_REMOTE_MAP);
     if (ret != BM_OK || base != expected) {
         BM_LOG_ERROR("Reserve VA failed, rank:" << options_.rankId << " expected:" << expected << " returned:" << base
                                                 << " size:" << totalLvaSize << " ret:" << ret);
         if (ret == BM_OK && base != nullptr) {
-            if (UseAclBackend()) {
-                (void)DlAclApi::AclrtReleaseMemAddress(base);
-            } else {
-                (void)DlHalApi::HalMemAddressFree(base);
-            }
+            (void)DlHalApi::HalMemAddressFree(base);
         }
         manager.FreeReserveGva(gvaInfo.va[HVM_GVA]);
         return BM_MALLOC_FAILED;
@@ -145,8 +142,8 @@ Result HybmVmmBasedSegment::UnReserveMemorySpace() noexcept
 
     for (auto lva : reservedLva_) {
         HybmVaManager::GetInstance().FreeReserveLva((uintptr_t)lva, HVM_DVA);
-        auto freeRet = UseAclBackend() ? DlAclApi::AclrtReleaseMemAddress(reinterpret_cast<void *>(lva))
-                                       : DlHalApi::HalMemAddressFree(lva);
+        // VA reservations are HAL family (0x2800 window, see ReserveMemorySpace).
+        auto freeRet = DlHalApi::HalMemAddressFree(lva);
         BM_LOG_INFO("free reserved address va:" << lva << " return:" << freeRet);
         if (freeRet != BM_OK) {
             BM_LOG_WARN("Unable to free reserved VA, ret:" << freeRet << " gva:" << globalVirtualAddress_
@@ -700,12 +697,9 @@ uint64_t HybmVmmBasedSegment::ReserveLva(const HostSdmaExportInfo &im)
         return 0;
     }
     uint64_t flag = MEM_RSV_TYPE_REMOTE_MAP;
-    Result ret;
-    if (UseAclBackend()) {
-        ret = DlAclApi::AclrtReserveMemAddress(&lva, im.size, 0, reinterpret_cast<void *>(reservedLva), 0);
-    } else {
-        ret = DlHalApi::HalMemAddressReserve(&lva, im.size, 0, reinterpret_cast<void *>(reservedLva), flag);
-    }
+    // HAL reserve for the import lva (same 0x2800 window rationale as
+    // ReserveMemorySpace); the physical handle/map stay ACL.
+    auto ret = DlHalApi::HalMemAddressReserve(&lva, im.size, 0, reinterpret_cast<void *>(reservedLva), flag);
     if (ret != 0 || lva != reinterpret_cast<void *>(reservedLva)) {
         BM_LOG_ERROR("Failed to reserve va local:" << options_.rankId << " remoteRank:" << im.rankId
                                                    << " size:" << im.size << " reservedVa:" << VaToStr(reservedLva)
