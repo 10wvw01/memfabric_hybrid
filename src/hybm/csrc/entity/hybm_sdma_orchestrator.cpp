@@ -523,9 +523,18 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
 
 Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize)
 {
+    // CANN names its device-side cust directory with the host PID, not the
+    // PID visible inside a container. Keep the source process-specific.
+    uint32_t hostPid = 0;
+    const auto pidRet = DlAclApi::RtDeviceGetBareTgid(&hostPid);
+    if (pidRet != BM_OK || hostPid == 0) {
+        BM_LOG_ERROR("resolve cust kernel host pid failed, ret: " << pidRet << " hostPid: " << hostPid);
+        return BM_DL_FUNCTION_FAILED;
+    }
+    BM_LOG_INFO("cust kernel pid mapping, containerPid: " << getpid() << " hostPid: " << hostPid);
     // 当前进程的专属链接指向 CANN 实际迁移文件，避免混用其他进程的 SO。
     const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*_" +
-                            std::to_string(getpid()) + "/" + HYBM_SDMA_ORCH_CUST_SO;
+                            std::to_string(hostPid) + "/" + HYBM_SDMA_ORCH_CUST_SO;
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
     const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
     /* 完整性校验: 入口符号存在 + 精确尺寸一致(防截断/拼接; 设备侧工具极简——实测可用
