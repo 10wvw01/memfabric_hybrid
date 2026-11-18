@@ -10,14 +10,7 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* hybm_sdma_contract.h — wire 契约(host↔epoch kernel 单一事实源)
- *
- * 段尾保留区布局经共享布局头 smem_shm_sdma_layout.h 与设备侧
- * 原语头共用单一事实源(无镜像漂移)。
- *
- * 邮箱化契约: 双环邮箱 + 按时长分轮消费(批处理 chunks/dstBase/flagBase 形态已废止);
- * host 数据面 API 废止(signal/wait/quiet 设备侧自驱)。
- */
+/* Host 与 AICPU 共用的 SDMA 请求格式；队列偏移统一使用设备布局头中的定义。 */
 #ifndef HYBM_SDMA_CONTRACT_H
 #define HYBM_SDMA_CONTRACT_H
 
@@ -31,39 +24,24 @@ namespace mf {
 /* 布局常量沿用共享头命名(SMEM_SHM_SDMA_*), hybm 侧经 include 直接使用 */
 
 /* ---- 邮件格式(32B/封, 8B 对齐字段) ---- */
-struct HybmSdmaReqMail {  /* 请求邮件(AICore→AICPU, signal 投递) */
-    uint64_t src;         /* 搬运源地址(本端段 GVA) */
-    uint64_t dst;         /* 搬运目的地址(对端段 GVA) */
-    uint64_t len;         /* 字节数(框架内部按粒度补齐) */
-    uint64_t imm;         /* 用户标签(原样回带到达到达邮件); reduce 时为编码形态, 见下 */
+struct HybmSdmaReqMail {  /* 传输请求(AICore→AICPU) */
+    uint64_t src;         /* 源地址(Put 本端 GM / Get 远端共享内存) */
+    uint64_t dst;         /* 目标地址(Put 远端共享内存 / Get 本端 GM) */
+    uint64_t len;         /* 低 32 位为实际字节数；bit 63 标识纯传输，bit 32–62 必须为零，不补齐尾部 */
+    uint64_t imm;         /* COPY 为零；浮点 ADD 编码见下 */
 };
 
-/* ---- imm 操作编码(wire 契约; 与 smem_shm_aicore_base_sdma.h 的 SdmaEncodeOpImm 对齐) ----
- * signal(op != COPY) 时 imm 编码: [63:48]=magic [47:40]=SQE opcode [39:0]=用户标签
- * AICPU 消费侧解码: magic 匹配→按 opcode 构造 reduce SQE + 到达邮件透传还原后的标签;
- * 不匹配→纯搬运(现状), 老调用(imm 为任意标签)无误判(magic 撞上概率 < 1/65536)。
- * SQE opcode 枚举值对齐 hcomm 权威源码(aicpu_hccl_sqcqv2.cc SdmaReduceOpcode):
- * NOT_ATOMIC=0(纯搬运) INT16=1 FP32=2 FP16=3 —— 高4位|低4位自造编码(如 0x71)固件不识别 */
+/* 操作编码：COPY 为零；ADD 的 [63:48] 为协议标识，[47:40] 为硬件操作码。
+ * 消费端先校验完整字段，再解码操作码。
+ */
 constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
 constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x02; /* FP32 累加: dst += src */
 constexpr uint8_t HYBM_SDMA_SQE_OP_FP16_ADD = 0x03; /* FP16 累加: dst += src */
 
-static inline uint8_t HybmSdmaDecodeOp(uint64_t imm, uint64_t *userTag)
+static inline uint8_t HybmSdmaDecodeOp(uint64_t encodedOp)
 {
-    if ((imm >> 48) == HYBM_SDMA_IMM_MAGIC) {
-        *userTag = imm & 0xFFFFFFFFFFULL;
-        return static_cast<uint8_t>((imm >> 40) & 0xFFULL);
-    }
-    *userTag = imm;
-    return 0x00; /* 无编码 = 纯搬运 */
+    return encodedOp == 0 ? 0 : static_cast<uint8_t>((encodedOp >> 40) & 0xFFULL);
 }
-
-struct HybmSdmaArrMail {  /* 到达邮件(AICPU→对端 AICore, wait 消费) */
-    uint64_t seq;         /* 序号(=请求序号; 首字段供到达戳 SQE 复用为拷贝源) */
-    uint64_t dst;         /* 数据落点(接收方免预约定布局, 直接定位) */
-    uint64_t len;         /* 数据长度 */
-    uint64_t imm;         /* 用户标签(来自 signal 的 imm, 原样透传) */
-};
 
 /* ---- host→epoch kernel 参数(值透传, 布局锁) ---- */
 struct HybmSdmaOrchParam {
@@ -95,7 +73,7 @@ struct HybmSdmaOrchResult {
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
-constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0005u; /* 结果区存活魔数 */
+constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0007u; /* 结果区存活魔数 */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_RUNNING = 0xFFFFFFFFu; /* 运行中(kernel 入口写, host 轮询判据) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_DEADLINE = 0;          /* 时限退出(正常换轮) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_STOP = 1;              /* 停止退出(析构) */
@@ -126,7 +104,7 @@ struct HybmSdmaOrchDbgMail {                                  /* 单条逐单日
     uint64_t reqF1;
     uint64_t reqF2;
     uint64_t reqF3;
-    uint64_t arrMailSlot; /* 计算出的对端到达邮件地址(异常值检测) */
+    uint64_t reserved; /* 保留为零，维持诊断记录大小 */
     uint64_t sqTailBefore;/* SQE 入环前 shadow 尾 */
     uint64_t sqTailAfter; /* SQE 入环后 shadow 尾 */
 };

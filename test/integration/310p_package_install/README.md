@@ -6,8 +6,10 @@
 2. 创建独立环境，执行 `python -m pip install --no-deps --force-reinstall` 安装指定 wheel。
 
 两条路径分别导入 Python 包和扩展、通过 Python SHMEM API 建池、调用 AICore 测试算子，
-双 die 双向传输 128 KiB，默认执行 100 轮并逐字检查接收数据，最后释放内存池。
-测试取消 MF_SDMA_ORCH_JSON，检查自动发现配置和 AICPU 部署、清理日志。
+双 die 通过同步 get 互读 128 KiB，默认执行 100 轮并逐字检查数据，最后释放内存池。
+每轮先准备本端源数据，Python SHMEM 栅栏确认双方源就绪，再调用 get；
+完成校验后的栅栏保护下一轮源缓冲复用。
+测试取消 MF_SDMA_ORCH_DIR 和 MF_SDMA_ORCH_JSON，检查自动发现配置和 AICPU 部署、清理日志。
 同时校验导入包、扩展位于对应测试虚拟环境，且已安装三份 AICPU 产物。
 
 ## 前置条件
@@ -19,11 +21,25 @@
 
 ## 运行
 
-在仓库根目录执行：
+1. 在仓库根目录加载 CANN 环境，并通过 `npu-smi info` 选择同卡两个空闲 die。
 
-```bash
-DEVICE_BASE=2 bash test/integration/310p_package_install/run.sh
-```
+   ```bash
+   source /usr/local/Ascend/cann-9.2.1/set_env.sh
+   ```
+
+2. 构建当前 Python ABI 对应的安装包和 wheel。
+
+   ```bash
+   bash script/build_and_pack_run.sh
+   ```
+
+3. 执行两种安装路径的通信测试。
+
+   ```bash
+   DEVICE_BASE=2 bash test/integration/310p_package_install/run.sh
+   ```
+
+4. 检查安装、导入路径、双 rank 数据校验及部署日志，确认脚本退出码为零。
 
 可通过 RUN_PACKAGE、WHEEL_PACKAGE 指定待测产物绝对路径，通过 LOG_DIR 指定全新日志目录，
 ROUNDS 指定正整数轮数，STORE_URL 指定配置存储地址。默认产物来自当前仓库 output 目录。

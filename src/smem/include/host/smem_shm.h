@@ -225,7 +225,7 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
  * @brief [310P 协同模式] 查询协同工作区地址(就绪判定: 非空 = 协同可用)
  *
  * host 侧数据面 API(submit/wait/get_result)已废止——搬运由
- * AICore kernel 内 smem_shm_sdma_signal/wait/quiet 设备侧自驱(见设备侧头文件
+ * AICore kernel 内 smem_shm_sdma_put/get/quiet 设备侧自驱(见设备侧头文件
  * smem_shm_aicore_base_sdma.h), host 仅建池与本就绪判定。
  *
  * @param handle           [in] shm object

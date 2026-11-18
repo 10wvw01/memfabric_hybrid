@@ -13,7 +13,7 @@
 /* hybm_sdma_orchestrator.h — 310P AICore×AICPU 协同模式传输准备(进程级单例 + 引用计数)
  *
  * 邮箱化: host 侧 submit/wait 数据面 API 废止(搬运由 AICore 经
- * smem_shm_sdma_signal/wait/quiet 设备侧自驱), 本类职责收敛为:
+ * smem_shm_sdma_put/get/quiet 设备侧自驱), 本类职责收敛为:
  *   1. 传输准备(CP 流/工作区/epoch kernel 加载, 含设备侧自动部署);
  *   2. ConfigureOrch: 段尾保留区初始化(双环清零) + epoch 参数装配 + 首轮内联下发
  *      (失败立即报错返回) + 监督线程启动;
@@ -107,6 +107,8 @@ private:
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
     Result PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson);
+    static Result ResolveOrchestratorJson(const std::string &directory, const std::string &explicitJson,
+                                          std::string &jsonPath);
     Result LoadOrchestratorKernel();       /* json 解析 + 部署探测 + 自动部署后加载 */
     Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
     Result PreloadKernel(); /* 普通短任务将同一 SO 预载到 CP1 全局符号空间 */

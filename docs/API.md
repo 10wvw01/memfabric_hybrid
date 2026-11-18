@@ -814,127 +814,48 @@ void *smem_shm_sdma_get_workspace(smem_shm_t handle);
 > 引擎层另有同语义镜像 `hybm_sdma_get_info`（`hybm_big_mem.h`，hybm C API 族，随头文件
 > Doxygen 注释文档化，不在此展开）。
 
-设备侧编程模型（AICore kernel 内使用，`#include "smem_shm_aicore_base_sdma.h"`，bisheng 编译，与
-910B `roce_write/poll_cq/quiet` 同构）。三件套均以池 gva（`smem_shm_create` 出参，经 kernel 参数
-传入）为首参——框架以 gva 为锚定位段尾保留区内的双环邮箱，用户无须关心任何队列/槽位/地址细节。
+设备侧包含 smem_shm_aicore_base_sdma.h。gva 是建池返回的池基址；
+重复传输可在 kernel 入口调用 smem_shm_sdma_ctx(gva)，随后使用对应的 _at(ctx, ...) 变体。
 
-##### smem_shm_sdma_signal
+| 接口 | 成功返回的含义 |
+|---|---|
+| smem_shm_sdma_put_nbi(gva, src, dst, bytes, op) | 本端 GM 到远端共享内存的请求已提交 |
+| smem_shm_sdma_get_nbi(gva, src, dst, bytes) | 远端共享内存到本端 GM 的请求已提交 |
+| smem_shm_sdma_quiet(gva) | 调用 block 此前提交的全部传输已完成 |
+| smem_shm_sdma_put(gva, src, dst, bytes, op) | put 与 quiet 均完成 |
+| smem_shm_sdma_get(gva, src, dst, bytes) | get 与 quiet 均完成 |
 
-投递一封搬运请求邮件。异步：函数返回仅表示请求已入环，实际搬运由 AICPU 编排 kernel 代投的
-SDMA 完成（同一队列 FIFO 保序）。请求环深度 64，满环时渐进退避自旋等待对端消费（背压：
-前 4096 轮纯自旋保低延迟，之后插入空转退避并渐进加倍）。
+所有接口返回 bool。失败时调用方必须终止当前操作并向上层报告错误，避免发布成功依赖。
+op 默认 SMEM_SHM_SDMA_OP_COPY，put 还支持 SMEM_SHM_SDMA_OP_ADD_FP16 和
+SMEM_SHM_SDMA_OP_ADD_FP32，按浮点逐元素执行 dst += src。get 仅支持 COPY。
 
-```c
-bool smem_shm_sdma_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
-                          uint64_t len, uint64_t imm);
-```
+使用约束：
 
-|参数/返回值|含义|
-|-|-|
-|gva|池基址（`smem_shm_create` 出参，框架定位保留区邮箱的锚）|
-|src|搬运源地址（本端池 GVA，任意 SMMU 可译地址）|
-|dst|搬运目的地址（对端池 GVA）|
-|len|搬运字节数（须 4 字节对齐，长度直传搬运引擎）|
-|imm|用户标签（64 位，原样透传到对端 `wait` 收到的邮件，用于对账/分派）|
-|返回值|true=已投递；false=满环自旋预算耗尽（邮件未投递，对端 `wait` 将以超时暴露）|
+- 每进程使用一个 SDMA 池；池对称段大小为 2 的幂，地址来自本次建池的映射。
+- 同一 block 的请求队列由一个执行主体使用，quiet 覆盖调用 block。
+- 地址和长度按 4 字节对齐；单条请求长度不超过 UINT32_MAX。
+- 零长度立即成功，保持请求和完成序号不变。
+- 远端操作数位于对端实际可用共享内存中；本端操作数允许普通设备 GM。
+- 自 rank 的搬运使用本地搬运路径。
+- NBI 源与目标在 quiet 完成前保持有效；提交失败后仍需按调用方的失败流程管理此前请求。
 
-投递前须将源数据区做 cache clean（`DataCacheCleanAndInvalid`），保证搬运引擎经一致性域读到新数据。
+缓存与完成顺序：
 
-##### smem_shm_sdma_wait
+- put：本地生产完成 → 源数据缓存维护 → put → quiet → 源缓冲可复用。
+- get：远端源就绪 → 目标缓存维护 → get → quiet → 目标缓存失效 → 本地消费。
+- 接收方消费 put 数据前，先确认应用就绪状态，再完成读取前的缓存维护。
+- quiet 保证 GM 传输完成。跨 rank 的就绪通知、消费确认与缓冲复用由应用协调。
 
-按序消费下一封到达邮件（FIFO：到达顺序=对端投递顺序）。渐进退避自旋直至命中或预算耗尽。
-邮件自描述数据落点，接收方无须与发送方预约定布局。
+迁移后的接口集中在 put/get/quiet，接收端通过应用约定的数据布局定位数据。
+需要设备内通知时，可在有效数据区为每个来源分配独占缓存行：先等待数据 quiet，
+再用同步 put 发布递增轮次；接收方失效状态缓存并确认轮次，消费完成后回传确认。
+再次复用接收缓冲前等待该确认，状态初始化在双方开始传输前完成。
 
-```c
-smem_shm_sdma_mail_t smem_shm_sdma_wait(__gm__ void *gva);
-
-struct smem_shm_sdma_mail_t {
-    uint64_t dst;    /* 数据落点 */
-    uint64_t len;    /* 数据长度（字节） */
-    uint64_t imm;    /* 用户标签（signal 的 imm 原样透传） */
-    uint32_t seq;    /* 完成序号（诊断） */
-    uint32_t status; /* 0=成功 1=超时 2=到达环溢出 */
-};
-```
-
-|字段|含义|
-|-|-|
-|dst|数据落点地址（直接据此定位数据，免预约定布局）|
-|len|数据长度|
-|imm|发送方 `signal` 的 imm 标签，原样回带|
-|seq|完成序号（0 基，诊断用）|
-|status|0=成功；1=轮询预算耗尽（无邮件或传输失败）；2=到达环溢出（消费落后超过 1024 封，邮件被越界覆写，不静默丢失）|
-
-到达环深度 1024：消费方应持续 `wait`，长期不消费将触发溢出（status=2 显式报错）。
-
-##### smem_shm_sdma_quiet
-
-等待本端全部已投递请求落地（完成证据按 FIFO 序落地，末封到即全部到）。典型时机：**源缓冲区
-复用/改写之前**——确认数据已被搬走，避免新旧数据竞争。
-
-```c
-bool smem_shm_sdma_quiet(__gm__ void *gva);
-```
-
-|参数/返回值|含义|
-|-|-|
-|gva|池基址（同上）|
-|返回值|true=全部已落地（无投递时平凡为 true）；false=轮询预算耗尽（传输异常）|
-
-##### 高频路径：smem_shm_sdma_reserved 与 _at 变体
-
-三件套的 gva 版每次调用内部要从 meta 区读 3 个 GM 值（对称段大小/rank/段物理大小）定位段尾
-保留区——这些值在 kernel 生命周期内不变。单 kernel 内多封收发（流水/循环）时，可在入口一次
-预计算保留区基址，后续走 `_at` 变体免重复 meta 读：
-
-```c
-__gm__ uint8_t *smem_shm_sdma_reserved(__gm__ void *gva);  /* 预计算段尾保留区基址 */
-
-bool smem_shm_sdma_signal_at(__gm__ uint8_t *res, __gm__ void *src, __gm__ void *dst,
-                             uint64_t len, uint64_t imm);
-smem_shm_sdma_mail_t smem_shm_sdma_wait_at(__gm__ uint8_t *res);
-bool smem_shm_sdma_quiet_at(__gm__ uint8_t *res);
-```
-
-|参数/返回值|含义|
-|-|-|
-|res|`smem_shm_sdma_reserved(gva)` 的缓存值（kernel 入口计算一次）|
-|其余参数/返回值|与 gva 版同名接口完全一致|
-
-```c
-/* 高频路径示例: 入口一次预计算, 循环内全程 _at */
-__gm__ uint8_t *res = smem_shm_sdma_reserved(gva);
-for (uint32_t c = 0; c < chunks; c++) {
-    (void)smem_shm_sdma_signal_at(res, chunk[c], peerChunk[c], bytes, c);
-}
-(void)smem_shm_sdma_quiet_at(res);
-```
-
-> 单封/低频场景直接使用 gva 版（薄转发，行为一致）；08 示例即按高频路径编写。
-
-##### 使用约束
-
-- 前提：310P 上以 `SMEMS_DATA_OP_SDMA` 建池且 `smem_shm_sdma_get_workspace` 返回非 NULL（就绪判定）；
-- gva 必须为本次建池的出参（段尾保留区按 gva/段布局定位，跨池混用未定义）；
-- 池对称段大小须为 2 的幂（建池时框架校验）；约束：每进程一个 SDMA 池（第二个池建池报错）；
-- 典型收发闭环（发送方产数据→对端改写→回传）：
-
-```c
-/* 发送方 kernel 内: 产数据 + clean + 投递, 复用源缓冲前 quiet, 再收回件 */
-ExCleanRegion(chunk, words);                                    /* 源数据 clean */
-smem_shm_sdma_signal(gva, chunk, peerChunk, bytes, seqTag);     /* 投递 */
-smem_shm_sdma_quiet(gva);                                       /* 全部落地(可复用 chunk) */
-smem_shm_sdma_mail_t m = smem_shm_sdma_wait(gva);               /* 收回件 */
-
-/* 接收方 kernel 内: 按序收件, 邮件自描述落点 */
-smem_shm_sdma_mail_t m = smem_shm_sdma_wait(gva);               /* status==0 才消费 */
-__gm__ uint32_t *p = (__gm__ uint32_t *)m.dst;                  /* 免预约定布局 */
-ExCleanRegion(p, m.len / 4);                                    /* 改写后 clean */
-smem_shm_sdma_signal(gva, p, peerReturnAddr, m.len, m.imm);     /* 回件(imm 回带对账) */
-```
-
-> 完整用法示例见 `examples/memory_pool/01_basic/08_310p_aicore_aicpu_sdma/`（一键运行 `bash run.sh`）；
-> 环境变量（`MF_SDMA_ORCH_JSON`/`MF_SDMA_ORCH_DISABLE`）见 `docs/environment_variables.md`。
+08 示例展示设备内往返与批量 NBI；09 示例展示主机栅栏确认源就绪后的四 rank get allreduce。
+部署时公开头、Host 库及 AICPU kernel 使用同一次构建的产物；建池会核对 kernel 协议标识。
+设置 MF_SDMA_ORCH_DIR 可递归查找同一子目录中的编排 SO、迁移 JSON 和 launch JSON；
+缺失或发现多套完整产物时初始化失败。未设置时沿用 MF_SDMA_ORCH_JSON 和自动发现。
+环境变量见 docs/environment_variables.md。
 
 > [!CAUTION] 注意
 > 如下接口对外封装了相同含义的Python接口，详细信息可参考`src/smem/csrc/python_wrapper/mk_transfer_adapter/csrc/pytransfer.cpp`。
