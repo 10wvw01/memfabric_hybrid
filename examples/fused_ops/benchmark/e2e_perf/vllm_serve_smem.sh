@@ -1,0 +1,94 @@
+#!/bin/bash
+# vllm serve with the prd_code fused operators enabled (TP2 MM+AR fusion over
+# the MemFabric SDMA pool). SMEM_OP selects the operator:
+#   SMEM_OP=ar  -> smem_mm_ar_310p3  (local reduction; default)
+#   SMEM_OP=iar -> smem_mm_iar_310p3 (hardware reduction)
+# Prerequisites (already GA-built in this workspace):
+#   - CANN 9.1.0 GA (source'd below)
+#   - memfabric v28-orch SDK: /home/w00804146/310P_2/memfabric_hybrid/output
+#   - orch_deploy_helper:     tools/aicpu_kernel_deploy/ (GA-built)
+#   - custom_opp packages:     prd_code/smem_mm_{ar,iar}_310p3/build_out
+#   - xops wheels:            xops_smem_mm_ar_310p3 / xops_smem_mm_iar_310p3 installed
+#   - prd_code vllm-ascend checkout installed (editable)
+# DFLASH=0 drops --speculative-config (dflash off): prefill splits into
+# 1x3840+256 (mamba-aligned), so the 3840-row main block engages the fusion.
+# TPOT regresses ~2.5x without dflash — TTFT-comparison only.
+set -u
+GA=/usr/local/Ascend/cann-9.1.0
+MFOUT=/home/w00804146/310P_2/memfabric_hybrid/output
+DIR=$(cd "$(dirname "$0")" && pwd)
+PRD=$(cd "$DIR/../.." && pwd)
+SMEM_OP=${SMEM_OP:-ar}
+
+case $SMEM_OP in
+  ar)  PKG=$PRD/smem_mm_ar_310p3/build_out/_CPack_Packages/Linux/External/custom_opp_ubuntu_aarch64.run/packages/vendors/smem_mm_ar_310p3 ;;
+  iar) PKG=$PRD/smem_mm_iar_310p3/build_out/_CPack_Packages/Linux/External/custom_opp_ubuntu_aarch64.run/packages/vendors/smem_mm_iar_310p3 ;;
+  *) echo "SMEM_OP must be 'ar' or 'iar' (got '$SMEM_OP')"; exit 1 ;;
+esac
+
+source $GA/set_env.sh
+# 宿主环境可能全局导出 ASCEND_RT_VISIBLE_DEVICES（本机 qwen-dflash 预设 0,1），
+# 泄漏进 serve 后设备 4/5 被重映射掉 → set_device(4) Invalid device ID。
+# serve 必须看到真实物理 id，此处无条件 unset 兜底。
+unset ASCEND_RT_VISIBLE_DEVICES
+# Workers land on physical devices 4/5 via the 310P worker device offset.
+# Do NOT use ASCEND_RT_VISIBLE_DEVICES here: the remapping makes the smem
+# library see logical ids 0/1, which selects the (asymmetric) device-0
+# window layout and breaks the symmetric pool ("import gva out of window").
+export VLLM_ASCEND_DEVICE_OFFSET=4
+export ASCEND_CUSTOM_OPP_PATH=$PKG
+export MF_SDMA_ORCH_DEPLOY_HELPER=$MFOUT/../tools/aicpu_kernel_deploy/orch_deploy_helper
+export MF_SDMA_ORCH_JSON=$MFOUT/hybm/aicpu_kernel/libmf_sdma_orch_v28.json
+export MEMFABRIC_HYBRID_HOME_PATH=$MFOUT
+export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=$MFOUT/hybm/lib64
+export MIXFABRIC_SDK_OUT=$MFOUT
+export LD_LIBRARY_PATH=$MFOUT/smem/lib64:$MFOUT/hybm/lib64:$MFOUT/acc_links/lib64:$PKG/op_api/lib:${LD_LIBRARY_PATH:-}
+# Operator selection (deprecated env path — additional_config keys work too).
+if [ "$SMEM_OP" = "ar" ]; then
+  export VLLM_ASCEND_ENABLE_SMEM_MM_AR_310P3=1
+  unset VLLM_ASCEND_ENABLE_SMEM_MM_IAR_310P3
+else
+  export VLLM_ASCEND_ENABLE_SMEM_MM_IAR_310P3=1
+  unset VLLM_ASCEND_ENABLE_SMEM_MM_AR_310P3
+fi
+export SMEM_MM_310P3_OP=$SMEM_OP
+
+DFLASH=${DFLASH:-1}
+# 真正的 dflash 开关：on = speculative 7-token + FULL_DECODE_ONLY ACLGraph；
+# off = 去 speculative-config + 仅 enforce-eager。
+SPEC_OPTS=(--speculative-config '{"method":"dflash","model":"/home/models/Qwen/Qwen3.6-35B-A3B-DFlash","num_speculative_tokens":7}')
+CG_OPTS=(--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[8,80]}')
+if [ "$DFLASH" != "1" ]; then
+  SPEC_OPTS=()
+  # dflash off：去 speculative-config，且 FULL_DECODE_ONLY 是 310P dflash 专属
+  # 作用域，非 dflash 跑法 = 仅 --enforce-eager
+  CG_OPTS=()
+fi
+
+if [ "$SMEM_OP" = "ar" ]; then
+  ADD_CFG='"enable_smem_mm_ar_310p3":true,"enable_smem_mm_iar_310p3":false'
+else
+  ADD_CFG='"enable_smem_mm_ar_310p3":false,"enable_smem_mm_iar_310p3":true'
+fi
+
+exec vllm serve /home/models/Qwen/Qwen3.6-35B-A3B-w8a8 \
+  --host 0.0.0.0 --port 8000 \
+  --served-model-name qwen3.6-35b-a3b-w8a8 \
+  --tensor-parallel-size 2 \
+  --quantization ascend \
+  --dtype float16 \
+  --max-model-len 8192 \
+  --max-num-seqs 16 \
+  --max-num-batched-tokens 4096 \
+  --gpu-memory-utilization 0.90 \
+  --enable-prefix-caching \
+  --mamba-ssm-cache-dtype float16 \
+  --mamba-cache-mode align \
+  --enable-chunked-prefill \
+  --async-scheduling \
+  --enforce-eager \
+  "${CG_OPTS[@]}" \
+  "${SPEC_OPTS[@]}" \
+  --profiler-config.profiler=torch \
+  --profiler-config.torch_profiler_dir=${SMEM_PROFILE_DIR:-/tmp/opencode/e2e_profile} \
+  --additional-config '{"enable_flashcomm1":false,"enable_flashcomm2_parallel_size":0,"enable_prefill_mc2":false,"enable_fused_mc2":0,'"$ADD_CFG"',"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":false}}'
