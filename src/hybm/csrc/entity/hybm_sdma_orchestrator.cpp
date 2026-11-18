@@ -611,6 +611,8 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
         return ret;
     }
     epochLaunched_ = true;
+    // 首轮 kernel 写入协议标识和 RUNNING 状态后才允许建池成功。
+    // 最多轮询 200 次、每次间隔 10 ms，及时拒绝旧 kernel、异常退出或未启动的情况。
     HybmSdmaOrchResult capability{};
     for (uint32_t attempt = 0; attempt < 200; ++attempt) {
         ret = DlAclApi::AclrtMemcpy(&capability, sizeof(capability),

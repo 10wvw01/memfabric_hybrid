@@ -444,7 +444,7 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     constexpr uint32_t descriptors = 2;
     const uint32_t count = (ctx->sqTail + descriptors) % ctx->sqDepth == 0 ? descriptors + 1 : descriptors;
     if (reserveSqeSpace(p, ctx, count) != 0) { return 1360; }
-    // A stage slot remains a DMA source until its previous completion has landed.
+    // 前次传输完成前，暂存槽仍是 DMA 源，不能覆盖。
     if (seq >= SMEM_SHM_SDMA_RS_STAGE_SLOTS) {
         const uint64_t previous = seq - SMEM_SHM_SDMA_RS_STAGE_SLOTS;
         const uint64_t previousStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET +

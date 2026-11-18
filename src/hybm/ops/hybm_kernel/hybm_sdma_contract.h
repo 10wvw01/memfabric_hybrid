@@ -10,7 +10,7 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* Host/AICPU SDMA request contract. Queue offsets share the device layout header. */
+/* Host 与 AICPU 共用的 SDMA 请求格式；队列偏移统一使用设备布局头中的定义。 */
 #ifndef HYBM_SDMA_CONTRACT_H
 #define HYBM_SDMA_CONTRACT_H
 
@@ -31,8 +31,8 @@ struct HybmSdmaReqMail {  /* 传输请求(AICore→AICPU) */
     uint64_t imm;         /* COPY 为零；浮点 ADD 编码见下 */
 };
 
-/* Operation encoding: COPY=0, ADD=[63:48] magic / [47:40] hardware opcode.
- * The consumer validates the whole field before decoding.
+/* 操作编码：COPY 为零；ADD 的 [63:48] 为协议标识，[47:40] 为硬件操作码。
+ * 消费端先校验完整字段，再解码操作码。
  */
 constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
 constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x02; /* FP32 累加: dst += src */

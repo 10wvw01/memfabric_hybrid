@@ -64,14 +64,14 @@ deviceId 与失败原因；系统 MUST NOT 静默降级到其他链路。禁用�
 - **WHEN** 同进程已有一个 SDMA SHM 实体，再创建第二个实体
 - **THEN** 第二次创建明确失败；销毁第一个实体后完整释放 CP 流、工作区与 kernel 资源
 
-### Requirement: 设备侧 Put/Get API 与 host 就绪判定
+### Requirement: 设备侧 put/get API 与 host 就绪判定
 
-设备侧 SHALL 提供 Put/Get 的 NBI 与同步接口，以及按调用 block 等待已提交传输完成的 quiet。
+设备侧 SHALL 提供 put/get 的 NBI 与同步接口，以及按调用 block 等待已提交传输完成的 quiet。
 NBI 成功表示请求已提交；同步接口与 quiet 成功表示 GM 传输完成。
-Get SHALL 由读取端独立发起，源端只需保证数据就绪。
+get SHALL 由读取端独立发起，源端只需保证数据就绪。
 远端操作数 SHALL 位于可用共享内存中，本端操作数允许普通 GM；地址和长度按 4 字节对齐，
 单条请求长度不得超过 UINT32_MAX，零长度直接成功且不推进任何队列序号。
-Put SHALL 支持 COPY、ADD_FP16 和 ADD_FP32，Get SHALL 只支持 COPY。
+put SHALL 支持 COPY、ADD_FP16 和 ADD_FP32，get SHALL 只支持 COPY。
 
 host 保留 smem_shm_sdma_get_workspace 就绪查询，无效 handle 返回 NULL。
 远端就绪及消费确认由应用协议协调；同一 block 的请求队列由一个执行主体使用。
@@ -81,14 +81,14 @@ host 保留 smem_shm_sdma_get_workspace 就绪查询，无效 handle 返回 NULL
 - **WHEN** 源端提交数据并等待 quiet 后发布应用轮次，消费端确认轮次后读改写并回传
 - **THEN** 往返结果与原有逐元素修改一致，源缓冲在对应 quiet 后可复用
 
-#### Scenario: 单边 Get
+#### Scenario: 单边 get
 
-- **WHEN** 源数据已就绪，读取端发起 Get 并等待 quiet
+- **WHEN** 源数据已就绪，读取端发起 get 并等待 quiet
 - **THEN** 本端普通 GM 中获得完整数据，源端无需运行配对收发操作
 
 #### Scenario: 执行协议
 
-- **WHEN** AICPU 消费 Put/Get 请求
+- **WHEN** AICPU 消费 put/get 请求
 - **THEN** 执行数据和本端完成两条描述符，原到达区保持未使用状态；
   SQ 空间在改写 stage 前整组预留，stage 上次完成后才能复用；
   主机建池有界核对运行 kernel 的协议标识

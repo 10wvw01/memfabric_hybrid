@@ -10,10 +10,10 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* 310P SHMEM device transfers. AICPU submits SDMA on behalf of each AICore block.
- * Put/Get and quiet complete transfers in GM. The caller maintains caches and
- * supplies an application protocol for remote readiness and buffer reuse.
- * Each block has one submitting execution context; quiet covers this block only.
+/* 310P SHMEM 设备传输：AICPU 为各 AICore block 提交 SDMA 请求。
+ * put/get 与 quiet 确认 GM 传输完成；调用方负责缓存维护，
+ * 并通过应用协议协调远端数据就绪和缓冲区复用。
+ * 每个 block 由一个执行主体提交请求，quiet 仅等待该 block 的传输。
  */
 #ifndef __MEMFABRIC_SMEM_AI_CORE_BASE_SDMA_H__
 #define __MEMFABRIC_SMEM_AI_CORE_BASE_SDMA_H__
@@ -124,7 +124,7 @@ SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ 
     if (len > UINT32_MAX || ((reinterpret_cast<uint64_t>(src) |
         reinterpret_cast<uint64_t>(dst) | len) & 3) != 0 ||
         static_cast<uint32_t>(op) > SMEM_SHM_SDMA_OP_ADD_FP16) { return false; }
-    // Route by the remote endpoint; the local buffer may be ordinary device memory.
+    // 根据远端地址选择队列；本端缓冲区允许使用普通设备内存。
     const uint64_t ownSeg = reinterpret_cast<uint64_t>(ctx.res) - (ctx.phys - SMEM_SHM_SDMA_RESERVED);
     const uint64_t srcSeg = reinterpret_cast<uint64_t>(src) & ~(ctx.symm - 1);
     const uint64_t dstSeg = reinterpret_cast<uint64_t>(dst) & ~(ctx.symm - 1);
@@ -186,12 +186,12 @@ SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ 
     return true;
 }
 
-/* Put/Get with zero bytes succeeds without queue activity.
- * Remote operands must be in usable shared memory; local operands may be ordinary GM.
- * Addresses and lengths are 4-byte aligned, length <= UINT32_MAX.
- * NBI success means submitted. quiet/synchronous success means GM transfer completed.
- * Callers maintain source/target caches and arrange remote source readiness.
- * quiet covers this block only, and does not imply remote consumption. */
+/* put/get 的零长度请求直接成功，不修改队列。
+ * 远端地址须位于有效共享内存，本端地址允许普通 GM。
+ * 地址与长度按 4 字节对齐，长度不超过 UINT32_MAX。
+ * NBI 成功表示请求已提交；quiet 或同步接口成功表示 GM 传输完成。
+ * 调用方负责源和目标缓存维护，并确认远端源数据就绪。
+ * quiet 仅等待调用 block 的传输；远端消费完成由应用协议确认。 */
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_nbi_at(const smem_shm_sdma_ctx_t &ctx,
     __gm__ void *src, __gm__ void *dst, uint64_t bytes,
     smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)

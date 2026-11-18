@@ -822,12 +822,12 @@ void *smem_shm_sdma_get_workspace(smem_shm_t handle);
 | smem_shm_sdma_put_nbi(gva, src, dst, bytes, op) | 本端 GM 到远端共享内存的请求已提交 |
 | smem_shm_sdma_get_nbi(gva, src, dst, bytes) | 远端共享内存到本端 GM 的请求已提交 |
 | smem_shm_sdma_quiet(gva) | 调用 block 此前提交的全部传输已完成 |
-| smem_shm_sdma_put(gva, src, dst, bytes, op) | Put 与 quiet 均完成 |
-| smem_shm_sdma_get(gva, src, dst, bytes) | Get 与 quiet 均完成 |
+| smem_shm_sdma_put(gva, src, dst, bytes, op) | put 与 quiet 均完成 |
+| smem_shm_sdma_get(gva, src, dst, bytes) | get 与 quiet 均完成 |
 
 所有接口返回 bool。失败时调用方必须终止当前操作并向上层报告错误，避免发布成功依赖。
-op 默认 SMEM_SHM_SDMA_OP_COPY，Put 还支持 SMEM_SHM_SDMA_OP_ADD_FP16 和
-SMEM_SHM_SDMA_OP_ADD_FP32，按浮点逐元素执行 dst += src。Get 仅支持 COPY。
+op 默认 SMEM_SHM_SDMA_OP_COPY，put 还支持 SMEM_SHM_SDMA_OP_ADD_FP16 和
+SMEM_SHM_SDMA_OP_ADD_FP32，按浮点逐元素执行 dst += src。get 仅支持 COPY。
 
 使用约束：
 
@@ -841,17 +841,17 @@ SMEM_SHM_SDMA_OP_ADD_FP32，按浮点逐元素执行 dst += src。Get 仅支持 
 
 缓存与完成顺序：
 
-- Put：本地生产完成 → 源数据缓存维护 → Put → quiet → 源缓冲可复用。
-- Get：远端源就绪 → 目标缓存维护 → Get → quiet → 目标缓存失效 → 本地消费。
-- 接收方消费 Put 数据前，先确认应用就绪状态，再完成读取前的缓存维护。
+- put：本地生产完成 → 源数据缓存维护 → put → quiet → 源缓冲可复用。
+- get：远端源就绪 → 目标缓存维护 → get → quiet → 目标缓存失效 → 本地消费。
+- 接收方消费 put 数据前，先确认应用就绪状态，再完成读取前的缓存维护。
 - quiet 保证 GM 传输完成。跨 rank 的就绪通知、消费确认与缓冲复用由应用协调。
 
-迁移后的接口集中在 Put/Get/quiet，接收端通过应用约定的数据布局定位数据。
+迁移后的接口集中在 put/get/quiet，接收端通过应用约定的数据布局定位数据。
 需要设备内通知时，可在有效数据区为每个来源分配独占缓存行：先等待数据 quiet，
-再用同步 Put 发布递增轮次；接收方失效状态缓存并确认轮次，消费完成后回传确认。
+再用同步 put 发布递增轮次；接收方失效状态缓存并确认轮次，消费完成后回传确认。
 再次复用接收缓冲前等待该确认，状态初始化在双方开始传输前完成。
 
-08 示例展示设备内往返与批量 NBI；09 示例展示主机栅栏确认源就绪后的四 rank Get allreduce。
+08 示例展示设备内往返与批量 NBI；09 示例展示主机栅栏确认源就绪后的四 rank get allreduce。
 部署时公开头、Host 库及 AICPU kernel 使用同一次构建的产物；建池会核对 kernel 协议标识。
 环境变量见 docs/environment_variables.md。
 

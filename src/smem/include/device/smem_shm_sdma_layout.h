@@ -10,11 +10,10 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* 310P SDMA reserved layout shared by the AICore producer and AICPU consumer.
- * Requests, cursors and completion stamps retain their offsets and 2 MiB reservation.
- * Different writers occupy separate 64-byte cache lines.
- * The former arrival region remains unused; retaining it preserves pool addressing.
- * A stage slot remains a DMA source until its previous quiet stamp is visible.
+/* AICore 生产端与 AICPU 消费端共用的 310P SDMA 保留区布局。
+ * 请求、游标和完成戳的偏移及 2 MiB 保留区大小保持一致，各写入方独占 64 字节缓存行。
+ * 原到达区保留为空，维持内存池的地址布局。
+ * 暂存槽在前次 quiet 完成戳可见之前仍是 DMA 源，不能覆盖。
  */
 #ifndef __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__
 #define __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__
@@ -46,7 +45,7 @@ constexpr uint64_t SMEM_SHM_SDMA_RS_CURSOR_STRIDE = 0x40; /* 游标间距(独占
 constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET = 0x19800;     /* 完成戳数组基址(SQE 写) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET_SLOTS = 64;    /* 每队列完成戳数 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET_STRIDE = 0x200; /* 队列间距(64×8B) */
-/* Completion-source slots retain their 32-byte stride; only the first uint64_t is used. */
+/* 完成戳暂存槽保持 32 字节间距，仅使用首个 uint64_t。 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_STAGE = 0x1F800;    /* 邮件像暂存数组基址(AICPU 写本端, SDMA 本端读) */
 constexpr uint32_t SMEM_SHM_SDMA_RS_STAGE_SLOTS = 512;   /* 每队列暂存槽数(每封 32B) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_STAGE_STRIDE = 0x4000; /* 队列间距(512×32B) */
@@ -58,7 +57,7 @@ constexpr uint32_t SMEM_SHM_SDMA_MAX_BLOCKS = 8; /* 每 die AICore block 数(<<<
 constexpr uint32_t SMEM_SHM_SDMA_QUEUES_PER_PEER = 16; /* 每对端队列槽位(block 0..7 在用, 8..15 预留) */
 constexpr uint32_t SMEM_SHM_SDMA_QUEUE_COUNT = 48; /* 邮箱队列总数(对端 × 槽位, hcomm 48 同规模) */
 
-/* Unused arrival-region offsets retained for layout compatibility and host diagnostics. */
+/* 原到达区保持为空，保留偏移用于布局兼容和 Host 诊断。 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_PEER_RINGS = 0xDF800; /* 到达子环数组基址 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_PEER_STAMP = 0x0000; /* 队列内: 到达戳数组(SQE 写) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_PEER_MAIL = 0x1000;   /* 队列内: 到达邮件数组(SQE 写) */
