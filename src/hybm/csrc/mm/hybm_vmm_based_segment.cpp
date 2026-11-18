@@ -341,18 +341,18 @@ Result HybmVmmBasedSegment::AllocLocalMemory(uint64_t size, MemSlicePtr &slice) 
         return BM_DL_FUNCTION_FAILED;
     }
     if (Is310PPath() && options_.segType == HYBM_MST_HBM) {
-        // 对端在导入映射后设置自己的访问权限，本端分配只授权本端驱动设备。
-        ret = SetHalVmmAccess(reinterpret_cast<void *>(allocAddr), size, logicDeviceId_);
-        if (ret != BM_OK) {
-            (void)DlHalApi::HalMemUnmap(reinterpret_cast<void *>(allocAddr));
-            ReleaseHandle(handle);
-            HybmVaManager::GetInstance().RemoveOneVaInfo(allocAddr, HVM_DVA);
-            exportMap_.erase(slice->index_);
-            slices_.erase(slice->index_);
-            allocatedSize_ -= size;
-            slice.reset();
-            return ret;
-        }
+        /* No explicit grant here. halMemSetAccess's own contract
+         * (ascend_hal_base.h): "after halMemMap, if handle has owner ... the
+         * owner location has readwrite prop automatic, NOT NEED TO SET
+         * AGAIN" and "repeat set ptr to same location ... will return
+         * DRV_ERROR_BUSY". The HalMemMap above already grants the owning
+         * device (this rank's driver device) READWRITE, so this extra call
+         * is a duplicate grant and the driver rejects it with ret 13 =
+         * DRV_ERROR_BUSY (observed on the 26.1.1 driver, 2026-11-18; every
+         * segment allocation -- 2MB MTE probe and 200MB SDMA pool alike --
+         * died here). The import path (MmapImport310P) KEEPS its grant: the
+         * imported handle's owner is the peer device, so the local device
+         * does need the explicit set-access to touch the peer segment. */
     }
     if (options_.segType == HYBM_MST_DRAM && options_.shared && (options_.flags & HYBM_FLAG_DRAM_MAP_HOST_VA) != 0) {
         struct drv_mem_access_desc desc[1];
@@ -446,8 +446,17 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
 
     if (Is310PPath()) {
         uint64_t shareable = 0U;
-        ret = DlHalApi::HalMemExportToShareableHandle(reinterpret_cast<drv_mem_handle_t *>(pos->second.handle),
-                                                      &shareable);
+        /* 310P MUST export with ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION(1):
+         * flags=0 keeps the kernel PID whitelist ON and the peer's import is
+         * rejected with 507899 (platform fact F12, user-authorized
+         * 2026-11-18). The ACL VMM path (hybm_vmm_handle_registry.cpp) has
+         * been passing the flag; this HAL path missed it, which is the
+         * one-way import wall the TP=2 campaigns kept hitting. The
+         * post-export ShareHandleSetAttribute below does not lift the
+         * whitelist in time on the 26.1.1 driver. */
+        ret = DlHalApi::HalMemExportToShareableHandleWithFlags(
+            reinterpret_cast<drv_mem_handle_t *>(pos->second.handle),
+            static_cast<uint32_t>(DlAclApi::ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION), &shareable);
         BM_VALIDATE_RETURN(ret == BM_OK, "HAL export failed, rank:" << options_.rankId << " ret:" << ret,
                            BM_DL_FUNCTION_FAILED);
         // Preserve the existing cross-process sharing policy and uint64_t wire handle.
