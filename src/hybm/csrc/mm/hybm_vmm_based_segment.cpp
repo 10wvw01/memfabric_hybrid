@@ -456,7 +456,7 @@ Result HybmVmmBasedSegment::ExportInner(const MemSlicePtr &slice, MemShareHandle
          * whitelist in time on the 26.1.1 driver. */
         ret = DlHalApi::HalMemExportToShareableHandleWithFlags(
             reinterpret_cast<drv_mem_handle_t *>(pos->second.handle),
-            static_cast<uint32_t>(DlAclApi::ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION), &shareable);
+            static_cast<uint32_t>(ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION), &shareable);
         BM_VALIDATE_RETURN(ret == BM_OK, "HAL export failed, rank:" << options_.rankId << " ret:" << ret,
                            BM_DL_FUNCTION_FAILED);
         // Preserve the existing cross-process sharing policy and uint64_t wire handle.
