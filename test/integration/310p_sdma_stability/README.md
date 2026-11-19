@@ -70,7 +70,7 @@ unset ASCEND_RT_VISIBLE_DEVICES
 python3 test/integration/310p_sdma_stability/test_exit_status.py \
   --device-base 2 \
   --binary /tmp/mf_310p_sdma_stability \
-  --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json
+  --kernel-dir build/src/hybm/ops/hybm_kernel
 ```
 
 3. 检查各故障场景的预期退出状态及正常完成对照。

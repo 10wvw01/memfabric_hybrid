@@ -17,8 +17,8 @@ def validate_install(args):
     package = Path(mf.__file__).resolve()
     if not package.is_relative_to(Path(args.prefix).resolve()):
         raise RuntimeError(f"unexpected imported package: {package}")
-    if os.environ.get("MF_SDMA_ORCH_DIR") or os.environ.get("MF_SDMA_ORCH_JSON"):
-        raise RuntimeError("MF_SDMA_ORCH_DIR and MF_SDMA_ORCH_JSON must be unset for automatic discovery")
+    if os.environ.get("MF_SDMA_ORCH_DIR"):
+        raise RuntimeError("MF_SDMA_ORCH_DIR must be unset for automatic discovery")
     import _pymf_hybrid
 
     extension = Path(_pymf_hybrid.__file__).resolve()

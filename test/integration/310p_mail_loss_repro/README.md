@@ -66,7 +66,7 @@ Host 诊断可读取请求游标和 AICPU 日志；设备传输使用公开 put/
    ```bash
    python3 test/integration/310p_mail_loss_repro/test_exit_status.py \
      --device-base 4 --binary /tmp/mf_mail_loss_repro \
-     --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json \
+     --kernel-dir build/src/hybm/ops/hybm_kernel \
      --log-dir /workspace/my-logs-dir/mail-exit
    ```
 

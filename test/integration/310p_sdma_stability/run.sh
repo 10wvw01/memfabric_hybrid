@@ -106,31 +106,17 @@ build_test()
     echo "[run.sh] 编译完成: $EX_BIN"
 }
 
-# ---------- 使用固定名称的AICPU kernel启动配置 ----------
-find_launch_json()
-{
-    if [ -f "$KERNEL_DIR/libmf_sdma_orch_launch.json" ]; then
-        echo "$KERNEL_DIR/libmf_sdma_orch_launch.json"
-    fi
-}
-
 # ---------- 运行 ----------
 run_test()
 {
-    local json
-    json="$(find_launch_json)"
-    if [ -z "$json" ]; then
-        echo "ERROR: 未找到 launch json(先完成主构建): $KERNEL_DIR/libmf_sdma_orch_launch.json"
-        exit 1
-    fi
     if [ ! -x "$EX_BIN" ]; then
         echo "ERROR: 测试未编译(先跑 bash run.sh --build-only): $EX_BIN"
         exit 1
     fi
-    export MF_SDMA_ORCH_JSON="$json"
+    export MF_SDMA_ORCH_DIR="${MF_SDMA_ORCH_DIR:-$KERNEL_DIR}"
     export LD_LIBRARY_PATH="$CANN_LIB:$MPI_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     local base="${TEST_DEVICE_BASE:-0}"
-    echo "[run.sh] 运行: device=$base/$((base + 1)) 轮数=${STRESS_ROUNDS:-30000} json=$(basename "$json")"
+    echo "[run.sh] 运行: device=$base/$((base + 1)) 轮数=${STRESS_ROUNDS:-30000} kernel_dir=$MF_SDMA_ORCH_DIR"
     if [ "$(id -u)" -eq 0 ]; then
         exec "$MPI_RUN" --allow-run-as-root -np 2 bash -c \
             "DEVICE_ID=\$(( $base + \$OMPI_COMM_WORLD_RANK )) exec $EX_BIN"

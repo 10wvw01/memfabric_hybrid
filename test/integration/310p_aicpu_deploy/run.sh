@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 LOG_DIR="${LOG_DIR:-/workspace/my-logs-dir/aicpu-deploy/$(date +%Y%m%d-%H%M%S-%N)}"
 mkdir -p "$LOG_DIR"
 export LD_LIBRARY_PATH="$ROOT/build/src/smem/csrc:$ROOT/build/src/hybm/csrc:$ASCEND_HOME_PATH/lib64:${LD_LIBRARY_PATH:-}"
-export MF_SDMA_ORCH_JSON="$ROOT/build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json"
+export MF_SDMA_ORCH_DIR="${MF_SDMA_ORCH_DIR:-$ROOT/build/src/hybm/ops/hybm_kernel}"
 export MF_LOG_LEVEL=1
 bisheng --npu-arch=dav-2002 -O2 -std=c++17 -x asc "$ROOT/test/integration/310p_aicpu_deploy/main.asc" \
  -o "$LOG_DIR/shmem_d2d" -I"$ASCEND_HOME_PATH/include" -I"$ROOT/src/smem/include/host" \

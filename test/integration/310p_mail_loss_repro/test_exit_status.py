@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """检查接收通知复现测试的退出码。
 
-需要加载CANN环境，并提供编译后的测试程序和AICPU kernel启动配置。
+需要加载CANN环境，并提供编译后的测试程序和AICPU kernel产物目录。
 故障在真实stream同步完成后或host读取状态时注入。
 """
 
@@ -142,7 +142,6 @@ class MailLossExitStatusTest(unittest.TestCase):
 
     def run_case(self, mode, expected, gens=7, rank=None):
         env = os.environ.copy()
-        env.pop("MF_SDMA_ORCH_DIR", None)
         env.pop("EX09_TEST_RANK", None)
         env.pop("EX09_TEST_MODE", None)
         env.update(
@@ -152,7 +151,7 @@ class MailLossExitStatusTest(unittest.TestCase):
             EX09_BATCH_GENS="1",
             EX09_GEN_DELAY_US="0",
             EX09_STALL_S="0" if mode == "stall" else "60",
-            MF_SDMA_ORCH_JSON=str(ARGS.kernel_json),
+            MF_SDMA_ORCH_DIR=str(ARGS.kernel_dir),
             MF_SDMA_ORCH_EPOCH_BUDGET_S="1",
         )
         if mode != "normal":
@@ -254,7 +253,7 @@ class MailLossExitStatusTest(unittest.TestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--kernel-json", type=Path, required=True)
+    parser.add_argument("--kernel-dir", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument(
         "--device-base",
@@ -266,7 +265,9 @@ if __name__ == "__main__":
     if not 0 <= ARGS.device_base < 65535:
         parser.error("--device-base须在0到65534之间")
     ARGS.binary = ARGS.binary.resolve(strict=True)
-    ARGS.kernel_json = ARGS.kernel_json.resolve(strict=True)
+    ARGS.kernel_dir = ARGS.kernel_dir.resolve(strict=True)
+    if not ARGS.kernel_dir.is_dir():
+        parser.error("--kernel-dir must be a directory")
     if ARGS.log_dir:
         ARGS.log_dir.mkdir(parents=True, exist_ok=True)
     unittest.main(argv=[__file__, *remaining], verbosity=2)

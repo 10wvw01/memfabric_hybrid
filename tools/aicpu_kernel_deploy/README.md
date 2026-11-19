@@ -2,7 +2,7 @@
 
 SHMEM SDMA 建池时由产品库自动部署 AICPU kernel。构建产物使用固定名称：
 `libmf_sdma_orch.so`、`libmf_sdma_orch.json`、`libmf_sdma_orch_launch.json`。
-三份文件需要位于同一目录，可通过 `MF_SDMA_ORCH_JSON` 指定 launch JSON。
+三份文件需要位于同一目录，可通过 `MF_SDMA_ORCH_DIR` 指定产物目录或其上级目录进行递归查找。
 
 `smem_shm_init` 初始化配置存储和设备；`smem_shm_create` 选择 SDMA 后触发部署。
 每次首次 Acquire 生成独立的临时加载名称，先确认设备目标文件缺失，再通过 CUST
