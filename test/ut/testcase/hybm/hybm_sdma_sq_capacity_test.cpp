@@ -101,6 +101,55 @@ protected:
     }
 };
 
+TEST_F(SdmaSqCapacityTest, PollingBudgetUsesElapsedTimeInsteadOfScanCount)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = 2;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 220032), 0);
+    clockNowNs = 3000000000ULL;
+    EXPECT_EQ(checkEpochBudget(result, budget, 220096), 1);
+    EXPECT_EQ(sleepCount, 0U);
+}
+
+TEST_F(SdmaSqCapacityTest, PollingClockIsSampledAndHeartbeatStillExpires)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = 2;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 1), 0);
+    EXPECT_EQ(clockCalls, 1U);
+    auto *heartbeat = reinterpret_cast<uint64_t *>(workspace.data() + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF);
+    *heartbeat = 20;
+    EXPECT_EQ(checkEpochBudget(result, budget, 2), 1);
+    EXPECT_EQ(clockCalls, 1U);
+}
+
+TEST_F(SdmaSqCapacityTest, PollingClockErrorsAreReported)
+{
+    EpochBudget budget{};
+    clockFailure = true;
+    EXPECT_EQ(initEpochBudget(&param, budget), 1370);
+    clockFailure = false;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    clockFailure = true;
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 0), -1370);
+}
+
+TEST_F(SdmaSqCapacityTest, ResidentPollingDoesNotRequireClockOrHeartbeat)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = ock::mf::HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT;
+    clockFailure = true;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 0), 0);
+    EXPECT_EQ(clockCalls, 0U);
+}
+
 TEST_F(SdmaSqCapacityTest, FullQueuePublishesPendingTasksAndRefreshesHead)
 {
     EXPECT_EQ(submitSqe(&param, &context, sqe), 0);
@@ -388,53 +437,5 @@ TEST_F(SdmaSqCapacityTest, SignalGroupPreservesNonzeroDoorbellOnWrap)
     EXPECT_EQ(publishedTail, 1U);
 }
 
-TEST_F(SdmaSqCapacityTest, PollingBudgetUsesElapsedTimeInsteadOfScanCount)
-{
-    EpochBudget budget{};
-    param.epochBudgetS = 2;
-    ASSERT_EQ(initEpochBudget(&param, budget), 0);
-    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
-    EXPECT_EQ(checkEpochBudget(result, budget, 220032), 0);
-    clockNowNs = 3000000000ULL;
-    EXPECT_EQ(checkEpochBudget(result, budget, 220096), 1);
-    EXPECT_EQ(sleepCount, 0U);
-}
-
-TEST_F(SdmaSqCapacityTest, PollingClockIsSampledAndHeartbeatStillExpires)
-{
-    EpochBudget budget{};
-    param.epochBudgetS = 2;
-    ASSERT_EQ(initEpochBudget(&param, budget), 0);
-    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
-    EXPECT_EQ(checkEpochBudget(result, budget, 1), 0);
-    EXPECT_EQ(clockCalls, 1U);
-    auto *heartbeat = reinterpret_cast<uint64_t *>(workspace.data() + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF);
-    *heartbeat = 20;
-    EXPECT_EQ(checkEpochBudget(result, budget, 2), 1);
-    EXPECT_EQ(clockCalls, 1U);
-}
-
-TEST_F(SdmaSqCapacityTest, PollingClockErrorsAreReported)
-{
-    EpochBudget budget{};
-    clockFailure = true;
-    EXPECT_EQ(initEpochBudget(&param, budget), 1370);
-    clockFailure = false;
-    ASSERT_EQ(initEpochBudget(&param, budget), 0);
-    clockFailure = true;
-    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
-    EXPECT_EQ(checkEpochBudget(result, budget, 0), -1370);
-}
-
-TEST_F(SdmaSqCapacityTest, ResidentPollingDoesNotRequireClockOrHeartbeat)
-{
-    EpochBudget budget{};
-    param.epochBudgetS = ock::mf::HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT;
-    clockFailure = true;
-    ASSERT_EQ(initEpochBudget(&param, budget), 0);
-    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
-    EXPECT_EQ(checkEpochBudget(result, budget, 0), 0);
-    EXPECT_EQ(clockCalls, 0U);
-}
 
 #endif
