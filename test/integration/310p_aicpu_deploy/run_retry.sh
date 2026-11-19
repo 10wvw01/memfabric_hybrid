@@ -39,7 +39,7 @@ for mode in missing-so invalid-json channel verify; do
     launch_task()
     {
         timeout --kill-after=10s 180s "${mpi_run[@]}" -np 2 bash -c '
-            export MF_SDMA_ORCH_JSON="$TEST_CASE_DIR/rank$OMPI_COMM_WORLD_RANK/libmf_sdma_orch_launch.json"
+            export MF_SDMA_ORCH_DIR="$TEST_CASE_DIR/rank$OMPI_COMM_WORLD_RANK"
             if [[ ( "$TEST_CASE_MODE" == channel || "$TEST_CASE_MODE" == verify ) && "$EXPECT_FAILURE" == 1 ]]; then
                 export LD_PRELOAD="$RETRY_INJECTOR${LD_PRELOAD:+:$LD_PRELOAD}"
                 if [[ "$OMPI_COMM_WORLD_RANK" == 0 ]]; then

@@ -18,40 +18,37 @@ rank0等待接收通知。两个rank逐轮通过MPI同步进度。
 任一rank的ACL接口调用失败时，日志输出rank、接口名、返回码和已完成轮数，
 随后通过MPI_Abort结束任务。数据或总耗时检查失败时，程序返回1。
 
-## 环境与构建
+## 环境、构建和运行
 
-需要Ascend310P3、CANN、bisheng和MPI。编译与运行使用同一套MPI。
-在仓库根目录加载本机CANN环境并设置ASCEND_HOME_PATH，例如：
+需要 Ascend310P3、CANN、bisheng 和 MPI，编译与运行使用同一套 MPI。
 
-```bash
-source /usr/local/Ascend/cann-9.2.1/set_env.sh
-export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.2.1
-```
+1. 在仓库根目录加载 CANN 环境，并通过 `npu-smi info` 选择同卡两个空闲 die。
 
-脚本会编译测试程序，缺少主库静态库时先构建主库。
-AICPU kernel启动配置使用当前构建目录中的libmf_sdma_orch_launch.json。
-测试程序写入/tmp/mf_310p_sdma_stability，同一容器内应顺序运行，避免并发覆盖产物。
+   ```bash
+   source /usr/local/Ascend/cann-9.2.1/set_env.sh
+   export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.2.1
+   ```
 
-## 运行
+2. 构建主库及测试程序。
 
-使用前通过npu-smi info确认设备0/1可用。以下命令清除设备可见性映射，显式选择设备0/1：
+   ```bash
+   bash script/build_and_pack_run.sh
+   bash test/integration/310p_sdma_stability/run.sh --build-only
+   ```
 
-```bash
-unset ASCEND_RT_VISIBLE_DEVICES
-TEST_DEVICE_BASE=0 STRESS_ROUNDS=30000 \
-  bash test/integration/310p_sdma_stability/run.sh
-```
+3. 清除设备可见性映射，显式指定所选设备运行。
 
-可以分开编译和运行：
+   ```bash
+   unset ASCEND_RT_VISIBLE_DEVICES
+   TEST_DEVICE_BASE=0 STRESS_ROUNDS=30000 \
+     bash test/integration/310p_sdma_stability/run.sh --run-only
+   ```
 
-```bash
-bash test/integration/310p_sdma_stability/run.sh --build-only
-TEST_DEVICE_BASE=0 STRESS_ROUNDS=30000 \
-  bash test/integration/310p_sdma_stability/run.sh --run-only
-```
+4. 按下节检查数据、设备同步和进程退出状态。
 
-STRESS_ROUNDS使用正整数，默认30000。TEST_DEVICE_BASE默认0，
-两个rank分别使用起始索引和下一索引。
+STRESS_ROUNDS 使用正整数，默认 30000；两个 rank 分别使用 TEST_DEVICE_BASE 及其下一索引。
+AICPU kernel 启动配置使用当前构建目录中的 `libmf_sdma_orch_launch.json`。
+测试程序位于 `/tmp/mf_310p_sdma_stability`，应顺序运行，避免并发覆盖产物。
 
 ## 判断结果
 
@@ -65,15 +62,19 @@ STRESS_ROUNDS使用正整数，默认30000。TEST_DEVICE_BASE默认0，
 
 ## 错误退出回归测试
 
-编译后，在同样的CANN环境下选择空闲的同卡两个die，例如设备2/3：
+1. 完成上述编译，在同一 CANN 环境下选择同卡两个空闲 die，例如设备 2/3。
+2. 运行退出码测试。
 
 ```bash
 unset ASCEND_RT_VISIBLE_DEVICES
 python3 test/integration/310p_sdma_stability/test_exit_status.py \
   --device-base 2 \
   --binary /tmp/mf_310p_sdma_stability \
-  --kernel-json build/src/hybm/ops/hybm_kernel/libmf_sdma_orch_launch.json
+  --kernel-dir build/src/hybm/ops/hybm_kernel
 ```
+
+3. 检查各故障场景的预期退出状态及正常完成对照。
+4. 检查脚本退出码和独立日志目录。
 
 脚本执行7轮真实收发，并通过临时预加载库改变host收到的接口返回值或抽样数据。
 同步与清理类故障在真实接口完成后注入。检查内容包括接口失败、数据失配、

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """检查310P SDMA稳定性测试的错误退出。
 
-需要加载CANN环境，并提供编译后的测试程序和AICPU kernel启动配置。
+需要加载CANN环境，并提供编译后的测试程序和AICPU kernel产物目录。
 通过临时预加载库改变host收到的接口返回值，检查失败时的退出码。
 """
 
@@ -134,7 +134,7 @@ class StabilityExitStatusTest(unittest.TestCase):
         env.update(
             TEST_DEVICE_BASE=str(ARGS.device_base),
             STRESS_ROUNDS="7",
-            MF_SDMA_ORCH_JSON=str(ARGS.kernel_json),
+            MF_SDMA_ORCH_DIR=str(ARGS.kernel_dir),
             MF_SDMA_ORCH_EPOCH_BUDGET_S="1",
         )
         if mode != "normal":
@@ -230,7 +230,7 @@ class StabilityExitStatusTest(unittest.TestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--kernel-json", type=Path, required=True)
+    parser.add_argument("--kernel-dir", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument(
         "--device-base",
@@ -242,7 +242,9 @@ if __name__ == "__main__":
     if not 0 <= ARGS.device_base < 65535:
         parser.error("--device-base须在0到65534之间")
     ARGS.binary = ARGS.binary.resolve(strict=True)
-    ARGS.kernel_json = ARGS.kernel_json.resolve(strict=True)
+    ARGS.kernel_dir = ARGS.kernel_dir.resolve(strict=True)
+    if not ARGS.kernel_dir.is_dir():
+        parser.error("--kernel-dir must be a directory")
     if ARGS.log_dir:
         ARGS.log_dir.mkdir(parents=True, exist_ok=True)
     unittest.main(argv=[__file__, *remaining], verbosity=2)

@@ -46,13 +46,9 @@
  * 为什么不一次下发跑到停止: host 侧全设备同步(AclrtSynchronizeDevice, torch_npu 分配
  * 显存时内部触发)等所有流的全部任务且无豁免——永不退出的 kernel 必阻塞它(serve 实测死因 507017)。
  *
- * 职责: 轮转消费本端段尾保留区 24 个按对端×block 划分的请求队列邮件 {src,dst,len,imm},
- * 邮件像写本端暂存后逐封构造 SQE 四连:
- *   ① 数据 SQE(src→dst)
- *   ⓪ 邮件像 SQE(32B ← 本端暂存 → 对端到达邮件槽)——v29: AICPU 对对端零直写
- *   ② 到达戳 SQE(8B seq ← 暂存槽首 → 对端到达戳槽)——FIFO 保序, 戳到即邮件+数据到
- *   ③ 完成戳 SQE(8B seq ← 同源 → 本端完成戳槽, quiet 语义)
- * 同队列 FIFO 保证 ⓪②③ 晚于 ① 落地; 对端 AICore 经 smem_shm_sdma_wait 按序消费。
+ * 轮转消费本端按对端和 block 划分的请求队列。
+ * 每条请求按顺序构造数据传输和本端完成描述符；只写本端完成状态。
+ * 暂存槽首 uint64_t 保存序号+1，前一次使用完成后才允许覆盖。
  *
  * SQE 64B 配方为 STARS V2 布局(hcomm AddOneMemcpySqeV2 逐字段比对+真机校验);
  * 配方与固件强耦合，改动须实机验证。设备加载名称由运行时自动生成。
@@ -334,7 +330,7 @@ inline void storeCell(uint64_t addr, uint64_t v)
 // v15 诊断逐单日志: 逐单落工作区环形缓冲(读回原文/计算地址/SQ 游标), host D2H 可读。
 // 单线程 kernel 无并发; 计数持久于工作区(跨 epoch 累计, 环形覆盖最旧)。
 void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf::HybmSdmaReqMail &mail,
-                uint64_t arrMailSlot, uint64_t sqTailBefore, uint64_t sqTailAfter)
+                uint64_t sqTailBefore, uint64_t sqTailAfter)
 {
     using namespace ock::mf;
     const uintptr_t ws = static_cast<uintptr_t>(p->resultAddr);
@@ -347,35 +343,30 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
     e->reqF1 = mail.dst;
     e->reqF2 = mail.len;
     e->reqF3 = mail.imm;
-    e->arrMailSlot = arrMailSlot;
+    e->reserved = 0;
     e->sqTailBefore = sqTailBefore;
     e->sqTailAfter = sqTailAfter;
     cacheFlushLine(reinterpret_cast<uintptr_t>(e)); /* 64B 恰一行 */
     storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF, cnt + 1);
 }
 
-// SQE 四连入环(不敲铃): ① 数据(src→dst, 可带 reduce opcode) ⓪ 邮件像(暂存 32B→对端邮件槽)
-// ② 到达戳(暂存槽首 8B→对端戳槽) ③ 完成戳(同源→本端戳槽); 同队列 FIFO 保证 ⓪②③ 晚于 ① 落地。
-// v25: ②③ 拷贝数据源=本端暂存(原为对端邮件内容首字段——跨芯片写在途时 SDMA 读回旧值, 并发邮件丢失挂死（507014）)。
-// v29: 戳值=环序号+1(请求环按对端划分后序号即对端连续序号); 邮件像同样经暂存由 ⓪ 投递
-// ——AICPU 跨卡直写实测不返回(设备侧 CPU 核的跨卡 store 无通路), 对端内存全部经 SDMA。
+// 数据传输与本端完成按 SQ FIFO 顺序执行。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
-                      const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t peerMailSlot,
-                      uint64_t peerArrStampSlot, uint64_t quietStampSlot, uint8_t sqeOpcode)
+                      const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot,
+                      uint64_t quietStampSlot, uint8_t sqeOpcode)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
-    // 一条请求的4个任务和可能的占位任务整体预留，等待时的提交位置保持非零。
-    const uint32_t count = ((ctx->sqTail + 4) % ctx->sqDepth == 0) ? 5 : 4;
+    // 整组预留，包含尾值回绕为零时的占位描述符。
+    constexpr uint32_t descriptors = 2;
+    const uint32_t count = ((ctx->sqTail + descriptors) % ctx->sqDepth == 0) ? descriptors + 1 : descriptors;
     if (reserveSqeSpace(p, ctx, count) != 0) {
         return 1360;
     }
-    /* 尾值防 0(v21, 并发邮件丢失挂死（507014） 修复): 本封四连若恰好使 shadow 尾落到 0, 该批 doorbell
-     * 值为 0——固件将其当"空环"哨兵静默丢弃, SQE 完好在环但永不执行(实测确定性丢失邮件)。
-     * 先插入一条无害占位 SQE(工作区 8B 自拷贝), 尾值落到 1; 小正值回绕形态实测安全。 */
-    if ((ctx->sqTail + 4) % ctx->sqDepth == 0) {
+    // 固件将 doorbell 尾值 0 当作空环；插入自拷贝占位使提交尾值非零。
+    if ((ctx->sqTail + descriptors) % ctx->sqDepth == 0) {
         const uint64_t scratch = p->resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF;
-        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + 4),
+        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + 2),
                           scratch, scratch, 8,
                           p->devId, p->overflowAddr, ssid);
         int32_t padRet = submitSqe(p, ctx, sqe);
@@ -390,16 +381,6 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
         return 1360; // 错误码: SQ 持续满/查询失败
     }
     buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + 1), stageSlot,
-                      peerMailSlot, sizeof(ock::mf::HybmSdmaArrMail), p->devId, p->overflowAddr, ssid); // ⓪ 邮件像
-    if (submitSqe(p, ctx, sqe) != 0) {
-        return 1364; // 错误码: 邮件像失败
-    }
-    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + 2), stageSlot,
-                      peerArrStampSlot, 8, p->devId, p->overflowAddr, ssid); // ② 到达戳(源=暂存槽首)
-    if (submitSqe(p, ctx, sqe) != 0) {
-        return 1361; // 错误码: 到达戳失败
-    }
-    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + 3), stageSlot,
                       quietStampSlot, 8, p->devId,
                       p->overflowAddr, ssid); // ③ 完成戳(源=同一暂存槽首, FIFO 序即全部到)
     if (submitSqe(p, ctx, sqe) != 0) {
@@ -421,16 +402,7 @@ int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
     return (r != 0) ? 1390 : 0;                                 // 错误码: 敲铃失败
 }
 
-// 消费一封请求邮件(队列 q 序号 d): 邮件像写本端暂存 → SQE 四连 → reqHead[q] 推进。
-// 返回 0 成功; 非 0 失败码(调用方记 result 并退出 epoch)。
-// v29 4-rank 化: 请求环按对端划分——队列下标经 PeerRankOf 反推目的 rank Q, 到达
-// 邮件/戳写入 Q 的保留区中"以本端 rank 视角"的到达环(PeerRingIdx(Q, rank))。
-// 槽位/戳值/暂存值均为环序号 d 的纯函数, 换轮重消费幂等(重写同槽同值)——逐环
-// 完整继承 2-rank 语义; 多对端各环独立, 互不影响。
-// v29(3): AICPU 对对端内存零直写——邮件像经本端暂存由 SQE ⓪ 投递(AICPU 跨卡直写
-// 实测不返回), 对端邮件/戳/数据全部经 SDMA SQE。
-// v31 多 AICore: 队列 = (对端, 发起 block)——目的 rank 与发起 block 由队列下标分解,
-// 到达子环按同一编码在对端定位; 每 (对端, block) 队列独立 SPSC。
+// 消费请求并推进本端游标；队列标识对端和发起 block。
 int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint32_t queueIdx,
                        uint64_t seq)
 {
@@ -440,45 +412,62 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     cacheInvalidateLine(reqSlot & ~static_cast<uintptr_t>(63));
     const volatile HybmSdmaReqMail *rm = reinterpret_cast<const volatile HybmSdmaReqMail *>(reqSlot);
     HybmSdmaReqMail mail = {rm->src, rm->dst, rm->len, rm->imm}; // 快照(后续槽可复用)
-    uint64_t immTag = mail.imm;                                  // 解码 reduce 编码 → 用户标签 + SQE opcode
-    const uint8_t sqeOpcode = HybmSdmaDecodeOp(mail.imm, &immTag);
+    if ((mail.len & (1ULL << 63)) == 0) { return 1334; }
+    if ((mail.len & 0x7FFFFFFF00000000ULL) != 0) { return 1331; }
+    mail.len &= UINT32_MAX;
+    if (mail.len == 0 || ((mail.src | mail.dst | mail.len) & 3) != 0) { return 1332; }
+    if (mail.imm != 0 &&
+        mail.imm != ((HYBM_SDMA_IMM_MAGIC << 48) | (uint64_t(HYBM_SDMA_SQE_OP_FP32_ADD) << 40)) &&
+        mail.imm != ((HYBM_SDMA_IMM_MAGIC << 48) | (uint64_t(HYBM_SDMA_SQE_OP_FP16_ADD) << 40))) {
+        return 1333;
+    }
+    const uint8_t sqeOpcode = HybmSdmaDecodeOp(mail.imm);
     /* 目的 rank/发起 block 分解与合法性(2-rank 时代单环即对端无需路由; 4-rank 须显式判定) */
     const uint32_t peerRingIdx = SmemShmSdmaQueuePeerRing(queueIdx);
-    const uint32_t producerBlock = SmemShmSdmaQueueBlock(queueIdx);
     const uint32_t peerRank = SmemShmSdmaPeerRankOf(p->rank, peerRingIdx);
     const uint64_t peerSegExpect = p->poolBaseGva + static_cast<uint64_t>(peerRank) * p->symSize;
-    const uint64_t peerSeg = mail.dst & ~(p->symSize - 1); // 对端段基址(掩码算术)
-    if (peerSeg != peerSegExpect) {                        // signal 侧已按 dst 路由, 此处复核防错环错投
-        return 1330; // 错误码: dst 段基与请求环目的不符(路由非法)
+    const uint64_t srcSeg = mail.src & ~(p->symSize - 1);
+    const uint64_t dstSeg = mail.dst & ~(p->symSize - 1);
+    const bool isGet = srcSeg == peerSegExpect;
+    const uint64_t peerSeg = isGet ? srcSeg : dstSeg;
+    const uint64_t remoteAddr = isGet ? mail.src : mail.dst;
+    const uint64_t usable = p->physSize - SMEM_SHM_SDMA_RESERVED;
+    const uint64_t remoteOffset = remoteAddr - peerSegExpect;
+    if (peerSeg != peerSegExpect || remoteOffset >= usable || mail.len > usable - remoteOffset ||
+        (isGet && (dstSeg == peerSegExpect || sqeOpcode != 0)) ||
+        (sqeOpcode != 0 && sqeOpcode != HYBM_SDMA_SQE_OP_FP32_ADD &&
+         sqeOpcode != HYBM_SDMA_SQE_OP_FP16_ADD)) {
+        return 1330;
     }
-    /* 到达子环下标 = 接收方视角(目的 rank 压缩去自身) × block 维——接收方 wait 按同一
-     * 编码定位本队列(参数序与 wait_peer_at 严格一致, 换序即错队列) */
-    const uint32_t arrQueueIdx = SmemShmSdmaQueueIdx(SmemShmSdmaPeerRingIdx(peerRank, p->rank), producerBlock);
-    const uint64_t peerRing = peerSeg + (p->physSize - SMEM_SHM_SDMA_RESERVED) +
-                              SMEM_SHM_SDMA_RS_PEER_RINGS + arrQueueIdx * SMEM_SHM_SDMA_RS_PEER_STRIDE;
-    const uint64_t peerMailSlot = peerRing + SMEM_SHM_SDMA_RS_PEER_MAIL +
-                                  (seq % SMEM_SHM_SDMA_RS_PEER_SLOTS) * sizeof(HybmSdmaArrMail);
-    const uint64_t peerArrStamp = peerRing + SMEM_SHM_SDMA_RS_PEER_STAMP +
-                                  (seq % SMEM_SHM_SDMA_RS_PEER_SLOTS) * 8; // 对端到达戳槽
-    /* v25/v29: 邮件像写本端暂存(本地写+刷出, 本端 SDMA 立即可见)——⓪②③ 的共同拷贝源
-     * (槽 32B: [序号+1][dst][len][imm]; 戳值=槽首 8B=序号+1) */
     const uint64_t stageSlot = p->resBase + SMEM_SHM_SDMA_RS_STAGE + queueIdx * SMEM_SHM_SDMA_RS_STAGE_STRIDE +
-                                (seq % SMEM_SHM_SDMA_RS_STAGE_SLOTS) * sizeof(HybmSdmaArrMail);
+                                (seq % SMEM_SHM_SDMA_RS_STAGE_SLOTS) * sizeof(HybmSdmaReqMail);
+    constexpr uint32_t descriptors = 2;
+    const uint32_t count = (ctx->sqTail + descriptors) % ctx->sqDepth == 0 ? descriptors + 1 : descriptors;
+    if (reserveSqeSpace(p, ctx, count) != 0) { return 1360; }
+    // 前次传输完成前，暂存槽仍是 DMA 源，不能覆盖。
+    if (seq >= SMEM_SHM_SDMA_RS_STAGE_SLOTS) {
+        const uint64_t previous = seq - SMEM_SHM_SDMA_RS_STAGE_SLOTS;
+        const uint64_t previousStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET +
+            queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
+            (previous % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8;
+        if (flushBatchDoorbell(p, ctx) != 0) { return 1390; }
+        uint32_t tries = 0;
+        while (loadCell(previousStamp) < previous + 1) {
+            if (++tries == 10000) { return 1366; }
+            usleep(100);
+        }
+    }
     uint64_t *st = reinterpret_cast<uint64_t *>(stageSlot);
-    st[0] = seq + 1; // 戳值(1 基; 0 保留为"空", 区分序号 0 与未写入槽位)——②③ 的 8B 拷贝源
-    st[1] = mail.dst;
-    st[2] = mail.len;
-    st[3] = immTag; // 还原后的用户标签(reduce 编码不透传, wait 方兼容)
+    st[0] = seq + 1; // 戳值(1 基; 0 保留为"空", 区分序号 0 与未写入槽位)，供完成描述符读取
     cacheFlushLine(stageSlot & ~static_cast<uintptr_t>(63)); // 32B 对齐单行, 刷出(SQE 可读)
     const uint64_t quietStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET + queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
                                 (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8; // 本端完成戳槽(队列内)
     const uint64_t tailBefore = ctx->sqTail;
-    auto ret = issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, peerMailSlot, peerArrStamp,
-                             quietStamp, sqeOpcode);
+    auto ret = issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode);
     if (ret != 0) {
         return ret;
     }
-    dbgLogMail(p, seq, mail, peerMailSlot, tailBefore, ctx->sqTail); // v15 逐单日志(最后写, 失败路径不记)
+    dbgLogMail(p, seq, mail, tailBefore, ctx->sqTail); // v15 逐单日志(最后写, 失败路径不记)
     storeCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + queueIdx * SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
               seq + 1); // reqHead[q] 推进
     return 0;
@@ -541,7 +530,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         bool progressed = true;
         /* 24 队列轮转消费: 每轮扫描全部队列各取一封, 直至批满或一轮零消费——任一队列
          * 不会长期占满批处理名额导致其他队列得不到处理, 队列内仍严格 FIFO
-         * (到达子环按对端×block 隔离, 跨队列无序约束) */
+         * (完成状态按对端×block 隔离, 跨队列无序约束) */
         while (progressed && batch < kDoorbellBatch) {
             progressed = false;
             for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT && batch < kDoorbellBatch; q++) {

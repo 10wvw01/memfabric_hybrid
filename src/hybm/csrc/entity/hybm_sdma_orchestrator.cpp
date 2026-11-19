@@ -27,8 +27,10 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <unistd.h>
 
@@ -285,27 +287,87 @@ static bool IsValidDeviceSoName(const std::string &name)
     return true;
 }
 
-Result SdmaOrchestrator::LoadOrchestratorKernel()
+static bool HasOrchestratorArtifacts(const std::filesystem::path &directory)
 {
-    std::string jsonPath = env::MF_SDMA_ORCH_JSON; // ① 环境变量显式指定
-    if (jsonPath.empty()) {
-        jsonPath = FindInstalledJson();            // ② 安装前缀自动发现
+    const char *names[] = {HYBM_SDMA_ORCH_CUST_SO, HYBM_SDMA_ORCH_CUST_JSON, HYBM_SDMA_ORCH_DEFAULT_JSON};
+    for (const auto *name : names) {
+        const auto file = directory / name;
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(file, error) || access(file.c_str(), R_OK) != 0) {
+            return false;
+        }
     }
-    if (jsonPath.empty()) {
-        jsonPath = HYBM_SDMA_ORCH_DEFAULT_JSON;     // ③ CWD 缺省名
-    }
-    char resolved[PATH_MAX] = {0};
-    if (realpath(jsonPath.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) {
-        BM_LOG_ERROR("sdma orchestrator json not accessible: " << jsonPath
-                                                                << " (set MF_SDMA_ORCH_JSON?)");
+    return true;
+}
+
+static Result FindOrchestratorJson(const std::string &directory, std::string &jsonPath)
+{
+    std::error_code error;
+    const auto root = std::filesystem::canonical(directory, error);
+    if (error || !std::filesystem::is_directory(root, error)) {
+        BM_LOG_ERROR("invalid MF_SDMA_ORCH_DIR: " << directory << " error: " << error.message());
         return BM_FILE_NOT_ACCESS;
     }
-    std::string runtimeJson;
-    auto ret = PrepareRuntimeJson(resolved, runtimeJson);
+    std::set<std::string> matches;
+    // 子目录符号链接不递归跟随，避免循环和同一安装目录被重复发现。
+    std::filesystem::recursive_directory_iterator current(root, error), end;
+    for (; !error && current != end; current.increment(error)) {
+        const auto &path = current->path();
+        if (path.filename() == HYBM_SDMA_ORCH_DEFAULT_JSON && HasOrchestratorArtifacts(path.parent_path())) {
+            matches.insert(path.string());
+        }
+    }
+    if (error) {
+        BM_LOG_ERROR("scan MF_SDMA_ORCH_DIR failed, directory: " << directory << " error: " << error.message());
+        return BM_FILE_NOT_ACCESS;
+    }
+    if (matches.size() != 1) {
+        BM_LOG_ERROR("MF_SDMA_ORCH_DIR requires one complete artifact directory, root: " << directory
+                     << " matches: " << matches.size() << " required: " << HYBM_SDMA_ORCH_CUST_SO << ", "
+                     << HYBM_SDMA_ORCH_CUST_JSON << ", " << HYBM_SDMA_ORCH_DEFAULT_JSON);
+        for (const auto &match : matches) {
+            BM_LOG_ERROR("SDMA artifact candidate: " << match);
+        }
+        return BM_FILE_NOT_ACCESS;
+    }
+    jsonPath = *matches.begin();
+    BM_LOG_INFO("SDMA artifacts found under MF_SDMA_ORCH_DIR, launch json: " << jsonPath);
+    return BM_OK;
+}
+
+Result SdmaOrchestrator::ResolveOrchestratorJson(const std::string &directory, std::string &jsonPath)
+{
+    jsonPath.clear();
+    if (!directory.empty()) {
+        return FindOrchestratorJson(directory, jsonPath);
+    }
+    std::string candidate = FindInstalledJson();
+    if (candidate.empty()) {
+        candidate = HYBM_SDMA_ORCH_DEFAULT_JSON;
+    }
+    char resolved[PATH_MAX] = {0};
+    if (realpath(candidate.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) {
+        BM_LOG_ERROR("sdma orchestrator json not accessible: " << candidate
+                     << " (set MF_SDMA_ORCH_DIR)");
+        return BM_FILE_NOT_ACCESS;
+    }
+    jsonPath = resolved;
+    return BM_OK;
+}
+
+Result SdmaOrchestrator::LoadOrchestratorKernel()
+{
+    std::string jsonPath;
+    auto ret = ResolveOrchestratorJson(env::MF_SDMA_ORCH_DIR, jsonPath);
     if (ret != BM_OK) {
         return ret;
     }
-    ret = DeployOrchestratorKernel(DirOf(resolved), runtimeJson);
+    std::string runtimeJson;
+    ret = PrepareRuntimeJson(jsonPath, runtimeJson);
+    if (ret != BM_OK) {
+        return ret;
+    }
+    ret = DeployOrchestratorKernel(DirOf(jsonPath), runtimeJson);
     (void)unlink(runtimeJson.c_str());
     return ret;
 }
@@ -609,6 +671,23 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
         BM_LOG_ERROR("first epoch launch failed, ret: " << ret << " sqId: " << sqId_ << " devId: " << devId_);
         DestroyEpochResources();
         return ret;
+    }
+    epochLaunched_ = true;
+    // 首轮 kernel 写入协议标识和 RUNNING 状态后才允许建池成功。
+    // 最多轮询 200 次、每次间隔 10 ms，及时拒绝旧 kernel、异常退出或未启动的情况。
+    HybmSdmaOrchResult capability{};
+    for (uint32_t attempt = 0; attempt < 200; ++attempt) {
+        ret = DlAclApi::AclrtMemcpy(&capability, sizeof(capability),
+            reinterpret_cast<void *>(epochParam_.resultAddr), sizeof(capability), ACL_MEMCPY_DEVICE_TO_HOST);
+        if (ret != BM_OK || capability.magic != 0) { break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (ret != BM_OK || capability.magic != HYBM_SDMA_ORCH_RESULT_MAGIC ||
+        capability.exitReason != HYBM_SDMA_ORCH_EXIT_RUNNING) {
+        BM_LOG_ERROR("SDMA kernel protocol handshake failed, magic: " << capability.magic
+            << " expected: " << HYBM_SDMA_ORCH_RESULT_MAGIC << " ret: " << ret << " devId: " << devId_);
+        StopEpoch();
+        return BM_ERROR;
     }
     configured_ = true; // 首轮已在设备运行
     epochLaunched_ = true;

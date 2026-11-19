@@ -68,8 +68,8 @@ inline const std::string MF_CONFIG_STORE_PORT_END =
 // 310P 设备发起 SDMA 协同模式显式禁用开关(默认启用: 310P 上 A3 SDMA 配方必败,
 // 协同为该平台唯一可用 SDMA 链路, 故零配置自动启用; 该变量仅供诊断场景显式关断)
 inline const std::string MF_SDMA_ORCH_DISABLE = GetEnvStr("MF_SDMA_ORCH_DISABLE"); // SdmaOrchestrator::Disabled 读取
-// 协同编排 kernel 的 launch json 路径(缺省依次: 安装前缀自动发现 → CWD 的 libmf_sdma_orch_launch.json)
-inline const std::string MF_SDMA_ORCH_JSON = GetEnvStr("MF_SDMA_ORCH_JSON"); // LoadOrchestratorKernel 读取
+// 编排产物目录；递归查找同目录中的 SO、迁移 JSON 和 launch JSON。
+inline const std::string MF_SDMA_ORCH_DIR = GetEnvStr("MF_SDMA_ORCH_DIR");
 // 搬运 kernel 每轮时长秒数(缺省 15): 到点自退后由监督线程重新拉起(环+游标零丢失)。
 // 4294967295=永不退出(诊断用; 会阻塞任何全设备同步, 见平台事实 2026-10-12 定案条目)
 inline const std::string MF_SDMA_ORCH_EPOCH_BUDGET_S = GetEnvStr("MF_SDMA_ORCH_EPOCH_BUDGET_S"); // ConfigureOrch 读取
