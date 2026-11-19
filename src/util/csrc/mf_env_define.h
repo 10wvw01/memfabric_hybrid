@@ -73,6 +73,12 @@ inline const std::string MF_SDMA_ORCH_DIR = GetEnvStr("MF_SDMA_ORCH_DIR");
 // 搬运 kernel 每轮时长秒数(缺省 15): 到点自退后由监督线程重新拉起(环+游标零丢失)。
 // 4294967295=永不退出(诊断用; 会阻塞任何全设备同步, 见平台事实 2026-10-12 定案条目)
 inline const std::string MF_SDMA_ORCH_EPOCH_BUDGET_S = GetEnvStr("MF_SDMA_ORCH_EPOCH_BUDGET_S"); // ConfigureOrch 读取
+// 寄存器同步唤醒(commByReg)显式开启开关(默认关: AICPU 空闲轮询走 GM 游标)。
+// 开启后 host 经 halMemCtl 查 AICore 控制寄存器基址并 H2D regBase 数组, AICore submit 后
+// set_cond 写 COND 唤醒 AICPU; 查询失败自动降级回 GM(零功能损失)。
+inline const std::string MF_SDMA_ORCH_COMM_BY_REG = GetEnvStr("MF_SDMA_ORCH_COMM_BY_REG"); // QueryAicoreRegs 读取
+// 诊断开关: 强制走 GM 轮询(优先级高于开启开关, 用于二分定位寄存器路径问题)
+inline const std::string MF_SDMA_ORCH_FORCE_GM = GetEnvStr("MF_SDMA_ORCH_FORCE_GM"); // QueryAicoreRegs 读取
 inline const std::string MF_GROUP_JOIN_MAX_TIMEOUT = GetEnvStr("MF_GROUP_JOIN_MAX_TIMEOUT");
 inline const std::string MF_GROUP_RETRY_TIME = GetEnvStr("MF_GROUP_RETRY_TIME", "MF_SMEM_GROUP_RETRY_TIME");
 inline const std::string MF_ACC_CHECK_PERIOD_HOURS =

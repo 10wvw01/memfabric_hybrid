@@ -106,6 +106,7 @@ private:
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
+    void QueryAicoreRegs(uint16_t devId);  /* halMemCtl 查 AICore 控制寄存器基址(失败降级 commByReg_=false 走 GM) */
     static Result ResolveOrchestratorJson(const std::string &directory, std::string &jsonPath);
     Result LoadOrchestratorKernel();       /* json 解析 + 经 CANN extend lib loader 部署到 CP1 */
     /* pypto 机制部署: so 字节经 DeviceArgs 传给 CP1 预加载的 libaicpu_extend_kernels.so,
@@ -140,6 +141,12 @@ private:
     std::atomic<uint64_t> workspace_{0};   /* 工作区设备地址(原子: 同上) */
     std::atomic<bool> stopFlag_{false};    /* 监督线程退出标志(StopEpoch 置位) */
     std::thread supervisor_;               /* 监督线程(分轮模式启动: 写报时计数/读结果区/换轮; 永不退出诊断模式不启动) */
+    /* 寄存器同步唤醒(commByReg): halMemCtl 查到的 AICore 控制寄存器基址(经 H2D 成功且
+     * MF_SDMA_ORCH_COMM_BY_REG=1 显式开启才置 true; 默认 false 走 GM 轮询, 行为与关一致) */
+    bool commByReg_{false};                /* 寄存器同步可用标志(QueryAicoreRegs 设置) */
+    uint64_t regBaseDevAddr_{0};           /* regBase 数组设备地址(10×u64, H2D 后; commByReg=false 时为 0) */
+    static constexpr uint32_t REG_BASE_CORES = 10;        /* 310P3 DAV_2002: 10 physical AICore */
+    static constexpr uint64_t REG_CORE_STRIDE = 0x200000ULL; /* per-core 2MB stride */
 };
 } // namespace mf
 } // namespace ock

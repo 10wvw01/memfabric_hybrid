@@ -20,9 +20,11 @@
 
 #include <cstdint>
 
-/* host/AICore 双侧可调标记: bisheng 统一编译(__CCE__, host+AICore 双 pass)下
- * __host__ __aicore__ 双属性(设备 kernel 与 host 代码均可调); 纯 g++ 环境
- * (AICPU kernel 交叉编译/host UT/orchestrator)无执行模型, 退化为普通 inline */
+/* host/AICore 双侧可调标记: bisheng 统一编译(双 pass)下 aicore pass 定义 __CCE__,
+ * 用 __aicore__ 属性(与 smem_shm_aicore_base_define.h 的 SMEM_SHM_INLINE_AICORE 同款
+ * 已验证配方——__host__ __aicore__ 双属性组合会被 bisheng aicore pass 判为 host-only,
+ * v31 后 .asc 编译 19 错实测); host pass 与纯 g++ 环境(AICPU kernel 交叉编译/host
+ * UT/orchestrator)不定义 __CCE__, 退化为普通 inline */
 #if defined(__CCE__)
 #if defined(__host_aicore__) /* bisheng 9.0.0 及更早: 双属性拼写为 __host_aicore__([host, aicore]) */
 #define SMEM_SHM_SDMA_LAYOUT_FN __host_aicore__ inline
@@ -60,6 +62,13 @@ constexpr uint32_t SMEM_SHM_SDMA_MAX_PEERS = SMEM_SHM_SDMA_MAX_RANKS - 1;
 constexpr uint32_t SMEM_SHM_SDMA_MAX_BLOCKS = 8; /* 每 die AICore block 数(<<<N>>> 启动上限) */
 constexpr uint32_t SMEM_SHM_SDMA_QUEUES_PER_PEER = 16; /* 每对端队列槽位(block 0..7 在用, 8..15 预留) */
 constexpr uint32_t SMEM_SHM_SDMA_QUEUE_COUNT = 48; /* 邮箱队列总数(对端 × 槽位, hcomm 48 同规模) */
+
+/* ---- 寄存器同步唤醒(commByReg)标志槽 ----
+ * host ConfigureOrch 在启用时写 1; AICore submit 路径读之, 启用则提交后 set_cond 写
+ * 本核 AICore 控制寄存器 COND(SPR 0x4C8)唤醒 AICPU 的空闲轮询(借鉴 pypto commByReg 配方)。
+ * 未启用槽为 0, AICore/AICPU 完全走 GM 路径(默认, 零行为变化)。
+ * regBase 数组不经保留区传递: host 经 epoch 参数 regBaseAddr 直接下发 AICPU 侧。 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_COMM_BY_REG = 0xF0000; /* commByReg 标志 u8(host 写, AICore 读) */
 
 /* 原到达区保持为空，保留偏移用于布局兼容和 Host 诊断。 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_PEER_RINGS = 0xDF800; /* 到达子环数组基址 */
