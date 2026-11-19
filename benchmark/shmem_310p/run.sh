@@ -13,7 +13,11 @@ LOG_DIR="${LOG_DIR:-$PWD/build/logs/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$LOG_DIR"
 bash build.sh
 backends="${BACKEND:-both}"
-if [[ "$backends" == both ]]; then backends="mf-signal hccl"; fi
+if [[ "$backends" == both ]]; then
+ backends="mf-signal hccl"
+elif [[ "$backends" == all ]]; then
+ backends="mf-sync mf-nbi mf-signal mf-signal-nbi hccl"
+fi
 for backend in $backends; do
  mkdir -p "$LOG_DIR/$backend"
  timeout --kill-after=10s "${TIMEOUT:-600}s" build/tp2_compare "$backend" "${DEVICE_BASE:-0}" \

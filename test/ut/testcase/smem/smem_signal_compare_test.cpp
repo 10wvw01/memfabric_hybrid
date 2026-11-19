@@ -3,15 +3,23 @@
 
 TEST(SmemSignalCompare, AllComparisonConditions)
 {
-    EXPECT_TRUE(SmemShmSignalCompare(7, SMEM_SHM_CMP_EQ, 7));
-    EXPECT_FALSE(SmemShmSignalCompare(7, SMEM_SHM_CMP_EQ, 8));
-    EXPECT_TRUE(SmemShmSignalCompare(7, SMEM_SHM_CMP_NE, 8));
-    EXPECT_TRUE(SmemShmSignalCompare(8, SMEM_SHM_CMP_GT, 7));
-    EXPECT_FALSE(SmemShmSignalCompare(7, SMEM_SHM_CMP_GT, 7));
-    EXPECT_TRUE(SmemShmSignalCompare(7, SMEM_SHM_CMP_GE, 7));
-    EXPECT_TRUE(SmemShmSignalCompare(6, SMEM_SHM_CMP_LT, 7));
-    EXPECT_FALSE(SmemShmSignalCompare(7, SMEM_SHM_CMP_LT, 7));
-    EXPECT_TRUE(SmemShmSignalCompare(7, SMEM_SHM_CMP_LE, 7));
+    struct Case {
+        smem_shm_cmp_t cmp;
+        bool less;
+        bool equal;
+        bool greater;
+    };
+    const Case cases[] = {
+        {SMEM_SHM_CMP_EQ, false, true, false}, {SMEM_SHM_CMP_NE, true, false, true},
+        {SMEM_SHM_CMP_GT, false, false, true}, {SMEM_SHM_CMP_GE, false, true, true},
+        {SMEM_SHM_CMP_LT, true, false, false}, {SMEM_SHM_CMP_LE, true, true, false},
+    };
+    for (const auto &item : cases) {
+        SCOPED_TRACE(static_cast<int>(item.cmp));
+        EXPECT_EQ(SmemShmSignalCompare(6, item.cmp, 7), item.less);
+        EXPECT_EQ(SmemShmSignalCompare(7, item.cmp, 7), item.equal);
+        EXPECT_EQ(SmemShmSignalCompare(8, item.cmp, 7), item.greater);
+    }
     EXPECT_FALSE(SmemShmSignalCompare(7, static_cast<smem_shm_cmp_t>(99), 7));
 }
 

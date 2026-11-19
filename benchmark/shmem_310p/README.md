@@ -6,10 +6,10 @@
 DEVICE_BASE=2 BACKEND=both LOG_DIR=/path/to/logs bash run.sh
 ```
 
-同一程序提供MF/HCCL后端，两进程、FP32原地SUM，测试256、512、1024、2048、4096方阵。BACKEND=both依次运行mf-signal和hccl，也可指定空格分隔的后端列表：
+同一程序提供MF/HCCL后端，两进程、FP32原地SUM，测试256、512、1024、2048、4096方阵。BACKEND=both依次运行mf-signal和hccl，BACKEND=all运行全部五种模式，也可指定空格分隔的后端列表：
 
 ```bash
-DEVICE_BASE=2 BACKEND="mf-sync mf-nbi mf-signal mf-signal-nbi hccl" \
+DEVICE_BASE=2 BACKEND=all \
  BLOCKS=8 CHUNKS=8 WARMUP=10 ROUNDS=100 LOG_DIR=/path/to/logs bash run.sh
 ```
 
