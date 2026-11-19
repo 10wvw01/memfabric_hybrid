@@ -56,9 +56,9 @@ struct HybmSdmaOrchParam {
     uint64_t symSize;     /* 对称段大小(对端段基址掩码算术用, 须 2 的幂) */
     uint64_t physSize;    /* 段物理大小(对端保留区定位用) */
     /* v29 4-rank 化: reqBase/quietBase 合并为 resBase(请求环/完成戳均由保留区基址+布局常量定位),
-     * 尾部追加 rank/rsv/poolBaseGva; 布局锁 80B, wire 变更由 KVER bump 隔离旧设备缓存 */
+     * 尾部使用 rank/rankCount/poolBaseGva; 布局保持80B，rankCount启用后通过协议标识检查配套产物 */
     uint32_t rank;        /* 本端 rank 号(请求环下标 = PeerRingIdx(rank, 目的 rank)) */
-    uint32_t rsv;         /* 填充对齐(显式置 0) */
+    uint32_t rankCount;   /* 世界大小，决定有效对端队列范围 */
     uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
 };
 static_assert(sizeof(HybmSdmaOrchParam) == 80, "Param 尺寸漂移"); /* 布局锁 80B(4×u32 头 + 6×u64 + 4×u32+u64 尾) */
@@ -73,7 +73,7 @@ struct HybmSdmaOrchResult {
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
-constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0008u; /* 结果区存活魔数 */
+constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0009u; /* 结果区存活魔数 */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_RUNNING = 0xFFFFFFFFu; /* 运行中(kernel 入口写, host 轮询判据) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_DEADLINE = 0;          /* 时限退出(正常换轮) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_STOP = 1;              /* 停止退出(析构) */
@@ -114,6 +114,17 @@ constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 永不退出的专用值(不判报时, 诊断用) */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;       /* 空闲退避 100µs(实测 ≈130µs) */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000;  /* 循环上限兜底(心跳停喂时防永跑; 每 15s 名额) */
+
+// 紧凑扫描编号映射到稀疏队列，保留每对端block 8..15的预留位置。
+inline uint32_t HybmSdmaScanQueue(uint32_t ordinal)
+{
+    return SmemShmSdmaQueueIdx(ordinal / SMEM_SHM_SDMA_MAX_BLOCKS, ordinal % SMEM_SHM_SDMA_MAX_BLOCKS);
+}
+
+inline uint32_t HybmSdmaNextScan(uint32_t ordinal, uint32_t count)
+{
+    return ordinal + 1 == count ? 0 : ordinal + 1;
+}
 
 } // namespace mf
 } // namespace ock
