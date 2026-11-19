@@ -28,7 +28,8 @@
  * 分轮运行后全设备同步最多等当前轮剩余(<15s)。launch json 为 KFCKernel(type 5),
  * 设备侧系统监控不给该类型计时——轮超时无 28s 强制结束风险。
  *
- * kernel 部署(2026-11-19 定案, 参考 pypto 机制): 借 CP1 启动时预加载的 CANN
+ * kernel 部署(2026-11-19 定案, 参考 pypto 机制, 两段式——extend loader 为主链, 原有
+ * aicpu 部署机制为兜底): 主链借 CP1 启动时预加载的 CANN
  * libaicpu_extend_kernels.so 里的 loader, 把本仓 libmf_sdma_orch.so 以 memfd 方式
  * 加载进 CP1(aicpu_scheduler)进程并填函数表——不落设备搜索路径, 不经 KFC 设备
  * shell(2026-11-18 驱动升级后 shell 平台级失效, 507018)。本仓 so 导出 loader 约定
@@ -36,6 +37,9 @@
  * DynTileFwkBackendKernelServer), 每轮以 DynTileFwkKernelServer 下发, cfgdata 指向
  * epoch 参数。超时用 args.timeout=0xFFFF + flag 0x100(永不超时), 每轮时长仍由
  * kernel 读主机报时计数自限。
+ *   兜底: 主链失败时回退本仓原有 aicpu 部署机制(CUST 通道迁移 so 落设备 → KFC 设备
+ *   shell 复制进 CP1 搜索路径 → aclrtBinaryLoadFromFile mode=0 加载取函数句柄),
+ *   每轮走 AclrtLaunchKernelWithConfig(funcHandle_, timeout 属性 0=永不超时)。
  *
  * 生命周期: 多池共享进程级资源, Acquire/Release 引用计数; ConfigureOrch 一次绑定
  * (约束: 每进程单 SDMA 池, 双环位于首个配置池的段尾保留区)。
@@ -58,6 +62,12 @@ constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;         /* 工作区总尺寸 
 constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 0;      /* epoch 结果区 64B(诊断) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_OVF_OFF = 64;        /* SQE overflow 目标 64B */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_STOP_OFF = 128;      /* 停止标志 8B(工作区自有, 销毁序安全) */
+
+/* 停止同步上限(秒), 兜底链 LaunchEpoch 的 attr timeout 用: StopEpoch 写停止标志后
+ * kernel 正常 ≤1ms 自退。0 = 永不超时(attr 值经 ConvertTimeoutToInner(0)=MAX_UINT64;
+ * 缺省 attr 则为默认超时 ≈6.4s 会误杀长时任务——507017, 故 attr 不可省略且必须显式置 0)。
+ * 每轮时长由主机报时驱动(kernel 读递增计数, 见 hybm_sdma_contract.h), 不经 attr。 */
+constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S = 0;
 
 class SdmaOrchestrator { // 协同模式传输准备单例(所有可变状态在 mutex_ 内维护)
 public:
@@ -111,6 +121,14 @@ private:
     /* pypto 机制部署: so 字节经 DeviceArgs 传给 CP1 预加载的 libaicpu_extend_kernels.so,
      * 由其在 CP1 进程内 memfd 加载并填函数表(不落设备搜索路径, 不经 KFC shell) */
     Result DeployOrchestratorKernel(const std::string &kernelDir);
+    /* ---- 兜底链(本仓原有 aicpu 部署机制, extend loader 失败时回退) ---- */
+    Result PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson);
+    Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
+    Result DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath); /* 自动部署 */
+    Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
+    Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
+    Result  KfcExec(const std::string &cmd, bool probe = false);
+    Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 设备内复制+完整性校验 */
     Result LaunchEpoch(void *stream);     /* 单轮下发到指定流(首轮 ConfigureOrch 内联, 后续由监督线程) */
     void SupervisorLoop();                 /* 监督线程: 每 100ms 写报时计数+读结果区, 发现当前轮退出即重新拉起 */
     void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
@@ -122,6 +140,13 @@ private:
     void *devParam_{nullptr};       // epoch 参数设备缓冲(每轮 H2D)
     void *rtLaunch_{nullptr};       // rtAicpuKernelLaunchExWithArgs(libruntime.so)
     void *runtimeLib_{nullptr};     // libruntime.so 句柄(保活)
+    /* ---- 兜底链状态(原有 aicpu 部署机制) ---- */
+    std::string deviceSoName_;      // 本次加载专用的设备文件名
+    bool deviceSoOwned_{false};     // 仅清理本次部署创建的文件
+    aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
+    aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchEpoch 函数句柄 */
+    aclrtBinHandle custBinHandle_{nullptr}; /* CUST 迁移句柄(保活: 持至进程退出) */
+    aclrtFuncHandle kfcFuncHandle_{nullptr}; /* KFC 通道句柄缓存(首次装载后复用, 免每次部署重装) */
     std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行(ready_/workspace_ 另以原子保护) */
     uint32_t refCount_{0};          /* 引用计数(entity 池级) */
     bool configured_{false};        /* 保留区已配置 + 搬运 kernel 已下发(ConfigureOrch 一次绑定) */
