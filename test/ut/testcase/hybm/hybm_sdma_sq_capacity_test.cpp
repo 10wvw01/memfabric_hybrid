@@ -4,18 +4,26 @@
 #include <cstring>
 #include <vector>
 #include <unistd.h>
+#include <cstdarg>
+#include <ctime>
 
 extern "C" int SdmaCapacitySleep(useconds_t);
+extern "C" long SdmaCapacityClock(long, ...);
 #define halSqCqQuery  SdmaCapacityQuery
 #define halSqCqConfig SdmaCapacityConfig
 #define usleep        SdmaCapacitySleep
+#define syscall       SdmaCapacityClock
 #include "../../../../src/hybm/ops/hybm_kernel/hybm_sdma_orch_kernel.cc"
+#undef syscall
 #undef usleep
 #undef halSqCqConfig
 #undef halSqCqQuery
 
 namespace {
 uint32_t queryCount, configCount, sleepCount, nextHead, publishedTail;
+uint64_t clockNowNs;
+uint32_t clockCalls;
+bool clockFailure;
 int configResult;
 bool replayHardware;
 SqContext *hardwareContext;
@@ -49,6 +57,21 @@ extern "C" int32_t SdmaCapacityConfig(uint32_t, void *info)
     return configResult;
 }
 
+extern "C" long SdmaCapacityClock(long number, ...)
+{
+    ++clockCalls;
+    if (clockFailure)
+        return -1;
+    va_list args;
+    va_start(args, number);
+    (void)va_arg(args, int);
+    auto *ts = va_arg(args, timespec *);
+    ts->tv_sec = clockNowNs / 1000000000ULL;
+    ts->tv_nsec = clockNowNs % 1000000000ULL;
+    va_end(args);
+    return 0;
+}
+
 class SdmaSqCapacityTest : public testing::Test {
 protected:
     alignas(64) std::array<uint8_t, 8 * kSqeSize> ring{};
@@ -59,6 +82,9 @@ protected:
     void SetUp() override
     {
         queryCount = configCount = sleepCount = 0;
+        clockNowNs = 1000000000ULL;
+        clockCalls = 0;
+        clockFailure = false;
         nextHead = 2;
         configResult = 0;
         replayHardware = false;
@@ -360,6 +386,55 @@ TEST_F(SdmaSqCapacityTest, SignalGroupPreservesNonzeroDoorbellOnWrap)
     EXPECT_EQ(context.sqTail, 1U);
     ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
     EXPECT_EQ(publishedTail, 1U);
+}
+
+TEST_F(SdmaSqCapacityTest, PollingBudgetUsesElapsedTimeInsteadOfScanCount)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = 2;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 220032), 0);
+    clockNowNs = 3000000000ULL;
+    EXPECT_EQ(checkEpochBudget(result, budget, 220096), 1);
+    EXPECT_EQ(sleepCount, 0U);
+}
+
+TEST_F(SdmaSqCapacityTest, PollingClockIsSampledAndHeartbeatStillExpires)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = 2;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 1), 0);
+    EXPECT_EQ(clockCalls, 1U);
+    auto *heartbeat = reinterpret_cast<uint64_t *>(workspace.data() + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF);
+    *heartbeat = 20;
+    EXPECT_EQ(checkEpochBudget(result, budget, 2), 1);
+    EXPECT_EQ(clockCalls, 1U);
+}
+
+TEST_F(SdmaSqCapacityTest, PollingClockErrorsAreReported)
+{
+    EpochBudget budget{};
+    clockFailure = true;
+    EXPECT_EQ(initEpochBudget(&param, budget), 1370);
+    clockFailure = false;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    clockFailure = true;
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 0), -1370);
+}
+
+TEST_F(SdmaSqCapacityTest, ResidentPollingDoesNotRequireClockOrHeartbeat)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = ock::mf::HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT;
+    clockFailure = true;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 0), 0);
+    EXPECT_EQ(clockCalls, 0U);
 }
 
 #endif
