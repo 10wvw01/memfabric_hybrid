@@ -60,8 +60,15 @@ struct HybmSdmaOrchParam {
     uint32_t rank;        /* 本端 rank 号(请求环下标 = PeerRingIdx(rank, 目的 rank)) */
     uint32_t rsv;         /* 填充对齐(显式置 0) */
     uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
+    /* 寄存器同步唤醒(commByReg): AICPU 空闲时读 AICore COND 寄存器代替 GM 全队列游标轮询,
+     * AICore submit 后 set_cond 唤醒。数据面(邮件/游标)仍走 GM——寄存器只传唤醒信号,
+     * 48 队列的 tail/head 无法压进单个 SPR, 故仅作空闲唤醒(与 pypto 单环配方的差异)。
+     * commByReg=0(默认)时 AICPU 完全走 GM 轮询, 零行为变化。 */
+    uint8_t  commByReg;   /* 1=空闲轮询经寄存器唤醒; 0=GM 轮询(默认) */
+    uint8_t  rsv2[7];     /* 填充对齐(显式置 0) */
+    uint64_t regBaseAddr; /* regBase 数组设备地址(10×u64, host 经 halMemCtl 查出后 H2D; AICPU 读 COND 用) */
 };
-static_assert(sizeof(HybmSdmaOrchParam) == 80, "Param 尺寸漂移"); /* 布局锁 80B(4×u32 头 + 6×u64 + 4×u32+u64 尾) */
+static_assert(sizeof(HybmSdmaOrchParam) == 96, "Param 尺寸漂移"); /* 布局锁 96B(80B + 1×u8 + 7×rsv + 1×u64 尾) */
 
 // 部署与清理确认使用独立参数，结果必须携带本次nonce。
 struct HybmSdmaDeployCheck {

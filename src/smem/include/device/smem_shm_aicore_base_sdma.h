@@ -35,6 +35,7 @@ struct smem_shm_sdma_ctx_t {
     uint32_t rank;       /* 本端 rank */
     uint32_t rankSize;   /* 世界大小 */
     uint32_t block;      /* 本 AICore block 号(GetBlockIdx, 队列下标 block 维) */
+    uint8_t commByReg;   /* 寄存器同步唤醒标志(保留区槽, host 写; 1=submit 后 set_cond 唤醒 AICPU) */
 };
 
 #ifdef __cplusplus
@@ -99,6 +100,22 @@ SMEM_SHM_INLINE_AICORE void SdmaWriteCell(__gm__ uint8_t *res, uint64_t off, uin
 
 /* ============================ 公开 API ============================ */
 
+/* ---- 寄存器同步唤醒(commByReg)原语, AICore 侧硬件指令 ----
+ * set_cond 为 bisheng 编译器内建(__builtin_cce_set_cond, 310P/3101 原生暴露, 实机验证:
+ * 不 crash 且 AICPU 侧可读到)。写本核 COND(SPR 0x4C8), AICPU 空闲轮询经 regBase volatile
+ * 读之——任一核值变化即被唤醒去扫 GM 游标(借鉴 pypto commByReg 配方; v31 多队列下寄存器
+ * 只承载唤醒信号, 数据面仍走 GM)。传入值含 block 与队列尾(变化即活动, 跨 block 不互冲)。 */
+SMEM_SHM_INLINE_AICORE void SdmaSetCond(uint64_t value)
+{
+    set_cond(static_cast<int64_t>(value));
+}
+
+/* 读 commByReg 标志(保留区槽, host ConfigureOrch 启用时写 1) */
+SMEM_SHM_INLINE_AICORE uint8_t SdmaReadCommByReg(__gm__ uint8_t *res)
+{
+    return static_cast<uint8_t>(SdmaReadCell(res, SMEM_SHM_SDMA_RS_COMM_BY_REG) & 0xFF);
+}
+
 SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
 {
     smem_shm_sdma_ctx_t c;
@@ -108,6 +125,7 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
     c.phys = smem_shm_get_phys_size(0);
     c.res = static_cast<__gm__ uint8_t *>(gva) + c.symm * c.rank + (c.phys - SMEM_SHM_SDMA_RESERVED);
     c.block = static_cast<uint32_t>(AscendC::GetBlockIdx()); /* v31: 队列按 block 划分 */
+    c.commByReg = SdmaReadCommByReg(c.res); /* 寄存器同步唤醒标志(0=AICore 不 set_cond, 全 GM) */
     return c;
 }
 
@@ -191,6 +209,11 @@ SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, u
     gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(gm);
     SdmaWriteCell(ctx.res, SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, tail + 1);
+    if (ctx.commByReg != 0) {
+        /* 寄存器同步唤醒: 写本核 COND 通知 AICPU 有活动(唤醒值含 block 与队列尾,
+         * 任一变化即活动; 同核覆盖写仅保留最新——AICPU 只判"变化", 不解码语义) */
+        SdmaSetCond((static_cast<uint64_t>(ctx.block) << 32) | (tail + 1));
+    }
 }
 
 SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,

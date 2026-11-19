@@ -596,12 +596,15 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 /* 用例 3b: 契约不变式(KFCKernel/type 5 不受设备侧 28s 强制结束约束; v11: 按时长分轮+主机报时) */
 TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 {
-    /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部追加 rank/rsv/poolBaseGva), 80B */
-    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 80U);
+    /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部追加 rank/rsv/poolBaseGva),
+     * commByReg 追加 commByReg/rsv2/regBaseAddr, 96B */
+    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 96U);
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U); // 第 4 个 u32 槽位
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);       // 保留区基址(定位原点)
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, rank), 64U);          // v29 追加: 本端 rank
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, poolBaseGva), 80U - 8U); // v29 追加: 池窗口基址
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, commByReg), 80U);        // 寄存器同步唤醒标志
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, regBaseAddr), 88U);      // regBase 数组设备地址
     /* 永不退出的专用值: 全 F(不判报时/无循环上限, 跑到停止/错误); 与默认值 0 语义区分 */
     EXPECT_EQ(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, 0xFFFFFFFFu);
     EXPECT_NE(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S);

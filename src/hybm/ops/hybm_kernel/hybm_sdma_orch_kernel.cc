@@ -332,6 +332,18 @@ inline void storeCell(uint64_t addr, uint64_t v)
     cacheFlushLine(addr & ~static_cast<uintptr_t>(63));
 }
 
+/* ---- 寄存器同步唤醒(commByReg)原语, 借鉴 pypto commByReg 配方 ----
+ * AICPU 侧经 halMemCtl 映射的目标核 AICore 控制寄存器 VA, volatile 直读(免 cache 维护)。
+ * v31 多队列适配: 48 队列的 tail/head 无法压进单个 SPR(与 pypto 单环配方的差异), 故
+ * 寄存器只承载"活动唤醒"信号——AICore submit 后 set_cond 写本核 COND(SPR 0x4C8),
+ * AICPU 空闲时读 10 核 COND, 任一变化即去扫 GM 游标; 数据面(邮件/cursor)仍走 GM。 */
+constexpr uint32_t REG_SPR_COND = 0x4C8; // COND 寄存器 pypto 偏移(AICore set_cond 写, AICPU 读)
+constexpr uint32_t REG_ORCH_CORES = 10;  // 310P3 DAV_2002: 10 物理 AICore(与 host REG_BASE_CORES 一致)
+inline uint64_t AicpuReadReg64(uint64_t regAddr)
+{
+    return *reinterpret_cast<volatile uint64_t *>(regAddr);
+}
+
 // v15 诊断逐单日志: 逐单落工作区环形缓冲(读回原文/计算地址/SQ 游标), host D2H 可读。
 // 单线程 kernel 无并发; 计数持久于工作区(跨 epoch 累计, 环形覆盖最旧)。
 void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf::HybmSdmaReqMail &mail,
@@ -635,6 +647,14 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         return 1;
     }
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
+    /* 寄存器同步唤醒装载: regBase 数组(10×u64, host H2D 后的设备地址; commByReg=0 时为 null 走 GM)。
+     * 唤醒正确性不依赖寄存器: 每 kCondForceScan 次空转强制全扫 GM 兜底(set_cond 丢失时不挂死)。 */
+    const volatile uint64_t *regBaseArr = (p->commByReg != 0 && p->regBaseAddr != 0)
+        ? reinterpret_cast<const volatile uint64_t *>(p->regBaseAddr)
+        : nullptr;
+    uint64_t lastCond[REG_ORCH_CORES] = {0}; // 上次各核 COND 采样(变化即活动)
+    constexpr uint32_t kCondForceScan = 4096;  // 空转兜底强扫周期(防止唤醒信号丢失)
+    uint32_t idleSpins = 0;                    // 连续空转计数(有消费即清零)
     /* 每队列消费起点(v31: 队列按对端×block 划分, 各队列独立游标持久于保留区, 换轮零丢失) */
     uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT];
     for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
@@ -658,6 +678,27 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         if (loadCell(p->stopAddr) != 0) { // 停止标志(host 析构)
             result->exitReason = HYBM_SDMA_ORCH_EXIT_STOP;
             break;
+        }
+        /* commByReg 空闲唤醒: 空转中(idleSpins>0)只读 10 核 COND(MMIO, 免 GM 全队列 dcci),
+         * 任一核 COND 变化即扫 GM 游标; 连续 kCondForceScan 次无变化强制扫 GM 兜底
+         * (唤醒信号丢失/未启用 set_cond 时退化为纯 GM 轮询, 不挂死)。 */
+        if (regBaseArr != nullptr && idleSpins > 0) {
+            bool woken = false;
+            for (uint32_t c = 0; c < REG_ORCH_CORES; c++) {
+                const uint64_t v = AicpuReadReg64(regBaseArr[c] + REG_SPR_COND);
+                if (v != lastCond[c]) {
+                    lastCond[c] = v;
+                    woken = true;
+                }
+            }
+            if (!woken) {
+                if (idleSpins < kCondForceScan) {
+                    idleSpins++;
+                    usleep(HYBM_SDMA_ORCH_EPOCH_IDLE_US);
+                    continue;
+                }
+                idleSpins = 0; // 兜底: 强制本轮 GM 全扫
+            }
         }
         uint32_t batch = 0;
         bool errored = false;
@@ -694,8 +735,11 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
             break;
         }
         if (batch == 0) { // 全环空(扫描一轮零消费)
+            idleSpins++; // commByReg: 进入空闲等待(下一轮经 COND 判定是否再扫)
+            usleep(HYBM_SDMA_ORCH_EPOCH_IDLE_US);
             continue;
         }
+        idleSpins = 0; // 有消费: 退出空闲等待(满批退出时环内可能仍有积压, 不等 COND 直接续扫)
         ret = flushBatchDoorbell(p, &ctx); // 批末统一敲铃
         if (ret != 0) {
             result->mainRet = static_cast<uint32_t>(ret);
