@@ -146,6 +146,48 @@ TEST_F(SdmaSqCapacityTest, PendingTransfersSurviveQueueWrap)
     EXPECT_EQ(executedTasks, (std::vector<uint16_t>{0, 1, 2, 3, 4, 5, 12, 10, 11}));
 }
 
+TEST_F(SdmaSqCapacityTest, SignalGroupWrapKeepsNotificationBeforeCompletion)
+{
+    context.sqTail = 5;
+    context.sqHead = 4;
+    ock::mf::HybmSdmaReqMail mail{0x1000, 0x2000, 4, 0};
+    ASSERT_EQ(issueMailSqes(&param, &context, 0, 10, mail, 0x3000, 0x4000, 0, 0x5000), 0);
+    EXPECT_EQ(context.sqTail, 1U);
+    EXPECT_EQ(configCount, 0U);
+    EXPECT_EQ(queryCount, 0U);
+    uint64_t target = 0;
+    std::memcpy(&target, ring.data() + 6 * kSqeSize + 40, 8);
+    EXPECT_EQ(target, 0x2000U);
+    std::memcpy(&target, ring.data() + 7 * kSqeSize + 40, 8);
+    EXPECT_EQ(target, 0x5000U);
+    std::memcpy(&target, ring.data() + 40, 8);
+    EXPECT_EQ(target, 0x4000U);
+}
+
+TEST_F(SdmaSqCapacityTest, FailedGroupReservationLeavesEverySqeUntouched)
+{
+    nextHead = 0;
+    const auto before = ring;
+    ock::mf::HybmSdmaReqMail mail{0x1000, 0x2000, 4, 0};
+    EXPECT_EQ(issueMailSqes(&param, &context, 0, 10, mail, 0x3000, 0x4000, 0, 0x5000), 1360);
+    EXPECT_EQ(context.sqTail, 7U);
+    EXPECT_EQ(ring, before);
+}
+
+TEST_F(SdmaSqCapacityTest, SignalOnlyGroupWritesNotificationThenCompletion)
+{
+    context.sqTail = 0;
+    ock::mf::HybmSdmaReqMail mail{0, 0, 0, 0};
+    ASSERT_EQ(issueMailSqes(&param, &context, 0, 10, mail, 0x3000, 0x4000, 0, 0x5000), 0);
+    EXPECT_EQ(context.sqTail, 2U);
+    uint64_t target = 0;
+    std::memcpy(&target, ring.data() + 40, 8);
+    EXPECT_EQ(target, 0x5000U);
+    std::memcpy(&target, ring.data() + kSqeSize + 40, 8);
+    EXPECT_EQ(target, 0x4000U);
+    EXPECT_EQ(configCount, 0U);
+}
+
 class SdmaDirectionTest : public SdmaSqCapacityTest {
 protected:
     std::vector<uint64_t> reserved = std::vector<uint64_t>(SMEM_SHM_SDMA_RESERVED / sizeof(uint64_t), 0);

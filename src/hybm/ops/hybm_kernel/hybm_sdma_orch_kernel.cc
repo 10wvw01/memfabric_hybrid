@@ -216,13 +216,10 @@ int32_t reserveSqeSpace(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, uint3
     return 1363;
 }
 
-int32_t submitSqe(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, const uint8_t sqe[kSqeSize])
+// 调用方已预留整组空间；仅推进局部尾值，整组写完后再发布shadow tail。
+void writeReservedSqe(const SqContext *c, uint32_t &tail, const uint8_t sqe[kSqeSize])
 {
-    if (reserveSqeSpace(p, c, 1) != 0) {
-        return 1363;
-    }
-    volatile uint8_t *slot = reinterpret_cast<volatile uint8_t *>(c->sqBase) +
-                             static_cast<uint64_t>(c->sqTail) * kSqeSize;
+    volatile uint8_t *slot = reinterpret_cast<volatile uint8_t *>(c->sqBase) + static_cast<uint64_t>(tail) * kSqeSize;
     const volatile uint64_t *src = reinterpret_cast<const volatile uint64_t *>(sqe);
     volatile uint64_t *dst = reinterpret_cast<volatile uint64_t *>(slot);
     for (uint32_t i = 0; i < kSqeSize / 8; i++) {
@@ -235,7 +232,15 @@ int32_t submitSqe(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, const uint8
     }
     /* 屏障纪律: 此处不 dsb(cvac 已写回一致性点, 逐封 dsb 4 次/封过重);
      * 由批末 doorbell 前的统一 memBarrier 保证全部 SQE 对 TSFW 可见 */
-    c->sqTail = (c->sqTail + 1) % c->sqDepth;
+    tail = (tail + 1) % c->sqDepth;
+}
+
+int32_t submitSqe(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, const uint8_t sqe[kSqeSize])
+{
+    if (reserveSqeSpace(p, c, 1) != 0) {
+        return 1363;
+    }
+    writeReservedSqe(c, c->sqTail, sqe);
     return 0;
 }
 
@@ -351,49 +356,49 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
 }
 
 // 数据传输与本端完成按 SQ FIFO 顺序执行。
-int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
-                      const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t quietStampSlot,
-                      uint8_t sqeOpcode, uint64_t signalDst = 0)
+void issueMailSqesReserved(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
+                           const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t quietStampSlot,
+                           uint8_t sqeOpcode, uint64_t signalDst = 0)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
+    uint32_t tail = ctx->sqTail;
     // 整组预留，包含尾值回绕为零时的占位描述符。
     const uint32_t descriptors = (mail.len ? 1U : 0U) + (signalDst ? 1U : 0U) + 1U;
-    const uint32_t count = ((ctx->sqTail + descriptors) % ctx->sqDepth == 0) ? descriptors + 1 : descriptors;
-    if (reserveSqeSpace(p, ctx, count) != 0) {
-        return 1360;
-    }
     // 固件将 doorbell 尾值 0 当作空环；插入自拷贝占位使提交尾值非零。
     if ((ctx->sqTail + descriptors) % ctx->sqDepth == 0) {
         const uint64_t scratch = p->resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF;
         buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + descriptors),
                           scratch, scratch, 8,
                           p->devId, p->overflowAddr, ssid);
-        int32_t padRet = submitSqe(p, ctx, sqe);
-        if (padRet != 0) {
-            return 1365; // 错误码: 占位 SQE 入环失败
-        }
+        writeReservedSqe(ctx, tail, sqe);
     }
     if (mail.len) {
         buildStarsSdmaSqe(sqe, streamId, taskId, mail.src, mail.dst, static_cast<uint32_t>(mail.len), p->devId,
                           p->overflowAddr, ssid, sqeOpcode);
-        int32_t r = submitSqe(p, ctx, sqe); // 满环活查询在 submitSqe 内自旋(上限 1s)
-        if (r != 0) {
-            return 1360; // 错误码: SQ 持续满/查询失败
-        }
+        writeReservedSqe(ctx, tail, sqe);
     }
     if (signalDst) {
         buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + (mail.len ? 1 : 0)),
                           stageSlot + 8, signalDst, 8, p->devId, p->overflowAddr, ssid);
-        if (submitSqe(p, ctx, sqe) != 0) {
-            return 1362;
-        }
+        writeReservedSqe(ctx, tail, sqe);
     }
     buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + descriptors - 1), stageSlot, quietStampSlot, 8,
                       p->devId, p->overflowAddr, ssid); // ③ 完成戳(源=同一暂存槽首, FIFO 序即全部到)
-    if (submitSqe(p, ctx, sqe) != 0) {
-        return 1362; // 错误码: 完成戳失败
+    writeReservedSqe(ctx, tail, sqe);
+    ctx->sqTail = tail;
+}
+
+int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
+                      const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t quietStampSlot,
+                      uint8_t sqeOpcode, uint64_t signalDst = 0)
+{
+    const uint32_t descriptors = (mail.len ? 1U : 0U) + (signalDst ? 1U : 0U) + 1U;
+    const uint32_t count = (ctx->sqTail + descriptors) % ctx->sqDepth == 0 ? descriptors + 1 : descriptors;
+    if (reserveSqeSpace(p, ctx, count) != 0) {
+        return 1360;
     }
+    issueMailSqesReserved(p, ctx, ssid, taskId, mail, stageSlot, quietStampSlot, sqeOpcode, signalDst);
     return 0;
 }
 
@@ -490,11 +495,7 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     const uint64_t quietStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET + queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
                                 (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8; // 本端完成戳槽(队列内)
     const uint64_t tailBefore = ctx->sqTail;
-    auto ret =
-        issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode, signalDst);
-    if (ret != 0) {
-        return ret;
-    }
+    issueMailSqesReserved(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode, signalDst);
     dbgLogMail(p, seq, mail, tailBefore, ctx->sqTail); // v15 逐单日志(最后写, 失败路径不记)
     storeCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + queueIdx * SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
               seq + 1); // reqHead[q] 推进
