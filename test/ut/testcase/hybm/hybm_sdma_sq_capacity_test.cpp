@@ -75,6 +75,22 @@ protected:
     }
 };
 
+TEST_F(SdmaSqCapacityTest, DoorbellSkipsUnchangedTailAndRetriesFailure)
+{
+    ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
+    ASSERT_EQ(configCount, 1U);
+    EXPECT_EQ(flushBatchDoorbell(&param, &context), 0);
+    EXPECT_EQ(configCount, 1U);
+    context.sqTail = 3;
+    configResult = -1;
+    EXPECT_EQ(flushBatchDoorbell(&param, &context), 1390);
+    EXPECT_EQ(context.submittedTail, 7U);
+    configResult = 0;
+    EXPECT_EQ(flushBatchDoorbell(&param, &context), 0);
+    EXPECT_EQ(context.submittedTail, 3U);
+    EXPECT_EQ(configCount, 3U);
+}
+
 TEST_F(SdmaSqCapacityTest, FullQueuePublishesPendingTasksAndRefreshesHead)
 {
     EXPECT_EQ(submitSqe(&param, &context, sqe), 0);
@@ -157,6 +173,7 @@ protected:
         param.physSize = param.symSize;
         param.poolBaseGva = 0x100000000ULL;
         param.resBase = reinterpret_cast<uint64_t>(reserved.data());
+        param.stopAddr = param.resBase + SMEM_SHM_SDMA_RESERVED - 8;
         context.sqTail = 0;
         context.sqHead = 0;
     }
@@ -290,6 +307,26 @@ TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
     EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, seq), 1366);
     EXPECT_EQ(loadCell(stage), 99U);
     EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaDirectionTest, CompletedStageReuseNeedsNoDoorbell)
+{
+    SetMail(false);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_QUIET, 1);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 512), 0);
+    EXPECT_EQ(configCount, 0U);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE), 513U);
+}
+
+TEST_F(SdmaDirectionTest, PendingStagePublishesBeforeStopWithoutOverwrite)
+{
+    SetMail(false);
+    context.sqTail = 2;
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE, 99);
+    storeCell(param.stopAddr, 1);
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 512), 1366);
+    EXPECT_EQ(configCount, 1U);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE), 99U);
 }
 
 #else

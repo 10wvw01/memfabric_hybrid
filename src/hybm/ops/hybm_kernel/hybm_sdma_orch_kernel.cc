@@ -176,6 +176,7 @@ struct SqContext {
     uint32_t sqDepth; // SQ 环深度
     uint32_t sqHead;  // SQ head(满环时活查询刷新)
     uint32_t sqTail;  // SQ shadow tail
+    uint32_t submittedTail; // 最近成功提交的尾值，SQ始终保留一个空槽
     uint32_t streamId; // SQE 的 rt_stream_id
     uint32_t devId;   // doorbell HAL 路径用
     uint32_t sqId;    // 目标 SQ
@@ -292,6 +293,7 @@ int32_t cp1LiveQuery(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
     ctx->sqBase = base;
     ctx->sqHead = head;
     ctx->sqTail = tail;
+    ctx->submittedTail = tail;
     return 0;
 }
 
@@ -402,8 +404,14 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
  * 并发邮件丢失挂死（507014） 根因)。尾值与返回码落诊断区(v15 逐单日志)。 */
 int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 {
+    if (ctx->sqTail == ctx->submittedTail) {
+        return 0;
+    }
     memBarrier();                                                // SQE 写序后(批内唯一 dsb)
     const int32_t r = doorbellViaHal(p->devId, ctx->sqId, ctx->sqTail); // 批末一次敲铃
+    if (r == 0) {
+        ctx->submittedTail = ctx->sqTail;
+    }
     const uintptr_t ws = static_cast<uintptr_t>(p->resultAddr);
     storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF, ctx->sqTail);
     storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_DBRET_OFF, static_cast<uint64_t>(static_cast<uint32_t>(r)));
@@ -476,11 +484,14 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
         const uint64_t previousStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET +
             queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
             (previous % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8;
-        if (flushBatchDoorbell(p, ctx) != 0) { return 1390; }
-        uint32_t tries = 0;
-        while (loadCell(previousStamp) < previous + 1) {
-            if (++tries == 10000) { return 1366; }
-            usleep(100);
+        if (loadCell(previousStamp) < previous + 1) {
+            if (flushBatchDoorbell(p, ctx) != 0) { return 1390; }
+            uint32_t tries = 0;
+            while (loadCell(previousStamp) < previous + 1) {
+                if (loadCell(p->stopAddr) != 0) { return 1366; }
+                if (++tries == 10000) { return 1366; }
+                usleep(100);
+            }
         }
     }
     uint64_t *st = reinterpret_cast<uint64_t *>(stageSlot);
