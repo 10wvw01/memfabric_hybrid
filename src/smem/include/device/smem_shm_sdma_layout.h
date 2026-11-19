@@ -24,11 +24,7 @@
  * __host__ __aicore__ 双属性(设备 kernel 与 host 代码均可调); 纯 g++ 环境
  * (AICPU kernel 交叉编译/host UT/orchestrator)无执行模型, 退化为普通 inline */
 #if defined(__CCE__)
-#if defined(__host_aicore__) /* bisheng 9.0.0 及更早: 双属性拼写为 __host_aicore__([host, aicore]) */
-#define SMEM_SHM_SDMA_LAYOUT_FN __host_aicore__ inline
-#else /* 新版本 bisheng: 拆分为 __host__ __aicore__ */
 #define SMEM_SHM_SDMA_LAYOUT_FN __host__ __aicore__ inline
-#endif
 #else
 #define SMEM_SHM_SDMA_LAYOUT_FN static inline
 #endif

@@ -27,6 +27,8 @@
 #include "dl_api.h"
 #include "dl_acl_api.h"
 #include "dl_hal_api.h"
+#include "dl_rt_api.h"
+#include "hybm_sdma_orchestrator.h"
 
 using namespace ock::mf;
 
@@ -38,6 +40,7 @@ int32_t initedDeviceId = -1;
 void *g_allocHandle = nullptr;
 HalVmmBuffer g_metaHalBuffer;
 bool g_metaCleanupPending = false;
+bool g_sdmaInitHeld = false;
 
 std::mutex initMutex;
 } // namespace
@@ -78,6 +81,36 @@ static inline Result hybm_load_library()
     return BM_OK;
 }
 
+// 保持初始化引用，避免实体销毁后再次部署，并在库卸载前释放设备文件和流。
+static void hybm_release_init_sdma()
+{
+    if (g_sdmaInitHeld) {
+        SdmaOrchestrator::GetInstance().Release();
+        g_sdmaInitHeld = false;
+    }
+}
+
+static Result hybm_prepare_init_sdma(uint16_t deviceId, uint64_t flags)
+{
+#if defined(ASCEND_NPU)
+    if (g_sdmaInitHeld || (flags & HYBM_FLAG_INIT_SHMEM_META) == 0 ||
+        DlAclApi::GetAscendSocType() != AscendSocType::ASCEND_310P || SdmaOrchestrator::Disabled()) {
+        return BM_OK;
+    }
+    auto ret = DlAclApi::AclrtSetDevice(deviceId);
+    BM_LOG_ERROR_RETURN_IT_IF_NOT_OK(ret, "set SDMA init device failed, deviceId: " << deviceId);
+    ret = DlRtApi::LoadLibrary();
+    BM_LOG_ERROR_RETURN_IT_IF_NOT_OK(ret, "load SDMA runtime failed, deviceId: " << deviceId);
+    ret = SdmaOrchestrator::GetInstance().Acquire(deviceId);
+    BM_LOG_ERROR_RETURN_IT_IF_NOT_OK(ret, "prepare SDMA during init failed, deviceId: " << deviceId);
+    g_sdmaInitHeld = true;
+#else
+    (void)deviceId;
+    (void)flags;
+#endif
+    return BM_OK;
+}
+
 HYBM_API int32_t hybm_init(uint16_t deviceId, uint64_t flags)
 {
     std::unique_lock<std::mutex> lockGuard{initMutex};
@@ -92,9 +125,17 @@ HYBM_API int32_t hybm_init(uint16_t deviceId, uint64_t flags)
             return BM_ERROR;
         }
         BM_LOG_ERROR_RETURN_IT_IF_NOT_OK(hybm_load_library(), "load library failed");
+        const bool hadSdmaInit = g_sdmaInitHeld;
+        BM_LOG_ERROR_RETURN_IT_IF_NOT_OK(hybm_prepare_init_sdma(deviceId, flags), "prepare SHMEM SDMA failed");
         if (g_baseAddr == 0) {
             auto ret = hybm_init_hbm_gva(deviceId, flags, g_baseAddr, DlAclApi::GetAscendSocType(), &g_allocHandle);
-            BM_LOG_ERROR_RETURN_IT_IF_NOT_OK(ret, "init shm meta failed");
+            if (ret != BM_OK) {
+                if (!hadSdmaInit) {
+                    hybm_release_init_sdma();
+                }
+                BM_LOG_ERROR("init shm meta failed, deviceId: " << deviceId << " ret: " << ret);
+                return ret;
+            }
         }
 
         initialized++;
@@ -110,11 +151,15 @@ HYBM_API int32_t hybm_init(uint16_t deviceId, uint64_t flags)
         BM_LOG_WARN("init ptracer module not successful, result: " << ret << ", msg: " << ptracer_get_last_err_msg());
     }
 
-    ret = hybm_init_hbm_gva(deviceId, flags, g_baseAddr, DlAclApi::GetAscendSocType(), &g_allocHandle);
+    ret = hybm_prepare_init_sdma(deviceId, flags);
+    if (ret == BM_OK) {
+        ret = hybm_init_hbm_gva(deviceId, flags, g_baseAddr, DlAclApi::GetAscendSocType(), &g_allocHandle);
+    }
     if (ret != BM_OK) {
+        hybm_release_init_sdma();
         ptracer_uninit();
         DlApi::CleanupLibrary();
-        BM_LOG_ERROR("hybm_init_hbm_gva failed, deviceId: " << deviceId << " flags: 0x" << std::hex << flags
+        BM_LOG_ERROR("hybm initialization failed, deviceId: " << deviceId << " flags: 0x" << std::hex << flags
                                                             << " ret: " << ret);
         return BM_ERROR;
     }
@@ -137,6 +182,7 @@ HYBM_API void hybm_uninit()
         return;
     }
 
+    hybm_release_init_sdma();
     if (!g_metaCleanupPending) {
         ptracer_uninit();
     }

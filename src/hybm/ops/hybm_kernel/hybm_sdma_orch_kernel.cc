@@ -576,27 +576,3 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     finishResult(result);
     return (result->exitReason == HYBM_SDMA_ORCH_EXIT_ERROR) ? 1 : 0;
 }
-
-/* ---- CANN extend lib loader 入口同名导出 ----
- * pypto 机制: host 把本 so 字节经 DeviceArgs.aicpuSoBin 传给 CP1 预加载的
- * libaicpu_extend_kernels.so, 其 DynTileFwkKernelServerInit 在 CP1 内 memfd 加载本 so
- * 并 dlsym 下列三个固定符号填函数表; 之后 DynTileFwkKernelServer 在 CP1 内分发到
- * funcKey 3. 这样 kernel 与 CP1 同进程, halSqCqQuery/Config(SQ 活查询/doorbell)可用.
- * 参数经 DeviceKernelArgs.cfgdata(偏移 40) 传入 HybmSdmaOrchParam 设备指针. */
-extern "C" __attribute__((visibility("default"))) uint32_t StaticTileFwkBackendKernelServer(void *args)
-{
-    (void)args;
-    return 0;
-}
-
-extern "C" __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServerInit(void *args)
-{
-    (void)args;
-    return 0;
-}
-
-extern "C" __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServer(void *args)
-{
-    void *param = *reinterpret_cast<void **>(reinterpret_cast<char *>(args) + 40); // cfgdata
-    return HybmSdmaOrchEpoch(param);
-}
