@@ -37,3 +37,16 @@ smem_shm_signal_wait_until(localReady, SMEM_SHM_CMP_EQ, seq);
 Host库、AICPU产物和使用新增设备API的应用需配套构建；运行时协议标识用于检查Host与AICPU内核是否匹配。
 
 功能测试：`test/integration/310p_shmem_signal`。统一MF/HCCL基准：`benchmark/shmem_310p`。
+
+## 按需编译诊断记录
+
+`MF_SDMA_DBG_MAIL`默认OFF，与Release/Debug构建类型独立。完成项目配置后可切换：
+
+```bash
+cmake -S . -B build -DMF_SDMA_DBG_MAIL=ON
+cmake --build build --target mf_sdma_orch_kernel
+```
+
+设为OFF后重新构建即可关闭。切换选项会更新构建依赖，重新生成AICPU内核。
+
+开关控制逐请求环形记录、doorbell尾值及返回码写回、累计消费数、退出SQ head采样和启动时的诊断性SQ状态查询。关闭时consumed/headAfter保持0，诊断区不再持续更新。协议标识、运行及退出状态、错误码、请求游标、完成戳和停止标志继续生效。

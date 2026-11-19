@@ -95,15 +95,25 @@ set(SDMA_ORCH_JSON_CUST_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch.json") 
 
 set(SDMA_ORCH_JSON_LAUNCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_sdma_orch_launch.json")
 
+option(MF_SDMA_DBG_MAIL "Enable SDMA request and queue diagnostic records" OFF)
+set(SDMA_ORCH_DEBUG_FLAGS)
+if(MF_SDMA_DBG_MAIL)
+    list(APPEND SDMA_ORCH_DEBUG_FLAGS -DMF_SDMA_DBG_MAIL)
+endif()
+set(SDMA_ORCH_DEBUG_CONFIG "${CMAKE_CURRENT_BINARY_DIR}/sdma_debug_flags.txt")
+file(GENERATE OUTPUT "${SDMA_ORCH_DEBUG_CONFIG}" CONTENT "MF_SDMA_DBG_MAIL=${MF_SDMA_DBG_MAIL}\n")
+
 add_custom_command( # 编排 kernel so 编译(hcc 交叉编译)
     OUTPUT ${SDMA_ORCH_SO_OUTPUT} # 产物: 设备侧 so
     COMMAND ${AICPU_COMPILER} # aarch64 交叉编译器
         -shared -O2 -std=c++17 -fPIC # 共享库/O2/C++17/位置无关
         ${AICPU_INC_FLAGS} # include 路径(含 smem 布局头共享目录)
+        ${SDMA_ORCH_DEBUG_FLAGS}
         -o ${SDMA_ORCH_SO_OUTPUT} # 输出目标
         ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # kernel 源文件
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # 依赖: kernel 源
             ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_contract.h # 依赖: wire 契约头
+            ${SDMA_ORCH_DEBUG_CONFIG}
     COMMENT "Compiling 310P sdma orchestrator kernel (libmf_sdma_orch.so)"
 )
 

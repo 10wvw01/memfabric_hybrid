@@ -266,13 +266,16 @@ int32_t cp1QueryProp(uint32_t devId, uint32_t sqId, uint32_t prop, uint32_t *v0,
 // 活查询 + 提交上下文装配(失败码写入返回值, 语义见各 1xxx 分支)
 int32_t cp1LiveQuery(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 {
-    uint32_t lo = 0, hi = 0, status = 0, head = 0, tail = 0;
+    uint32_t lo = 0, hi = 0, head = 0, tail = 0;
+#ifdef MF_SDMA_DBG_MAIL
+    uint32_t status = 0;
     int32_t rStatus = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_STATUS, &status, nullptr);
+    (void)rStatus;
+#endif
     int32_t rBase = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_BASE, &lo, &hi);
     int32_t rDepth = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_DEPTH, &ctx->sqDepth, nullptr);
     int32_t rHead = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &head, nullptr);
     int32_t rTail = cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_TAIL, &tail, nullptr);
-    (void)rStatus; // 状态仅诊断
     if (rTail != 0) { // TAIL 失败: sqTail 是 SQE 写入位置, 失败即退出防覆写固件未消费 SQE
         return 1400 + (rTail & 0xFF);
     }
@@ -329,6 +332,7 @@ inline void storeCell(uint64_t addr, uint64_t v)
 
 // v15 诊断逐单日志: 逐单落工作区环形缓冲(读回原文/计算地址/SQ 游标), host D2H 可读。
 // 单线程 kernel 无并发; 计数持久于工作区(跨 epoch 累计, 环形覆盖最旧)。
+#ifdef MF_SDMA_DBG_MAIL
 void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf::HybmSdmaReqMail &mail,
                 uint64_t sqTailBefore, uint64_t sqTailAfter)
 {
@@ -349,6 +353,8 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
     cacheFlushLine(reinterpret_cast<uintptr_t>(e)); /* 64B 恰一行 */
     storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF, cnt + 1);
 }
+
+#endif
 
 // 数据传输与本端完成按 SQ FIFO 顺序执行。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
@@ -404,9 +410,11 @@ int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 {
     memBarrier();                                                // SQE 写序后(批内唯一 dsb)
     const int32_t r = doorbellViaHal(p->devId, ctx->sqId, ctx->sqTail); // 批末一次敲铃
+#ifdef MF_SDMA_DBG_MAIL
     const uintptr_t ws = static_cast<uintptr_t>(p->resultAddr);
     storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF, ctx->sqTail);
     storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_DBRET_OFF, static_cast<uint64_t>(static_cast<uint32_t>(r)));
+#endif
     return (r != 0) ? 1390 : 0;                                 // 错误码: 敲铃失败
 }
 
@@ -489,13 +497,17 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     cacheFlushLine(stageSlot & ~static_cast<uintptr_t>(63)); // 32B 对齐单行, 刷出(SQE 可读)
     const uint64_t quietStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET + queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
                                 (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8; // 本端完成戳槽(队列内)
+#ifdef MF_SDMA_DBG_MAIL
     const uint64_t tailBefore = ctx->sqTail;
+#endif
     auto ret =
         issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode, signalDst);
     if (ret != 0) {
         return ret;
     }
-    dbgLogMail(p, seq, mail, tailBefore, ctx->sqTail); // v15 逐单日志(最后写, 失败路径不记)
+#ifdef MF_SDMA_DBG_MAIL
+    dbgLogMail(p, seq, mail, tailBefore, ctx->sqTail);
+#endif
     storeCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + queueIdx * SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
               seq + 1); // reqHead[q] 推进
     return 0;
@@ -513,6 +525,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     result->magic = HYBM_SDMA_ORCH_RESULT_MAGIC;
     result->mainRet = 0;
     result->consumed = 0;
+    result->headAfter = 0;
     result->exitReason = HYBM_SDMA_ORCH_EXIT_RUNNING; // 运行中(host 轮询判据: 变为终值即退出)
     finishResult(result);                             // 入口状态刷出(host 立即可见 RUNNING)
     SqContext ctx = {};
@@ -575,7 +588,9 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
                     break;
                 }
                 heads[q]++;
+#ifdef MF_SDMA_DBG_MAIL
                 result->consumed++;
+#endif
                 batch++;
                 progressed = true;
             }
@@ -598,9 +613,11 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
             break;
         }
     }
+#ifdef MF_SDMA_DBG_MAIL
     uint32_t headA = ctx.sqHead; // head 采样初值(查询失败时兜底)
     (void)cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &headA, nullptr); // 逐单日志: head 采样
     result->headAfter = headA;
+#endif
     finishResult(result);
     return (result->exitReason == HYBM_SDMA_ORCH_EXIT_ERROR) ? 1 : 0;
 }

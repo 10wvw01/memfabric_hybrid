@@ -292,13 +292,6 @@ TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
     EXPECT_EQ(context.sqTail, 0U);
 }
 
-#else
-#include <gtest/gtest.h>
-TEST(SdmaSqCapacityTest, RequiresAarch64CacheInstructions)
-{
-    GTEST_SKIP() << "AICPU cache instructions require AArch64";
-}
-
 TEST_F(SdmaDirectionTest, PutSignalOrdersDataNotificationAndCompletion)
 {
     SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG);
@@ -360,6 +353,28 @@ TEST_F(SdmaSqCapacityTest, SignalGroupPreservesNonzeroDoorbellOnWrap)
     EXPECT_EQ(context.sqTail, 1U);
     ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
     EXPECT_EQ(publishedTail, 1U);
+}
+
+TEST_F(SdmaDirectionTest, DisabledDiagnosticsLeaveWorkspaceUntouched)
+{
+    workspace.fill(0xA5);
+    const auto snapshot = workspace;
+    SetMail(false);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
+    EXPECT_EQ(workspace, snapshot);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(*reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_HEAD), 1U);
+    configResult = -7;
+    EXPECT_EQ(flushBatchDoorbell(&param, &context), 1390);
+    EXPECT_EQ(workspace, snapshot);
+}
+
+#else
+#include <gtest/gtest.h>
+TEST(SdmaSqCapacityTest, RequiresAarch64CacheInstructions)
+{
+    GTEST_SKIP() << "AICPU cache instructions require AArch64";
 }
 
 #endif

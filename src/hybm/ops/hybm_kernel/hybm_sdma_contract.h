@@ -67,9 +67,9 @@ static_assert(sizeof(HybmSdmaOrchParam) == 80, "Param 尺寸漂移"); /* 布局�
 struct HybmSdmaOrchResult {
     uint32_t magic;       /* 存活魔数(kernel 执行过) */
     uint32_t mainRet;     /* 主返回码(0=成功/1=失败) */
-    uint32_t consumed;    /* 本 epoch 消费邮件数(低 16 位有效) */
+    uint32_t consumed;    /* MF_SDMA_DBG_MAIL开启时累计请求数，关闭时为0 */
     uint32_t exitReason;  /* 退出原因(0=时限/1=停止/2=错误) */
-    uint64_t headAfter;   /* 逐单日志: 退出时 SQ head 采样 */
+    uint64_t headAfter;   /* MF_SDMA_DBG_MAIL开启时退出SQ head采样，关闭时为0 */
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
