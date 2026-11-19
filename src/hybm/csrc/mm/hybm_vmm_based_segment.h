@@ -82,10 +82,6 @@ private:
     Result ReleaseP2PLease(int32_t phyId) noexcept;
     void ReleaseP2PLeases(const std::set<uint32_t> &removedRanks = {}) noexcept;
     bool Is310PPath() const noexcept;
-    // 310P HBM pools run the whole handle lifetime in the ACL family (see
-    // MallocFromDevice): the HAL shareable records the container pid and dies
-    // at import with 42, and the two wire formats are not interchangeable.
-    bool UseAclBackend() const noexcept { return Is310PPath() && options_.segType == HYBM_MST_HBM; }
     void ReleaseHandle(drv_mem_handle_t *handle) noexcept;
 
     std::vector<HostSdmaExportInfo> imports_;
