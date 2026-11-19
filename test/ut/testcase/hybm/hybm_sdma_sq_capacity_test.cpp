@@ -126,7 +126,7 @@ TEST_F(SdmaSqCapacityTest, WholeTransferReservesSpaceBeforeWritingDescriptors)
 {
     context.sqTail = 6;
     nextHead = 6;
-    ock::mf::HybmSdmaReqMail mail{};
+    ock::mf::HybmSdmaReqMail mail{0, 0, 4, 0};
     EXPECT_EQ(issueMailSqes(&param, &context, 0, 0, mail, 0, 0, 0), 0);
     EXPECT_EQ(configCount, 1U);
     EXPECT_EQ(publishedTail, 6U);
@@ -140,7 +140,7 @@ TEST_F(SdmaSqCapacityTest, PendingTransfersSurviveQueueWrap)
     context.sqTail = 6;
     for (uint16_t task = 0; task < 6; ++task)
         std::memcpy(ring.data() + task * kSqeSize + 6, &task, 2);
-    ock::mf::HybmSdmaReqMail mail{};
+    ock::mf::HybmSdmaReqMail mail{0, 0, 4, 0};
     ASSERT_EQ(issueMailSqes(&param, &context, 0, 10, mail, 0, 0, 0), 0);
     ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
     EXPECT_EQ(executedTasks, (std::vector<uint16_t>{0, 1, 2, 3, 4, 5, 12, 10, 11}));
@@ -298,4 +298,68 @@ TEST(SdmaSqCapacityTest, RequiresAarch64CacheInstructions)
 {
     GTEST_SKIP() << "AICPU cache instructions require AArch64";
 }
+
+TEST_F(SdmaDirectionTest, PutSignalOrdersDataNotificationAndCompletion)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = param.poolBaseGva + param.symSize + 16384;
+    signal[1] = 1234567;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 3U);
+    EXPECT_EQ(DescriptorAddress(0, 40), param.poolBaseGva + param.symSize + 8192);
+    EXPECT_EQ(DescriptorAddress(1, 40), signal[0]);
+    EXPECT_EQ(DescriptorAddress(2, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+    const uint64_t source = DescriptorAddress(1, 32);
+    EXPECT_EQ(*reinterpret_cast<uint64_t *>(source), 1234567U);
+    signal[1] = 9;
+    EXPECT_EQ(*reinterpret_cast<uint64_t *>(source), 1234567U);
+}
+
+TEST_F(SdmaDirectionTest, StandaloneSignalHasNoDataDescriptor)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase);
+    mail->src = 0;
+    mail->len = 1ULL << 63;
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = mail->dst;
+    signal[1] = 88;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(DescriptorAddress(0, 40), mail->dst);
+    EXPECT_EQ(DescriptorAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+}
+
+TEST_F(SdmaDirectionTest, RejectsUnalignedOrWrongPeerSignal)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    for (uint64_t addr :
+         {param.poolBaseGva + param.symSize + 3, param.poolBaseGva + 64, param.poolBaseGva + 2 * param.symSize - 4}) {
+        signal[0] = addr;
+        EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+        EXPECT_EQ(context.sqTail, 0U);
+    }
+}
+
+TEST_F(SdmaDirectionTest, GetSignalIsRejected)
+{
+    SetMail(true, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = param.poolBaseGva + param.symSize + 64;
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+}
+
+TEST_F(SdmaSqCapacityTest, SignalGroupPreservesNonzeroDoorbellOnWrap)
+{
+    context.sqTail = 5;
+    context.sqHead = 4;
+    ock::mf::HybmSdmaReqMail mail{0x1000, 0x2000, 4, 0};
+    ASSERT_EQ(issueMailSqes(&param, &context, 0, 7, mail, 0x3000, 0x4000, 0, 0x5000), 0);
+    EXPECT_EQ(context.sqTail, 1U);
+    ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
+    EXPECT_EQ(publishedTail, 1U);
+}
+
 #endif

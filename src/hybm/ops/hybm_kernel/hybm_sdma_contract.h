@@ -28,11 +28,11 @@ struct HybmSdmaReqMail {  /* 传输请求(AICore→AICPU) */
     uint64_t src;         /* 源地址(Put 本端 GM / Get 远端共享内存) */
     uint64_t dst;         /* 目标地址(Put 远端共享内存 / Get 本端 GM) */
     uint64_t len;         /* 低 32 位为实际字节数；bit 63 标识纯传输，bit 32–62 必须为零，不补齐尾部 */
-    uint64_t imm;         /* COPY 为零；浮点 ADD 编码见下 */
+    uint64_t imm;         /* 数据操作编码，bit39表示携带通知参数 */
 };
 
 /* 操作编码：COPY 为零；ADD 的 [63:48] 为协议标识，[47:40] 为硬件操作码。
- * 消费端先校验完整字段，再解码操作码。
+ * bit39表示携带SET通知；消费端去掉通知标记后校验数据操作编码。
  */
 constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
 constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x02; /* FP32 累加: dst += src */
@@ -73,7 +73,7 @@ struct HybmSdmaOrchResult {
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
-constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0007u; /* 结果区存活魔数 */
+constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0008u; /* 结果区存活魔数 */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_RUNNING = 0xFFFFFFFFu; /* 运行中(kernel 入口写, host 轮询判据) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_DEADLINE = 0;          /* 时限退出(正常换轮) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_STOP = 1;              /* 停止退出(析构) */
