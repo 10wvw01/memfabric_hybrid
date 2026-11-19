@@ -22,18 +22,22 @@
  *   3. submit 的 chunks 边界(0/65 拒绝, 1~64 通过参数关)
  *   4. 工作区布局常量不变式(偏移不重叠, 哨兵区在邮箱区之外)
  *   5. smem 层 sdma 协同 API 的无效 handle 拒绝
+ *   6. 协议握手(ConfigureOrch 轮询结果区): 成功/旧魔数/错误退出/轮询耗尽/首轮下发失败
  */
 #include <gtest/gtest.h> // googletest 框架
 #include <cstddef>      // offsetof
 #include <vector>
 
+#include <array>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <mockcpp/mockcpp.hpp>
-#include "dl_acl_api.h"
 #include "hybm_common_include.h"
 #define private public
+#include "dl_acl_api.h"             // 指针直换式注入需要 DlAclApi 私有函数指针可写(同 urma 用例手法)
 #include "hybm_sdma_orchestrator.h" // 被测单例
 #undef private
 
@@ -287,6 +291,139 @@ TEST_F(SdmaArtifactDirectoryTest, RejectsDirectoryInPlaceOfKernelFile)
     std::filesystem::create_directory(kernel);
     std::string json;
     EXPECT_EQ(prep.ResolveOrchestratorJson(root.string(), json), BM_FILE_NOT_ACCESS);
+}
+
+/* ---- 协议握手(ConfigureOrch 轮询结果区) ----
+ * 注入方式: 直接替换 DlAclApi 函数指针(同 urma 用例手法), memcpy 按 host 内存真实拷贝,
+ * 用例只需在工作区结果区预置 kernel 视角的字节即可驱动握手各分支。
+ */
+namespace {
+uint32_t gHandshakeReadCount = 0; // memcpy 注入计数(轮询预算回归锚点)
+
+int32_t HostPathMemcpy(void *dst, size_t destMax, const void *src, size_t count, uint32_t kind)
+{
+    (void)kind;
+    if (dst == nullptr || src == nullptr || count > destMax) {
+        return BM_INVALID_PARAM;
+    }
+    ++gHandshakeReadCount;
+    std::memcpy(dst, src, count);
+    return BM_OK;
+}
+
+int32_t AlwaysOkMemset(void *dst, size_t destMax, int32_t value, size_t count)
+{
+    (void)dst;
+    (void)destMax;
+    (void)value;
+    (void)count;
+    return BM_OK; // 保留区基址是设备侧地址, UT 无设备内存, 清零不可真实执行
+}
+
+int AlwaysOkCreateStream(void **stream)
+{
+    (void)stream; // 不写 *stream: epochStream_ 保持空, 销毁路径按空流早退
+    return BM_OK;
+}
+} // namespace
+
+class SdmaHandshakeTest : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        oldMemcpy_ = DlAclApi::pAclrtMemcpy;
+        oldMemset_ = DlAclApi::pAclrtMemset;
+        oldCreateStream_ = DlAclApi::pAclrtCreateStream;
+        DlAclApi::pAclrtMemcpy = HostPathMemcpy;
+        DlAclApi::pAclrtMemset = AlwaysOkMemset;
+        DlAclApi::pAclrtCreateStream = AlwaysOkCreateStream;
+        gHandshakeReadCount = 0;
+        ws.fill(0);
+        prep.workspace_ = reinterpret_cast<uint64_t>(ws.data()); // 工作区指向 host 内存
+    }
+    void TearDown() override
+    {
+        GlobalMockObject::verify();
+        DlAclApi::pAclrtMemcpy = oldMemcpy_;
+        DlAclApi::pAclrtMemset = oldMemset_;
+        DlAclApi::pAclrtCreateStream = oldCreateStream_;
+    }
+    void MockLaunchOk()
+    {
+        MOCKER_CPP(&SdmaOrchestrator::LaunchEpoch, int32_t (*)(SdmaOrchestrator *, void *))
+            .stubs()
+            .will(returnValue(BM_OK));
+    }
+    /* 在工作区结果区预置 kernel 视角的字节(magic + 退出原因) */
+    void PublishResult(uint32_t magic, uint32_t exitReason)
+    {
+        auto *r = reinterpret_cast<HybmSdmaOrchResult *>(ws.data() + HYBM_SDMA_ORCH_WS_RESULT_OFF);
+        r->magic = magic;
+        r->exitReason = exitReason;
+    }
+    auto Configure() { return prep.ConfigureOrch(kPoolBaseGva, kSegSize, kSegSize, 0, kPoolBaseGva); }
+
+    static constexpr uint64_t kPoolBaseGva = 0x100000000ULL;
+    static constexpr uint64_t kSegSize = 64ULL * 1024 * 1024;
+    SdmaOrchestrator prep;
+    std::array<uint8_t, HYBM_SDMA_ORCH_WS_SIZE> ws;
+    aclrtMemcpyFunc oldMemcpy_{nullptr};
+    aclrtMemsetFunc oldMemset_{nullptr};
+    aclrtCreateStreamFunc oldCreateStream_{nullptr};
+};
+
+/* 用例 6a: magic 正确且运行中 → 建池成功; 失败侧状态翻转由显式 StopEpoch 收尾 */
+TEST_F(SdmaHandshakeTest, AcceptsRunningKernelAndConfiguresPool)
+{
+    MockLaunchOk();
+    PublishResult(HYBM_SDMA_ORCH_RESULT_MAGIC, HYBM_SDMA_ORCH_EXIT_RUNNING);
+    EXPECT_EQ(Configure(), BM_OK);
+    EXPECT_TRUE(prep.configured_);
+    EXPECT_TRUE(prep.epochLaunched_);
+    prep.StopEpoch(); // 默认预算会启动监督线程, 先结束再离场, 避免可 join 线程随用例析构
+    EXPECT_FALSE(prep.epochLaunched_);
+}
+
+/* 用例 6b: 旧协议版本的魔数必须被拒绝(混布旧 kernel 时建池失败) */
+TEST_F(SdmaHandshakeTest, RejectsStaleKernelMagic)
+{
+    MockLaunchOk();
+    PublishResult(0x5D0A0005u, HYBM_SDMA_ORCH_EXIT_RUNNING); // 旧协议版本的魔数
+    EXPECT_EQ(Configure(), BM_ERROR);
+    EXPECT_FALSE(prep.configured_);
+    EXPECT_FALSE(prep.epochLaunched_); // 失败路径经 StopEpoch 复位, 不得残留已下发状态
+}
+
+/* 用例 6c: 魔数正确但 kernel 已错误退出 → 建池失败 */
+TEST_F(SdmaHandshakeTest, RejectsKernelExitedWithError)
+{
+    MockLaunchOk();
+    PublishResult(HYBM_SDMA_ORCH_RESULT_MAGIC, HYBM_SDMA_ORCH_EXIT_ERROR);
+    EXPECT_EQ(Configure(), BM_ERROR);
+    EXPECT_FALSE(prep.configured_);
+    EXPECT_FALSE(prep.epochLaunched_);
+}
+
+/* 用例 6d: kernel 未启动(结果区恒 0) → 轮询预算耗尽后失败返回, 不得死循环 */
+TEST_F(SdmaHandshakeTest, ExhaustsPollBudgetWhenKernelNeverStarts)
+{
+    MockLaunchOk();
+    EXPECT_EQ(Configure(), BM_ERROR);
+    EXPECT_FALSE(prep.configured_);
+    EXPECT_FALSE(prep.epochLaunched_);
+    EXPECT_EQ(gHandshakeReadCount, 201U); // 200 次轮询 + StopEpoch 诊断读 1 次
+}
+
+/* 用例 6e: 首轮下发失败必须立即报错, 不得进入握手(防止池看似就绪实则无消费者) */
+TEST_F(SdmaHandshakeTest, LaunchFailureFailsBeforeHandshakeWithoutHalfState)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LaunchEpoch, int32_t (*)(SdmaOrchestrator *, void *))
+        .stubs()
+        .will(returnValue(BM_NOT_INITIALIZED));
+    EXPECT_EQ(Configure(), BM_NOT_INITIALIZED);
+    EXPECT_FALSE(prep.configured_);
+    EXPECT_FALSE(prep.epochLaunched_);
+    EXPECT_EQ(gHandshakeReadCount, 0U); // 未进入握手轮询
 }
 
 /* 用例 1: Acquire 在资源缺失环境(UT stub)必然失败, 且失败后状态干净可重试 */

@@ -199,6 +199,14 @@ TEST_F(SdmaDirectionTest, PutRetainsRemoteDestinationAndAddOpcode)
     EXPECT_EQ(context.sqTail, 2U);
 }
 
+TEST_F(SdmaDirectionTest, PutEncodesFp16AddOpcode)
+{
+    SetMail(false, (ock::mf::HYBM_SDMA_IMM_MAGIC << 48) | (uint64_t(ock::mf::HYBM_SDMA_SQE_OP_FP16_ADD) << 40));
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(ring[16], ock::mf::HYBM_SDMA_SQE_OP_FP16_ADD);
+    EXPECT_EQ(context.sqTail, 2U);
+}
+
 TEST_F(SdmaDirectionTest, GetSupportsOrdinaryLocalDeviceMemory)
 {
     SetMail(true);
@@ -262,9 +270,32 @@ TEST_F(SdmaDirectionTest, UnmarkedRequestsRejected)
     mail->len &= UINT32_MAX;
     EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1334);
     SetMail(false);
+    mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
     mail->len &= UINT32_MAX;
     EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1334);
     EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaDirectionTest, ZeroLengthAndMisalignedRequestsRejected)
+{
+    SetMail(true);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->len = 1ULL << 63; // 标记位在但实际长度为 0, 不得放行
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1332);
+    SetMail(true);
+    mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mail->len = (1ULL << 63) | 2ULL; // 长度未按 4 字节对齐
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1332);
+    EXPECT_EQ(context.sqTail, 0U); // 校验失败不消耗 SQE
+}
+
+TEST_F(SdmaDirectionTest, ImmOutsideWhitelistRejected)
+{
+    SetMail(false, 0x1234ULL << 40); // 协议标识位不是 'RD'
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1333);
+    SetMail(false, (ock::mf::HYBM_SDMA_IMM_MAGIC << 48) | (0x09ULL << 40)); // 标识对但 opcode 未定义
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1333);
+    EXPECT_EQ(context.sqTail, 0U); // 校验失败不消耗 SQE
 }
 
 TEST_F(SdmaSqCapacityTest, TransferPairPadsZeroTailAndKeepsCompletionLast)
