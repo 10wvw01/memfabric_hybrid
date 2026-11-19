@@ -12,7 +12,7 @@
 
 /* AICore 生产端与 AICPU 消费端共用的 310P SDMA 保留区布局。
  * 请求、游标和完成戳的偏移及 2 MiB 保留区大小保持一致，各写入方独占 64 字节缓存行。
- * 原到达区保留为空，维持内存池的地址布局。
+ * 原到达区的一部分存放通知参数，维持内存池的地址布局。
  * 暂存槽在前次 quiet 完成戳可见之前仍是 DMA 源，不能覆盖。
  */
 #ifndef __MEMFABRIC_SMEM_SHM_SDMA_LAYOUT_H__
@@ -45,10 +45,15 @@ constexpr uint64_t SMEM_SHM_SDMA_RS_CURSOR_STRIDE = 0x40; /* 游标间距(独占
 constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET = 0x19800;     /* 完成戳数组基址(SQE 写) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET_SLOTS = 64;    /* 每队列完成戳数 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_QUIET_STRIDE = 0x200; /* 队列间距(64×8B) */
-/* 完成戳暂存槽保持 32 字节间距，仅使用首个 uint64_t。 */
+/* 暂存槽保持32字节间距：首个uint64_t保存完成序号，第二个保存通知值。 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_STAGE = 0x1F800;    /* 邮件像暂存数组基址(AICPU 写本端, SDMA 本端读) */
 constexpr uint32_t SMEM_SHM_SDMA_RS_STAGE_SLOTS = 512;   /* 每队列暂存槽数(每封 32B) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_STAGE_STRIDE = 0x4000; /* 队列间距(512×32B) */
+
+// 通知参数保存在原到达区，每请求16字节，随请求tail一起发布。
+constexpr uint64_t SMEM_SHM_SDMA_RS_SIGNAL = 0xDF800;
+constexpr uint64_t SMEM_SHM_SDMA_RS_SIGNAL_STRIDE = 0x400;
+constexpr uint64_t SMEM_SHM_SDMA_SIGNAL_FLAG = 1ULL << 39;
 
 /* ---- 协同模式规模上限 ---- */
 constexpr uint32_t SMEM_SHM_SDMA_MAX_RANKS = 4;  /* rank 上限(8-rank 全互联被每卡 8 个 P2P 槽位硬约束否定) */
@@ -57,7 +62,7 @@ constexpr uint32_t SMEM_SHM_SDMA_MAX_BLOCKS = 8; /* 每 die AICore block 数(<<<
 constexpr uint32_t SMEM_SHM_SDMA_QUEUES_PER_PEER = 16; /* 每对端队列槽位(block 0..7 在用, 8..15 预留) */
 constexpr uint32_t SMEM_SHM_SDMA_QUEUE_COUNT = 48; /* 邮箱队列总数(对端 × 槽位, hcomm 48 同规模) */
 
-/* 原到达区保持为空，保留偏移用于布局兼容和 Host 诊断。 */
+/* 原到达区偏移保留用于布局兼容；通知参数使用其起始部分。 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_PEER_RINGS = 0xDF800; /* 到达子环数组基址 */
 constexpr uint64_t SMEM_SHM_SDMA_RS_PEER_STAMP = 0x0000; /* 队列内: 到达戳数组(SQE 写) */
 constexpr uint64_t SMEM_SHM_SDMA_RS_PEER_MAIL = 0x1000;   /* 队列内: 到达邮件数组(SQE 写) */

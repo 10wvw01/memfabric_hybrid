@@ -3,7 +3,7 @@
 
 #include "smem_shm_aicore_base_sdma.h"
 
-// 应用状态槽将接收标志和发送暂存区放在不同缓存行，避免相互覆盖。
+// 每个通知槽独占缓存行，槽位间距保留以兼容已有用例。
 #define SDMA_READY_INLINE __attribute__((always_inline)) __aicore__ inline
 constexpr uint64_t SDMA_READY_SLOT_STRIDE = 128;
 
@@ -20,22 +20,14 @@ SDMA_READY_INLINE void SdmaMaintainCache(__gm__ void *base, uint64_t bytes)
 SDMA_READY_INLINE bool SdmaPublishReady(const smem_shm_sdma_ctx_t &ctx, __gm__ uint8_t *own,
     __gm__ uint8_t *peer, uint64_t sourceOffset, uint64_t targetOffset, uint64_t sequence)
 {
-    auto scratch = own + sourceOffset + 64;
-    *reinterpret_cast<__gm__ volatile uint64_t *>(scratch) = sequence;
-    SdmaMaintainCache(scratch, 8);
-    return smem_shm_sdma_put_at(ctx, scratch, peer + targetOffset, 8);
+    (void)own;
+    (void)sourceOffset;
+    return smem_shm_sdma_signal_set_at(ctx, reinterpret_cast<__gm__ uint64_t *>(peer + targetOffset), sequence);
 }
 
 SDMA_READY_INLINE bool SdmaWaitReady(__gm__ uint8_t *own, uint64_t offset, uint64_t sequence)
 {
-    auto flag = own + offset;
-    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; ++i) {
-        SdmaMaintainCache(flag, 8);
-        if (*reinterpret_cast<__gm__ volatile uint64_t *>(flag) == sequence) {
-            return true;
-        }
-    }
-    return false;
+    return smem_shm_signal_wait_until(reinterpret_cast<__gm__ uint64_t *>(own + offset), SMEM_SHM_CMP_EQ, sequence);
 }
 
 #undef SDMA_READY_INLINE
