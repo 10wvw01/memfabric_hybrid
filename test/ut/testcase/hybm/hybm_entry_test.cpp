@@ -21,6 +21,10 @@
 #include "dl_api.h"
 #include "hybm_va_manager.h"
 #include "hybm_gva_version.h"
+#include "dl_rt_api.h"
+#define private public
+#include "hybm_sdma_orchestrator.h"
+#undef private
 
 using namespace ock::mf;
 
@@ -396,3 +400,94 @@ TEST_F(HybmEntryTest, hybm_gva_to_va_invalid_mem_type)
 
     hybm_uninit();
 }
+
+#if defined(ASCEND_NPU)
+TEST_F(HybmEntryTest, ShmemInitPreparesSdmaBeforePoolsAndRetainsInitializationReference)
+{
+    MockHybmInitSuccess();
+    MockHybmUninitSuccess();
+    MOCKER(DlAclApi::GetAscendSocType).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER(DlAclApi::AclrtSetDevice).stubs().will(returnValue(BM_OK));
+    MOCKER(DlRtApi::LoadLibrary).stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::InitCpStream, ock::mf::Result(*)(SdmaOrchestrator *, uint16_t))
+        .stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::AllocWorkspace, ock::mf::Result(*)(SdmaOrchestrator *))
+        .stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::LoadOrchestratorKernel, ock::mf::Result(*)(SdmaOrchestrator *))
+        .expects(once()).will(returnValue(BM_OK));
+    auto &orch = SdmaOrchestrator::GetInstance();
+    ASSERT_EQ(hybm_init(0, 0), BM_OK);
+    EXPECT_EQ(orch.GetRefCountForTest(), 0U);
+    ASSERT_EQ(hybm_init(0, HYBM_FLAG_INIT_SHMEM_META), BM_OK);
+    EXPECT_TRUE(orch.Ready());
+    EXPECT_EQ(orch.GetRefCountForTest(), 1U);
+    EXPECT_FALSE(orch.epochLaunched_);
+    ASSERT_EQ(orch.Acquire(0), BM_OK);
+    orch.Release();
+    EXPECT_EQ(orch.GetRefCountForTest(), 1U);
+    ASSERT_EQ(hybm_init(0, HYBM_FLAG_INIT_SHMEM_META), BM_OK);
+    EXPECT_EQ(orch.GetRefCountForTest(), 1U);
+    hybm_uninit();
+    hybm_uninit();
+    EXPECT_TRUE(orch.Ready());
+    hybm_uninit();
+    EXPECT_EQ(orch.GetRefCountForTest(), 0U);
+    EXPECT_FALSE(orch.Ready());
+}
+
+TEST_F(HybmEntryTest, ShmemSdmaPreparationFailureLeavesInitializationRetryable)
+{
+    MockHybmInitSuccess();
+    MockHybmUninitSuccess();
+    MOCKER(DlAclApi::GetAscendSocType).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER(DlAclApi::AclrtSetDevice).stubs().will(returnValue(BM_OK));
+    MOCKER(DlRtApi::LoadLibrary).stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::InitCpStream, ock::mf::Result(*)(SdmaOrchestrator *, uint16_t))
+        .stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::AllocWorkspace, ock::mf::Result(*)(SdmaOrchestrator *))
+        .stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::LoadOrchestratorKernel, ock::mf::Result(*)(SdmaOrchestrator *))
+        .stubs().will(returnValue(BM_ERROR)).then(returnValue(BM_OK));
+    auto &orch = SdmaOrchestrator::GetInstance();
+    EXPECT_EQ(hybm_init(0, HYBM_FLAG_INIT_SHMEM_META), BM_ERROR);
+    EXPECT_FALSE(HybmHasInited());
+    EXPECT_FALSE(orch.Ready());
+    EXPECT_EQ(orch.GetRefCountForTest(), 0U);
+    ASSERT_EQ(hybm_init(0, HYBM_FLAG_INIT_SHMEM_META), BM_OK);
+    EXPECT_EQ(orch.GetRefCountForTest(), 1U);
+    hybm_uninit();
+    EXPECT_EQ(orch.GetRefCountForTest(), 0U);
+}
+
+TEST_F(HybmEntryTest, OtherSocShmemInitDoesNotPrepare310pSdma)
+{
+    MockHybmInitSuccess();
+    MockHybmUninitSuccess();
+    MOCKER(DlAclApi::GetAscendSocType).stubs().will(returnValue(AscendSocType::ASCEND_910B));
+    MOCKER_CPP(&SdmaOrchestrator::InitOnce, ock::mf::Result(*)(SdmaOrchestrator *, uint16_t)).expects(never());
+    ASSERT_EQ(hybm_init(0, HYBM_FLAG_INIT_SHMEM_META), BM_OK);
+    EXPECT_EQ(SdmaOrchestrator::GetInstance().GetRefCountForTest(), 0U);
+    hybm_uninit();
+}
+
+TEST_F(HybmEntryTest, MetaFailureReleasesNewSdmaReferenceWithoutUninitializingOtherModule)
+{
+    MockHybmUninitSuccess();
+    MOCKER(HalGvaPrecheck).stubs().will(returnValue(BM_OK));
+    MOCKER(DlApi::LoadLibrary).stubs().will(returnValue(BM_OK));
+    MOCKER(ptracer_init).stubs().will(returnValue(BM_OK));
+    MOCKER(hybm_init_hbm_gva).stubs().will(returnValue(BM_OK)).then(returnValue(BM_ERROR));
+    MOCKER(DlAclApi::GetAscendSocType).stubs().will(returnValue(AscendSocType::ASCEND_310P));
+    MOCKER(DlAclApi::AclrtSetDevice).stubs().will(returnValue(BM_OK));
+    MOCKER(DlRtApi::LoadLibrary).stubs().will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::InitOnce, ock::mf::Result(*)(SdmaOrchestrator *, uint16_t))
+        .stubs().will(returnValue(BM_OK));
+    ASSERT_EQ(hybm_init(0, 0), BM_OK);
+    EXPECT_EQ(hybm_init(0, HYBM_FLAG_INIT_SHMEM_META), BM_ERROR);
+    EXPECT_TRUE(HybmHasInited());
+    EXPECT_FALSE(SdmaOrchestrator::GetInstance().Ready());
+    EXPECT_EQ(SdmaOrchestrator::GetInstance().GetRefCountForTest(), 0U);
+    hybm_uninit();
+    EXPECT_FALSE(HybmHasInited());
+}
+#endif
