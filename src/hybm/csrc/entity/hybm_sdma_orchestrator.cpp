@@ -46,19 +46,111 @@ namespace {
 /* ACL_STREAM_DEVICE_USE_ONLY 的值(acl_rt.h:0x20): SQ 注册进 CP1 trs 表(AICPU 可查可投的前提) */
 constexpr uint32_t HYBM_ACL_STREAM_DEVICE_USE_ONLY = 0x20U;
 constexpr uint32_t HYBM_SDMA_ORCH_BLOCK_DIM = 1;       /* 单 block(kernel 状态机单线程语义) */
-constexpr uint32_t HYBM_SDMA_ORCH_KFC_TIMEOUT_S = 25;  /* KFC 设备 shell 命令超时(部署链专用) */
-constexpr char HYBM_SDMA_ORCH_FUNC_NAME[] = "HybmSdmaOrchEpoch"; /* epoch 消费 kernel 入口符号 */
 constexpr char HYBM_SDMA_ORCH_DEFAULT_JSON[] = "libmf_sdma_orch_launch.json";
-constexpr char HYBM_SDMA_ORCH_CUST_JSON[] = "libmf_sdma_orch.json";  /* CUST 迁移 json 名(与 launch json 同目录) */
-constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧 kernel so 名(CUST 迁移源) */
-/* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 须在本卡设备上部署) */
-constexpr char HYBM_SDMA_ORCH_DEV_SEARCH_DIR[] = "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device";
-constexpr char HYBM_SDMA_ORCH_DEPLOY_LOCK[] = "/tmp/.mf_sdma_orch_deploy.lock"; /* 部署互斥锁(host 侧) */
-constexpr uint32_t HYBM_SDMA_ORCH_DEPLOY_RETRY = 5;   /* 复制/校验重试次数(迁移异步完成裕量) */
-constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 512; /* KFC 命令缓冲尺寸(命令为受控常量拼接) */
-/* KFC 命令退出码非 0 时 stream sync 的回传码(实测): 用于区分"文件缺失"与"通道异常" */
-constexpr int32_t HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR = 507018;
+constexpr char HYBM_SDMA_ORCH_KERNEL_SO[] = "libmf_sdma_orch.so"; /* host 侧 kernel so 名 */
+constexpr char HYBM_SDMA_ORCH_KERNEL_JSON[] = "libmf_sdma_orch.json"; /* kernel 配套 op json(产物三件套之一) */
+/* pypto 机制: CP1 启动时预加载的 CANN extend 库, 提供在 CP1 进程内加载任意 so 的 loader.
+ * 不依赖设备搜索路径文件与 KFC shell(2026-11-18 起 KFC shell 平台级失效). */
+constexpr char HYBM_SDMA_ORCH_EXTEND_SO[] = "libaicpu_extend_kernels.so";
+constexpr char HYBM_SDMA_ORCH_EXTEND_INIT_FUNC[] = "DynTileFwkKernelServerInit"; /* loader 入口 */
+constexpr char HYBM_SDMA_ORCH_EXTEND_EXEC_FUNC[] = "DynTileFwkKernelServer";     /* 函数表分发入口 */
+constexpr uint32_t HYBM_SDMA_ORCH_EXTEND_KERNEL_TYPE = 5;      /* AICPU_KFC */
+constexpr uint32_t HYBM_SDMA_ORCH_EXTEND_LAUNCH_FLAG = 0x100U; /* RT_KERNEL_USE_SPECIAL_TIMEOUT */
+constexpr uint16_t HYBM_SDMA_ORCH_EXTEND_TIMEOUT_NEVER = 0xFFFFU; /* args.timeout: 0xFFFF=永不超时 */
 constexpr uint32_t HYBM_SDMA_ORCH_SUPERVISOR_MAX_ERR = 16; /* 监督线程连续失败上限(放弃后数据面停在背压) */
+
+/* ---- extend lib loader 的 ABI 镜像 ----
+ * loader 在 CP1 内读 DeviceArgs.aicpuSoBin/aicpuSoLen/deviceId(偏移 96/104/112)取 so 字节;
+ * DeviceKernelArgs.cfgdata(偏移 40)承载本端参数指针. 布局与 pypto device_runner 一致. */
+struct ExtendDeviceKernelArgs {
+    int64_t *ctrlFlowCache{nullptr};
+    int64_t *inputs{nullptr};
+    int64_t *outputs{nullptr};
+    int64_t *workspace{nullptr};
+    int64_t *tilingdata{nullptr};
+    int64_t *cfgdata{nullptr};
+    int64_t *commContexts{nullptr};
+    void *costmodeldata{nullptr};
+    void *aicoreModel{nullptr};
+    uint64_t taskWastTime{0};
+    uint64_t maxDynamicAssembleOutcastMem{0};
+    uint64_t maxDynamicCellMatchTableMem{0};
+    uint8_t machineConfig{0};
+    uint8_t pad[3]{0};
+    uint8_t subMachineConfig[4]{0}; /* ToSubMachineConfig{ProfConfig{uint32}} */
+    uint32_t runMode{0};
+    uint32_t p1{0};
+    uint64_t globalRound{0};
+    uint64_t ctrlBlockNum{0};
+};
+struct ExtendDeviceArgs {
+    uint32_t nrAic{0};
+    uint32_t nrAiv{0};
+    uint32_t nrAicpu{0};
+    uint32_t nrValidAic{0};
+    uint64_t opaque{0};
+    uint64_t devQueueAddr{0};
+    uint64_t sharedBuffer{0};
+    uint64_t coreRegAddr{0};
+    uint64_t corePmuRegAddr{0};
+    uint64_t corePmuAddr{0};
+    uint64_t pmuEventAddr{0};
+    uint64_t taskType : 4;
+    uint64_t machineConfig : 8;
+    uint64_t taskId : 52;
+    uint64_t taskData{0};
+    uint64_t taskWastTime{0};
+    uint64_t aicpuSoBin{0};
+    uint64_t aicpuSoLen{0};
+    uint64_t deviceId{0};
+    uint64_t runtimeDataRingBufferAddr{0};
+    uint64_t dynamicCellMatchAddr{0};
+    uint64_t dynamicCellMatchCapacity{0};
+    uint32_t hostPid{0};
+    uint32_t scheCpuNum{0};
+    uint32_t enableCtrl : 2;
+    uint32_t validGetPgMask : 30;
+    uint64_t aicpuPerfAddr{0};
+    uint64_t devDfxArgAddr{0};
+    uint32_t maxAicpuNum{0};
+    uint32_t launchSchedAicpuNum{7};
+    bool launchSchedSameCluster{true};
+    bool enableVFFusion{false};
+    bool enableEslModel{false};
+    bool hasAicpuTask{false};
+    bool commByReg{false};
+    uint32_t archInfo{2002}; /* DAV_2002 */
+    uint32_t profValue{0};
+};
+struct ExtendArgs {
+    ExtendDeviceKernelArgs kArgs;
+    char kernelName[32];
+    char soName[32];
+    char opName[32];
+};
+struct ExtendRtArgs {
+    void *args;
+    void *hostInputInfoPtr;
+    void *kernelOffsetInfoPtr;
+    uint32_t argsSize;
+    uint16_t hostInputInfoNum;
+    uint16_t kernelOffsetInfoNum;
+    uint32_t soNameAddrOffset;
+    uint32_t kernelNameAddrOffset;
+    uint8_t isNoNeedH2DCopy;
+    uint16_t timeout;
+    uint8_t reserved;
+};
+static_assert(offsetof(ExtendDeviceArgs, aicpuSoBin) == 96, "aicpuSoBin offset");
+static_assert(offsetof(ExtendDeviceArgs, aicpuSoLen) == 104, "aicpuSoLen offset");
+static_assert(offsetof(ExtendDeviceArgs, deviceId) == 112, "deviceId offset");
+static_assert(offsetof(ExtendDeviceKernelArgs, cfgdata) == 40, "cfgdata offset");
+static_assert(offsetof(ExtendArgs, kernelName) == 128, "kernelName offset");
+static_assert(offsetof(ExtendArgs, soName) == 160, "soName offset");
+static_assert(sizeof(ExtendArgs) == 224, "ExtendArgs size");
+
+using RtAicpuLaunchFn = int (*)(uint32_t, const char *, uint32_t, const ExtendRtArgs *, void *, const void *,
+                                uint32_t);
 
 /* 解析每轮时长(秒): MF_SDMA_ORCH_EPOCH_BUDGET_S 显式指定;
  * 非法/未设 → 默认 15s; 4294967295 → 永不退出的专用值(诊断模式, 会阻塞全设备同步) */
@@ -218,39 +310,6 @@ static std::string FindInstalledJson()
     return "";
 }
 
-/* 同 Host 的迁移和复制串行执行，避免多个进程混用 CUST 临时文件。 */
-class DeployFlockGuard {
-public:
-    /* O_NOFOLLOW: 拒绝跟随预置符号链接(防锁文件劫持); O_CLOEXEC: 子进程不继承;
-     * 0600: 属主读写 */
-    DeployFlockGuard()
-        : fd_(open(HYBM_SDMA_ORCH_DEPLOY_LOCK, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600))
-    {
-        if (fd_ < 0) {
-            BM_LOG_ERROR("deploy lock open failed, errno: " << errno);
-            return;
-        }
-        if (flock(fd_, LOCK_EX) != 0) {
-            BM_LOG_ERROR("deploy lock acquire failed, errno: " << errno);
-            (void)close(fd_);
-            fd_ = -1;
-        }
-    }
-    bool Valid() const
-    {
-        return fd_ >= 0;
-    }
-    ~DeployFlockGuard()
-    {
-        if (fd_ >= 0) {
-            (void)flock(fd_, LOCK_UN);
-            (void)close(fd_);
-        }
-    }
-private:
-    int fd_; // -1 = 未持锁
-};
-
 /* 取路径目录部分(最后一个 '/' 之前; 无 '/' 返回空串) */
 static std::string DirOf(const std::string &path)
 {
@@ -258,38 +317,10 @@ static std::string DirOf(const std::string &path)
     return (pos == std::string::npos) ? std::string() : path.substr(0, pos);
 }
 
-/* 读取构建产物的 kernelSo，运行时替换为本次加载的独立文件名。 */
-static std::string ExtractDeviceSoName(const std::string &content)
-{
-    auto pos = content.find("\"kernelSo\"");
-    if (pos == std::string::npos) {
-        return "";
-    }
-    auto colon = content.find(':', pos);
-    auto start = (colon == std::string::npos) ? colon : content.find('"', colon);
-    auto end = (start == std::string::npos) ? start : content.find('"', start + 1);
-    return (end == std::string::npos) ? "" : content.substr(start + 1, end - start - 1);
-}
-
-/* deviceSoName 白名单校验(仅 [A-Za-z0-9._-], 长度 1~64): 名字拼入 KFC 命令串经
- * 设备 OS system() 执行——不做校验存在 shell 注入风险; json 由本仓构建产出,
- * 校验是纵深防御 */
-static bool IsValidDeviceSoName(const std::string &name)
-{
-    if (name.empty() || name.size() > 64) {
-        return false;
-    }
-    for (char c : name) {
-        if (std::isalnum(static_cast<unsigned char>(c)) == 0 && c != '.' && c != '_' && c != '-') {
-            return false;
-        }
-    }
-    return true;
-}
-
+/* 产物目录完整性: so + kernel op json + launch json 三件套齐全且可读 */
 static bool HasOrchestratorArtifacts(const std::filesystem::path &directory)
 {
-    const char *names[] = {HYBM_SDMA_ORCH_CUST_SO, HYBM_SDMA_ORCH_CUST_JSON, HYBM_SDMA_ORCH_DEFAULT_JSON};
+    const char *names[] = {HYBM_SDMA_ORCH_KERNEL_SO, HYBM_SDMA_ORCH_KERNEL_JSON, HYBM_SDMA_ORCH_DEFAULT_JSON};
     for (const auto *name : names) {
         const auto file = directory / name;
         std::error_code error;
@@ -300,6 +331,7 @@ static bool HasOrchestratorArtifacts(const std::filesystem::path &directory)
     return true;
 }
 
+/* 在 MF_SDMA_ORCH_DIR 下递归找完整的产物目录, 必须恰好命中一套(0 套或多套都判失败, 避免选错版本) */
 static Result FindOrchestratorJson(const std::string &directory, std::string &jsonPath)
 {
     std::error_code error;
@@ -309,7 +341,7 @@ static Result FindOrchestratorJson(const std::string &directory, std::string &js
         return BM_FILE_NOT_ACCESS;
     }
     std::set<std::string> matches;
-    // 子目录符号链接不递归跟随，避免循环和同一安装目录被重复发现。
+    // 子目录符号链接不递归跟随, 避免循环和同一安装目录被重复发现。
     std::filesystem::recursive_directory_iterator current(root, error), end;
     for (; !error && current != end; current.increment(error)) {
         const auto &path = current->path();
@@ -323,8 +355,8 @@ static Result FindOrchestratorJson(const std::string &directory, std::string &js
     }
     if (matches.size() != 1) {
         BM_LOG_ERROR("MF_SDMA_ORCH_DIR requires one complete artifact directory, root: " << directory
-                     << " matches: " << matches.size() << " required: " << HYBM_SDMA_ORCH_CUST_SO << ", "
-                     << HYBM_SDMA_ORCH_CUST_JSON << ", " << HYBM_SDMA_ORCH_DEFAULT_JSON);
+                     << " matches: " << matches.size() << " required: " << HYBM_SDMA_ORCH_KERNEL_SO << ", "
+                     << HYBM_SDMA_ORCH_KERNEL_JSON << ", " << HYBM_SDMA_ORCH_DEFAULT_JSON);
         for (const auto &match : matches) {
             BM_LOG_ERROR("SDMA artifact candidate: " << match);
         }
@@ -341,9 +373,9 @@ Result SdmaOrchestrator::ResolveOrchestratorJson(const std::string &directory, s
     if (!directory.empty()) {
         return FindOrchestratorJson(directory, jsonPath);
     }
-    std::string candidate = FindInstalledJson();
+    std::string candidate = FindInstalledJson();   // ① 安装前缀自动发现
     if (candidate.empty()) {
-        candidate = HYBM_SDMA_ORCH_DEFAULT_JSON;
+        candidate = HYBM_SDMA_ORCH_DEFAULT_JSON;   // ② CWD 缺省名
     }
     char resolved[PATH_MAX] = {0};
     if (realpath(candidate.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) {
@@ -362,253 +394,94 @@ Result SdmaOrchestrator::LoadOrchestratorKernel()
     if (ret != BM_OK) {
         return ret;
     }
-    std::string runtimeJson;
-    ret = PrepareRuntimeJson(jsonPath, runtimeJson);
-    if (ret != BM_OK) {
-        return ret;
-    }
-    ret = DeployOrchestratorKernel(DirOf(jsonPath), runtimeJson);
-    (void)unlink(runtimeJson.c_str());
-    return ret;
+    /* json 仅用于定位 kernel 目录(产物三件套同目录); 部署走 CP1 extend lib loader, 不消费 json 内容 */
+    return DeployOrchestratorKernel(DirOf(jsonPath));
 }
 
-Result SdmaOrchestrator::PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson)
+Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &kernelDir)
 {
-    std::ifstream input(jsonPath);
+    const std::string hostSo = kernelDir + "/" + HYBM_SDMA_ORCH_KERNEL_SO;
+    std::ifstream input(hostSo, std::ios::binary);
     if (!input) {
-        BM_LOG_ERROR("open launch json failed, path: " << jsonPath);
+        BM_LOG_ERROR("sdma orch kernel so not accessible, path: " << hostSo);
         return BM_FILE_NOT_ACCESS;
     }
-    std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    const auto sourceName = ExtractDeviceSoName(content);
-    if (!IsValidDeviceSoName(sourceName)) {
-        BM_LOG_ERROR("invalid kernelSo in launch json: " << jsonPath);
-        return BM_INVALID_PARAM;
-    }
-    const auto field = content.find("\"kernelSo\"");
-    const auto namePos = content.find('"', content.find(':', field)) + 1;
-    std::string path = "/tmp/libmf_sdma_orch_" + std::to_string(getpid()) + "_XXXXXX.json";
-    int fd = mkstemps(&path[0], 5);
-    if (fd < 0) {
-        BM_LOG_ERROR("create runtime launch json failed, errno: " << errno);
+    std::vector<char> soBytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (soBytes.empty()) {
+        BM_LOG_ERROR("sdma orch kernel so empty, path: " << hostSo);
         return BM_FILE_NOT_ACCESS;
     }
-    const auto base = path.substr(path.find_last_of('/') + 1);
-    deviceSoName_ = base.substr(0, base.size() - 5) + ".so";
-    content.replace(namePos, sourceName.size(), deviceSoName_);
-    const bool written = write(fd, content.data(), content.size()) == static_cast<ssize_t>(content.size());
-    const int closeRet = close(fd);
-    if (!written || closeRet != 0) {
-        BM_LOG_ERROR("write runtime launch json failed, path: " << path << " errno: " << errno);
-        (void)unlink(path.c_str());
-        return BM_FILE_NOT_ACCESS;
-    }
-    runtimeJson = path;
-    return BM_OK;
-}
-
-Result SdmaOrchestrator::TryLoadKernel(const std::string &jsonPath)
-{
-    aclrtBinaryLoadOption loadOption{};
-    loadOption.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
-    loadOption.value.cpuKernelMode = 0; /* mode=0: 走 CP1 搜索路径(A.4-3) */
-    aclrtBinaryLoadOptions loadOptions{};
-    loadOptions.options = &loadOption;
-    loadOptions.numOpt = 1;
-    auto ret = DlAclApi::AclrtBinaryLoadFromFile(jsonPath.c_str(), &loadOptions, &binHandle_);
-    if (ret != BM_OK) { // 设备侧文件缺失或 json 问题(日志由调用方分层记录)
-        return ret;
-    }
-    return DlAclApi::AclrtBinaryGetFunction(binHandle_, HYBM_SDMA_ORCH_FUNC_NAME, &funcHandle_);
-}
-
-Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath)
-{
-    DeployFlockGuard lock;
-    if (!lock.Valid()) {
+    /* 1) so 字节 H2D: loader 经 DeviceArgs.aicpuSoBin 读取, 在 CP1 进程内 memfd 加载 */
+    if (DlAclApi::AclrtMalloc(&devSo_, soBytes.size(), ACL_MEM_MALLOC_HUGE_FIRST) != BM_OK ||
+        DlAclApi::AclrtMemcpy(devSo_, soBytes.size(), soBytes.data(), soBytes.size(),
+                              ACL_MEMCPY_HOST_TO_DEVICE) != BM_OK) {
+        BM_LOG_ERROR("upload kernel so failed, devId: " << devId_ << " size: " << soBytes.size());
         return BM_ERROR;
     }
-    const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName_;
-    // 每次加载使用独立名称，避免 CP1 复用已缓存的旧代码。
-    auto ret = KfcExec("test ! -e " + dst);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("automatic deploy requires an unused device path, devId: " << devId_ << " dst: " << dst);
-        return ret;
+    /* 2) DeviceArgs H2D: loader 只读 aicpuSoBin/aicpuSoLen/deviceId(偏移 96/104/112) */
+    ExtendDeviceArgs da{};
+    da.deviceId = devId_;
+    da.archInfo = 2002; /* DAV_2002 */
+    da.nrAic = 10;
+    da.nrValidAic = 8;
+    da.nrAicpu = 5;
+    da.maxAicpuNum = 15;
+    da.scheCpuNum = 3;
+    da.hostPid = static_cast<uint32_t>(getpid());
+    da.aicpuSoBin = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(devSo_));
+    da.aicpuSoLen = soBytes.size();
+    if (DlAclApi::AclrtMalloc(&devArgs_, sizeof(da), ACL_MEM_MALLOC_HUGE_FIRST) != BM_OK ||
+        DlAclApi::AclrtMemcpy(devArgs_, sizeof(da), &da, sizeof(da), ACL_MEMCPY_HOST_TO_DEVICE) != BM_OK) {
+        BM_LOG_ERROR("upload DeviceArgs failed, devId: " << devId_);
+        return BM_ERROR;
     }
-    BM_LOG_INFO("automatic deploy begin, devId: " << devId_ << " dst: " << dst);
-    uint64_t soSize = 0;
-    ret = MigrateViaCustChannel(kernelDir, soSize);
-    if (ret != BM_OK) {
-        return ret;
+    /* 3) rtAicpuKernelLaunchExWithArgs(libruntime.so): 与 pypto 相同的 KFC 下发接口。
+     * 优先从已加载符号解析(进程通常已由 ascendcl 带入 libruntime, 不依赖 LD_LIBRARY_PATH
+     * 里有 CANN lib64——新机器上更稳); 都取不到再显式 dlopen */
+    if (rtLaunch_ == nullptr) {
+        rtLaunch_ = dlsym(RTLD_DEFAULT, "rtAicpuKernelLaunchExWithArgs");
     }
-    deviceSoOwned_ = true;
-    ret = CopyToSearchPath(deviceSoName_, soSize);
-    if (ret != BM_OK) {
-        return ret;
+    if (rtLaunch_ == nullptr) {
+        runtimeLib_ = dlopen("libruntime.so", RTLD_NOW | RTLD_GLOBAL);
+        if (runtimeLib_ == nullptr) {
+            BM_LOG_ERROR("dlopen libruntime.so failed: " << dlerror());
+            return BM_ERROR;
+        }
+        rtLaunch_ = dlsym(runtimeLib_, "rtAicpuKernelLaunchExWithArgs");
+        if (rtLaunch_ == nullptr) {
+            BM_LOG_ERROR("dlsym rtAicpuKernelLaunchExWithArgs failed: " << dlerror());
+            return BM_ERROR;
+        }
     }
-    ret = TryLoadKernel(launchJsonPath);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("kernel load failed after automatic deploy, ret: " << ret << " devId: " << devId_);
-    }
-    return ret;
-}
-
-Result SdmaOrchestrator::MigrateViaCustChannel(const std::string &dir, uint64_t &soSize)
-{
-    const std::string hostSo = dir + "/" + HYBM_SDMA_ORCH_CUST_SO;
-    struct stat st = {};
-    if (stat(hostSo.c_str(), &st) != 0) {
-        BM_LOG_ERROR("cust kernel so missing, path: " << hostSo);
-        return BM_FILE_NOT_ACCESS;
-    }
-    soSize = static_cast<uint64_t>(st.st_size); // 设备侧完整性校验用
-    const std::string custJson = dir + "/" + HYBM_SDMA_ORCH_CUST_JSON;
-    char resolved[PATH_MAX] = {0};
-    if (realpath(custJson.c_str(), resolved) == nullptr || access(resolved, R_OK) != 0) {
-        BM_LOG_ERROR("cust json not accessible, path: " << custJson);
-        return BM_FILE_NOT_ACCESS;
-    }
-    // CANN 会复用已迁移的文件；文件生命周期由 CANN 管理，重试时保留迁移源。
-    aclrtBinaryLoadOption loadOption{};
-    loadOption.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
-    loadOption.value.cpuKernelMode = 1; /* mode=1: H2D 迁移通道(CUSTAICPUKernel 专用), 本身不落盘 */
-    aclrtBinaryLoadOptions loadOptions{};
-    loadOptions.options = &loadOption;
-    loadOptions.numOpt = 1;
-    aclrtBinHandle bh = nullptr;
-    auto ret = DlAclApi::AclrtBinaryLoadFromFile(resolved, &loadOptions, &bh);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("cust migrate load failed, ret: " << ret << " json: " << resolved);
-        return ret;
-    }
-    aclrtFuncHandle fh = nullptr;
-    ret = DlAclApi::AclrtBinaryGetFunction(bh, HYBM_SDMA_ORCH_FUNC_NAME, &fh); // GetFunction 才触发设备写文件
-    if (ret != BM_OK) {
-        /* 返回值不可靠: 实测 CUST 模式下正确入口名也可能 107000 且文件照样落盘,
-         * 不作失败处理, 以复制+完整性校验为最终判据 */
-        BM_LOG_INFO("cust migrate getfunc ret: " << ret << " (tolerated, verify later)");
-    }
-    custBinHandle_ = bh; // 保活: 持句柄至进程退出(迁移进程退出才触发清理链, 本进程即用户进程)
-    BM_LOG_INFO("cust migrate done, devId: " << devId_ << " soSize: " << soSize);
-    return BM_OK;
-}
-
-/* 加载 KFC 通道入口: 写临时 json → mode=0 加载 → 取 op "K" 句柄 → 删临时文件
- * (json 须带 .json 扩展名——无扩展名实测加载 107000; mkstemp 模板须以 X 结尾
- * 与扩展名冲突, 故用 pid+计数排它创建; CWD 可能只读, 用 /tmp) */
-Result SdmaOrchestrator::LoadKfcChannel(aclrtFuncHandle &fh)
-{
-    if (kfcFuncHandle_ != nullptr) { // 已缓存(首次装载后复用)
-        fh = kfcFuncHandle_;
-        return BM_OK;
-    }
-    fh = nullptr;
-    char path[64] = {0};
-    int fd = -1;
-    for (uint32_t i = 0; i < 16 && fd < 0; i++) { // 计数上限 16(同名残留/并发冲突防御)
-        (void)snprintf(path, sizeof(path), "/tmp/mf_kfc_%d_%u.json", static_cast<int>(getpid()), i);
-        fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
-    }
-    if (fd < 0) {
-        BM_LOG_ERROR("kfc tmpfile failed, errno: " << errno);
-        return BM_FILE_NOT_ACCESS;
-    }
-    // 最小 KFC json(functionName=system, kernelSo 指向不存在文件触发 dlsym 回退)
-    static constexpr char KFC_JSON_CONTENT[] =
-        "{\"K\":{\"opInfo\":{\"opKernelLib\":\"KFCKernel\",\"kernelSo\":\"kfc_min.so\","
-        "\"functionName\":\"system\"}}}";
-    const ssize_t wantLen = static_cast<ssize_t>(sizeof(KFC_JSON_CONTENT) - 1);
-    if (write(fd, KFC_JSON_CONTENT, sizeof(KFC_JSON_CONTENT) - 1) != wantLen) {
-        BM_LOG_ERROR("kfc tmpfile write failed, errno: " << errno << " json: " << path);
-        (void)close(fd);
-        (void)unlink(path);
-        return BM_FILE_NOT_ACCESS;
-    }
-    (void)close(fd);
-    aclrtBinaryLoadOption loadOption{};
-    loadOption.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
-    loadOption.value.cpuKernelMode = 0;
-    aclrtBinaryLoadOptions loadOptions{};
-    loadOptions.options = &loadOption;
-    loadOptions.numOpt = 1;
-    aclrtBinHandle bh = nullptr;
-    auto ret = DlAclApi::AclrtBinaryLoadFromFile(path, &loadOptions, &bh);
-    (void)unlink(path); // json 已消费即删
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("kfc load failed, ret: " << ret << " json: " << path);
-        return ret;
-    }
-    ret = DlAclApi::AclrtBinaryGetFunction(bh, "K", &fh);
-    if (ret == BM_OK) {
-        kfcFuncHandle_ = fh; // 缓存句柄(部署链全程复用)
-    } else {
-        BM_LOG_ERROR("kfc getfunc failed, ret: " << ret);
-    }
-    return ret;
-}
-
-Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
-{
-    if (cmd.size() >= HYBM_SDMA_ORCH_CMD_BUF_SIZE) {
-        BM_LOG_ERROR("kfc cmd too long, len: " << cmd.size());
-        return BM_INVALID_PARAM;
-    }
-    aclrtFuncHandle fh = nullptr;
-    auto ret = LoadKfcChannel(fh);
-    if (ret != BM_OK) {
-        return ret;
-    }
-    char buf[HYBM_SDMA_ORCH_CMD_BUF_SIZE] = {0};
-    strncpy(buf, cmd.c_str(), sizeof(buf) - 1);
-    aclrtLaunchKernelAttr attr{}; // 超时属性: 防设备 shell 挂死卡初始化
-    attr.id = aclrtLaunchKernelAttrId::ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT;
-    attr.value.timeout = HYBM_SDMA_ORCH_KFC_TIMEOUT_S;
-    aclrtLaunchKernelCfg cfg{};
-    cfg.attrs = &attr;
-    cfg.numAttrs = 1;
-    // 命令串作为 host args 透传 → 设备 OS 内 system() 执行
-    ret = DlAclApi::AclrtLaunchKernelWithHostArgs(fh, 1, launchStream_, &cfg, buf, strlen(buf) + 1, nullptr, 0);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("kfc launch failed, ret: " << ret << " cmd: " << cmd);
-        return ret;
+    /* 4) 启动 CP1 内 loader: extend lib 在 CP1 进程内 memfd 加载本 so 并填函数表 */
+    ExtendArgs initArgs{};
+    initArgs.kArgs.cfgdata = reinterpret_cast<int64_t *>(devArgs_);
+    (void)snprintf(initArgs.kernelName, sizeof(initArgs.kernelName), "%s", HYBM_SDMA_ORCH_EXTEND_INIT_FUNC);
+    (void)snprintf(initArgs.soName, sizeof(initArgs.soName), "%s", HYBM_SDMA_ORCH_EXTEND_SO);
+    ExtendRtArgs rtInit{};
+    rtInit.args = &initArgs;
+    rtInit.argsSize = sizeof(initArgs);
+    rtInit.kernelNameAddrOffset = offsetof(ExtendArgs, kernelName);
+    rtInit.soNameAddrOffset = offsetof(ExtendArgs, soName);
+    auto launch = reinterpret_cast<RtAicpuLaunchFn>(rtLaunch_);
+    int ret = launch(HYBM_SDMA_ORCH_EXTEND_KERNEL_TYPE, "AST_DYN_AICPU", 1, &rtInit, nullptr, launchStream_, 0);
+    if (ret != 0) {
+        BM_LOG_ERROR("extend loader launch failed, ret: " << ret << " devId: " << devId_);
+        return BM_ERROR;
     }
     ret = DlAclApi::AclrtSynchronizeStream(launchStream_);
-    if (ret != BM_OK) { // sync 非 0 = 命令退出码非 0(或流错误)
-        if (probe && ret == HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR) {
-            BM_LOG_INFO("kfc probe miss (expected on first run), sync: " << ret << " cmd: " << cmd);
-        } else {
-            BM_LOG_ERROR("kfc cmd failed, sync: " << ret << " cmd: " << cmd);
-        }
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("extend loader sync failed, ret: " << ret << " devId: " << devId_);
+        return BM_ERROR;
     }
-    return ret;
-}
-
-Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize)
-{
-    // 当前进程的专属链接指向 CANN 实际迁移文件，避免混用其他进程的 SO。
-    const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*_" +
-                            std::to_string(getpid()) + "/" + HYBM_SDMA_ORCH_CUST_SO;
-    const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
-    const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
-    /* 完整性校验: 入口符号存在 + 精确尺寸一致(防截断/拼接; 设备侧工具极简——实测可用
-     * grep/awk/顶层管道, wc/stat/md5sum/cmp 均缺失, 故用 ls -l 第 5 列取尺寸) */
-    const std::string verifyCmd = "grep -q " + std::string(HYBM_SDMA_ORCH_FUNC_NAME) + " " + dst +
-                                  " && ls -l " + dst + " | awk '{print $5}' | grep -qx " +
-                                  std::to_string(soSize);
-    for (uint32_t i = 0; i < HYBM_SDMA_ORCH_DEPLOY_RETRY; i++) { // 重试为迁移异步完成留裕量
-        if (KfcExec(copyCmd) != BM_OK) {
-            sleep(1);
-            continue;
-        }
-        if (KfcExec(verifyCmd) == BM_OK) {
-            BM_LOG_INFO("kernel deployed to CP1 search path, devId: " << devId_ << " dst: " << dst);
-            return BM_OK;
-        }
-        sleep(1); // 校验失败等一拍再重试(重 cat 幂等)
+    /* 5) epoch 参数设备缓冲(每轮 H2D, kernel 只读) */
+    if (DlAclApi::AclrtMalloc(&devParam_, sizeof(HybmSdmaOrchParam), ACL_MEM_MALLOC_HUGE_FIRST) != BM_OK) {
+        BM_LOG_ERROR("alloc epoch param buffer failed, devId: " << devId_);
+        return BM_ERROR;
     }
-    BM_LOG_ERROR("deploy copy/verify failed after retries, devId: " << devId_ << " dst: " << dst
-                 << " expectedSize: " << soSize);
-    return BM_ERROR;
+    extendLoaderReady_ = true;
+    BM_LOG_INFO("kernel deployed to CP1 via extend loader, devId: " << devId_ << " soSize: " << soBytes.size());
+    return BM_OK;
 }
 
 Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
@@ -715,43 +588,43 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
 
 Result SdmaOrchestrator::LaunchEpoch(void *stream)
 {
-    if (funcHandle_ == nullptr || stream == nullptr) { // 直接检查将使用的句柄与流
-        BM_LOG_ERROR("sdma orch launch precond failed, funcHandle null: " << (funcHandle_ == nullptr)
-                                                                        << " stream null: " << (stream == nullptr));
+    if (!extendLoaderReady_ || rtLaunch_ == nullptr || devParam_ == nullptr || stream == nullptr) {
+        BM_LOG_ERROR("sdma orch launch precond failed, loaderReady: " << extendLoaderReady_
+                   << " rtLaunch null: " << (rtLaunch_ == nullptr)
+                   << " devParam null: " << (devParam_ == nullptr)
+                   << " stream null: " << (stream == nullptr));
         return BM_NOT_INITIALIZED;
     }
-    aclrtArgsHandle argsHandle = nullptr;
-    auto ret = DlAclApi::AclrtKernelArgsInit(funcHandle_, &argsHandle);
+    /* 每轮参数 H2D(loader 通道的 DeviceKernelArgs.cfgdata 指向它, kernel 侧只读) */
+    auto ret = DlAclApi::AclrtMemcpy(devParam_, sizeof(HybmSdmaOrchParam), &epochParam_,
+                                     sizeof(HybmSdmaOrchParam), ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != BM_OK) {
-        BM_LOG_ERROR("KernelArgsInit failed, ret: " << ret << " sqId: " << sqId_);
+        BM_LOG_ERROR("upload epoch param failed, ret: " << ret << " sqId: " << sqId_);
         return ret;
     }
-    HybmSdmaOrchParam p = epochParam_; /* Append 接口非 const, 本地拷贝 */
-    aclrtParamHandle paramHandle = nullptr;
-    ret = DlAclApi::AclrtKernelArgsAppend(argsHandle, &p, sizeof(p), &paramHandle);
-    if (ret == BM_OK) {
-        ret = DlAclApi::AclrtKernelArgsFinalize(argsHandle); // 封包(此后不可再 Append)
+    /* KFC 方式下发 extend lib 的 DynTileFwkKernelServer: CP1 内按函数表分发到本 so 的
+     * 同名导出(经偏移 40 的 cfgdata 取参数指针后转调 HybmSdmaOrchEpoch) */
+    ExtendArgs execArgs{};
+    execArgs.kArgs.cfgdata = reinterpret_cast<int64_t *>(devParam_);
+    (void)snprintf(execArgs.kernelName, sizeof(execArgs.kernelName), "%s", HYBM_SDMA_ORCH_EXTEND_EXEC_FUNC);
+    (void)snprintf(execArgs.soName, sizeof(execArgs.soName), "%s", HYBM_SDMA_ORCH_EXTEND_SO);
+    ExtendRtArgs rtExec{};
+    rtExec.args = &execArgs;
+    rtExec.argsSize = sizeof(execArgs);
+    rtExec.kernelNameAddrOffset = offsetof(ExtendArgs, kernelName);
+    rtExec.soNameAddrOffset = offsetof(ExtendArgs, soName);
+    /* 永不超时: timeout=0xFFFF + flag 含 RT_KERNEL_USE_SPECIAL_TIMEOUT(0x100) ——与
+     * pypto 相同的约定; 每轮时长由 kernel 读报时计数自限, 不经 runtime 超时 */
+    rtExec.timeout = HYBM_SDMA_ORCH_EXTEND_TIMEOUT_NEVER;
+    auto launch = reinterpret_cast<RtAicpuLaunchFn>(rtLaunch_);
+    const int retLaunch = launch(HYBM_SDMA_ORCH_EXTEND_KERNEL_TYPE, "AST_DYN_AICPU",
+                                 HYBM_SDMA_ORCH_BLOCK_DIM, &rtExec, nullptr, stream,
+                                 HYBM_SDMA_ORCH_EXTEND_LAUNCH_FLAG);
+    if (retLaunch != 0) {
+        BM_LOG_ERROR("epoch launch via extend loader failed, ret: " << retLaunch << " sqId: " << sqId_);
+        return BM_ERROR;
     }
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("KernelArgs Append/Finalize failed, ret: " << ret << " sqId: " << sqId_);
-        return ret;
-    }
-    aclrtLaunchKernelAttr attr{};
-    attr.id = aclrtLaunchKernelAttrId::ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT;
-    /* 0=永不超时: 每轮时长由 kernel 读报时计数自限, 不经 attr; 任何有限 attr 值到达即把
-     * 任务标记为 507017 超时(host 侧语义)导致监督线程的 sync 提前返回; attr 不可省略
-     * (numAttrs=0 被 runtime 拒绝 107000, 缺省值为默认超时 ≈6.4s 同样误杀) */
-    attr.value.timeout = HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S;
-    aclrtLaunchKernelCfg cfg{};
-    cfg.attrs = &attr;
-    cfg.numAttrs = 1;
-    // 单轮下发(异步提交, kernel 跑满预算/停止标志/错误退出; 由监督线程 sync)
-    ret = DlAclApi::AclrtLaunchKernelWithConfig(funcHandle_, HYBM_SDMA_ORCH_BLOCK_DIM, stream, &cfg,
-                                                argsHandle, nullptr);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("LaunchKernelWithConfig(epoch) failed, ret: " << ret << " sqId: " << sqId_);
-    }
-    return ret;
+    return BM_OK;
 }
 
 void SdmaOrchestrator::SupervisorLoop()
@@ -885,17 +758,6 @@ void SdmaOrchestrator::Cleanup()
     StopEpoch(); // 先停监督线程与当前轮(占用 epochStream_, 必须先于流销毁)
     DestroyEpochResources(); // 兜底(StopEpoch 早退路径下防泄漏, 幂等)
     configured_ = false; // 复位(允许后续重配置)
-    if (deviceSoOwned_ && launchStream_ != nullptr) {
-        const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName_;
-        const auto ret = KfcExec("rm -f " + dst);
-        if (ret == BM_OK) {
-            BM_LOG_INFO("automatic deploy file removed, devId: " << devId_ << " dst: " << dst);
-        } else {
-            BM_LOG_ERROR("remove deployed kernel failed, devId: " << devId_ << " dst: " << dst << " ret: " << ret);
-        }
-    }
-    deviceSoOwned_ = false;
-    deviceSoName_.clear();
     if (cpStream_ != nullptr) {
         (void)DlAclApi::AclrtDestroyStream(cpStream_); // SQ 随流注销
         cpStream_ = nullptr;
@@ -908,10 +770,26 @@ void SdmaOrchestrator::Cleanup()
         (void)DlAclApi::AclrtFree(reinterpret_cast<void *>(workspace_.load()));
         workspace_ = 0;
     }
-    /* binHandle_ 无对应卸载接口(DlAclApi 未封装), 随进程生命周期释放 */
-    binHandle_ = nullptr;
-    funcHandle_ = nullptr;
-    custBinHandle_ = nullptr;
+    /* extend loader 缓冲释放: loader 侧 so 已在 CP1 进程内 memfd 加载, 此处仅释放 host
+     * 侧 H2D 副本(设备侧加载物随 CP1 进程生命周期, 无卸载接口——与 pypto 相同取舍) */
+    if (devParam_ != nullptr) {
+        (void)DlAclApi::AclrtFree(devParam_);
+        devParam_ = nullptr;
+    }
+    if (devArgs_ != nullptr) {
+        (void)DlAclApi::AclrtFree(devArgs_);
+        devArgs_ = nullptr;
+    }
+    if (devSo_ != nullptr) {
+        (void)DlAclApi::AclrtFree(devSo_);
+        devSo_ = nullptr;
+    }
+    extendLoaderReady_ = false;
+    rtLaunch_ = nullptr;  // libruntime.so 的符号缓存随句柄失效重取
+    if (runtimeLib_ != nullptr) {
+        (void)dlclose(runtimeLib_);
+        runtimeLib_ = nullptr;
+    }
     refCount_ = 0;
     sqId_ = 0;
     streamId_ = 0;
