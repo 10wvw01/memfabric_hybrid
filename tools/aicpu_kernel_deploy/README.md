@@ -20,20 +20,80 @@
 
 ## 手动诊断
 
-`make ASCEND_HOME_PATH=<CANN目录>` 构建 deployer 和 mini_kfc。
-mini_kfc 可查询指定设备上的文件；deployer 用于单独排查 CUST 迁移通道。
+deployer 用于单独测试 CUST 迁移通道，mini_kfc 用于执行设备侧查询和复制。
 两个工具仅用于开发诊断，保持在产品安装包外。
 
-CUST 迁移 JSON 的基名与 SO 配对。`BinaryLoadFromFile(cpuMode=1)` 配合
-`BinaryGetFunction` 触发迁移。当前进程通过以下设备侧链接读取 SO：
+### 构建与通道检查
+
+在仓库根目录执行，`ASCEND_HOME_PATH` 指向本机 CANN 安装目录：
+
+```bash
+make -C tools/aicpu_kernel_deploy ASCEND_HOME_PATH="$ASCEND_HOME_PATH"
+TOOLS_DIR="$(pwd)/tools/aicpu_kernel_deploy"
+DEVICE_ID=0
+"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "echo mf_sdma_channel_ok"
+```
+
+通道检查成功时输出 `launch=0 sync=0`。失败时先排查设备状态、CANN 环境和 KFC 通道，
+再继续迁移测试。
+
+### 迁移、检查与复制
+
+`ARTIFACT_DIR` 指向包含三份产物的实际目录；deployer 直接接收 JSON 文件路径。
+CUST 迁移 JSON 的基名与 SO 配对，`BinaryLoadFromFile(cpuMode=1)` 配合
+`BinaryGetFunction` 触发迁移。
+
+```bash
+ARTIFACT_DIR=/path/to/aicpu_kernel
+"$TOOLS_DIR/deployer" "$DEVICE_ID" "$ARTIFACT_DIR/libmf_sdma_orch.json" 600 >deployer.log 2>&1 &
+DEPLOY_PID=$!
+cat deployer.log
+```
+
+等待日志出现 `getfunc ret=0` 后继续。日志尚未输出时可再次查看；进程提前退出时先检查错误。
+保活时间内，当前进程通过以下设备侧链接读取 SO：
 
 `/home/CustAiCpuUser/cust_aicpu_<dieId>_<vfId>_<hostPid>/libmf_sdma_orch.so`
 
-其中 dieId 为卡内 die 编号，hostPid 为执行迁移的主机进程号；该链接指向 CANN
-管理的迁移文件。查询和复制须使用当前 die、当前进程的链接，并保持迁移进程及
-句柄存活。使用 deployer 时，hostPid 可从后台进程的 $! 获取。
-mini_kfc 可用 grep -q HybmSdmaOrchEpoch 检查该链接指向的文件内容。
-随后通过 KFC 在设备 OS 中复制到 `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/`。
+其中 dieId 为卡内 die 编号，hostPid 为执行迁移的主机进程号，vfId 由运行环境决定。
+该链接指向 CANN 管理的迁移文件。查询和复制时保持 deployer 进程存活，
+下面的 `DIE_ID` 按目标设备的实际映射填写：
+
+```bash
+DIE_ID=0
+SOURCE_GLOB="/home/CustAiCpuUser/cust_aicpu_${DIE_ID}_*_${DEPLOY_PID}/libmf_sdma_orch.so"
+"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "ls -l $SOURCE_GLOB"
+"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "grep -q HybmSdmaOrchEpoch $SOURCE_GLOB"
+```
+
+复制时使用本次手动测试的独立名称，复制命令先检查源文件恰好匹配一个、目标文件尚不存在：
+
+```bash
+DEVICE_SO="/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_manual_${DEPLOY_PID}.so"
+"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" \
+    "set -- $SOURCE_GLOB; test \$# -eq 1 && test -f \"\$1\" && test ! -e '$DEVICE_SO' && cp \"\$1\" '$DEVICE_SO'"
+HOST_SO_SIZE=$(wc -c < "$ARTIFACT_DIR/libmf_sdma_orch.so")
+"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" \
+    "grep -q HybmSdmaOrchEpoch '$DEVICE_SO' && ls -l '$DEVICE_SO' | awk '{print \$5}' | grep -qx '$HOST_SO_SIZE'"
+```
+
+确认各命令均返回 `launch=0 sync=0`，最后一条设备检查同时验证入口字符串及主机与设备 SO 字节数。
+设备侧尺寸检查沿用产品库的 `ls -l` 与 `awk`，适用于设备提供的精简命令环境。
+mini_kfc 输出命令及返回状态，设备命令的标准输出需从设备日志查看。
+上述步骤验证迁移和复制；kernel 的实际加载、启动及数据搬运通过 08 示例测试。
+示例由产品库按本次运行的独立名称自动部署，手动复制文件供部署链排查使用。
+
+### 清理手动测试文件
+
+完成检查后，仅删除本次手动复制的目标文件，再结束迁移进程：
+
+```bash
+"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "rm -f '$DEVICE_SO'"
+kill "$DEPLOY_PID"
+wait "$DEPLOY_PID"
+```
+
+若 deployer 已到保活时间并退出，可直接回收后台进程状态。CUST 源文件由 CANN 管理。
 
 ## 回退与审计
 
