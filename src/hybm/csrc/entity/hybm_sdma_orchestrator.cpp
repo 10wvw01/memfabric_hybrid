@@ -600,9 +600,10 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd)
 
 Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize)
 {
-    // 当前进程的专属链接指向 CANN 实际迁移文件，避免混用其他进程的 SO。
-    const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*_" +
-                            std::to_string(getpid()) + "/" + HYBM_SDMA_ORCH_CUST_SO;
+    /* CANN 9.1.0 实测: CUST 目录名为 cust_aicpu_<die>_<digit>_<seq> 三字段、无宿主 pid,
+     * 带 pid 分量的 glob 永不匹配; 用 die 前缀宽匹配, 正确性由 VerifyDeployment 后置校验兜底 */
+    const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*/" +
+                            HYBM_SDMA_ORCH_CUST_SO;
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
     const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
     const auto ret = KfcExec(copyCmd);

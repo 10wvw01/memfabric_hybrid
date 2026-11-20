@@ -179,8 +179,8 @@ TEST_F(SdmaDeployTest, CopiesDirectlyThroughCurrentProcessLink)
     prep.dieId_ = 1;
     ASSERT_EQ(prep.CopyToSearchPath("libmf_sdma_orch_copy.so", 12), BM_OK);
     ASSERT_EQ(commands.size(), 1U);
-    EXPECT_NE(commands[0].find("cust_aicpu_1_*_" + std::to_string(getpid()) + "/libmf_sdma_orch.so"),
-              std::string::npos);
+    EXPECT_NE(commands[0].find("cust_aicpu_1_*/libmf_sdma_orch.so"), std::string::npos);
+    EXPECT_EQ(commands[0].find(std::to_string(getpid())), std::string::npos); /* 目录名不含宿主 pid */
     EXPECT_EQ(commands[0].find("/home/CustAiCpuUser/lib/libmf_sdma_orch.so.*"), std::string::npos);
     unlink((dir + "/libmf_sdma_orch.so").c_str());
     unlink((dir + "/libmf_sdma_orch.json").c_str());
