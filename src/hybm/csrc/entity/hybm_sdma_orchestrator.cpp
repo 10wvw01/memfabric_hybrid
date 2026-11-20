@@ -388,7 +388,16 @@ Result SdmaOrchestrator::PrepareRuntimeJson(const std::string &jsonPath, std::st
     }
     const auto field = content.find("\"kernelSo\"");
     const auto namePos = content.find('"', content.find(':', field)) + 1;
-    std::string path = "/tmp/libmf_sdma_orch_" + std::to_string(getpid()) + "_XXXXXX.json";
+    hostPid_ = 0;
+    const auto pidRet = DlAclApi::RtDeviceGetBareTgid(&hostPid_);
+    if (pidRet != BM_OK || hostPid_ == 0) {
+        BM_LOG_ERROR("resolve deployment host pid failed, ret: " << pidRet << " hostPid: " << hostPid_
+                                                                 << " deviceId: " << devId_);
+        hostPid_ = 0;
+        return BM_DL_FUNCTION_FAILED;
+    }
+    BM_LOG_INFO("deployment pid mapping, localPid: " << getpid() << " hostPid: " << hostPid_);
+    std::string path = "/tmp/libmf_sdma_orch_" + std::to_string(hostPid_) + "_XXXXXX.json";
     int fd = mkstemps(&path[0], 5);
     if (fd < 0) {
         BM_LOG_ERROR("create runtime launch json failed, errno: " << errno);
@@ -600,9 +609,13 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd)
 
 Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize)
 {
-    // 当前进程的专属链接指向 CANN 实际迁移文件，避免混用其他进程的 SO。
+    if (hostPid_ == 0) {
+        BM_LOG_ERROR("deployment host pid unavailable, deviceId: " << devId_);
+        return BM_INVALID_PARAM;
+    }
+    // CANN 的迁移目录使用宿主机 PID，容器内 PID 可能属于另一个命名空间。
     const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*_" +
-                            std::to_string(getpid()) + "/" + HYBM_SDMA_ORCH_CUST_SO;
+                            std::to_string(hostPid_) + "/" + HYBM_SDMA_ORCH_CUST_SO;
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
     const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
     const auto ret = KfcExec(copyCmd);
@@ -981,6 +994,7 @@ void SdmaOrchestrator::Cleanup()
     deviceSoOwned_ = false;
     deployNonce_ = 0;
     deviceSoName_.clear();
+    hostPid_ = 0;
     if (cpStream_ != nullptr) {
         (void)DlAclApi::AclrtDestroyStream(cpStream_); // SQ 随流注销
         cpStream_ = nullptr;

@@ -60,12 +60,22 @@ protected:
         std::ofstream(input) << R"({"HybmSdmaOrchEpoch":{"opInfo":{"kernelSo":"libmf_sdma_orch.so"}}})";
         commands.clear();
         checkCalls = 0;
+        barePid = static_cast<uint32_t>(getpid()) + 1000000U;
+        bareResult = BM_OK;
+        MOCKER(DlAclApi::RtDeviceGetBareTgid).stubs().will(invoke(QueryBarePid));
     }
     void TearDown() override
     {
         GlobalMockObject::verify();
         unlink(input.c_str());
         unlink(runtime.c_str());
+    }
+    static int32_t QueryBarePid(uint32_t *pid)
+    {
+        if (bareResult == BM_OK) {
+            *pid = barePid;
+        }
+        return bareResult;
     }
     static int32_t Capture(SdmaOrchestrator *, const std::string &cmd)
     {
@@ -90,14 +100,20 @@ protected:
     std::string runtime;
     static std::vector<std::string> commands;
     static unsigned checkCalls;
+    static uint32_t barePid;
+    static int32_t bareResult;
 };
 std::vector<std::string> SdmaDeployTest::commands;
 unsigned SdmaDeployTest::checkCalls = 0;
+uint32_t SdmaDeployTest::barePid = 0;
+int32_t SdmaDeployTest::bareResult = BM_OK;
 
 TEST_F(SdmaDeployTest, GeneratesSeparateNamesWithoutManualVersion)
 {
     ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
     const auto firstName = prep.deviceSoName_;
+    EXPECT_EQ(firstName.find("libmf_sdma_orch_" + std::to_string(barePid) + "_"), 0U);
+    EXPECT_EQ(prep.hostPid_, barePid);
     std::ifstream file(runtime);
     const std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     EXPECT_NE(json.find(firstName), std::string::npos);
@@ -116,6 +132,30 @@ TEST_F(SdmaDeployTest, RejectsMissingAndUnsafeKernelName)
         EXPECT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_INVALID_PARAM);
         EXPECT_TRUE(runtime.empty());
     }
+}
+
+TEST_F(SdmaDeployTest, HostPidQueryFailureStopsBeforeCreatingRuntimeJson)
+{
+    bareResult = BM_ERROR;
+    EXPECT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_DL_FUNCTION_FAILED);
+    EXPECT_TRUE(runtime.empty());
+    EXPECT_TRUE(prep.deviceSoName_.empty());
+    EXPECT_EQ(prep.hostPid_, 0U);
+}
+
+TEST_F(SdmaDeployTest, ZeroHostPidStopsBeforeCreatingRuntimeJson)
+{
+    barePid = 0;
+    EXPECT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_DL_FUNCTION_FAILED);
+    EXPECT_TRUE(runtime.empty());
+    EXPECT_TRUE(prep.deviceSoName_.empty());
+    EXPECT_EQ(prep.hostPid_, 0U);
+}
+
+TEST_F(SdmaDeployTest, CopyRejectsUnavailableHostPid)
+{
+    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &)).expects(never());
+    EXPECT_EQ(prep.CopyToSearchPath("libmf_sdma_orch_test.so", 123), BM_INVALID_PARAM);
 }
 
 TEST_F(SdmaDeployTest, ChannelFailureDoesNotAssumePredeployment)
@@ -149,6 +189,7 @@ TEST_F(SdmaDeployTest, CleanupRemovesOnlyOwnedDeviceFile)
     prep.deviceSoName_ = "libmf_sdma_orch_test.so";
     prep.deviceSoOwned_ = true;
     prep.deployNonce_ = 2468;
+    prep.hostPid_ = barePid;
     MOCKER_CPP(&SdmaOrchestrator::CheckDeploymentResult, int32_t(*)(SdmaOrchestrator *, const void *, size_t, bool))
         .expects(exactly(2))
         .will(invoke(CheckAbsent));
@@ -157,6 +198,7 @@ TEST_F(SdmaDeployTest, CleanupRemovesOnlyOwnedDeviceFile)
     ASSERT_EQ(commands.size(), 1U);
     EXPECT_EQ(commands[0], "rm -f /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_test.so");
     EXPECT_TRUE(prep.deviceSoName_.empty());
+    EXPECT_EQ(prep.hostPid_, 0U);
     EXPECT_FALSE(prep.deviceSoOwned_);
     prep.Cleanup();
     EXPECT_EQ(commands.size(), 1U);
@@ -177,10 +219,10 @@ TEST_F(SdmaDeployTest, CopiesDirectlyThroughCurrentProcessLink)
     EXPECT_EQ(size, 12U);
     EXPECT_TRUE(commands.empty());
     prep.dieId_ = 1;
+    prep.hostPid_ = barePid;
     ASSERT_EQ(prep.CopyToSearchPath("libmf_sdma_orch_copy.so", 12), BM_OK);
     ASSERT_EQ(commands.size(), 1U);
-    EXPECT_NE(commands[0].find("cust_aicpu_1_*_" + std::to_string(getpid()) + "/libmf_sdma_orch.so"),
-              std::string::npos);
+    EXPECT_NE(commands[0].find("cust_aicpu_1_*_" + std::to_string(barePid) + "/libmf_sdma_orch.so"), std::string::npos);
     EXPECT_EQ(commands[0].find("/home/CustAiCpuUser/lib/libmf_sdma_orch.so.*"), std::string::npos);
     unlink((dir + "/libmf_sdma_orch.so").c_str());
     unlink((dir + "/libmf_sdma_orch.json").c_str());
@@ -256,6 +298,7 @@ TEST_F(SdmaDeployTest, CopyCommandAlwaysCopiesAndFitsOriginalBuffer)
 {
     MockChannel();
     prep.dieId_ = 1;
+    prep.hostPid_ = barePid;
     const std::string name = "libmf_sdma_orch_2147483647_XXXXXX.so";
     ASSERT_EQ(prep.CopyToSearchPath(name, 19056), BM_OK);
     ASSERT_EQ(prep.CopyToSearchPath(name, 19056), BM_OK);
