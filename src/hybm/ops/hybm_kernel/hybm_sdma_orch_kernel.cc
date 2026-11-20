@@ -42,7 +42,7 @@
  * cntvct_el0/cntfrq_el0 均不可用(v7 时代 type 2 正常, type 5 两 die 全失效,
  * 2026-10-12 实测), 每轮时长改由主机报时驱动: 监督线程每 100ms 往工作区
  * HEARTBEAT_OFF 写递增计数, kernel 主循环读之, 到 budgetS×10 跳即自退;
- * 循环上限保留兜底(报时停喂时防永跑)。host 发现退出后重新拉起新一轮(环+游标零丢失)。
+ * 主机报时停止更新时，由设备单调时钟限制每轮时长。Host发现退出后重新拉起新一轮。
  * 为什么不一次下发跑到停止: host 侧全设备同步(AclrtSynchronizeDevice, torch_npu 分配
  * 显存时内部触发)等所有流的全部任务且无豁免——永不退出的 kernel 必阻塞它(serve 实测死因 507017)。
  *
@@ -60,6 +60,8 @@
 #include <cerrno>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/syscall.h>
 
 #include "hybm_sdma_contract.h"
 
@@ -503,6 +505,53 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
               seq + 1); // reqHead[q] 推进
     return 0;
 }
+struct EpochBudget {
+    bool resident;
+    uint64_t heartbeatTicks;
+    uint64_t deadlineNs;
+};
+
+int32_t readMonotonicNs(uint64_t &now)
+{
+    timespec ts{};
+    // 使用系统调用，避免libc的VDSO路径读取当前AICPU环境不可用的计数寄存器。
+    if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) != 0)
+        return 1370;
+    now = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
+    return 0;
+}
+
+int32_t initEpochBudget(const ock::mf::HybmSdmaOrchParam *p, EpochBudget &budget)
+{
+    using namespace ock::mf;
+    budget = {};
+    budget.resident = p->epochBudgetS == HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT;
+    if (budget.resident)
+        return 0;
+    const uint32_t seconds = p->epochBudgetS ? p->epochBudgetS : HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S;
+    uint64_t now = 0;
+    if (readMonotonicNs(now) != 0)
+        return 1370;
+    budget.heartbeatTicks = static_cast<uint64_t>(seconds) * HYBM_SDMA_ORCH_HEARTBEAT_HZ;
+    budget.deadlineNs = now + static_cast<uint64_t>(seconds) * 1000000000ULL;
+    return 0;
+}
+
+// 返回0继续运行，1表示预算到期，负值表示时钟读取失败。
+int32_t checkEpochBudget(const volatile ock::mf::HybmSdmaOrchResult *result, const EpochBudget &budget, uint64_t loop)
+{
+    if (budget.resident)
+        return 0;
+    if (LoadHeartbeat(result) >= budget.heartbeatTicks)
+        return 1;
+    if (loop % ock::mf::HYBM_SDMA_ORCH_EPOCH_CLOCK_INTERVAL != 0)
+        return 0;
+    uint64_t now = 0;
+    if (readMonotonicNs(now) != 0)
+        return -1370;
+    return now >= budget.deadlineNs ? 1 : 0;
+}
+
 } // namespace
 
 namespace {
@@ -591,20 +640,19 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
         heads[q] = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
     }
-    /* 报时预算(v11): 永不退出的专用值不判报时(诊断模式); 0 用默认 15s(兼容旧 host);
-     * 到 budgetS×10 跳自退——host 每 100ms 写一次递增计数, 精度 100ms, 不受设备负载影响。
-     * 循环上限保留兜底(报时停喂时防永跑, 名额按 15s 预算折算)。 */
-    const bool resident = (p->epochBudgetS == HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
-    const uint32_t budgetS =
-        (p->epochBudgetS == 0) ? HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S : p->epochBudgetS;
-    const uint64_t budgetTicks = static_cast<uint64_t>(budgetS) * HYBM_SDMA_ORCH_HEARTBEAT_HZ;
-    const uint64_t maxLoops = resident ? UINT64_MAX
-        : (static_cast<uint64_t>(HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS) * budgetS +
-           HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S - 1) / HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S;
+    EpochBudget budget{};
+    if (initEpochBudget(p, budget) != 0) {
+        result->mainRet = 1370;
+        result->exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
+        finishResult(result);
+        return 1;
+    }
     constexpr uint32_t kDoorbellBatch = 8; // 攒批上限(环内积压时 N 封一铃降 HAL 开销; 单封场景批=1)
-    for (uint64_t loops = 0; loops < maxLoops; loops++) {
-        if (!resident && LoadHeartbeat(result) >= budgetTicks) {
-            result->exitReason = HYBM_SDMA_ORCH_EXIT_DEADLINE; // 时限到点(正常换轮)
+    for (uint64_t loops = 0;; ++loops) {
+        const int32_t state = checkEpochBudget(result, budget, loops);
+        if (state != 0) {
+            result->mainRet = state < 0 ? 1370 : 0;
+            result->exitReason = state < 0 ? HYBM_SDMA_ORCH_EXIT_ERROR : HYBM_SDMA_ORCH_EXIT_DEADLINE;
             break;
         }
         if (loadCell(p->stopAddr) != 0) { // 停止标志(host 析构)
@@ -646,7 +694,6 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
             break;
         }
         if (batch == 0) { // 全环空(扫描一轮零消费)
-            usleep(HYBM_SDMA_ORCH_EPOCH_IDLE_US);
             continue;
         }
         ret = flushBatchDoorbell(p, &ctx); // 批末统一敲铃
