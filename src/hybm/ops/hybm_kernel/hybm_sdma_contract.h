@@ -66,7 +66,7 @@ static_assert(sizeof(HybmSdmaOrchParam) == 80, "Param 尺寸漂移"); /* 布局�
 // 部署与清理确认使用独立参数，结果必须携带本次nonce。
 struct HybmSdmaDeployCheck {
     uint64_t expectedAddr;
-    uint64_t expectedSize; // 0表示确认SO及owner标记均已删除
+    uint64_t expectedSize; // 0表示确认SO已删除
     uint64_t nonce;
     uint64_t resultAddr;
     char path[256];

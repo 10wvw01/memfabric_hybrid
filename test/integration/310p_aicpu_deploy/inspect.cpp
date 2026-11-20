@@ -36,7 +36,7 @@ static bool Inspect(const std::string &command, const std::vector<char> &bytes,
         if (mf_tools::LoadFunction(name, "HybmSdmaVerifyDeploy", function))
             return false;
     }
-    // 保留已加载入口，待目标文件删除后使用同一入口检查 SO 与 owner 均已不存在。
+    // 保留已加载入口，待目标文件删除后使用同一入口检查 SO 已不存在。
     ock::mf::HybmSdmaDeployResult result{};
     const std::vector<char> empty;
     const auto &expected = mode == "present" ? bytes : empty;

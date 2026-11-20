@@ -62,8 +62,9 @@ for mode in missing-so invalid-json channel verify; do
         done
     done
     if [[ "$mode" == verify ]]; then
-        grep -q 'deployment verification failed' "$LOG_DIR/$mode-failure.log"
+        grep -q 'deployment load or verification failed' "$LOG_DIR/$mode-failure.log"
         grep -q 'automatic deploy file removed' "$LOG_DIR/$mode-failure.log"
+        [[ $(grep -c 'INJECT KFC launch failure' "$LOG_DIR/$mode-failure.log") == 1 ]]
     fi
     export EXPECT_FAILURE=0
     launch_task > "$LOG_DIR/$mode-restart.log" 2>&1

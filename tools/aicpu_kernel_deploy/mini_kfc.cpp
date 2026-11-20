@@ -142,7 +142,7 @@ int main(int argc, char **argv)
     char *end = nullptr;
     long dev = strtol(argv[1], &end, 10);
     Options o;
-    if (!*argv[1] || *end || dev < 0 || dev > INT_MAX || !Parse(argc, argv, o) || strlen(argv[2]) >= 1024) {
+    if (!*argv[1] || *end || dev < 0 || dev > INT_MAX || !Parse(argc, argv, o) || strlen(argv[2]) >= 512) {
         puts("[E] invalid arguments");
         return 1;
     }

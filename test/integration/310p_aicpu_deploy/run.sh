@@ -40,14 +40,14 @@ for run in 1 2; do
     for rank in 0 1; do
         log="$LOG_DIR/run$run-rank$rank.log"
         for attempt in $(seq 1 60); do
-            if grep -q 'deployed SO byte-for-byte verified' "$log"; then break; fi
+            if grep -q 'kernel deployed to CP1 search path' "$log"; then break; fi
             sleep 1
         done
-        path="$(sed -n 's/.*deployed SO byte-for-byte verified.* path: //p' "$log" | head -1)"
+        path="$(sed -n 's/.*kernel deployed to CP1 search path.* dst: //p' "$log" | head -1)"
         if [[ ! "$path" =~ ^/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_[0-9]+_[a-zA-Z0-9]+\.so$ ]]; then
             echo "ERROR invalid deployed path: $path"; exit 1
         fi
-        nonce="$(sed -n 's/.*deployed SO byte-for-byte verified, nonce: \([0-9]*\).*/\1/p' "$log" | head -1)"
+        nonce="$(sed -n 's/.*kernel deployed to CP1 search path.* nonce: \([0-9]*\).*/\1/p' "$log" | head -1)"
         probe "present $path $nonce"
     done
     ret=0
@@ -55,13 +55,13 @@ for run in 1 2; do
     if ((ret)); then cat "$LOG_DIR"/run"$run"-rank*.log; exit 1; fi
     for rank in 0 1; do
         log="$LOG_DIR/run$run-rank$rank.log"
-        for text in 'automatic deploy begin' 'deployed SO byte-for-byte verified' \
+        for text in 'automatic deploy begin' 'kernel deployed to CP1 search path' \
                     'deployment files absence verified' 'automatic deploy file removed' \
                     'full_payload_checked=1' 'cleanup_complete=1'; do
             if ! grep -q "$text" "$log"; then echo "ERROR missing $text in $log"; exit 1; fi
         done
-        path="$(sed -n 's/.*deployed SO byte-for-byte verified.* path: //p' "$log" | head -1)"
-        nonce="$(sed -n 's/.*deployed SO byte-for-byte verified, nonce: \([0-9]*\).*/\1/p' "$log" | head -1)"
+        path="$(sed -n 's/.*kernel deployed to CP1 search path.* dst: //p' "$log" | head -1)"
+        nonce="$(sed -n 's/.*kernel deployed to CP1 search path.* nonce: \([0-9]*\).*/\1/p' "$log" | head -1)"
         probe "absent $path $nonce"
         grep -E 'automatic deploy|byte-for-byte verified|absence verified|PASS' "$log"
     done

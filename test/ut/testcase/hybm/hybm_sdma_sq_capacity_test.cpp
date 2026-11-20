@@ -309,10 +309,6 @@ protected:
         }
         ASSERT_EQ(write(fd, bytes.data(), bytes.size()), static_cast<ssize_t>(bytes.size()));
         close(fd);
-        FILE *owner = fopen((path + ".owner").c_str(), "w");
-        ASSERT_NE(owner, nullptr);
-        fprintf(owner, "2468");
-        fclose(owner);
         param.expectedAddr = reinterpret_cast<uint64_t>(bytes.data());
         param.expectedSize = bytes.size();
         param.resultAddr = reinterpret_cast<uint64_t>(&result);
@@ -322,11 +318,10 @@ protected:
     void TearDown() override
     {
         unlink(path.c_str());
-        unlink((path + ".owner").c_str());
     }
 };
 
-TEST_F(SdmaDeployVerifyTest, ExactBytesAndCurrentOwnerAreRequired)
+TEST_F(SdmaDeployVerifyTest, ExactBytesAndRequestNonceAreReturned)
 {
     ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
     EXPECT_EQ(result.status, 0U);
@@ -344,12 +339,13 @@ TEST_F(SdmaDeployVerifyTest, SameSizeCorruptedFileIsRejected)
     EXPECT_EQ(result.status, 5U);
 }
 
-TEST_F(SdmaDeployVerifyTest, OldOwnerIsRejectedEvenWithMatchingBytes)
+TEST_F(SdmaDeployVerifyTest, DifferentRequestNonceIsReturnedWithMatchingBytes)
 {
     param.nonce = 1357;
     ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
-    EXPECT_EQ(result.status, 2U);
-    EXPECT_EQ(result.compared, 0U);
+    EXPECT_EQ(result.status, 0U);
+    EXPECT_EQ(result.nonce, 1357U);
+    EXPECT_EQ(result.compared, bytes.size());
 }
 
 TEST_F(SdmaDeployVerifyTest, ExtraBytesAreRejected)
@@ -362,11 +358,11 @@ TEST_F(SdmaDeployVerifyTest, ExtraBytesAreRejected)
     EXPECT_EQ(result.status, 4U);
 }
 
-TEST_F(SdmaDeployVerifyTest, MissingClaimIsRejected)
+TEST_F(SdmaDeployVerifyTest, TruncatedFileIsRejected)
 {
-    unlink((path + ".owner").c_str());
+    ASSERT_EQ(truncate(path.c_str(), bytes.size() - 1), 0);
     ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
-    EXPECT_EQ(result.status, 1U);
+    EXPECT_EQ(result.status, 4U);
 }
 
 TEST_F(SdmaDeployVerifyTest, MissingTargetIsRejected)
@@ -376,15 +372,12 @@ TEST_F(SdmaDeployVerifyTest, MissingTargetIsRejected)
     EXPECT_EQ(result.status, 3U);
 }
 
-TEST_F(SdmaDeployVerifyTest, CleanupRequiresBothFilesToBeAbsent)
+TEST_F(SdmaDeployVerifyTest, CleanupRequiresTargetToBeAbsent)
 {
     param.expectedSize = 0;
     ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
     EXPECT_EQ(result.status, 6U);
     unlink(path.c_str());
-    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
-    EXPECT_EQ(result.status, 6U);
-    unlink((path + ".owner").c_str());
     ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
     EXPECT_EQ(result.status, 0U);
     EXPECT_EQ(result.nonce, param.nonce);

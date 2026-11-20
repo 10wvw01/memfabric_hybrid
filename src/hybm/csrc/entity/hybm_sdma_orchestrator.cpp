@@ -56,8 +56,7 @@ constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧
 /* CP1 搜索路径(实测: 每卡独立设备 OS 文件系统, 须在本卡设备上部署) */
 constexpr char HYBM_SDMA_ORCH_DEV_SEARCH_DIR[] = "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device";
 constexpr char HYBM_SDMA_ORCH_DEPLOY_LOCK[] = "/tmp/.mf_sdma_orch_deploy.lock"; /* 部署互斥锁(host 侧) */
-constexpr uint32_t HYBM_SDMA_ORCH_DEPLOY_RETRY = 5;   /* 复制/校验重试次数(迁移异步完成裕量) */
-constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 1024; /* KFC 命令缓冲尺寸(命令为受控常量拼接) */
+constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 512; /* KFC 命令缓冲尺寸(命令为受控常量拼接) */
 /* AICPU任务异常也可能来自system丢失退出状态，须另行确认命令实际结果。 */
 constexpr int32_t HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED = 507018;
 constexpr uint32_t HYBM_SDMA_ORCH_SUPERVISOR_MAX_ERR = 16; /* 监督线程连续失败上限(放弃后数据面停在背压) */
@@ -443,21 +442,21 @@ Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &kernelDir, 
         return ret;
     }
     deviceSoOwned_ = true;
-    for (uint32_t i = 0; i < HYBM_SDMA_ORCH_DEPLOY_RETRY; ++i) {
-        ret = CopyToSearchPath(deviceSoName_, soSize);
-        if (ret != BM_OK && ret != HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
-            return ret;
-        }
-        ret = TryLoadKernel(launchJsonPath);
-        if (ret == BM_OK) {
-            ret = VerifyDeployment(kernelDir + "/" + HYBM_SDMA_ORCH_CUST_SO);
-        }
-        if (ret == BM_OK) {
-            return BM_OK;
-        }
-        sleep(1);
+    ret = CopyToSearchPath(deviceSoName_, soSize);
+    if (ret != BM_OK && ret != HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
+        return ret;
     }
-    BM_LOG_ERROR("deployment verification failed, devId: " << devId_ << " dst: " << dst << " ret: " << ret);
+    const bool resultUnconfirmed = ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED;
+    ret = TryLoadKernel(launchJsonPath);
+    if (ret == BM_OK && resultUnconfirmed) {
+        ret = VerifyDeployment(kernelDir + "/" + HYBM_SDMA_ORCH_CUST_SO);
+    }
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("deployment load or verification failed, devId: " << devId_ << " dst: " << dst << " ret: " << ret);
+    } else {
+        BM_LOG_INFO("kernel deployed to CP1 search path, devId: " << devId_ << " nonce: " << deployNonce_
+                                                                  << " dst: " << dst);
+    }
     return ret;
 }
 
@@ -476,7 +475,7 @@ Result SdmaOrchestrator::MigrateViaCustChannel(const std::string &dir, uint64_t 
         BM_LOG_ERROR("cust json not accessible, path: " << custJson);
         return BM_FILE_NOT_ACCESS;
     }
-    // CANN 会复用已迁移的文件；文件生命周期由 CANN 管理，重试时保留迁移源。
+    // CANN 会复用已迁移的文件；文件生命周期由 CANN 管理，后续初始化保留迁移源。
     aclrtBinaryLoadOption loadOption{};
     loadOption.type = aclrtBinaryLoadOptionType::ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
     loadOption.value.cpuKernelMode = 1; /* mode=1: H2D 迁移通道(CUSTAICPUKernel 专用), 本身不落盘 */
@@ -605,12 +604,7 @@ Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint6
     const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*_" +
                             std::to_string(getpid()) + "/" + HYBM_SDMA_ORCH_CUST_SO;
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
-    const std::string claim = dst + ".owner";
-    const std::string nonce = std::to_string(deployNonce_);
-    // 首次创建采用noclobber；重试仅校验本次文件，避免改写已加载的SO。
-    const std::string copyCmd = "if test -e " + dst + "; then test \"$(cat " + claim + ")\" = " + nonce +
-                                " && test -r " + dst + "; else (set -C; { printf %s " + nonce + " > " + claim +
-                                " && cat " + src + "; } > " + dst + "); fi && chmod 644 " + dst;
+    const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
     const auto ret = KfcExec(copyCmd);
     BM_LOG_INFO("deployment copy submitted, devId: " << devId_ << " nonce: " << deployNonce_ << " bytes: " << soSize
                                                      << " shellRet: " << ret);
@@ -973,8 +967,7 @@ void SdmaOrchestrator::Cleanup()
         // 首次校验提交失败时，SO 可能尚未真正加载；删除前先执行入口，保留可用的校验代码。
         auto ret = CheckDeploymentResult(nullptr, 0, true);
         if (ret == BM_OK) {
-            ret = KfcExec("if test \"$(cat " + dst + ".owner)\" = " + std::to_string(deployNonce_) + "; then rm -f " +
-                          dst + " " + dst + ".owner; fi");
+            ret = KfcExec("rm -f " + dst);
         }
         if (ret == BM_OK || ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
             ret = CheckDeploymentResult(nullptr, 0);

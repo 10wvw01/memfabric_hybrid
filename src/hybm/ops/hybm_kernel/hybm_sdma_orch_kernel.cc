@@ -508,19 +508,6 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
 namespace {
 uint32_t verifyDeployBytes(const ock::mf::HybmSdmaDeployCheck &p, uint64_t &compared)
 {
-    char claimPath[288];
-    snprintf(claimPath, sizeof(claimPath), "%s.owner", p.path);
-    FILE *claim = fopen(claimPath, "rb");
-    if (claim == nullptr) {
-        return 1;
-    }
-    unsigned long long owner = 0;
-    char extra = 0;
-    const int fields = fscanf(claim, "%llu%c", &owner, &extra);
-    fclose(claim);
-    if (fields != 1 || owner != p.nonce) {
-        return 2;
-    }
     FILE *file = fopen(p.path, "rb");
     if (file == nullptr) {
         return 3;
@@ -560,14 +547,10 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaVerifyDeploy(
     result->compared = 0;
     result->reserved = 0;
     if (p.expectedSize == 0) {
-        char claimPath[288];
-        snprintf(claimPath, sizeof(claimPath), "%s.owner", p.path);
         struct stat st {};
         errno = 0;
         bool targetGone = lstat(p.path, &st) == -1 && errno == ENOENT;
-        errno = 0;
-        bool claimGone = lstat(claimPath, &st) == -1 && errno == ENOENT;
-        result->status = targetGone && claimGone ? 0 : 6;
+        result->status = targetGone ? 0 : 6;
     } else {
         result->status = verifyDeployBytes(p, result->compared);
     }
