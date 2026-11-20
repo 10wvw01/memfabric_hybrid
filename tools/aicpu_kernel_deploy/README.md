@@ -6,7 +6,8 @@ SHMEM 初始化和独立诊断使用同一套 AICPU 产物：`libmf_sdma_orch.so
 
 ## SHMEM 自动部署
 
-`smem_shm_init` 为本次初始化生成独立的设备 SO 文件名，经 CUST 通道迁移文件后，
+`smem_shm_init` 查询宿主机 PID，使用宿主机 PID 与随机后缀生成本次独立的设备 SO 文件名。
+CANN 迁移源目录按宿主机 PID 命名，查询成功后经 CUST 通道迁移文件，
 执行一次 `cat 源文件 > 目标文件 && chmod 644 目标文件`，随后加载本次独立名称的 SO。
 复制命令成功提交后，若同步返回 507018，则加载校验入口，并逐字节比较 Host 原始 SO
 与设备 SO，校验通过后继续初始化。复制、加载或校验失败直接返回错误。
@@ -44,12 +45,14 @@ cat deployer.log
 
 等待日志出现 `getfunc ret=0 verification=pending` 后继续。
 `deployer` 报告迁移接口阶段状态，复制和校验期间保持该进程存活。
-`DIE_ID` 按目标设备映射填写，设备侧源链接包含当前 die、vf 和迁移进程编号。
+`DIE_ID` 按目标设备映射填写。deployer 输出本地 PID 与宿主机 PID，设备侧源链接使用宿主机 PID。
+`DEPLOY_PID` 用于控制当前容器中的后台进程，`HOST_PID` 用于定位设备侧迁移目录。
 
 ```bash
-SOURCE_GLOB="/home/CustAiCpuUser/cust_aicpu_${DIE_ID}_*_${DEPLOY_PID}/libmf_sdma_orch.so"
+HOST_PID=$(sed -n 's/^pid mapping localPid=[0-9]* hostPid=\([0-9]*\)$/\1/p' deployer.log | head -1)
+SOURCE_GLOB="/home/CustAiCpuUser/cust_aicpu_${DIE_ID}_*_${HOST_PID}/libmf_sdma_orch.so"
 NONCE=$(date +%s%N)
-DEVICE_SO="/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_manual_${DEPLOY_PID}_${NONCE}.so"
+DEVICE_SO="/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_manual_${HOST_PID}_${NONCE}.so"
 "$TOOLS_DIR/mini_kfc" "$DEVICE_ID" \
     "cat $SOURCE_GLOB > '$DEVICE_SO' && chmod 644 '$DEVICE_SO'" \
     --expect-so "$ARTIFACT_DIR/libmf_sdma_orch.so" "$DEVICE_SO" "$NONCE"

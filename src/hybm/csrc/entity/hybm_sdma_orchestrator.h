@@ -123,6 +123,7 @@ private:
     void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
     void Cleanup();                        /* 逆序清理(锁内, 归零时) */
 
+    uint32_t hostPid_{0};           // CANN 迁移目录及本次设备 SO 名称使用的宿主机 PID
     std::string deviceSoName_;      // 本次加载专用的设备文件名
     uint64_t deployNonce_{0};
     bool deviceSoOwned_{false};     // 仅清理本次部署创建的文件
