@@ -59,6 +59,7 @@ protected:
         input = path;
         std::ofstream(input) << R"({"HybmSdmaOrchEpoch":{"opInfo":{"kernelSo":"libmf_sdma_orch.so"}}})";
         commands.clear();
+        checkCalls = 0;
     }
     void TearDown() override
     {
@@ -66,14 +67,21 @@ protected:
         unlink(input.c_str());
         unlink(runtime.c_str());
     }
-    static int32_t Capture(SdmaOrchestrator *, const std::string &cmd, bool)
+    static int32_t Capture(SdmaOrchestrator *, const std::string &cmd)
     {
         commands.push_back(cmd);
         return BM_OK;
     }
+    static int32_t CheckAbsent(SdmaOrchestrator *, const void *bytes, size_t size, bool allowPresent)
+    {
+        EXPECT_EQ(bytes, nullptr);
+        EXPECT_EQ(size, 0U);
+        EXPECT_EQ(allowPresent, checkCalls++ == 0);
+        return BM_OK;
+    }
     void MockChannel()
     {
-        MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &, bool))
+        MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &))
             .stubs()
             .will(invoke(Capture));
     }
@@ -81,8 +89,10 @@ protected:
     std::string input;
     std::string runtime;
     static std::vector<std::string> commands;
+    static unsigned checkCalls;
 };
 std::vector<std::string> SdmaDeployTest::commands;
+unsigned SdmaDeployTest::checkCalls = 0;
 
 TEST_F(SdmaDeployTest, GeneratesSeparateNamesWithoutManualVersion)
 {
@@ -100,7 +110,8 @@ TEST_F(SdmaDeployTest, GeneratesSeparateNamesWithoutManualVersion)
 
 TEST_F(SdmaDeployTest, RejectsMissingAndUnsafeKernelName)
 {
-    for (const auto &value : {"{}", "{\"kernelSo\":\"../bad.so\"}", "{\"kernelSo\":\"a;bad.so\"}"}) {
+    for (const auto &value : {"{}", "{\"kernelSo\":\"../bad.so\"}", "{\"kernelSo\":\"a;bad.so\"}",
+                              "{\"kernelSo\":\"libmf_sdma_orch.so\""}) {
         std::ofstream(input) << value;
         EXPECT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_INVALID_PARAM);
         EXPECT_TRUE(runtime.empty());
@@ -110,11 +121,16 @@ TEST_F(SdmaDeployTest, RejectsMissingAndUnsafeKernelName)
 TEST_F(SdmaDeployTest, ChannelFailureDoesNotAssumePredeployment)
 {
     ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
-    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &, bool))
+    MOCKER_CPP(&SdmaOrchestrator::MigrateViaCustChannel,
+               int32_t(*)(SdmaOrchestrator *, const std::string &, uint64_t &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &))
         .stubs()
         .will(returnValue(BM_ERROR));
-    EXPECT_EQ(prep.DeployOrchestratorKernel("/missing", runtime), BM_ERROR);
-    EXPECT_FALSE(prep.deviceSoOwned_);
+    MOCKER_CPP(&SdmaOrchestrator::TryLoadKernel, int32_t(*)(SdmaOrchestrator *, const std::string &)).expects(never());
+    EXPECT_EQ(prep.DeployOrchestratorKernel("/unused", runtime), BM_ERROR);
+    EXPECT_FALSE(prep.ready_.load());
 }
 
 TEST_F(SdmaDeployTest, MissingHostArtifactFailsBeforeCopy)
@@ -122,8 +138,7 @@ TEST_F(SdmaDeployTest, MissingHostArtifactFailsBeforeCopy)
     ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
     MockChannel();
     EXPECT_EQ(prep.DeployOrchestratorKernel("/missing", runtime), BM_FILE_NOT_ACCESS);
-    ASSERT_EQ(commands.size(), 1U);
-    EXPECT_EQ(commands[0].find("test ! -e "), 0U);
+    EXPECT_TRUE(commands.empty());
     EXPECT_FALSE(prep.deviceSoOwned_);
 }
 
@@ -133,10 +148,16 @@ TEST_F(SdmaDeployTest, CleanupRemovesOnlyOwnedDeviceFile)
     prep.launchStream_ = reinterpret_cast<void *>(1);
     prep.deviceSoName_ = "libmf_sdma_orch_test.so";
     prep.deviceSoOwned_ = true;
+    prep.deployNonce_ = 2468;
+    MOCKER_CPP(&SdmaOrchestrator::CheckDeploymentResult, int32_t(*)(SdmaOrchestrator *, const void *, size_t, bool))
+        .expects(exactly(2))
+        .will(invoke(CheckAbsent));
     MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
     prep.Cleanup();
     ASSERT_EQ(commands.size(), 1U);
-    EXPECT_EQ(commands[0], "rm -f /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_test.so");
+    EXPECT_NE(commands[0].find(".owner)\" = 2468"), std::string::npos);
+    EXPECT_NE(commands[0].find("rm -f /usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_test.so "),
+              std::string::npos);
     EXPECT_TRUE(prep.deviceSoName_.empty());
     EXPECT_FALSE(prep.deviceSoOwned_);
     prep.Cleanup();
@@ -161,7 +182,7 @@ TEST_F(SdmaDeployTest, RetryPreservesCustFilesAndCopiesThroughCurrentProcessLink
     EXPECT_TRUE(commands.empty());
     prep.dieId_ = 1;
     ASSERT_EQ(prep.CopyToSearchPath("libmf_sdma_orch_retry.so", 12), BM_OK);
-    ASSERT_EQ(commands.size(), 2U);
+    ASSERT_EQ(commands.size(), 1U);
     EXPECT_NE(commands[0].find("cust_aicpu_1_*_" + std::to_string(getpid()) + "/libmf_sdma_orch.so"),
               std::string::npos);
     EXPECT_EQ(commands[0].find("/home/CustAiCpuUser/lib/libmf_sdma_orch.so.*"), std::string::npos);
@@ -176,6 +197,98 @@ TEST_F(SdmaDeployTest, CleanupPreservesUnownedFiles)
     prep.deviceSoName_ = "libmf_sdma_orch_preexisting.so";
     prep.Cleanup();
     EXPECT_TRUE(commands.empty());
+}
+
+TEST_F(SdmaDeployTest, UnconfirmedShellResultRequiresSuccessfulDeploymentVerification)
+{
+    ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
+    MOCKER_CPP(&SdmaOrchestrator::MigrateViaCustChannel,
+               int32_t(*)(SdmaOrchestrator *, const std::string &, uint64_t &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &))
+        .stubs()
+        .will(returnValue(507018));
+    MOCKER_CPP(&SdmaOrchestrator::TryLoadKernel, int32_t(*)(SdmaOrchestrator *, const std::string &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::VerifyDeployment, int32_t(*)(SdmaOrchestrator *, const std::string &))
+        .expects(once())
+        .will(returnValue(BM_OK));
+    EXPECT_EQ(prep.DeployOrchestratorKernel("/unused", runtime), BM_OK);
+}
+
+TEST_F(SdmaDeployTest, UnconfirmedShellResultStillRejectsFailedVerification)
+{
+    ASSERT_EQ(prep.PrepareRuntimeJson(input, runtime), BM_OK);
+    MOCKER_CPP(&SdmaOrchestrator::MigrateViaCustChannel,
+               int32_t(*)(SdmaOrchestrator *, const std::string &, uint64_t &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &))
+        .stubs()
+        .will(returnValue(507018));
+    MOCKER_CPP(&SdmaOrchestrator::TryLoadKernel, int32_t(*)(SdmaOrchestrator *, const std::string &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::VerifyDeployment, int32_t(*)(SdmaOrchestrator *, const std::string &))
+        .expects(exactly(5))
+        .will(returnValue(BM_ERROR));
+    MOCKER(::sleep).stubs().will(returnValue(0));
+    EXPECT_EQ(prep.DeployOrchestratorKernel("/unused", runtime), BM_ERROR);
+}
+
+TEST_F(SdmaDeployTest, CleanupConfirmsAbsenceAfterUnconfirmedShellResult)
+{
+    prep.launchStream_ = reinterpret_cast<void *>(1);
+    prep.deviceSoName_ = "libmf_sdma_orch_owned.so";
+    prep.deployNonce_ = 2468;
+    prep.deviceSoOwned_ = true;
+    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &))
+        .stubs()
+        .will(returnValue(507018));
+    MOCKER_CPP(&SdmaOrchestrator::CheckDeploymentResult, int32_t(*)(SdmaOrchestrator *, const void *, size_t, bool))
+        .expects(exactly(2))
+        .will(invoke(CheckAbsent));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    prep.Cleanup();
+    EXPECT_FALSE(prep.deviceSoOwned_);
+}
+
+TEST_F(SdmaDeployTest, CleanupKeepsFileWhenVerifierCannotExecute)
+{
+    prep.launchStream_ = reinterpret_cast<void *>(1);
+    prep.deviceSoName_ = "libmf_sdma_orch_owned.so";
+    prep.deviceSoOwned_ = true;
+    MOCKER_CPP(&SdmaOrchestrator::CheckDeploymentResult, int32_t(*)(SdmaOrchestrator *, const void *, size_t, bool))
+        .expects(once())
+        .will(returnValue(BM_ERROR));
+    MOCKER_CPP(&SdmaOrchestrator::KfcExec, int32_t(*)(SdmaOrchestrator *, const std::string &)).expects(never());
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    prep.Cleanup();
+}
+
+TEST_F(SdmaDeployTest, LaunchFailureIsNotAnUnconfirmedCommand)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LoadKfcChannel, int32_t(*)(SdmaOrchestrator *, aclrtFuncHandle &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(507018));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    EXPECT_EQ(prep.KfcExec("true"), BM_ERROR);
+}
+
+TEST_F(SdmaDeployTest, SyncExceptionKeepsUnconfirmedCommandStatus)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LoadKfcChannel, int32_t(*)(SdmaOrchestrator *, aclrtFuncHandle &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtSynchronizeStream).stubs().will(returnValue(507018));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    EXPECT_EQ(prep.KfcExec("true"), 507018);
 }
 
 class SdmaArtifactDirectoryTest : public ::testing::Test {

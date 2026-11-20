@@ -5,8 +5,8 @@
 三份文件需要位于同一目录，可通过 `MF_SDMA_ORCH_DIR` 指定产物目录或其上级目录进行递归查找。
 
 `smem_shm_init` 初始化配置存储和设备，并持有部署资源引用。
-初始化首次 Acquire 生成独立的临时加载名称，先确认设备目标文件缺失，再通过 CUST
-迁移 SO，复制到 CP1 搜索目录并检查入口名和文件大小，最后加载。
+初始化首次 Acquire 生成独立的临时加载名称，通过 CUST 迁移 SO，以禁止覆盖的方式复制到
+CP1 搜索目录，再加载校验入口，核对本次归属标记及 Host 与设备 SO 的每个字节。
 `smem_shm_create` 选择 SDMA 后绑定内存池并启动搬运 kernel。
 临时加载名称由运行时生成，使用者无需维护版本号。已有部署文件不会被当作本次
 部署成功的依据；CP1 加载缓存按本次独立名称区分。
@@ -15,8 +15,8 @@
 其他进程及历史部署文件保持原样。异常退出可能留下临时设备文件，后续进程使用
 新的名称完成部署。设备通道失败或部署失败会返回错误。
 
-部署日志包含 `automatic deploy begin`、`kernel deployed to CP1 search path`、
-`automatic deploy file removed` 和具体设备路径，可用于核对缺失、复制、清理过程。
+部署日志包含 `automatic deploy begin`、`deployed SO byte-for-byte verified`、
+`deployment files absence verified`、`automatic deploy file removed` 和具体设备路径，可用于核对复制与清理结果。
 
 ## 手动诊断
 
@@ -34,8 +34,8 @@ DEVICE_ID=0
 "$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "echo mf_sdma_channel_ok"
 ```
 
-通道检查成功时输出 `launch=0 sync=0`。失败时先排查设备状态、CANN 环境和 KFC 通道，
-再继续迁移测试。
+通道检查成功时输出 `launch=0 sync=0`。`sync=507018` 时结果待确认，文件操作需继续检查实际状态。
+其他错误先排查设备状态、CANN 环境和 KFC 通道，再继续迁移测试。
 
 ### 迁移、检查与复制
 
@@ -62,36 +62,30 @@ cat deployer.log
 ```bash
 DIE_ID=0
 SOURCE_GLOB="/home/CustAiCpuUser/cust_aicpu_${DIE_ID}_*_${DEPLOY_PID}/libmf_sdma_orch.so"
-"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "ls -l $SOURCE_GLOB"
-"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "grep -q HybmSdmaOrchEpoch $SOURCE_GLOB"
-```
-
-复制时使用本次手动测试的独立名称，复制命令先检查源文件恰好匹配一个、目标文件尚不存在：
-
-```bash
 DEVICE_SO="/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_manual_${DEPLOY_PID}.so"
+NONCE=$(date +%s%N)
 "$TOOLS_DIR/mini_kfc" "$DEVICE_ID" \
-    "set -- $SOURCE_GLOB; test \$# -eq 1 && test -f \"\$1\" && test ! -e '$DEVICE_SO' && cp \"\$1\" '$DEVICE_SO'"
-HOST_SO_SIZE=$(wc -c < "$ARTIFACT_DIR/libmf_sdma_orch.so")
-"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" \
-    "grep -q HybmSdmaOrchEpoch '$DEVICE_SO' && ls -l '$DEVICE_SO' | awk '{print \$5}' | grep -qx '$HOST_SO_SIZE'"
+    "set -- $SOURCE_GLOB; test \$# -eq 1 && test -f \"\$1\" && (set -C; { printf %s '$NONCE' > '$DEVICE_SO.owner' && cat \"\$1\"; } > '$DEVICE_SO') && chmod 644 '$DEVICE_SO'" \
+    --expect-so "$ARTIFACT_DIR/libmf_sdma_orch.so" "$DEVICE_SO" "$NONCE"
 ```
 
-确认各命令均返回 `launch=0 sync=0`，最后一条设备检查同时验证入口字符串及主机与设备 SO 字节数。
-设备侧尺寸检查沿用产品库的 `ls -l` 与 `awk`，适用于设备提供的精简命令环境。
-mini_kfc 输出命令及返回状态，设备命令的标准输出需从设备日志查看。
-上述步骤验证迁移和复制；kernel 的实际加载、启动及数据搬运通过 08 示例测试。
-示例由产品库按本次运行的独立名称自动部署，手动复制文件供部署链排查使用。
+复制模式核对归属标记及全部文件内容，成功时输出 `verification=BYTE_FOR_BYTE_CONFIRMED`。
+命令返回 507018 时仍继续校验实际结果；文件或标记不匹配时返回失败。
+kernel 的启动及数据搬运通过 08 示例测试。示例由产品库按本次独立名称自动部署。
 
 ### 清理手动测试文件
 
-完成检查后，仅删除本次手动复制的目标文件，再结束迁移进程：
+完成检查后，按本次归属标记删除目标文件，并确认 SO 与标记均已不存在：
 
 ```bash
-"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" "rm -f '$DEVICE_SO'"
+"$TOOLS_DIR/mini_kfc" "$DEVICE_ID" \
+    "test \"\$(cat '$DEVICE_SO.owner')\" = '$NONCE' && rm -f '$DEVICE_SO' '$DEVICE_SO.owner'" \
+    --expect-absent "$DEVICE_SO" "$NONCE"
 kill "$DEPLOY_PID"
 wait "$DEPLOY_PID"
 ```
+
+成功时输出 `verification=ABSENCE_CONFIRMED`，随后结束迁移进程。
 
 若 deployer 已到保活时间并退出，可直接回收后台进程状态。CUST 源文件由 CANN 管理。
 
@@ -103,3 +97,40 @@ wait "$DEPLOY_PID"
 
 CUST 迁移源通过当前 die、当前进程的专属链接读取，迁移前保留 CANN 已建立引用的文件。
 memfabric 创建的 CP1 目标文件在失败或正常释放时清理；CANN 文件的回收时机需按运行环境确认。
+
+## shell返回码与部署确认
+
+设备调度进程忽略SIGCHLD时，shell命令可能已经执行，但system等待子进程时返回ECHILD，
+随后由CANN报告507018。库把这类返回统一记录为结果未确认，并保留原始返回码。
+任务提交失败、超时和通道断开仍按错误处理。
+
+每次部署使用独立文件名和nonce标记。首次复制采用noclobber，已有目标只在标记匹配时进入校验，
+不会原地改写可能已加载的SO。加载后调用专用AICPU校验入口，核对标记，并与Host上传的原文件
+逐字节比较。只有返回本次nonce、成功状态和完整比较长度后，才启动SHMEM编排器。
+
+清理前先执行校验入口，保证校验代码已加载，再删除带本次nonce标记的文件，
+随后通过同一AICPU结果通道确认SO及标记均已不存在。
+校验入口直接使用文件接口并写回结果，不依赖shell的退出码。正式部署代码保持原有信号设置。
+
+回退此改动需配套回退并重建Host库与AICPU产物。诊断时保留原始shell返回码、目标路径、nonce、
+比较字节数和清理确认记录；校验失败时拒绝启动编排器。
+
+## 手动shell命令的结果确认
+
+`mini_kfc <dev> "<cmd>"` 保留原始launch/sync返回码。任务提交成功后，sync为507018时输出
+`shell_status=UNCONFIRMED`，退出码为2；其他执行错误返回1。sync为0时返回0。
+
+文件操作可指定实际结果检查，所用AICPU校验SO需来自本次配套构建并包含HybmSdmaVerifyDeploy入口：
+
+```bash
+mini_kfc <dev> "<复制并写入owner标记的命令>" --expect-so <Host原始SO> <设备文件名或路径> <nonce>
+mini_kfc <dev> "<按nonce匹配后删除SO及owner标记的命令>" --expect-absent <设备文件名或路径> <nonce>
+```
+
+这些模式在shell返回0或507018后均检查实际状态，只有内容、标记或删除状态确认成功才返回0。
+校验失败返回1。默认从目标SO中加载校验入口；清理模式在删除前先加载，使文件删除后仍可使用入口。
+使用独立的已部署校验SO时，附加 `--verifier <设备侧SO基名>`。
+
+复制命令应使用独立目标名和noclobber，并把nonce写入目标的 `.owner` 文件；校验模式逐字节比较
+Host原始SO和设备文件。`--expect-absent`确认目标与 `.owner` 文件均不存在。
+nonce需为本次操作生成的非零整数。`deployer`仅报告迁移接口阶段结果，实际文件验证状态输出为pending。

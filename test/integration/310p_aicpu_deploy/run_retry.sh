@@ -62,7 +62,7 @@ for mode in missing-so invalid-json channel verify; do
         done
     done
     if [[ "$mode" == verify ]]; then
-        grep -q 'deploy copy/verify failed after retries' "$LOG_DIR/$mode-failure.log"
+        grep -q 'deployment verification failed' "$LOG_DIR/$mode-failure.log"
         grep -q 'automatic deploy file removed' "$LOG_DIR/$mode-failure.log"
     fi
     export EXPECT_FAILURE=0

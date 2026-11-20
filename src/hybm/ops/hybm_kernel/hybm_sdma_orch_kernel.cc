@@ -56,6 +56,9 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cerrno>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "hybm_sdma_contract.h"
@@ -501,6 +504,78 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     return 0;
 }
 } // namespace
+
+namespace {
+uint32_t verifyDeployBytes(const ock::mf::HybmSdmaDeployCheck &p, uint64_t &compared)
+{
+    char claimPath[288];
+    snprintf(claimPath, sizeof(claimPath), "%s.owner", p.path);
+    FILE *claim = fopen(claimPath, "rb");
+    if (claim == nullptr) {
+        return 1;
+    }
+    unsigned long long owner = 0;
+    char extra = 0;
+    const int fields = fscanf(claim, "%llu%c", &owner, &extra);
+    fclose(claim);
+    if (fields != 1 || owner != p.nonce) {
+        return 2;
+    }
+    FILE *file = fopen(p.path, "rb");
+    if (file == nullptr) {
+        return 3;
+    }
+    uint32_t status = 0;
+    alignas(64) unsigned char chunk[4096];
+    while (compared < p.expectedSize) {
+        const size_t want = p.expectedSize - compared < sizeof(chunk) ? p.expectedSize - compared : sizeof(chunk);
+        if (fread(chunk, 1, want, file) != want) {
+            status = 4;
+            break;
+        }
+        const uintptr_t expected = p.expectedAddr + compared;
+        for (uintptr_t line = expected & ~uintptr_t(63); line < expected + want; line += 64) {
+            cacheInvalidateLine(line);
+        }
+        memBarrier();
+        if (memcmp(chunk, reinterpret_cast<const void *>(expected), want) != 0) {
+            status = 5;
+            break;
+        }
+        compared += want;
+    }
+    if (status == 0 && (fgetc(file) != EOF || ferror(file))) {
+        status = 4;
+    }
+    fclose(file);
+    return status;
+}
+} // namespace
+
+extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaVerifyDeploy(void *args)
+{
+    const auto &p = *static_cast<ock::mf::HybmSdmaDeployCheck *>(args);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaDeployResult *>(p.resultAddr);
+    result->nonce = p.nonce;
+    result->compared = 0;
+    result->reserved = 0;
+    if (p.expectedSize == 0) {
+        char claimPath[288];
+        snprintf(claimPath, sizeof(claimPath), "%s.owner", p.path);
+        struct stat st {};
+        errno = 0;
+        bool targetGone = lstat(p.path, &st) == -1 && errno == ENOENT;
+        errno = 0;
+        bool claimGone = lstat(claimPath, &st) == -1 && errno == ENOENT;
+        result->status = targetGone && claimGone ? 0 : 6;
+    } else {
+        result->status = verifyDeployBytes(p, result->compared);
+    }
+    cacheFlushLine(p.resultAddr & ~uintptr_t(63));
+    cacheFlushLine((p.resultAddr + sizeof(*result) - 1) & ~uintptr_t(63));
+    memBarrier();
+    return 0;
+}
 
 // kernel 入口: 按序消费请求环邮件(诊断模式跑到停止/错误; 正常模式到点自退)。
 // 返回 0 正常退出(停止); 1 错误退出(诊断见 result)。

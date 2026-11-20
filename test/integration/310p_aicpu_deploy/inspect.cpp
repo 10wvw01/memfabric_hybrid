@@ -2,9 +2,11 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <map>
+#include <sstream>
 #include <string>
-#include "acl/acl.h"
-#include "acl/acl_rt.h"
+#include "shell_result_check.h"
 
 static void Check(const char *api, aclError ret)
 {
@@ -14,53 +16,54 @@ static void Check(const char *api, aclError ret)
     }
 }
 
-static aclrtFuncHandle Load(const char *jsonPath)
+static bool Inspect(const std::string &command, const std::vector<char> &bytes,
+                    std::map<std::string, aclrtFuncHandle> &loaded)
 {
-    std::ofstream json(jsonPath);
-    json << R"({"K":{"opInfo":{"opKernelLib":"KFCKernel","kernelSo":"kfc_min.so","functionName":"system"}}})";
-    json.close();
-    aclrtBinaryLoadOption option{};
-    option.type = ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
-    option.value.cpuKernelMode = 0;
-    aclrtBinaryLoadOptions options{};
-    options.options = &option;
-    options.numOpt = 1;
-    aclrtBinHandle binary = nullptr;
-    Check("load inspector", aclrtBinaryLoadFromFile(jsonPath, &options, &binary));
-    aclrtFuncHandle function = nullptr;
-    Check("get inspector", aclrtBinaryGetFunction(binary, "K", &function));
-    return function;
+    std::istringstream input(command);
+    std::string mode, path;
+    uint64_t nonce = 0;
+    if (!(input >> mode >> path >> nonce) || !nonce || (mode != "present" && mode != "absent")) {
+        std::cerr << "ERROR invalid inspection request: " << command << std::endl;
+        return false;
+    }
+    auto &function = loaded[path];
+    if (!function) {
+        const auto name = path.substr(path.find_last_of('/') + 1);
+        if (mode == "absent" || !mf_tools::SafeSoName(name)) {
+            std::cerr << "ERROR verifier unavailable: " << path << std::endl;
+            return false;
+        }
+        if (mf_tools::LoadFunction(name, "HybmSdmaVerifyDeploy", function))
+            return false;
+    }
+    // 保留已加载入口，待目标文件删除后使用同一入口检查 SO 与 owner 均已不存在。
+    ock::mf::HybmSdmaDeployResult result{};
+    const std::vector<char> empty;
+    const auto &expected = mode == "present" ? bytes : empty;
+    return mf_tools::ReadCheck(function, path, nonce, expected, result, stderr) && result.status == 0 &&
+           result.compared == expected.size();
 }
 
 int main(int argc, char **argv)
 {
     if (argc != 3) {
-        std::cerr << "ERROR usage: inspect device json_path" << std::endl;
+        std::cerr << "ERROR usage: inspect device host_so" << std::endl;
+        return 1;
+    }
+    std::ifstream source(argv[2], std::ios::binary);
+    const std::vector<char> bytes((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+    if (source.bad() || bytes.empty()) {
+        std::cerr << "ERROR cannot read source: " << argv[2] << std::endl;
         return 1;
     }
     const int device = std::atoi(argv[1]);
     Check("aclInit", aclInit(nullptr));
     Check("set device", aclrtSetDevice(device));
-    const auto function = Load(argv[2]);
-    aclrtStream stream = nullptr;
-    Check("create stream", aclrtCreateStream(&stream));
-    aclrtLaunchKernelAttr attr{};
-    attr.id = ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT;
-    attr.value.timeout = 25;
-    aclrtLaunchKernelCfg cfg{};
-    cfg.attrs = &attr;
-    cfg.numAttrs = 1;
+    std::map<std::string, aclrtFuncHandle> loaded;
     std::cout << "READY" << std::endl;
     std::string command;
-    while (std::getline(std::cin, command) && command != "exit") {
-        auto ret =
-            aclrtLaunchKernelWithHostArgs(function, 1, stream, &cfg, command.data(), command.size() + 1, nullptr, 0);
-        if (ret == ACL_SUCCESS)
-            ret = aclrtSynchronizeStreamWithTimeout(stream, 30000);
-        std::cerr << command << " ret=" << ret << std::endl;
-        std::cout << ret << std::endl;
-    }
-    Check("destroy stream", aclrtDestroyStream(stream));
+    while (std::getline(std::cin, command) && command != "exit")
+        std::cout << (Inspect(command, bytes, loaded) ? 0 : 1) << std::endl;
     Check("reset device", aclrtResetDevice(device));
     Check("aclFinalize", aclFinalize());
 }

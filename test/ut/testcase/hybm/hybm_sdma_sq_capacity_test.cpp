@@ -292,6 +292,104 @@ TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
     EXPECT_EQ(context.sqTail, 0U);
 }
 
+class SdmaDeployVerifyTest : public testing::Test {
+protected:
+    std::array<unsigned char, 8192> bytes{};
+    alignas(64) ock::mf::HybmSdmaDeployResult result{};
+    ock::mf::HybmSdmaDeployCheck param{};
+    std::string path;
+    void SetUp() override
+    {
+        char name[] = "/tmp/mf_deploy_verify_XXXXXX";
+        int fd = mkstemp(name);
+        ASSERT_GE(fd, 0);
+        path = name;
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            bytes[i] = i % 251;
+        }
+        ASSERT_EQ(write(fd, bytes.data(), bytes.size()), static_cast<ssize_t>(bytes.size()));
+        close(fd);
+        FILE *owner = fopen((path + ".owner").c_str(), "w");
+        ASSERT_NE(owner, nullptr);
+        fprintf(owner, "2468");
+        fclose(owner);
+        param.expectedAddr = reinterpret_cast<uint64_t>(bytes.data());
+        param.expectedSize = bytes.size();
+        param.resultAddr = reinterpret_cast<uint64_t>(&result);
+        param.nonce = 2468;
+        memcpy(param.path, path.c_str(), path.size() + 1);
+    }
+    void TearDown() override
+    {
+        unlink(path.c_str());
+        unlink((path + ".owner").c_str());
+    }
+};
+
+TEST_F(SdmaDeployVerifyTest, ExactBytesAndCurrentOwnerAreRequired)
+{
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 0U);
+    EXPECT_EQ(result.nonce, 2468U);
+    EXPECT_EQ(result.compared, bytes.size());
+}
+
+TEST_F(SdmaDeployVerifyTest, SameSizeCorruptedFileIsRejected)
+{
+    FILE *file = fopen(path.c_str(), "r+b");
+    ASSERT_NE(file, nullptr);
+    fputc(255, file);
+    fclose(file);
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 5U);
+}
+
+TEST_F(SdmaDeployVerifyTest, OldOwnerIsRejectedEvenWithMatchingBytes)
+{
+    param.nonce = 1357;
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 2U);
+    EXPECT_EQ(result.compared, 0U);
+}
+
+TEST_F(SdmaDeployVerifyTest, ExtraBytesAreRejected)
+{
+    FILE *file = fopen(path.c_str(), "ab");
+    ASSERT_NE(file, nullptr);
+    fputc(0, file);
+    fclose(file);
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 4U);
+}
+
+TEST_F(SdmaDeployVerifyTest, MissingClaimIsRejected)
+{
+    unlink((path + ".owner").c_str());
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 1U);
+}
+
+TEST_F(SdmaDeployVerifyTest, MissingTargetIsRejected)
+{
+    unlink(path.c_str());
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 3U);
+}
+
+TEST_F(SdmaDeployVerifyTest, CleanupRequiresBothFilesToBeAbsent)
+{
+    param.expectedSize = 0;
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 6U);
+    unlink(path.c_str());
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 6U);
+    unlink((path + ".owner").c_str());
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 0U);
+    EXPECT_EQ(result.nonce, param.nonce);
+}
+
 #else
 #include <gtest/gtest.h>
 TEST(SdmaSqCapacityTest, RequiresAarch64CacheInstructions)

@@ -32,80 +32,146 @@
  * SOFTWARE.
  */
 
-/* mini_kfc — KFC 通道工具(诊断用): host 一条 launch, 设备 OS 内执行任意 shell 命令
- *
- * 机制: json 声明 KFCKernel + functionName "system" + kernelSo 指向不存在的 .so
- *       → CP1 内 KFC handler dlopen 失败不报错、回退 dlsym(RTLD_DEFAULT) 命中 libc
- *       的 system() → param(host args 透传的命令串)成为其参数。零部署零上传。
- * 输出语义(重要, X9 实测勘正): "sync=N" = 命令退出码(0=成功, 非零→507018 形式回传);
- *       本工具在 launch 或 sync 失败时返回非零退出码。
- * 安全告示: 本工具在设备 OS 内执行任意 shell 命令, 仅限开发/诊断环境使用,
- *       禁止随产品运行时分发(产品库内置部署仅执行固定命令串, 见 hybm_sdma_orchestrator.cpp)。
- * 用法: ./mini_kfc <dev> "<命令>"
- */
-#include <cstdio>
-#include <cstring>
+// 开发诊断工具：507018保持为结果未确认，文件操作可使用与产品库相同的AICPU校验入口。
+#include <cerrno>
+#include <climits>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include "shell_result_check.h"
 
-#include "acl/acl.h"
-#include "acl/acl_rt.h"
-
+namespace {
+struct Options {
+    std::string host, target, verifier;
+    uint64_t nonce = 0;
+    bool present = false, absent = false;
+};
+void Usage()
+{
+    puts("mini_kfc <device> <command> [--expect-so <host.so> <device-path> <nonce> | --expect-absent <device-path> "
+         "<nonce>] [--verifier <device-so-name>]");
+    puts("Exit: 0=confirmed, 1=error/check failed, 2=shell result unconfirmed. Checker SO must export "
+         "HybmSdmaVerifyDeploy.");
+}
+bool Nonce(const char *text, uint64_t &value)
+{
+    char *end = nullptr;
+    errno = 0;
+    if (!*text || *text == '-')
+        return false;
+    auto parsed = strtoull(text, &end, 10);
+    if (errno || *end || !parsed)
+        return false;
+    value = parsed;
+    return true;
+}
+bool Parse(int argc, char **argv, Options &o)
+{
+    for (int i = 3; i < argc; ++i) {
+        const std::string flag = argv[i];
+        if (flag == "--verifier" && i + 1 < argc)
+            o.verifier = argv[++i];
+        else if (flag == "--expect-so" && i + 3 < argc && !o.present && !o.absent) {
+            o.present = true;
+            o.host = argv[++i];
+            o.target = argv[++i];
+            if (!Nonce(argv[++i], o.nonce))
+                return false;
+        } else if (flag == "--expect-absent" && i + 2 < argc && !o.present && !o.absent) {
+            o.absent = true;
+            o.target = argv[++i];
+            if (!Nonce(argv[++i], o.nonce))
+                return false;
+        } else
+            return false;
+    }
+    if (!o.present && !o.absent)
+        return o.verifier.empty();
+    if (o.target.empty())
+        return false;
+    const auto basename = o.target.substr(o.target.find_last_of('/') + 1);
+    if (o.verifier.empty())
+        o.verifier = basename;
+    if (!mf_tools::SafeSoName(o.verifier))
+        return false;
+    if (o.target.find('/') == std::string::npos)
+        o.target = "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/" + o.target;
+    return o.target.size() < sizeof(ock::mf::HybmSdmaDeployCheck::path);
+}
+int Run(const char *command, const Options &o, const std::vector<char> &bytes)
+{
+    aclrtFuncHandle checker = nullptr;
+    ock::mf::HybmSdmaDeployResult result{};
+    // 删除前先加载校验代码，文件删除后继续使用本进程中已加载的入口。
+    if (o.absent) {
+        if (mf_tools::LoadFunction(o.verifier, "HybmSdmaVerifyDeploy", checker) ||
+            !mf_tools::ReadCheck(checker, o.target, o.nonce, {}, result) || (result.status != 0 && result.status != 6))
+            return 1;
+    }
+    bool submitted = false;
+    auto ret = mf_tools::ExecuteShell(command, submitted);
+    if (!submitted)
+        return 1;
+    if (ret && ret != mf_tools::SHELL_RESULT_UNCONFIRMED)
+        return 1;
+    if (ret == mf_tools::SHELL_RESULT_UNCONFIRMED)
+        puts("shell_status=UNCONFIRMED");
+    if (!o.present && !o.absent)
+        return ret ? mf_tools::EXIT_UNCONFIRMED : 0;
+    if (!checker && mf_tools::LoadFunction(o.verifier, "HybmSdmaVerifyDeploy", checker))
+        return 1;
+    if (!mf_tools::ReadCheck(checker, o.target, o.nonce, bytes, result) || result.status ||
+        result.compared != bytes.size()) {
+        puts("verification=FAILED");
+        return 1;
+    }
+    puts(o.absent ? "verification=ABSENCE_CONFIRMED" : "verification=BYTE_FOR_BYTE_CONFIRMED");
+    return 0;
+}
+} // namespace
 int main(int argc, char **argv)
 {
-    int dev = argc >= 2 ? atoi(argv[1]) : 0;
-    const char *cmd = argc >= 3 ? argv[2] : "echo hello";
-    if (aclInit(nullptr) != ACL_SUCCESS) {
-        printf("[E] aclInit\n");
+    if (argc == 2 && std::string(argv[1]) == "--help") {
+        Usage();
+        return 0;
+    }
+    if (argc < 3) {
+        Usage();
         return 1;
     }
-    if (aclrtSetDevice(dev) != ACL_SUCCESS) {
-        printf("[E] SetDevice(%d)\n", dev);
+    char *end = nullptr;
+    long dev = strtol(argv[1], &end, 10);
+    Options o;
+    if (!*argv[1] || *end || dev < 0 || dev > INT_MAX || !Parse(argc, argv, o) || strlen(argv[2]) >= 1024) {
+        puts("[E] invalid arguments");
         return 1;
     }
-    // 最小 KFC json(functionName=system, kernelSo 指向不存在文件触发 dlsym 回退)
-    FILE *f = fopen("kfc_min.json", "w");
-    if (f == nullptr) {
-        printf("[E] write kfc_min.json\n");
-        return 1;
-    }
-    fprintf(f, "{\"K\":{\"opInfo\":{\"opKernelLib\":\"KFCKernel\",\"kernelSo\":\"kfc_min.so\","
-               "\"functionName\":\"system\"}}}");
-    fclose(f);
-    aclrtBinaryLoadOptions lo = {};
-    aclrtBinaryLoadOption opt = {};
-    opt.type = ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
-    opt.value.cpuKernelMode = 0; // mode=0: 不迁移, 直接按 json 路由
-    lo.numOpt = 1;
-    lo.options = &opt;
-    aclrtBinHandle bh = nullptr;
-    if (aclrtBinaryLoadFromFile("kfc_min.json", &lo, &bh) != 0) {
-        printf("[E] load\n");
-        return 1;
-    }
-    aclrtFuncHandle fh = nullptr;
-    if (aclrtBinaryGetFunction(bh, "K", &fh) != 0) {
-        printf("[E] func\n");
-        return 1;
-    }
-    aclrtStream s = nullptr;
-    aclError streamRet = aclrtCreateStream(&s);
-    if (streamRet != ACL_SUCCESS) {
-        printf("[E] create stream ret=%d\n", (int)streamRet);
-        return 1;
-    }
-    char buf[1024];
-    strncpy(buf, cmd, 1023);
-    buf[sizeof(buf) - 1] = '\0'; // strncpy 不保证终止, strlen 前必须显式补
-    // 含控制字符的命令一定是误传(放行 tab)
-    for (const char *p = buf; *p; p++) {
-        if ((unsigned char)*p < 0x20 && *p != '\t') {
-            printf("[E] cmd 含控制字符 (0x%02x)\n", (unsigned char)*p);
+    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(argv[2]); *p; ++p)
+        if (*p < 0x20 && *p != '\t') {
+            puts("[E] command contains control characters");
+            return 1;
+        }
+    std::vector<char> bytes;
+    if (o.present) {
+        std::ifstream input(o.host, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        if (input.bad() || bytes.empty()) {
+            puts("[E] cannot read nonempty source SO");
             return 1;
         }
     }
-    // 命令串作为 host args 透传 → CP1 内 system() 执行; 退出码经 stream sync 传回
-    aclError r = aclrtLaunchKernelWithHostArgs(fh, 1, s, nullptr, buf, strlen(buf) + 1, nullptr, 0);
-    aclError sr = r == ACL_SUCCESS ? aclrtSynchronizeStream(s) : r;
-    printf("cmd='%s' launch=%d sync=%d\n", cmd, (int)r, (int)sr);
-    return r == ACL_SUCCESS && sr == ACL_SUCCESS ? 0 : 1;
+    if (aclInit(nullptr)) {
+        puts("[E] aclInit");
+        return 1;
+    }
+    auto ret = aclrtSetDevice(static_cast<int>(dev));
+    if (ret) {
+        printf("[E] SetDevice(%ld) ret=%d\n", dev, ret);
+        (void)aclFinalize();
+        return 1;
+    }
+    int status = Run(argv[2], o, bytes);
+    (void)aclrtResetDevice(static_cast<int>(dev));
+    (void)aclFinalize();
+    return status;
 }

@@ -12,11 +12,13 @@ bisheng --npu-arch=dav-2002 -O2 -std=c++17 -x asc "$ROOT/test/integration/310p_a
  -I"$ROOT/src/smem/include/device" -L"$ROOT/build/src/smem/csrc" -lmf_smem \
  -L"$ROOT/build/src/hybm/csrc" -lmf_hybm_core -L"$ASCEND_HOME_PATH/lib64" -lascendcl -lruntime -ldl -pthread
 g++ -O2 -std=c++17 "$ROOT/test/integration/310p_aicpu_deploy/inspect.cpp" -o "$LOG_DIR/inspect" \
- -I"$ASCEND_HOME_PATH/include" -L"$ASCEND_HOME_PATH/lib64" -lascendcl -lruntime
+ -I"$ASCEND_HOME_PATH/include" -I"$ROOT/tools/aicpu_kernel_deploy" \
+ -I"$ROOT/src/hybm/ops/hybm_kernel" -I"$ROOT/src/smem/include/device" \
+ -L"$ASCEND_HOME_PATH/lib64" -lascendcl -lruntime
 export DEPLOY_INSPECT_SECONDS="${DEPLOY_INSPECT_SECONDS:-15}"
 pids=()
 coproc INSPECTOR { timeout --kill-after=10s 300s "$LOG_DIR/inspect" "${DEVICE_BASE:-2}" \
-    "$LOG_DIR/inspect.json" 2> "$LOG_DIR/inspect.log"; }
+    "$MF_SDMA_ORCH_DIR/libmf_sdma_orch.so" 2> "$LOG_DIR/inspect.log"; }
 inspector_pid=$INSPECTOR_PID
 trap 'for pid in "${pids[@]}" "$inspector_pid"; do kill "$pid" 2>/dev/null || true; done' EXIT
 read -r -t 45 reply <&"${INSPECTOR[0]}"
@@ -38,27 +40,30 @@ for run in 1 2; do
     for rank in 0 1; do
         log="$LOG_DIR/run$run-rank$rank.log"
         for attempt in $(seq 1 60); do
-            if grep -q 'kernel deployed to CP1 search path' "$log"; then break; fi
+            if grep -q 'deployed SO byte-for-byte verified' "$log"; then break; fi
             sleep 1
         done
-        path="$(sed -n 's/.*kernel deployed to CP1 search path.* dst: //p' "$log" | head -1)"
+        path="$(sed -n 's/.*deployed SO byte-for-byte verified.* path: //p' "$log" | head -1)"
         if [[ ! "$path" =~ ^/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/libmf_sdma_orch_[0-9]+_[a-zA-Z0-9]+\.so$ ]]; then
             echo "ERROR invalid deployed path: $path"; exit 1
         fi
-        probe "test -f $path"
+        nonce="$(sed -n 's/.*deployed SO byte-for-byte verified, nonce: \([0-9]*\).*/\1/p' "$log" | head -1)"
+        probe "present $path $nonce"
     done
     ret=0
     for pid in "${pids[@]}"; do wait "$pid" || ret=1; done
     if ((ret)); then cat "$LOG_DIR"/run"$run"-rank*.log; exit 1; fi
     for rank in 0 1; do
         log="$LOG_DIR/run$run-rank$rank.log"
-        for text in 'automatic deploy begin' 'kernel deployed to CP1 search path' \
-                    'automatic deploy file removed' 'full_payload_checked=1' 'cleanup_complete=1'; do
+        for text in 'automatic deploy begin' 'deployed SO byte-for-byte verified' \
+                    'deployment files absence verified' 'automatic deploy file removed' \
+                    'full_payload_checked=1' 'cleanup_complete=1'; do
             if ! grep -q "$text" "$log"; then echo "ERROR missing $text in $log"; exit 1; fi
         done
-        path="$(sed -n 's/.*kernel deployed to CP1 search path.* dst: //p' "$log" | head -1)"
-        probe "test ! -e $path"
-        grep -E 'automatic deploy|kernel deployed to CP1|PASS' "$log"
+        path="$(sed -n 's/.*deployed SO byte-for-byte verified.* path: //p' "$log" | head -1)"
+        nonce="$(sed -n 's/.*deployed SO byte-for-byte verified, nonce: \([0-9]*\).*/\1/p' "$log" | head -1)"
+        probe "absent $path $nonce"
+        grep -E 'automatic deploy|byte-for-byte verified|absence verified|PASS' "$log"
     done
 done
 printf 'exit\n' >&"${INSPECTOR[1]}"

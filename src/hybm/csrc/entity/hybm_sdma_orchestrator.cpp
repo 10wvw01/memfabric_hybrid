@@ -30,6 +30,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <vector>
+#include "mf_scope_guard.h"
 #include <set>
 #include <string>
 #include <unistd.h>
@@ -55,9 +57,9 @@ constexpr char HYBM_SDMA_ORCH_CUST_SO[] = "libmf_sdma_orch.so";      /* host 侧
 constexpr char HYBM_SDMA_ORCH_DEV_SEARCH_DIR[] = "/usr/lib64/aicpu_kernels/0/aicpu_kernels_device";
 constexpr char HYBM_SDMA_ORCH_DEPLOY_LOCK[] = "/tmp/.mf_sdma_orch_deploy.lock"; /* 部署互斥锁(host 侧) */
 constexpr uint32_t HYBM_SDMA_ORCH_DEPLOY_RETRY = 5;   /* 复制/校验重试次数(迁移异步完成裕量) */
-constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 512; /* KFC 命令缓冲尺寸(命令为受控常量拼接) */
-/* KFC 命令退出码非 0 时 stream sync 的回传码(实测): 用于区分"文件缺失"与"通道异常" */
-constexpr int32_t HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR = 507018;
+constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 1024; /* KFC 命令缓冲尺寸(命令为受控常量拼接) */
+/* AICPU任务异常也可能来自system丢失退出状态，须另行确认命令实际结果。 */
+constexpr int32_t HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED = 507018;
 constexpr uint32_t HYBM_SDMA_ORCH_SUPERVISOR_MAX_ERR = 16; /* 监督线程连续失败上限(放弃后数据面停在背压) */
 
 /* 解析每轮时长(秒): MF_SDMA_ORCH_EPOCH_BUDGET_S 显式指定;
@@ -381,8 +383,8 @@ Result SdmaOrchestrator::PrepareRuntimeJson(const std::string &jsonPath, std::st
     }
     std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     const auto sourceName = ExtractDeviceSoName(content);
-    if (!IsValidDeviceSoName(sourceName)) {
-        BM_LOG_ERROR("invalid kernelSo in launch json: " << jsonPath);
+    if (!IsValidDeviceSoName(sourceName) || content.find_last_of('}') == std::string::npos) {
+        BM_LOG_ERROR("invalid launch json or kernelSo, path: " << jsonPath);
         return BM_INVALID_PARAM;
     }
     const auto field = content.find("\"kernelSo\"");
@@ -396,6 +398,9 @@ Result SdmaOrchestrator::PrepareRuntimeJson(const std::string &jsonPath, std::st
     const auto base = path.substr(path.find_last_of('/') + 1);
     deviceSoName_ = base.substr(0, base.size() - 5) + ".so";
     content.replace(namePos, sourceName.size(), deviceSoName_);
+    const auto end = content.find_last_of('}');
+    content.insert(end, ",\"HybmSdmaVerifyDeploy\":{\"opInfo\":{\"opKernelLib\":\"KFCKernel\",\"kernelSo\":\"" +
+                            deviceSoName_ + "\",\"functionName\":\"HybmSdmaVerifyDeploy\"}}");
     const bool written = write(fd, content.data(), content.size()) == static_cast<ssize_t>(content.size());
     const int closeRet = close(fd);
     if (!written || closeRet != 0) {
@@ -429,12 +434,8 @@ Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &kernelDir, 
         return BM_ERROR;
     }
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName_;
-    // 每次加载使用独立名称，避免 CP1 复用已缓存的旧代码。
-    auto ret = KfcExec("test ! -e " + dst);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("automatic deploy requires an unused device path, devId: " << devId_ << " dst: " << dst);
-        return ret;
-    }
+    deployNonce_ = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    auto ret = BM_OK;
     BM_LOG_INFO("automatic deploy begin, devId: " << devId_ << " dst: " << dst);
     uint64_t soSize = 0;
     ret = MigrateViaCustChannel(kernelDir, soSize);
@@ -442,14 +443,21 @@ Result SdmaOrchestrator::DeployOrchestratorKernel(const std::string &kernelDir, 
         return ret;
     }
     deviceSoOwned_ = true;
-    ret = CopyToSearchPath(deviceSoName_, soSize);
-    if (ret != BM_OK) {
-        return ret;
+    for (uint32_t i = 0; i < HYBM_SDMA_ORCH_DEPLOY_RETRY; ++i) {
+        ret = CopyToSearchPath(deviceSoName_, soSize);
+        if (ret != BM_OK && ret != HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
+            return ret;
+        }
+        ret = TryLoadKernel(launchJsonPath);
+        if (ret == BM_OK) {
+            ret = VerifyDeployment(kernelDir + "/" + HYBM_SDMA_ORCH_CUST_SO);
+        }
+        if (ret == BM_OK) {
+            return BM_OK;
+        }
+        sleep(1);
     }
-    ret = TryLoadKernel(launchJsonPath);
-    if (ret != BM_OK) {
-        BM_LOG_ERROR("kernel load failed after automatic deploy, ret: " << ret << " devId: " << devId_);
-    }
+    BM_LOG_ERROR("deployment verification failed, devId: " << devId_ << " dst: " << dst << " ret: " << ret);
     return ret;
 }
 
@@ -547,7 +555,7 @@ Result SdmaOrchestrator::LoadKfcChannel(aclrtFuncHandle &fh)
     return ret;
 }
 
-Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
+Result SdmaOrchestrator::KfcExec(const std::string &cmd)
 {
     if (cmd.size() >= HYBM_SDMA_ORCH_CMD_BUF_SIZE) {
         BM_LOG_ERROR("kfc cmd too long, len: " << cmd.size());
@@ -556,7 +564,7 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
     aclrtFuncHandle fh = nullptr;
     auto ret = LoadKfcChannel(fh);
     if (ret != BM_OK) {
-        return ret;
+        return ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED ? BM_ERROR : ret;
     }
     char buf[HYBM_SDMA_ORCH_CMD_BUF_SIZE] = {0};
     strncpy(buf, cmd.c_str(), sizeof(buf) - 1);
@@ -566,20 +574,28 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd, bool probe)
     aclrtLaunchKernelCfg cfg{};
     cfg.attrs = &attr;
     cfg.numAttrs = 1;
+    void *commandStream = nullptr;
+    ret = DlAclApi::AclrtCreateStream(&commandStream);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("create shell stream failed, ret: " << ret);
+        return ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED ? BM_ERROR : ret;
+    }
     // 命令串作为 host args 透传 → 设备 OS 内 system() 执行
-    ret = DlAclApi::AclrtLaunchKernelWithHostArgs(fh, 1, launchStream_, &cfg, buf, strlen(buf) + 1, nullptr, 0);
+    ret = DlAclApi::AclrtLaunchKernelWithHostArgs(fh, 1, commandStream, &cfg, buf, strlen(buf) + 1, nullptr, 0);
     if (ret != BM_OK) {
         BM_LOG_ERROR("kfc launch failed, ret: " << ret << " cmd: " << cmd);
-        return ret;
+        (void)DlAclApi::AclrtDestroyStream(commandStream);
+        return ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED ? BM_ERROR : ret;
     }
-    ret = DlAclApi::AclrtSynchronizeStream(launchStream_);
-    if (ret != BM_OK) { // sync 非 0 = 命令退出码非 0(或流错误)
-        if (probe && ret == HYBM_SDMA_ORCH_KFC_CMD_EXIT_ERR) {
-            BM_LOG_INFO("kfc probe miss (expected on first run), sync: " << ret << " cmd: " << cmd);
+    ret = DlAclApi::AclrtSynchronizeStream(commandStream);
+    if (ret != BM_OK) { // 保留原始错误，507018交由调用方确认实际状态
+        if (ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
+            BM_LOG_INFO("shell result unconfirmed; postcondition required, sync: " << ret << " cmd: " << cmd);
         } else {
             BM_LOG_ERROR("kfc cmd failed, sync: " << ret << " cmd: " << cmd);
         }
     }
+    (void)DlAclApi::AclrtDestroyStream(commandStream);
     return ret;
 }
 
@@ -589,26 +605,93 @@ Result SdmaOrchestrator::CopyToSearchPath(const std::string &deviceSoName, uint6
     const std::string src = "/home/CustAiCpuUser/cust_aicpu_" + std::to_string(dieId_) + "_*_" +
                             std::to_string(getpid()) + "/" + HYBM_SDMA_ORCH_CUST_SO;
     const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName;
-    const std::string copyCmd = "cat " + src + " > " + dst + " && chmod 644 " + dst;
-    /* 完整性校验: 入口符号存在 + 精确尺寸一致(防截断/拼接; 设备侧工具极简——实测可用
-     * grep/awk/顶层管道, wc/stat/md5sum/cmp 均缺失, 故用 ls -l 第 5 列取尺寸) */
-    const std::string verifyCmd = "grep -q " + std::string(HYBM_SDMA_ORCH_FUNC_NAME) + " " + dst +
-                                  " && ls -l " + dst + " | awk '{print $5}' | grep -qx " +
-                                  std::to_string(soSize);
-    for (uint32_t i = 0; i < HYBM_SDMA_ORCH_DEPLOY_RETRY; i++) { // 重试为迁移异步完成留裕量
-        if (KfcExec(copyCmd) != BM_OK) {
-            sleep(1);
-            continue;
-        }
-        if (KfcExec(verifyCmd) == BM_OK) {
-            BM_LOG_INFO("kernel deployed to CP1 search path, devId: " << devId_ << " dst: " << dst);
-            return BM_OK;
-        }
-        sleep(1); // 校验失败等一拍再重试(重 cat 幂等)
+    const std::string claim = dst + ".owner";
+    const std::string nonce = std::to_string(deployNonce_);
+    // 首次创建采用noclobber；重试仅校验本次文件，避免改写已加载的SO。
+    const std::string copyCmd = "if test -e " + dst + "; then test \"$(cat " + claim + ")\" = " + nonce +
+                                " && test -r " + dst + "; else (set -C; { printf %s " + nonce + " > " + claim +
+                                " && cat " + src + "; } > " + dst + "); fi && chmod 644 " + dst;
+    const auto ret = KfcExec(copyCmd);
+    BM_LOG_INFO("deployment copy submitted, devId: " << devId_ << " nonce: " << deployNonce_ << " bytes: " << soSize
+                                                     << " shellRet: " << ret);
+    return ret;
+}
+
+Result SdmaOrchestrator::VerifyDeployment(const std::string &hostSo)
+{
+    std::ifstream input(hostSo, std::ios::binary);
+    std::vector<char> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (input.bad() || bytes.empty()) {
+        BM_LOG_ERROR("read deployment source failed, path: " << hostSo);
+        return BM_FILE_NOT_ACCESS;
     }
-    BM_LOG_ERROR("deploy copy/verify failed after retries, devId: " << devId_ << " dst: " << dst
-                 << " expectedSize: " << soSize);
-    return BM_ERROR;
+    return CheckDeploymentResult(bytes.data(), bytes.size());
+}
+
+Result SdmaOrchestrator::CheckDeploymentResult(const void *bytes, size_t size, bool allowPresent)
+{
+    void *expected = nullptr;
+    auto ret = DlAclApi::AclrtMalloc(&expected, size + 128, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("alloc verification buffer failed, ret: " << ret);
+        return ret;
+    }
+    ScopeGuard<void *> release(expected, [](void *p) { (void)DlAclApi::AclrtFree(p); });
+    if (size != 0) {
+        ret = DlAclApi::AclrtMemcpy(expected, size, bytes, size, ACL_MEMCPY_HOST_TO_DEVICE);
+    }
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("upload verification bytes failed, ret: " << ret);
+        return ret;
+    }
+    HybmSdmaDeployCheck check{};
+    check.expectedAddr = reinterpret_cast<uint64_t>(expected);
+    check.expectedSize = size;
+    check.nonce = deployNonce_;
+    check.resultAddr = reinterpret_cast<uint64_t>(expected) + ((size + 63) & ~size_t(63));
+    const std::string target = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName_;
+    if (target.size() >= sizeof(check.path)) {
+        BM_LOG_ERROR("verification path too long, size: " << target.size());
+        return BM_INVALID_PARAM;
+    }
+    memcpy(check.path, target.c_str(), target.size() + 1);
+    ret = DlAclApi::AclrtMemset(reinterpret_cast<void *>(check.resultAddr), sizeof(HybmSdmaDeployResult), 0,
+                                sizeof(HybmSdmaDeployResult));
+    aclrtFuncHandle verify = nullptr;
+    if (ret == BM_OK) {
+        ret = DlAclApi::AclrtBinaryGetFunction(binHandle_, "HybmSdmaVerifyDeploy", &verify);
+    }
+    void *stream = nullptr;
+    if (ret == BM_OK) {
+        ret = DlAclApi::AclrtCreateStream(&stream);
+    }
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("prepare verifier failed, ret: " << ret);
+        return ret;
+    }
+    ScopeGuard<void *> closeStream(stream, [](void *p) { (void)DlAclApi::AclrtDestroyStream(p); });
+    ret = DlAclApi::AclrtLaunchKernelWithHostArgs(verify, 1, stream, nullptr, &check, sizeof(check), nullptr, 0);
+    if (ret == BM_OK) {
+        ret = DlAclApi::AclrtSynchronizeStream(stream);
+    }
+    HybmSdmaDeployResult result{};
+    if (ret == BM_OK) {
+        ret = DlAclApi::AclrtMemcpy(&result, sizeof(result), reinterpret_cast<void *>(check.resultAddr), sizeof(result),
+                                    ACL_MEMCPY_DEVICE_TO_HOST);
+    }
+    const bool presentAllowed = allowPresent && size == 0 && result.status == 6;
+    if (ret != BM_OK || result.nonce != check.nonce || (result.status != 0 && !presentAllowed) ||
+        result.compared != size) {
+        BM_LOG_ERROR("deployment postcondition failed, ret: " << ret << " status: " << result.status
+                                                              << " compared: " << result.compared
+                                                              << " expected: " << size << " nonce: " << result.nonce);
+        return BM_ERROR;
+    }
+    const char *message = allowPresent ? "cleanup verifier ready, nonce: "
+                          : size       ? "deployed SO byte-for-byte verified, nonce: "
+                                       : "deployment files absence verified, nonce: ";
+    BM_LOG_INFO(message << check.nonce << " bytes: " << result.compared << " path: " << target);
+    return BM_OK;
 }
 
 Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
@@ -887,7 +970,15 @@ void SdmaOrchestrator::Cleanup()
     configured_ = false; // 复位(允许后续重配置)
     if (deviceSoOwned_ && launchStream_ != nullptr) {
         const std::string dst = std::string(HYBM_SDMA_ORCH_DEV_SEARCH_DIR) + "/" + deviceSoName_;
-        const auto ret = KfcExec("rm -f " + dst);
+        // 首次校验提交失败时，SO 可能尚未真正加载；删除前先执行入口，保留可用的校验代码。
+        auto ret = CheckDeploymentResult(nullptr, 0, true);
+        if (ret == BM_OK) {
+            ret = KfcExec("if test \"$(cat " + dst + ".owner)\" = " + std::to_string(deployNonce_) + "; then rm -f " +
+                          dst + " " + dst + ".owner; fi");
+        }
+        if (ret == BM_OK || ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
+            ret = CheckDeploymentResult(nullptr, 0);
+        }
         if (ret == BM_OK) {
             BM_LOG_INFO("automatic deploy file removed, devId: " << devId_ << " dst: " << dst);
         } else {
@@ -895,6 +986,7 @@ void SdmaOrchestrator::Cleanup()
         }
     }
     deviceSoOwned_ = false;
+    deployNonce_ = 0;
     deviceSoName_.clear();
     if (cpStream_ != nullptr) {
         (void)DlAclApi::AclrtDestroyStream(cpStream_); // SQ 随流注销
