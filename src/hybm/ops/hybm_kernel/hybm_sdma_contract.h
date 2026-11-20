@@ -63,6 +63,21 @@ struct HybmSdmaOrchParam {
 };
 static_assert(sizeof(HybmSdmaOrchParam) == 80, "Param 尺寸漂移"); /* 布局锁 80B(4×u32 头 + 6×u64 + 4×u32+u64 尾) */
 
+// 部署与清理确认使用独立参数，结果必须携带本次nonce。
+struct HybmSdmaDeployCheck {
+    uint64_t expectedAddr;
+    uint64_t expectedSize; // 0表示确认SO已删除
+    uint64_t nonce;
+    uint64_t resultAddr;
+    char path[256];
+};
+struct HybmSdmaDeployResult {
+    uint64_t nonce;
+    uint64_t compared;
+    uint32_t status;
+    uint32_t reserved;
+};
+
 /* ---- kernel→host 结果(诊断, 工作区) ---- */
 struct HybmSdmaOrchResult {
     uint32_t magic;       /* 存活魔数(kernel 执行过) */

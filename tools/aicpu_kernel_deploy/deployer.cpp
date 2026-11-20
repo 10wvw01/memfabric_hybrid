@@ -77,13 +77,13 @@ int main(int argc, char **argv)
         return 1;
     }
     aclrtFuncHandle fh = nullptr;
-    r = aclrtBinaryGetFunction(bh, funcName, &fh); // GetFunction 才触发设备写文件
-    printf("getfunc ret=%d (0=文件已落盘)\n", (int)r);
+    r = aclrtBinaryGetFunction(bh, funcName, &fh); // GetFunction触发迁移，实际文件由后续校验确认
+    printf("getfunc ret=%d verification=pending\n", (int)r);
     fflush(stdout); // 后台运行时日志不丢
     if (r != 0) {
         return 1;
     }
-    printf("deployed, alive %ds...\n", secs);
+    printf("CUST migration interface succeeded, verification=pending, alive %ds...\n", secs);
     fflush(stdout);
     sleep(secs); // 保活 → 文件不被清理链删除
     return 0;

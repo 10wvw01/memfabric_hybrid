@@ -113,15 +113,18 @@ private:
     Result DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath); /* 自动部署 */
     Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
     Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
-    /* KFC 通道执行一条设备 OS 命令; probe=true 时"文件缺失"退出码降级为 INFO(首轮探测预期, 仅部署链内部使用) */
-    Result KfcExec(const std::string &cmd, bool probe = false);
-    Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 设备内复制+完整性校验 */
+    /* 成功提交后sync返回507018表示结果未确认，由部署/清理调用方检查实际状态。 */
+    Result KfcExec(const std::string &cmd);
+    Result VerifyDeployment(const std::string &hostSo);
+    Result CheckDeploymentResult(const void *bytes, size_t size, bool allowPresent = false);
+    Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 提交设备内复制 */
     Result LaunchEpoch(void *stream);     /* 单轮下发到指定流(首轮 ConfigureOrch 内联, 后续由监督线程) */
     void SupervisorLoop();                 /* 监督线程: 每 100ms 写报时计数+读结果区, 发现当前轮退出即重新拉起 */
     void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
     void Cleanup();                        /* 逆序清理(锁内, 归零时) */
 
     std::string deviceSoName_;      // 本次加载专用的设备文件名
+    uint64_t deployNonce_{0};
     bool deviceSoOwned_{false};     // 仅清理本次部署创建的文件
     std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行(ready_/workspace_ 另以原子保护) */
     uint32_t refCount_{0};          /* HYBM 初始化及实体共同持有引用 */
