@@ -1,0 +1,9 @@
+{
+    "RegSyncAicpuKernel": {
+        "opInfo": {
+            "opKernelLib": "KFCKernel",
+            "kernelSo": "libreg_sync_aicpu.so",
+            "functionName": "RegSyncAicpuKernel"
+        }
+    }
+}

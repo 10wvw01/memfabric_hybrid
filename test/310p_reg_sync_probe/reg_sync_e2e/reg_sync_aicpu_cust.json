@@ -1,0 +1,9 @@
+{
+    "RegSyncAicpuKernel": {
+        "opInfo": {
+            "opKernelLib": "CUSTAICPUKernel",
+            "kernelSo": "libreg_sync_aicpu.so",
+            "functionName": "RegSyncAicpuKernel"
+        }
+    }
+}
