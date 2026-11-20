@@ -28,11 +28,11 @@ struct HybmSdmaReqMail {  /* 传输请求(AICore→AICPU) */
     uint64_t src;         /* 源地址(Put 本端 GM / Get 远端共享内存) */
     uint64_t dst;         /* 目标地址(Put 远端共享内存 / Get 本端 GM) */
     uint64_t len;         /* 低 32 位为实际字节数；bit 63 标识纯传输，bit 32–62 必须为零，不补齐尾部 */
-    uint64_t imm;         /* COPY 为零；浮点 ADD 编码见下 */
+    uint64_t imm;         /* 数据操作编码，bit39表示携带通知参数 */
 };
 
 /* 操作编码：COPY 为零；ADD 的 [63:48] 为协议标识，[47:40] 为硬件操作码。
- * 消费端先校验完整字段，再解码操作码。
+ * bit39表示携带SET通知；消费端去掉通知标记后校验数据操作编码。
  */
 constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
 constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x02; /* FP32 累加: dst += src */
@@ -60,15 +60,23 @@ struct HybmSdmaOrchParam {
     uint32_t rank;        /* 本端 rank 号(请求环下标 = PeerRingIdx(rank, 目的 rank)) */
     uint32_t rsv;         /* 填充对齐(显式置 0) */
     uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
-    /* 寄存器同步唤醒(commByReg): AICPU 空闲时读 AICore COND 寄存器代替 GM 全队列游标轮询,
-     * AICore submit 后 set_cond 唤醒。数据面(邮件/游标)仍走 GM——寄存器只传唤醒信号,
-     * 48 队列的 tail/head 无法压进单个 SPR, 故仅作空闲唤醒(与 pypto 单环配方的差异)。
-     * commByReg=0(默认)时 AICPU 完全走 GM 轮询, 零行为变化。 */
-    uint8_t  commByReg;   /* 1=空闲轮询经寄存器唤醒; 0=GM 轮询(默认) */
-    uint8_t  rsv2[7];     /* 填充对齐(显式置 0) */
-    uint64_t regBaseAddr; /* regBase 数组设备地址(10×u64, host 经 halMemCtl 查出后 H2D; AICPU 读 COND 用) */
 };
-static_assert(sizeof(HybmSdmaOrchParam) == 96, "Param 尺寸漂移"); /* 布局锁 96B(80B + 1×u8 + 7×rsv + 1×u64 尾) */
+static_assert(sizeof(HybmSdmaOrchParam) == 80, "Param 尺寸漂移"); /* 布局锁 80B(4×u32 头 + 6×u64 + 4×u32+u64 尾) */
+
+// 部署与清理确认使用独立参数，结果必须携带本次nonce。
+struct HybmSdmaDeployCheck {
+    uint64_t expectedAddr;
+    uint64_t expectedSize; // 0表示确认SO已删除
+    uint64_t nonce;
+    uint64_t resultAddr;
+    char path[256];
+};
+struct HybmSdmaDeployResult {
+    uint64_t nonce;
+    uint64_t compared;
+    uint32_t status;
+    uint32_t reserved;
+};
 
 /* ---- kernel→host 结果(诊断, 工作区) ---- */
 struct HybmSdmaOrchResult {
@@ -80,7 +88,7 @@ struct HybmSdmaOrchResult {
 };
 static_assert(sizeof(HybmSdmaOrchResult) == 24, "Result 尺寸漂移"); /* 布局锁 24B */
 
-constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0007u; /* 结果区存活魔数 */
+constexpr uint32_t HYBM_SDMA_ORCH_RESULT_MAGIC = 0x5D0A0008u; /* 结果区存活魔数 */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_RUNNING = 0xFFFFFFFFu; /* 运行中(kernel 入口写, host 轮询判据) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_DEADLINE = 0;          /* 时限退出(正常换轮) */
 constexpr uint32_t HYBM_SDMA_ORCH_EXIT_STOP = 1;              /* 停止退出(析构) */
@@ -119,8 +127,7 @@ static_assert(sizeof(HybmSdmaOrchDbgMail) == 64, "DbgMail 尺寸漂移"); /* 布
 
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 永不退出的专用值(不判报时, 诊断用) */
-constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;       /* 空闲退避 100µs(实测 ≈130µs) */
-constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS = 220000;  /* 循环上限兜底(心跳停喂时防永跑; 每 15s 名额) */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_CLOCK_INTERVAL = 64; /* 稀疏读取单调时钟，限制每轮实际时长 */
 
 } // namespace mf
 } // namespace ock

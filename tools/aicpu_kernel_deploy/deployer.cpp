@@ -43,6 +43,7 @@
  *       预部署、部署链排查与库外 kernel 的手动落盘。
  * 用法: ./deployer <dev> <CUST_json路径> <保活秒数> [入口函数名]
  */
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
@@ -64,6 +65,15 @@ int main(int argc, char **argv)
         printf("[E] SetDevice(%d)\n", dev);
         return 1;
     }
+    int32_t hostPid = 0;
+    const auto pidRet = aclrtDeviceGetBareTgid(&hostPid);
+    if (pidRet != ACL_SUCCESS || hostPid <= 0) {
+        printf("[E] resolve host pid ret=%d localPid=%d hostPid=%d\n", pidRet, getpid(), hostPid);
+        (void)aclrtResetDevice(dev);
+        (void)aclFinalize();
+        return 1;
+    }
+    printf("pid mapping localPid=%d hostPid=%d\n", getpid(), hostPid);
     aclrtBinaryLoadOptions lo = {};
     aclrtBinaryLoadOption opt = {};
     opt.type = ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
@@ -77,13 +87,13 @@ int main(int argc, char **argv)
         return 1;
     }
     aclrtFuncHandle fh = nullptr;
-    r = aclrtBinaryGetFunction(bh, funcName, &fh); // GetFunction 才触发设备写文件
-    printf("getfunc ret=%d (0=文件已落盘)\n", (int)r);
+    r = aclrtBinaryGetFunction(bh, funcName, &fh); // GetFunction触发迁移，实际文件由后续校验确认
+    printf("getfunc ret=%d verification=pending\n", (int)r);
     fflush(stdout); // 后台运行时日志不丢
     if (r != 0) {
         return 1;
     }
-    printf("deployed, alive %ds...\n", secs);
+    printf("CUST migration interface succeeded, verification=pending, alive %ds...\n", secs);
     fflush(stdout);
     sleep(secs); // 保活 → 文件不被清理链删除
     return 0;

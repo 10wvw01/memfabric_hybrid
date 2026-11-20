@@ -21,7 +21,7 @@
 ```
 docs/310p/
 ├── 机制档案.md   —— 怎么构造和提交搬运指令（wire 级配方，hcomm 源码级证实）
-├── 部署档案.md   —— 怎么把 kernel 弄上设备（deployer+KFC → extend loader 自部署 → OPP 三段演进）
+├── 部署档案.md   —— 怎么把 kernel 弄上设备（deployer+KFC → 自部署 → OPP 三段演进）
 └── 平台事实.md   —— 这块板子实测是什么行为（F 表/S 表/T 表，跨环境使用前复核）
 ```
 

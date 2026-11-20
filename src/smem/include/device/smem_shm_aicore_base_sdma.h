@@ -21,6 +21,7 @@
 #include "smem_shm_aicore_base_define.h"
 #include "smem_shm_aicore_base_meta.h"
 #include "smem_shm_sdma_layout.h"
+#include "smem_shm_signal_define.h"
 typedef enum smem_shm_sdma_op {
     SMEM_SHM_SDMA_OP_COPY = 0,     /* dst = src */
     SMEM_SHM_SDMA_OP_ADD_FP32 = 1, /* 搬运+reduce dst += src (fp32 逐元素) */
@@ -34,7 +35,6 @@ struct smem_shm_sdma_ctx_t {
     uint32_t rank;       /* 本端 rank */
     uint32_t rankSize;   /* 世界大小 */
     uint32_t block;      /* 本 AICore block 号(GetBlockIdx, 队列下标 block 维) */
-    uint8_t commByReg;   /* 寄存器同步唤醒标志(保留区槽, host 写; 1=submit 后 set_cond 唤醒 AICPU) */
 };
 
 #ifdef __cplusplus
@@ -99,22 +99,6 @@ SMEM_SHM_INLINE_AICORE void SdmaWriteCell(__gm__ uint8_t *res, uint64_t off, uin
 
 /* ============================ 公开 API ============================ */
 
-/* ---- 寄存器同步唤醒(commByReg)原语, AICore 侧硬件指令 ----
- * set_cond 为 bisheng 编译器内建(__builtin_cce_set_cond, 310P/3101 原生暴露, 实机验证:
- * 不 crash 且 AICPU 侧可读到)。写本核 COND(SPR 0x4C8), AICPU 空闲轮询经 regBase volatile
- * 读之——任一核值变化即被唤醒去扫 GM 游标(借鉴 pypto commByReg 配方; v31 多队列下寄存器
- * 只承载唤醒信号, 数据面仍走 GM)。传入值含 block 与队列尾(变化即活动, 跨 block 不互冲)。 */
-SMEM_SHM_INLINE_AICORE void SdmaSetCond(uint64_t value)
-{
-    set_cond(static_cast<int64_t>(value));
-}
-
-/* 读 commByReg 标志(保留区槽, host ConfigureOrch 启用时写 1) */
-SMEM_SHM_INLINE_AICORE uint8_t SdmaReadCommByReg(__gm__ uint8_t *res)
-{
-    return static_cast<uint8_t>(SdmaReadCell(res, SMEM_SHM_SDMA_RS_COMM_BY_REG) & 0xFF);
-}
-
 SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
 {
     smem_shm_sdma_ctx_t c;
@@ -124,7 +108,6 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
     c.phys = smem_shm_get_phys_size(0);
     c.res = static_cast<__gm__ uint8_t *>(gva) + c.symm * c.rank + (c.phys - SMEM_SHM_SDMA_RESERVED);
     c.block = static_cast<uint32_t>(AscendC::GetBlockIdx()); /* v31: 队列按 block 划分 */
-    c.commByReg = SdmaReadCommByReg(c.res); /* 寄存器同步唤醒标志(0=AICore 不 set_cond, 全 GM) */
     return c;
 }
 
@@ -134,15 +117,14 @@ SMEM_SHM_INLINE_AICORE uint32_t smem_shm_sdma_peer_cnt(const smem_shm_sdma_ctx_t
     return (c.rankSize < SMEM_SHM_SDMA_MAX_RANKS) ? (c.rankSize - 1U) : (SMEM_SHM_SDMA_MAX_RANKS - 1U);
 }
 
-SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src,
-                                                    __gm__ void *dst, uint64_t len,
-                                                    smem_shm_sdma_op_t op, bool get)
+SMEM_SHM_INLINE_AICORE bool SdmaResolveQueue(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
+                                             uint64_t len, smem_shm_sdma_op_t op, bool get, __gm__ uint64_t *signal,
+                                             uint32_t &queue)
 {
-    if (len == 0) { return true; }
-    if (len > UINT32_MAX || ((reinterpret_cast<uint64_t>(src) |
-        reinterpret_cast<uint64_t>(dst) | len) & 3) != 0 ||
-        static_cast<uint32_t>(op) > SMEM_SHM_SDMA_OP_ADD_FP16) { return false; }
-    // 根据远端地址选择队列；本端缓冲区允许使用普通设备内存。
+    if (len > UINT32_MAX || ((reinterpret_cast<uint64_t>(src) | reinterpret_cast<uint64_t>(dst) | len) & 3) ||
+        static_cast<uint32_t>(op) > SMEM_SHM_SDMA_OP_ADD_FP16) {
+        return false;
+    }
     const uint64_t ownSeg = reinterpret_cast<uint64_t>(ctx.res) - (ctx.phys - SMEM_SHM_SDMA_RESERVED);
     const uint64_t srcSeg = reinterpret_cast<uint64_t>(src) & ~(ctx.symm - 1);
     const uint64_t dstSeg = reinterpret_cast<uint64_t>(dst) & ~(ctx.symm - 1);
@@ -153,59 +135,75 @@ SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ 
     const bool isGet = srcRemote;
     const uint64_t remoteSeg = isGet ? srcSeg : dstSeg;
     const int64_t segOff = static_cast<int64_t>(remoteSeg - ownSeg) / static_cast<int64_t>(ctx.symm);
-    const int64_t peerQ = static_cast<int64_t>(ctx.rank) + segOff;
-    const int64_t rankBound = static_cast<int64_t>((ctx.rankSize < SMEM_SHM_SDMA_MAX_RANKS)
-                                                        ? ctx.rankSize : SMEM_SHM_SDMA_MAX_RANKS);
-    if (segOff == 0 || peerQ < 0 || peerQ >= rankBound ||
-        ctx.block >= SMEM_SHM_SDMA_MAX_BLOCKS ||
+    const int64_t peer = static_cast<int64_t>(ctx.rank) + segOff;
+    const int64_t rankBound = ctx.rankSize < SMEM_SHM_SDMA_MAX_RANKS ? ctx.rankSize : SMEM_SHM_SDMA_MAX_RANKS;
+    if (segOff == 0 || peer < 0 || peer >= rankBound || ctx.block >= SMEM_SHM_SDMA_MAX_BLOCKS ||
         srcRemote == dstRemote || isGet != get || (isGet && op != SMEM_SHM_SDMA_OP_COPY)) {
         return false;
     }
-    const uint64_t remoteAddr = reinterpret_cast<uint64_t>(isGet ? src : dst);
     const uint64_t usable = ctx.phys - SMEM_SHM_SDMA_RESERVED;
-    const uint64_t offset = remoteAddr - remoteSeg;
+    const uint64_t offset = reinterpret_cast<uint64_t>(isGet ? src : dst) - remoteSeg;
     if (offset >= usable || len > usable - offset) { return false; }
-    const uint32_t peerRank = static_cast<uint32_t>(peerQ);
-    /* v31: 队列 = (对端环下标, 本 block)——各 AICore block 各走各队, 背压仅限本队列 */
-    const uint32_t r = SmemShmSdmaQueueIdx(SmemShmSdmaPeerRingIdx(ctx.rank, peerRank), ctx.block);
-    const uint64_t ringOff = r * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE;
-    const uint64_t tailOff = SMEM_SHM_SDMA_RS_REQ_TAIL + r * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
-    const uint64_t headOff = SMEM_SHM_SDMA_RS_REQ_HEAD + r * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
-    const uint64_t tail = SdmaReadCell(ctx.res, tailOff);
-    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
-    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {
-        const uint64_t head = SdmaReadCell(ctx.res, headOff);
-        if (tail - head < SMEM_SHM_SDMA_RS_REQ_SLOTS) {
-            break;
+    if (signal) {
+        const uint64_t addr = reinterpret_cast<uint64_t>(signal);
+        if (get || (addr & 7) || addr < remoteSeg || addr - remoteSeg >= usable || usable - (addr - remoteSeg) < 8) {
+            return false;
         }
-        SdmaPollBackoff(i, delay); /* 该环满: 仅背压本环(其他对端环不受影响) */
     }
-    const uint64_t head = SdmaReadCell(ctx.res, headOff);
-    if (tail - head >= SMEM_SHM_SDMA_RS_REQ_SLOTS) {
-        return false; /* 满环预算耗尽，请求未提交 */
+    queue = SmemShmSdmaQueueIdx(SmemShmSdmaPeerRingIdx(ctx.rank, static_cast<uint32_t>(peer)), ctx.block);
+    return true;
+}
+
+SMEM_SHM_INLINE_AICORE bool SdmaReserveRequest(const smem_shm_sdma_ctx_t &ctx, uint32_t queue, uint64_t &tail)
+{
+    tail = SdmaReadCell(ctx.res, SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
+    const uint64_t headOff = SMEM_SHM_SDMA_RS_REQ_HEAD + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
+    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
+    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; ++i) {
+        if (tail - SdmaReadCell(ctx.res, headOff) < SMEM_SHM_SDMA_RS_REQ_SLOTS)
+            break;
+        SdmaPollBackoff(i, delay);
     }
-    __gm__ uint8_t *slot = ctx.res + SMEM_SHM_SDMA_RS_REQ_RING + ringOff +
+    return tail - SdmaReadCell(ctx.res, headOff) < SMEM_SHM_SDMA_RS_REQ_SLOTS;
+}
+
+SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, uint32_t queue, uint64_t tail,
+                                               __gm__ void *src, __gm__ void *dst, uint64_t len, smem_shm_sdma_op_t op,
+                                               __gm__ uint64_t *signal, uint64_t value)
+{
+    __gm__ uint8_t *slot = ctx.res + SMEM_SHM_SDMA_RS_REQ_RING + queue * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE +
                            (tail % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 32;
-    uint8_t sqeOp = 0;
-    if (op == SMEM_SHM_SDMA_OP_ADD_FP32) {
-        sqeOp = SMEM_SDMA_SQE_OP_FP32_ADD;
-    } else if (op == SMEM_SHM_SDMA_OP_ADD_FP16) {
-        sqeOp = SMEM_SDMA_SQE_OP_FP16_ADD;
+    const uint8_t opcode = op == SMEM_SHM_SDMA_OP_ADD_FP32
+                               ? SMEM_SDMA_SQE_OP_FP32_ADD
+                               : (op == SMEM_SHM_SDMA_OP_ADD_FP16 ? SMEM_SDMA_SQE_OP_FP16_ADD : 0);
+    if (signal) {
+        const uint64_t off =
+            SMEM_SHM_SDMA_RS_SIGNAL + queue * SMEM_SHM_SDMA_RS_SIGNAL_STRIDE + (tail % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 16;
+        SdmaWriteCell(ctx.res, off, reinterpret_cast<uint64_t>(signal));
+        SdmaWriteCell(ctx.res, off + 8, value);
     }
-    const uint64_t immOut = (sqeOp != 0) ? SdmaEncodeOp(sqeOp) : 0;
-    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 0) = reinterpret_cast<uint64_t>(src);
+    *reinterpret_cast<__gm__ volatile uint64_t *>(slot) = reinterpret_cast<uint64_t>(src);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 8) = reinterpret_cast<uint64_t>(dst);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 16) = len | (1ULL << 63);
-    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 24) = immOut;
-    AscendC::GlobalTensor<int32_t> t;
-    t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);
-    AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t);
-    SdmaWriteCell(ctx.res, tailOff, tail + 1);
-    if (ctx.commByReg != 0) {
-        /* 寄存器同步唤醒: 写本核 COND 通知 AICPU 有活动(唤醒值含 block 与队列尾,
-         * 任一变化即活动; 同核覆盖写仅保留最新——AICPU 只判"变化", 不解码语义) */
-        SdmaSetCond((static_cast<uint64_t>(ctx.block) << 32) | (tail + 1));
-    }
+    *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 24) =
+        (opcode ? SdmaEncodeOp(opcode) : 0) | (signal ? SMEM_SHM_SDMA_SIGNAL_FLAG : 0);
+    AscendC::GlobalTensor<int32_t> gm;
+    gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);
+    AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(gm);
+    SdmaWriteCell(ctx.res, SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, tail + 1);
+}
+
+SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
+                                         uint64_t len, smem_shm_sdma_op_t op, bool get,
+                                         __gm__ uint64_t *signal = nullptr, uint64_t value = 0)
+{
+    if (len == 0 && !signal)
+        return true;
+    uint32_t queue = 0;
+    uint64_t tail = 0;
+    if (!SdmaResolveQueue(ctx, src, dst, len, op, get, signal, queue) || !SdmaReserveRequest(ctx, queue, tail))
+        return false;
+    SdmaPublishRequest(ctx, queue, tail, src, dst, len, op, signal, value);
     return true;
 }
 
@@ -308,6 +306,97 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get(__gm__ void *gva,
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet(__gm__ void *gva)
 {
     return smem_shm_sdma_quiet_at(smem_shm_sdma_ctx(gva));
+}
+
+/* 传输后对远端64位通知执行SET。接收方观察到该通知值时，本请求数据操作已完成。
+ * signal按8字节对齐，须位于目标peer的有效共享段，每个通知槽由单个发送方写入。
+ * bytes为0时只发布通知，src/dst不使用。NBI成功表示入队，源数据保持有效至quiet成功。
+ * 同步版本等待当前block此前已提交操作完成。调用方负责数据缓存维护和接收缓冲复用。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal_nbi_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src,
+                                                            __gm__ void *dst, uint64_t bytes, __gm__ uint64_t *signal,
+                                                            uint64_t value,
+                                                            smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+{
+    if (!signal) {
+        return false;
+    }
+    if (bytes == 0) {
+        return SdmaSubmitAt(ctx, nullptr, signal, 0, SMEM_SHM_SDMA_OP_COPY, false, signal, value);
+    }
+    return SdmaSubmitAt(ctx, src, dst, bytes, op, false, signal, value);
+}
+
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src,
+                                                        __gm__ void *dst, uint64_t bytes, __gm__ uint64_t *signal,
+                                                        uint64_t value, smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+{
+    return smem_shm_sdma_put_signal_nbi_at(ctx, src, dst, bytes, signal, value, op) && smem_shm_sdma_quiet_at(ctx);
+}
+
+// 独立SET通知同样经SDMA请求队列提交；NBI版本需配合quiet管理完成。
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_set_nbi_at(const smem_shm_sdma_ctx_t &ctx, __gm__ uint64_t *signal,
+                                                            uint64_t value)
+{
+    return smem_shm_sdma_put_signal_nbi_at(ctx, nullptr, nullptr, 0, signal, value);
+}
+
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_set_at(const smem_shm_sdma_ctx_t &ctx, __gm__ uint64_t *signal,
+                                                        uint64_t value)
+{
+    return smem_shm_sdma_signal_set_nbi_at(ctx, signal, value) && smem_shm_sdma_quiet_at(ctx);
+}
+
+/* 对本地64位通知检测一次；函数维护通知缓存行，返回比较结果。
+ * 通知槽使用独立64字节缓存行，避免接收方其他写入覆盖远端更新。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_signal_test(__gm__ uint64_t *signal, smem_shm_cmp_t cmp, uint64_t value)
+{
+    if (!signal || (reinterpret_cast<uint64_t>(signal) & 7) || cmp < SMEM_SHM_CMP_EQ || cmp > SMEM_SHM_CMP_LE) {
+        return false;
+    }
+    const uint64_t actual = SdmaReadCell(reinterpret_cast<__gm__ uint8_t *>(signal), 0);
+    return SmemShmSignalCompare(actual, cmp, value);
+}
+
+/* 等待比较成立，budget是检测次数上限；失败返回false。
+ * 仅维护通知缓存行，收到通知后数据区域的缓存维护由调用方负责。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_signal_wait_until(__gm__ uint64_t *signal, smem_shm_cmp_t cmp, uint64_t value,
+                                                       uint64_t budget = SMEM_SHM_SDMA_POLL_MAX_ITER)
+{
+    if (!signal || (reinterpret_cast<uint64_t>(signal) & 7) || cmp < SMEM_SHM_CMP_EQ || cmp > SMEM_SHM_CMP_LE) {
+        return false;
+    }
+    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
+    for (uint64_t i = 0; i < budget; ++i) {
+        if (smem_shm_signal_test(signal, cmp, value)) {
+            return true;
+        }
+        SdmaPollBackoff(i, delay);
+    }
+    return false;
+}
+
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal_nbi(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
+                                                         uint64_t bytes, __gm__ uint64_t *signal, uint64_t value,
+                                                         smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+{
+    return smem_shm_sdma_put_signal_nbi_at(smem_shm_sdma_ctx(gva), src, dst, bytes, signal, value, op);
+}
+
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal(__gm__ void *gva, __gm__ void *src, __gm__ void *dst,
+                                                     uint64_t bytes, __gm__ uint64_t *signal, uint64_t value,
+                                                     smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+{
+    return smem_shm_sdma_put_signal_at(smem_shm_sdma_ctx(gva), src, dst, bytes, signal, value, op);
+}
+
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_set_nbi(__gm__ void *gva, __gm__ uint64_t *signal, uint64_t value)
+{
+    return smem_shm_sdma_signal_set_nbi_at(smem_shm_sdma_ctx(gva), signal, value);
+}
+
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_signal_set(__gm__ void *gva, __gm__ uint64_t *signal, uint64_t value)
+{
+    return smem_shm_sdma_signal_set_at(smem_shm_sdma_ctx(gva), signal, value);
 }
 
 #endif // __MEMFABRIC_SMEM_AI_CORE_BASE_SDMA_H__

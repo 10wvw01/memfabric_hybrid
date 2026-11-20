@@ -14,7 +14,7 @@
  *
  * 邮箱化: host 侧 submit/wait 数据面 API 废止(搬运由 AICore 经
  * smem_shm_sdma_put/get/quiet 设备侧自驱), 本类职责收敛为:
- *   1. 传输准备(CP 流/工作区/epoch kernel 部署, 见下方"kernel 部署"段);
+ *   1. 传输准备(CP 流/工作区/epoch kernel 加载, 含设备侧自动部署);
  *   2. ConfigureOrch: 段尾保留区初始化(双环清零) + epoch 参数装配 + 首轮内联下发
  *      (失败立即报错返回) + 监督线程启动;
  *   3. StopEpoch: 写停止标志 → 停监督线程 → kernel ≤1ms 自退 → 同步确认 → 读结果区诊断。
@@ -27,15 +27,6 @@
  * 任务下发 507000), 永不退出的 kernel 必阻塞它(serve 实测死因 507017)。
  * 分轮运行后全设备同步最多等当前轮剩余(<15s)。launch json 为 KFCKernel(type 5),
  * 设备侧系统监控不给该类型计时——轮超时无 28s 强制结束风险。
- *
- * kernel 部署(2026-11-19 定案, 参考 pypto 机制): 借 CP1 启动时预加载的 CANN
- * libaicpu_extend_kernels.so 里的 loader, 把本仓 libmf_sdma_orch.so 以 memfd 方式
- * 加载进 CP1(aicpu_scheduler)进程并填函数表——不落设备搜索路径, 不经 KFC 设备
- * shell(2026-11-18 驱动升级后 shell 平台级失效, 507018)。本仓 so 导出 loader 约定
- * 的三个同名符号(StaticTileFwkBackendKernelServer / DynTileFwkBackendKernelServerInit /
- * DynTileFwkBackendKernelServer), 每轮以 DynTileFwkKernelServer 下发, cfgdata 指向
- * epoch 参数。超时用 args.timeout=0xFFFF + flag 0x100(永不超时), 每轮时长仍由
- * kernel 读主机报时计数自限。
  *
  * 生命周期: 多池共享进程级资源, Acquire/Release 引用计数; ConfigureOrch 一次绑定
  * (约束: 每进程单 SDMA 池, 双环位于首个配置池的段尾保留区)。
@@ -58,6 +49,15 @@ constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;         /* 工作区总尺寸 
 constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 0;      /* epoch 结果区 64B(诊断) */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_OVF_OFF = 64;        /* SQE overflow 目标 64B */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_STOP_OFF = 128;      /* 停止标志 8B(工作区自有, 销毁序安全) */
+
+/* 停止同步上限(秒): StopEpoch 写停止标志后 kernel 正常 ≤1ms 自退。
+ * 0 = 永不超时(attr 值经 ConvertTimeoutToInner(0)=MAX_UINT64; 缺省 attr 则为默认
+ * 超时 ≈6.4s 会误杀长时任务——507017, 故 attr 不可省略且必须显式置 0)。
+ * 任何有限 attr 值都会在到达时把任务标记为超时(507017, host 侧语义, 设备侧不杀)
+ * 导致监督线程的 sync 提前返回、不等 kernel 退出。每轮时长由主机报时驱动
+ * (kernel 读递增计数, 见 hybm_sdma_contract.h), 不经 attr。设备故障(kernel 卡在
+ * HAL 调用)时 sync 不返回、销毁挂起——已接受的取舍 */
+constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S = 0;
 
 class SdmaOrchestrator { // 协同模式传输准备单例(所有可变状态在 mutex_ 内维护)
 public:
@@ -106,25 +106,29 @@ private:
     Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
     Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
     Result AllocWorkspace();               /* 工作区分配与清零 */
-    void QueryAicoreRegs(uint16_t devId);  /* halMemCtl 查 AICore 控制寄存器基址(失败降级 commByReg_=false 走 GM) */
+    Result PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson);
     static Result ResolveOrchestratorJson(const std::string &directory, std::string &jsonPath);
-    Result LoadOrchestratorKernel();       /* json 解析 + 经 CANN extend lib loader 部署到 CP1 */
-    /* pypto 机制部署: so 字节经 DeviceArgs 传给 CP1 预加载的 libaicpu_extend_kernels.so,
-     * 由其在 CP1 进程内 memfd 加载并填函数表(不落设备搜索路径, 不经 KFC shell) */
-    Result DeployOrchestratorKernel(const std::string &kernelDir);
+    Result LoadOrchestratorKernel();       /* json 解析 + 部署探测 + 自动部署后加载 */
+    Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
+    Result DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath); /* 自动部署 */
+    Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
+    Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
+    /* 成功提交后sync返回507018表示结果未确认，由部署/清理调用方检查实际状态。 */
+    Result KfcExec(const std::string &cmd);
+    Result VerifyDeployment(const std::string &hostSo);
+    Result CheckDeploymentResult(const void *bytes, size_t size, bool allowPresent = false);
+    Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 提交设备内复制 */
     Result LaunchEpoch(void *stream);     /* 单轮下发到指定流(首轮 ConfigureOrch 内联, 后续由监督线程) */
     void SupervisorLoop();                 /* 监督线程: 每 100ms 写报时计数+读结果区, 发现当前轮退出即重新拉起 */
     void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
     void Cleanup();                        /* 逆序清理(锁内, 归零时) */
 
-    bool extendLoaderReady_{false}; // CP1 extend lib loader 已装载本 so(函数表已填)
-    void *devSo_{nullptr};          // so 字节设备缓冲(loader 输入, 进程内保活)
-    void *devArgs_{nullptr};        // DeviceArgs 设备缓冲(loader 输入)
-    void *devParam_{nullptr};       // epoch 参数设备缓冲(每轮 H2D)
-    void *rtLaunch_{nullptr};       // rtAicpuKernelLaunchExWithArgs(libruntime.so)
-    void *runtimeLib_{nullptr};     // libruntime.so 句柄(保活)
+    uint32_t hostPid_{0};           // CANN 迁移目录及本次设备 SO 名称使用的宿主机 PID
+    std::string deviceSoName_;      // 本次加载专用的设备文件名
+    uint64_t deployNonce_{0};
+    bool deviceSoOwned_{false};     // 仅清理本次部署创建的文件
     std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行(ready_/workspace_ 另以原子保护) */
-    uint32_t refCount_{0};          /* 引用计数(entity 池级) */
+    uint32_t refCount_{0};          /* HYBM 初始化及实体共同持有引用 */
     bool configured_{false};        /* 保留区已配置 + 搬运 kernel 已下发(ConfigureOrch 一次绑定) */
     bool epochLaunched_{false};     /* 搬运 kernel 在运行(StopEpoch 幂等性: 停过即不再重复停) */
     HybmSdmaOrchParam epochParam_{}; /* epoch kernel 参数(ConfigureOrch 装配) */
@@ -137,16 +141,14 @@ private:
     void *epochStream_{nullptr};    /* 搬运 kernel 提交流(普通流, 每轮任务下发于此;
                                       * 曾尝试带隔离标志建流使全设备同步看不见它, 实测装机版本无效且
                                       * 拒收任务下发, 已回退——见平台事实 2026-10-12 条目) */
+    aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
+    aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchEpoch 函数句柄 */
+    aclrtBinHandle custBinHandle_{nullptr}; /* CUST 迁移句柄(保活: 持至进程退出) */
+    aclrtFuncHandle kfcFuncHandle_{nullptr}; /* KFC 通道句柄缓存(首次装载后复用, 免每次部署重装) */
     std::atomic<bool> ready_{false};       /* 就绪标志(原子: 无锁读与锁内写并发) */
     std::atomic<uint64_t> workspace_{0};   /* 工作区设备地址(原子: 同上) */
     std::atomic<bool> stopFlag_{false};    /* 监督线程退出标志(StopEpoch 置位) */
     std::thread supervisor_;               /* 监督线程(分轮模式启动: 写报时计数/读结果区/换轮; 永不退出诊断模式不启动) */
-    /* 寄存器同步唤醒(commByReg): halMemCtl 查到的 AICore 控制寄存器基址(经 H2D 成功且
-     * MF_SDMA_ORCH_COMM_BY_REG=1 显式开启才置 true; 默认 false 走 GM 轮询, 行为与关一致) */
-    bool commByReg_{false};                /* 寄存器同步可用标志(QueryAicoreRegs 设置) */
-    uint64_t regBaseDevAddr_{0};           /* regBase 数组设备地址(10×u64, H2D 后; commByReg=false 时为 0) */
-    static constexpr uint32_t REG_BASE_CORES = 10;        /* 310P3 DAV_2002: 10 physical AICore */
-    static constexpr uint64_t REG_CORE_STRIDE = 0x200000ULL; /* per-core 2MB stride */
 };
 } // namespace mf
 } // namespace ock

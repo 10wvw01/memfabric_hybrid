@@ -4,18 +4,26 @@
 #include <cstring>
 #include <vector>
 #include <unistd.h>
+#include <cstdarg>
+#include <ctime>
 
 extern "C" int SdmaCapacitySleep(useconds_t);
+extern "C" long SdmaCapacityClock(long, ...);
 #define halSqCqQuery  SdmaCapacityQuery
 #define halSqCqConfig SdmaCapacityConfig
 #define usleep        SdmaCapacitySleep
+#define syscall       SdmaCapacityClock
 #include "../../../../src/hybm/ops/hybm_kernel/hybm_sdma_orch_kernel.cc"
+#undef syscall
 #undef usleep
 #undef halSqCqConfig
 #undef halSqCqQuery
 
 namespace {
 uint32_t queryCount, configCount, sleepCount, nextHead, publishedTail;
+uint64_t clockNowNs;
+uint32_t clockCalls;
+bool clockFailure;
 int configResult;
 bool replayHardware;
 SqContext *hardwareContext;
@@ -49,6 +57,21 @@ extern "C" int32_t SdmaCapacityConfig(uint32_t, void *info)
     return configResult;
 }
 
+extern "C" long SdmaCapacityClock(long number, ...)
+{
+    ++clockCalls;
+    if (clockFailure)
+        return -1;
+    va_list args;
+    va_start(args, number);
+    (void)va_arg(args, int);
+    auto *ts = va_arg(args, timespec *);
+    ts->tv_sec = clockNowNs / 1000000000ULL;
+    ts->tv_nsec = clockNowNs % 1000000000ULL;
+    va_end(args);
+    return 0;
+}
+
 class SdmaSqCapacityTest : public testing::Test {
 protected:
     alignas(64) std::array<uint8_t, 8 * kSqeSize> ring{};
@@ -59,6 +82,9 @@ protected:
     void SetUp() override
     {
         queryCount = configCount = sleepCount = 0;
+        clockNowNs = 1000000000ULL;
+        clockCalls = 0;
+        clockFailure = false;
         nextHead = 2;
         configResult = 0;
         replayHardware = false;
@@ -74,6 +100,55 @@ protected:
         std::memset(sqe, 0x3C, sizeof(sqe));
     }
 };
+
+TEST_F(SdmaSqCapacityTest, PollingBudgetUsesElapsedTimeInsteadOfScanCount)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = 2;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 220032), 0);
+    clockNowNs = 3000000000ULL;
+    EXPECT_EQ(checkEpochBudget(result, budget, 220096), 1);
+    EXPECT_EQ(sleepCount, 0U);
+}
+
+TEST_F(SdmaSqCapacityTest, PollingClockIsSampledAndHeartbeatStillExpires)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = 2;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 1), 0);
+    EXPECT_EQ(clockCalls, 1U);
+    auto *heartbeat = reinterpret_cast<uint64_t *>(workspace.data() + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF);
+    *heartbeat = 20;
+    EXPECT_EQ(checkEpochBudget(result, budget, 2), 1);
+    EXPECT_EQ(clockCalls, 1U);
+}
+
+TEST_F(SdmaSqCapacityTest, PollingClockErrorsAreReported)
+{
+    EpochBudget budget{};
+    clockFailure = true;
+    EXPECT_EQ(initEpochBudget(&param, budget), 1370);
+    clockFailure = false;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    clockFailure = true;
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 0), -1370);
+}
+
+TEST_F(SdmaSqCapacityTest, ResidentPollingDoesNotRequireClockOrHeartbeat)
+{
+    EpochBudget budget{};
+    param.epochBudgetS = ock::mf::HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT;
+    clockFailure = true;
+    ASSERT_EQ(initEpochBudget(&param, budget), 0);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+    EXPECT_EQ(checkEpochBudget(result, budget, 0), 0);
+    EXPECT_EQ(clockCalls, 0U);
+}
 
 TEST_F(SdmaSqCapacityTest, FullQueuePublishesPendingTasksAndRefreshesHead)
 {
@@ -126,7 +201,7 @@ TEST_F(SdmaSqCapacityTest, WholeTransferReservesSpaceBeforeWritingDescriptors)
 {
     context.sqTail = 6;
     nextHead = 6;
-    ock::mf::HybmSdmaReqMail mail{};
+    ock::mf::HybmSdmaReqMail mail{0, 0, 4, 0};
     EXPECT_EQ(issueMailSqes(&param, &context, 0, 0, mail, 0, 0, 0), 0);
     EXPECT_EQ(configCount, 1U);
     EXPECT_EQ(publishedTail, 6U);
@@ -140,7 +215,7 @@ TEST_F(SdmaSqCapacityTest, PendingTransfersSurviveQueueWrap)
     context.sqTail = 6;
     for (uint16_t task = 0; task < 6; ++task)
         std::memcpy(ring.data() + task * kSqeSize + 6, &task, 2);
-    ock::mf::HybmSdmaReqMail mail{};
+    ock::mf::HybmSdmaReqMail mail{0, 0, 4, 0};
     ASSERT_EQ(issueMailSqes(&param, &context, 0, 10, mail, 0, 0, 0), 0);
     ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
     EXPECT_EQ(executedTasks, (std::vector<uint16_t>{0, 1, 2, 3, 4, 5, 12, 10, 11}));
@@ -292,10 +367,166 @@ TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
     EXPECT_EQ(context.sqTail, 0U);
 }
 
+class SdmaDeployVerifyTest : public testing::Test {
+protected:
+    std::array<unsigned char, 8192> bytes{};
+    alignas(64) ock::mf::HybmSdmaDeployResult result{};
+    ock::mf::HybmSdmaDeployCheck param{};
+    std::string path;
+    void SetUp() override
+    {
+        char name[] = "/tmp/mf_deploy_verify_XXXXXX";
+        int fd = mkstemp(name);
+        ASSERT_GE(fd, 0);
+        path = name;
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            bytes[i] = i % 251;
+        }
+        ASSERT_EQ(write(fd, bytes.data(), bytes.size()), static_cast<ssize_t>(bytes.size()));
+        close(fd);
+        param.expectedAddr = reinterpret_cast<uint64_t>(bytes.data());
+        param.expectedSize = bytes.size();
+        param.resultAddr = reinterpret_cast<uint64_t>(&result);
+        param.nonce = 2468;
+        memcpy(param.path, path.c_str(), path.size() + 1);
+    }
+    void TearDown() override
+    {
+        unlink(path.c_str());
+    }
+};
+
+TEST_F(SdmaDeployVerifyTest, ExactBytesAndRequestNonceAreReturned)
+{
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 0U);
+    EXPECT_EQ(result.nonce, 2468U);
+    EXPECT_EQ(result.compared, bytes.size());
+}
+
+TEST_F(SdmaDeployVerifyTest, SameSizeCorruptedFileIsRejected)
+{
+    FILE *file = fopen(path.c_str(), "r+b");
+    ASSERT_NE(file, nullptr);
+    fputc(255, file);
+    fclose(file);
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 5U);
+}
+
+TEST_F(SdmaDeployVerifyTest, DifferentRequestNonceIsReturnedWithMatchingBytes)
+{
+    param.nonce = 1357;
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 0U);
+    EXPECT_EQ(result.nonce, 1357U);
+    EXPECT_EQ(result.compared, bytes.size());
+}
+
+TEST_F(SdmaDeployVerifyTest, ExtraBytesAreRejected)
+{
+    FILE *file = fopen(path.c_str(), "ab");
+    ASSERT_NE(file, nullptr);
+    fputc(0, file);
+    fclose(file);
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 4U);
+}
+
+TEST_F(SdmaDeployVerifyTest, TruncatedFileIsRejected)
+{
+    ASSERT_EQ(truncate(path.c_str(), bytes.size() - 1), 0);
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 4U);
+}
+
+TEST_F(SdmaDeployVerifyTest, MissingTargetIsRejected)
+{
+    unlink(path.c_str());
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 3U);
+}
+
+TEST_F(SdmaDeployVerifyTest, CleanupRequiresTargetToBeAbsent)
+{
+    param.expectedSize = 0;
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 6U);
+    unlink(path.c_str());
+    ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
+    EXPECT_EQ(result.status, 0U);
+    EXPECT_EQ(result.nonce, param.nonce);
+}
+
 #else
 #include <gtest/gtest.h>
 TEST(SdmaSqCapacityTest, RequiresAarch64CacheInstructions)
 {
     GTEST_SKIP() << "AICPU cache instructions require AArch64";
 }
+
+TEST_F(SdmaDirectionTest, PutSignalOrdersDataNotificationAndCompletion)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = param.poolBaseGva + param.symSize + 16384;
+    signal[1] = 1234567;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 3U);
+    EXPECT_EQ(DescriptorAddress(0, 40), param.poolBaseGva + param.symSize + 8192);
+    EXPECT_EQ(DescriptorAddress(1, 40), signal[0]);
+    EXPECT_EQ(DescriptorAddress(2, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+    const uint64_t source = DescriptorAddress(1, 32);
+    EXPECT_EQ(*reinterpret_cast<uint64_t *>(source), 1234567U);
+    signal[1] = 9;
+    EXPECT_EQ(*reinterpret_cast<uint64_t *>(source), 1234567U);
+}
+
+TEST_F(SdmaDirectionTest, StandaloneSignalHasNoDataDescriptor)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase);
+    mail->src = 0;
+    mail->len = 1ULL << 63;
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = mail->dst;
+    signal[1] = 88;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(DescriptorAddress(0, 40), mail->dst);
+    EXPECT_EQ(DescriptorAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+}
+
+TEST_F(SdmaDirectionTest, RejectsUnalignedOrWrongPeerSignal)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    for (uint64_t addr :
+         {param.poolBaseGva + param.symSize + 3, param.poolBaseGva + 64, param.poolBaseGva + 2 * param.symSize - 4}) {
+        signal[0] = addr;
+        EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+        EXPECT_EQ(context.sqTail, 0U);
+    }
+}
+
+TEST_F(SdmaDirectionTest, GetSignalIsRejected)
+{
+    SetMail(true, SMEM_SHM_SDMA_SIGNAL_FLAG);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = param.poolBaseGva + param.symSize + 64;
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+}
+
+TEST_F(SdmaSqCapacityTest, SignalGroupPreservesNonzeroDoorbellOnWrap)
+{
+    context.sqTail = 5;
+    context.sqHead = 4;
+    ock::mf::HybmSdmaReqMail mail{0x1000, 0x2000, 4, 0};
+    ASSERT_EQ(issueMailSqes(&param, &context, 0, 7, mail, 0x3000, 0x4000, 0, 0x5000), 0);
+    EXPECT_EQ(context.sqTail, 1U);
+    ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
+    EXPECT_EQ(publishedTail, 1U);
+}
+
+
 #endif

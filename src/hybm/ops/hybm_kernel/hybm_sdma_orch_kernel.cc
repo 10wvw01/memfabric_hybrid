@@ -42,7 +42,7 @@
  * cntvct_el0/cntfrq_el0 均不可用(v7 时代 type 2 正常, type 5 两 die 全失效,
  * 2026-10-12 实测), 每轮时长改由主机报时驱动: 监督线程每 100ms 往工作区
  * HEARTBEAT_OFF 写递增计数, kernel 主循环读之, 到 budgetS×10 跳即自退;
- * 循环上限保留兜底(报时停喂时防永跑)。host 发现退出后重新拉起新一轮(环+游标零丢失)。
+ * 主机报时停止更新时，由设备单调时钟限制每轮时长。Host发现退出后重新拉起新一轮。
  * 为什么不一次下发跑到停止: host 侧全设备同步(AclrtSynchronizeDevice, torch_npu 分配
  * 显存时内部触发)等所有流的全部任务且无豁免——永不退出的 kernel 必阻塞它(serve 实测死因 507017)。
  *
@@ -56,7 +56,12 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cerrno>
+#include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/syscall.h>
 
 #include "hybm_sdma_contract.h"
 
@@ -327,18 +332,6 @@ inline void storeCell(uint64_t addr, uint64_t v)
     cacheFlushLine(addr & ~static_cast<uintptr_t>(63));
 }
 
-/* ---- 寄存器同步唤醒(commByReg)原语, 借鉴 pypto commByReg 配方 ----
- * AICPU 侧经 halMemCtl 映射的目标核 AICore 控制寄存器 VA, volatile 直读(免 cache 维护)。
- * v31 多队列适配: 48 队列的 tail/head 无法压进单个 SPR(与 pypto 单环配方的差异), 故
- * 寄存器只承载"活动唤醒"信号——AICore submit 后 set_cond 写本核 COND(SPR 0x4C8),
- * AICPU 空闲时读 10 核 COND, 任一变化即去扫 GM 游标; 数据面(邮件/cursor)仍走 GM。 */
-constexpr uint32_t REG_SPR_COND = 0x4C8; // COND 寄存器 pypto 偏移(AICore set_cond 写, AICPU 读)
-constexpr uint32_t REG_ORCH_CORES = 10;  // 310P3 DAV_2002: 10 物理 AICore(与 host REG_BASE_CORES 一致)
-inline uint64_t AicpuReadReg64(uint64_t regAddr)
-{
-    return *reinterpret_cast<volatile uint64_t *>(regAddr);
-}
-
 // v15 诊断逐单日志: 逐单落工作区环形缓冲(读回原文/计算地址/SQ 游标), host D2H 可读。
 // 单线程 kernel 无并发; 计数持久于工作区(跨 epoch 累计, 环形覆盖最旧)。
 void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf::HybmSdmaReqMail &mail,
@@ -364,13 +357,13 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
 
 // 数据传输与本端完成按 SQ FIFO 顺序执行。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
-                      const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot,
-                      uint64_t quietStampSlot, uint8_t sqeOpcode)
+                      const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t quietStampSlot,
+                      uint8_t sqeOpcode, uint64_t signalDst = 0)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
     // 整组预留，包含尾值回绕为零时的占位描述符。
-    constexpr uint32_t descriptors = 2;
+    const uint32_t descriptors = (mail.len ? 1U : 0U) + (signalDst ? 1U : 0U) + 1U;
     const uint32_t count = ((ctx->sqTail + descriptors) % ctx->sqDepth == 0) ? descriptors + 1 : descriptors;
     if (reserveSqeSpace(p, ctx, count) != 0) {
         return 1360;
@@ -378,7 +371,7 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
     // 固件将 doorbell 尾值 0 当作空环；插入自拷贝占位使提交尾值非零。
     if ((ctx->sqTail + descriptors) % ctx->sqDepth == 0) {
         const uint64_t scratch = p->resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF;
-        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + 2),
+        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + descriptors),
                           scratch, scratch, 8,
                           p->devId, p->overflowAddr, ssid);
         int32_t padRet = submitSqe(p, ctx, sqe);
@@ -386,15 +379,23 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
             return 1365; // 错误码: 占位 SQE 入环失败
         }
     }
-    buildStarsSdmaSqe(sqe, streamId, taskId, mail.src, mail.dst,
-                      static_cast<uint32_t>(mail.len), p->devId, p->overflowAddr, ssid, sqeOpcode);
-    int32_t r = submitSqe(p, ctx, sqe); // 满环活查询在 submitSqe 内自旋(上限 1s)
-    if (r != 0) {
-        return 1360; // 错误码: SQ 持续满/查询失败
+    if (mail.len) {
+        buildStarsSdmaSqe(sqe, streamId, taskId, mail.src, mail.dst, static_cast<uint32_t>(mail.len), p->devId,
+                          p->overflowAddr, ssid, sqeOpcode);
+        int32_t r = submitSqe(p, ctx, sqe); // 满环活查询在 submitSqe 内自旋(上限 1s)
+        if (r != 0) {
+            return 1360; // 错误码: SQ 持续满/查询失败
+        }
     }
-    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + 1), stageSlot,
-                      quietStampSlot, 8, p->devId,
-                      p->overflowAddr, ssid); // ③ 完成戳(源=同一暂存槽首, FIFO 序即全部到)
+    if (signalDst) {
+        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + (mail.len ? 1 : 0)),
+                          stageSlot + 8, signalDst, 8, p->devId, p->overflowAddr, ssid);
+        if (submitSqe(p, ctx, sqe) != 0) {
+            return 1362;
+        }
+    }
+    buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + descriptors - 1), stageSlot, quietStampSlot, 8,
+                      p->devId, p->overflowAddr, ssid); // ③ 完成戳(源=同一暂存槽首, FIFO 序即全部到)
     if (submitSqe(p, ctx, sqe) != 0) {
         return 1362; // 错误码: 完成戳失败
     }
@@ -427,7 +428,21 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     if ((mail.len & (1ULL << 63)) == 0) { return 1334; }
     if ((mail.len & 0x7FFFFFFF00000000ULL) != 0) { return 1331; }
     mail.len &= UINT32_MAX;
-    if (mail.len == 0 || ((mail.src | mail.dst | mail.len) & 3) != 0) { return 1332; }
+    if (((mail.src | mail.dst | mail.len) & 3) != 0) {
+        return 1332;
+    }
+    const bool hasSignal = (mail.imm & SMEM_SHM_SDMA_SIGNAL_FLAG) != 0;
+    mail.imm &= ~SMEM_SHM_SDMA_SIGNAL_FLAG;
+    if (mail.len == 0 && !hasSignal) {
+        return 1332;
+    }
+    uint64_t signalDst = 0, signalValue = 0;
+    if (hasSignal) {
+        const uint64_t off = p->resBase + SMEM_SHM_SDMA_RS_SIGNAL + queueIdx * SMEM_SHM_SDMA_RS_SIGNAL_STRIDE +
+                             (seq % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 16;
+        signalDst = loadCell(off);
+        signalValue = loadCell(off + 8);
+    }
     if (mail.imm != 0 &&
         mail.imm != ((HYBM_SDMA_IMM_MAGIC << 48) | (uint64_t(HYBM_SDMA_SQE_OP_FP32_ADD) << 40)) &&
         mail.imm != ((HYBM_SDMA_IMM_MAGIC << 48) | (uint64_t(HYBM_SDMA_SQE_OP_FP16_ADD) << 40))) {
@@ -451,9 +466,13 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
          sqeOpcode != HYBM_SDMA_SQE_OP_FP16_ADD)) {
         return 1330;
     }
+    if (hasSignal && (isGet || (signalDst & 7) || signalDst < peerSegExpect || signalDst - peerSegExpect >= usable ||
+                      usable - (signalDst - peerSegExpect) < 8)) {
+        return 1330;
+    }
     const uint64_t stageSlot = p->resBase + SMEM_SHM_SDMA_RS_STAGE + queueIdx * SMEM_SHM_SDMA_RS_STAGE_STRIDE +
                                 (seq % SMEM_SHM_SDMA_RS_STAGE_SLOTS) * sizeof(HybmSdmaReqMail);
-    constexpr uint32_t descriptors = 2;
+    const uint32_t descriptors = (mail.len ? 1U : 0U) + (hasSignal ? 1U : 0U) + 1U;
     const uint32_t count = (ctx->sqTail + descriptors) % ctx->sqDepth == 0 ? descriptors + 1 : descriptors;
     if (reserveSqeSpace(p, ctx, count) != 0) { return 1360; }
     // 前次传输完成前，暂存槽仍是 DMA 源，不能覆盖。
@@ -470,12 +489,14 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
         }
     }
     uint64_t *st = reinterpret_cast<uint64_t *>(stageSlot);
+    if (hasSignal) { st[1] = signalValue; }
     st[0] = seq + 1; // 戳值(1 基; 0 保留为"空", 区分序号 0 与未写入槽位)，供完成描述符读取
     cacheFlushLine(stageSlot & ~static_cast<uintptr_t>(63)); // 32B 对齐单行, 刷出(SQE 可读)
     const uint64_t quietStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET + queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
                                 (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8; // 本端完成戳槽(队列内)
     const uint64_t tailBefore = ctx->sqTail;
-    auto ret = issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode);
+    auto ret =
+        issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode, signalDst);
     if (ret != 0) {
         return ret;
     }
@@ -484,7 +505,109 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
               seq + 1); // reqHead[q] 推进
     return 0;
 }
+struct EpochBudget {
+    bool resident;
+    uint64_t heartbeatTicks;
+    uint64_t deadlineNs;
+};
+
+int32_t readMonotonicNs(uint64_t &now)
+{
+    timespec ts{};
+    // 使用系统调用，避免libc的VDSO路径读取当前AICPU环境不可用的计数寄存器。
+    if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) != 0)
+        return 1370;
+    now = static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
+    return 0;
+}
+
+int32_t initEpochBudget(const ock::mf::HybmSdmaOrchParam *p, EpochBudget &budget)
+{
+    using namespace ock::mf;
+    budget = {};
+    budget.resident = p->epochBudgetS == HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT;
+    if (budget.resident)
+        return 0;
+    const uint32_t seconds = p->epochBudgetS ? p->epochBudgetS : HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S;
+    uint64_t now = 0;
+    if (readMonotonicNs(now) != 0)
+        return 1370;
+    budget.heartbeatTicks = static_cast<uint64_t>(seconds) * HYBM_SDMA_ORCH_HEARTBEAT_HZ;
+    budget.deadlineNs = now + static_cast<uint64_t>(seconds) * 1000000000ULL;
+    return 0;
+}
+
+// 返回0继续运行，1表示预算到期，负值表示时钟读取失败。
+int32_t checkEpochBudget(const volatile ock::mf::HybmSdmaOrchResult *result, const EpochBudget &budget, uint64_t loop)
+{
+    if (budget.resident)
+        return 0;
+    if (LoadHeartbeat(result) >= budget.heartbeatTicks)
+        return 1;
+    if (loop % ock::mf::HYBM_SDMA_ORCH_EPOCH_CLOCK_INTERVAL != 0)
+        return 0;
+    uint64_t now = 0;
+    if (readMonotonicNs(now) != 0)
+        return -1370;
+    return now >= budget.deadlineNs ? 1 : 0;
+}
+
 } // namespace
+
+namespace {
+uint32_t verifyDeployBytes(const ock::mf::HybmSdmaDeployCheck &p, uint64_t &compared)
+{
+    FILE *file = fopen(p.path, "rb");
+    if (file == nullptr) {
+        return 3;
+    }
+    uint32_t status = 0;
+    alignas(64) unsigned char chunk[4096];
+    while (compared < p.expectedSize) {
+        const size_t want = p.expectedSize - compared < sizeof(chunk) ? p.expectedSize - compared : sizeof(chunk);
+        if (fread(chunk, 1, want, file) != want) {
+            status = 4;
+            break;
+        }
+        const uintptr_t expected = p.expectedAddr + compared;
+        for (uintptr_t line = expected & ~uintptr_t(63); line < expected + want; line += 64) {
+            cacheInvalidateLine(line);
+        }
+        memBarrier();
+        if (memcmp(chunk, reinterpret_cast<const void *>(expected), want) != 0) {
+            status = 5;
+            break;
+        }
+        compared += want;
+    }
+    if (status == 0 && (fgetc(file) != EOF || ferror(file))) {
+        status = 4;
+    }
+    fclose(file);
+    return status;
+}
+} // namespace
+
+extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaVerifyDeploy(void *args)
+{
+    const auto &p = *static_cast<ock::mf::HybmSdmaDeployCheck *>(args);
+    auto *result = reinterpret_cast<ock::mf::HybmSdmaDeployResult *>(p.resultAddr);
+    result->nonce = p.nonce;
+    result->compared = 0;
+    result->reserved = 0;
+    if (p.expectedSize == 0) {
+        struct stat st {};
+        errno = 0;
+        bool targetGone = lstat(p.path, &st) == -1 && errno == ENOENT;
+        result->status = targetGone ? 0 : 6;
+    } else {
+        result->status = verifyDeployBytes(p, result->compared);
+    }
+    cacheFlushLine(p.resultAddr & ~uintptr_t(63));
+    cacheFlushLine((p.resultAddr + sizeof(*result) - 1) & ~uintptr_t(63));
+    memBarrier();
+    return 0;
+}
 
 // kernel 入口: 按序消费请求环邮件(诊断模式跑到停止/错误; 正常模式到点自退)。
 // 返回 0 正常退出(停止); 1 错误退出(诊断见 result)。
@@ -512,59 +635,29 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         return 1;
     }
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
-    /* 寄存器同步唤醒装载: regBase 数组(10×u64, host H2D 后的设备地址; commByReg=0 时为 null 走 GM)。
-     * 唤醒正确性不依赖寄存器: 每 kCondForceScan 次空转强制全扫 GM 兜底(set_cond 丢失时不挂死)。 */
-    const volatile uint64_t *regBaseArr = (p->commByReg != 0 && p->regBaseAddr != 0)
-        ? reinterpret_cast<const volatile uint64_t *>(p->regBaseAddr)
-        : nullptr;
-    uint64_t lastCond[REG_ORCH_CORES] = {0}; // 上次各核 COND 采样(变化即活动)
-    constexpr uint32_t kCondForceScan = 4096;  // 空转兜底强扫周期(防止唤醒信号丢失)
-    uint32_t idleSpins = 0;                    // 连续空转计数(有消费即清零)
     /* 每队列消费起点(v31: 队列按对端×block 划分, 各队列独立游标持久于保留区, 换轮零丢失) */
     uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT];
     for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
         heads[q] = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
     }
-    /* 报时预算(v11): 永不退出的专用值不判报时(诊断模式); 0 用默认 15s(兼容旧 host);
-     * 到 budgetS×10 跳自退——host 每 100ms 写一次递增计数, 精度 100ms, 不受设备负载影响。
-     * 循环上限保留兜底(报时停喂时防永跑, 名额按 15s 预算折算)。 */
-    const bool resident = (p->epochBudgetS == HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
-    const uint32_t budgetS =
-        (p->epochBudgetS == 0) ? HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S : p->epochBudgetS;
-    const uint64_t budgetTicks = static_cast<uint64_t>(budgetS) * HYBM_SDMA_ORCH_HEARTBEAT_HZ;
-    const uint64_t maxLoops = resident ? UINT64_MAX
-        : (static_cast<uint64_t>(HYBM_SDMA_ORCH_EPOCH_MAX_LOOPS) * budgetS +
-           HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S - 1) / HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S;
+    EpochBudget budget{};
+    if (initEpochBudget(p, budget) != 0) {
+        result->mainRet = 1370;
+        result->exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
+        finishResult(result);
+        return 1;
+    }
     constexpr uint32_t kDoorbellBatch = 8; // 攒批上限(环内积压时 N 封一铃降 HAL 开销; 单封场景批=1)
-    for (uint64_t loops = 0; loops < maxLoops; loops++) {
-        if (!resident && LoadHeartbeat(result) >= budgetTicks) {
-            result->exitReason = HYBM_SDMA_ORCH_EXIT_DEADLINE; // 时限到点(正常换轮)
+    for (uint64_t loops = 0;; ++loops) {
+        const int32_t state = checkEpochBudget(result, budget, loops);
+        if (state != 0) {
+            result->mainRet = state < 0 ? 1370 : 0;
+            result->exitReason = state < 0 ? HYBM_SDMA_ORCH_EXIT_ERROR : HYBM_SDMA_ORCH_EXIT_DEADLINE;
             break;
         }
         if (loadCell(p->stopAddr) != 0) { // 停止标志(host 析构)
             result->exitReason = HYBM_SDMA_ORCH_EXIT_STOP;
             break;
-        }
-        /* commByReg 空闲唤醒: 空转中(idleSpins>0)只读 10 核 COND(MMIO, 免 GM 全队列 dcci),
-         * 任一核 COND 变化即扫 GM 游标; 连续 kCondForceScan 次无变化强制扫 GM 兜底
-         * (唤醒信号丢失/未启用 set_cond 时退化为纯 GM 轮询, 不挂死)。 */
-        if (regBaseArr != nullptr && idleSpins > 0) {
-            bool woken = false;
-            for (uint32_t c = 0; c < REG_ORCH_CORES; c++) {
-                const uint64_t v = AicpuReadReg64(regBaseArr[c] + REG_SPR_COND);
-                if (v != lastCond[c]) {
-                    lastCond[c] = v;
-                    woken = true;
-                }
-            }
-            if (!woken) {
-                if (idleSpins < kCondForceScan) {
-                    idleSpins++;
-                    usleep(HYBM_SDMA_ORCH_EPOCH_IDLE_US);
-                    continue;
-                }
-                idleSpins = 0; // 兜底: 强制本轮 GM 全扫
-            }
         }
         uint32_t batch = 0;
         bool errored = false;
@@ -601,11 +694,8 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
             break;
         }
         if (batch == 0) { // 全环空(扫描一轮零消费)
-            idleSpins++; // commByReg: 进入空闲等待(下一轮经 COND 判定是否再扫)
-            usleep(HYBM_SDMA_ORCH_EPOCH_IDLE_US);
             continue;
         }
-        idleSpins = 0; // 有消费: 退出空闲等待(满批退出时环内可能仍有积压, 不等 COND 直接续扫)
         ret = flushBatchDoorbell(p, &ctx); // 批末统一敲铃
         if (ret != 0) {
             result->mainRet = static_cast<uint32_t>(ret);
@@ -618,28 +708,4 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     result->headAfter = headA;
     finishResult(result);
     return (result->exitReason == HYBM_SDMA_ORCH_EXIT_ERROR) ? 1 : 0;
-}
-
-/* ---- CANN extend lib loader 入口同名导出 ----
- * pypto 机制: host 把本 so 字节经 DeviceArgs.aicpuSoBin 传给 CP1 预加载的
- * libaicpu_extend_kernels.so, 其 DynTileFwkKernelServerInit 在 CP1 内 memfd 加载本 so
- * 并 dlsym 下列三个固定符号填函数表; 之后 DynTileFwkKernelServer 在 CP1 内分发到
- * funcKey 3. 这样 kernel 与 CP1 同进程, halSqCqQuery/Config(SQ 活查询/doorbell)可用.
- * 参数经 DeviceKernelArgs.cfgdata(偏移 40) 传入 HybmSdmaOrchParam 设备指针. */
-extern "C" __attribute__((visibility("default"))) uint32_t StaticTileFwkBackendKernelServer(void *args)
-{
-    (void)args;
-    return 0;
-}
-
-extern "C" __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServerInit(void *args)
-{
-    (void)args;
-    return 0;
-}
-
-extern "C" __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServer(void *args)
-{
-    void *param = *reinterpret_cast<void **>(reinterpret_cast<char *>(args) + 40); // cfgdata
-    return HybmSdmaOrchEpoch(param);
 }
