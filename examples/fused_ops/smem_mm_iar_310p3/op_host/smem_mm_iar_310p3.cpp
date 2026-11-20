@@ -4,6 +4,17 @@
 
 
 namespace optiling {
+// TilingFunc：把宿主传入的 7 个 int64 属性原样转存进 tiling 结构，并做
+// 协议契约校验（校验不过直接返回失败，kernel 不会被发射）。本算子的几何
+// 参数全部来自宿主调用方（会话层已建好对称池），tiling 阶段不自行计算
+// 切分，因此 workspace 尺寸为 0、BlockDim 固定为 15（8 个 Cube 核做矩阵乘
+// + 7 个 Vector 核做通信调度、尾部拷出与完成通知排空）。其余协议参数
+//（SDMA 包长 1MiB、通信子组 1024 行、矩阵乘 8 核）已固化为 kernel 编译期
+// 常量，不再经属性传入。
+// 校验项（常量同源于 tiling.h 布局推导段，唯一事实源）：
+//   行数 kRowsAlign 对齐且在 [kMinRows, kMaxRows] 内；
+//   池单侧 symm >= kPoolFloor（建池下限由算子自身规格推导，不满足在
+//   tiling 期即拒，不再等到 kernel 内 Trap）。
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
   SmemMmIar310p3TilingData *tiling = context->GetTilingData<SmemMmIar310p3TilingData>();
@@ -11,32 +22,28 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
   if (attrs == nullptr) {
     return ge::GRAPH_FAILED;
   }
-  const int64_t* v[13] = {};
-  for (size_t i = 0; i < 13; ++i) {
+  const int64_t* v[7] = {};
+  for (size_t i = 0; i < 7; ++i) {
     v[i] = attrs->GetInt(i);
     if (v[i] == nullptr) {
       return ge::GRAPH_FAILED;
     }
   }
   tiling->gva = static_cast<uint64_t>(v[0][0]);
-  tiling->peerGva = static_cast<uint64_t>(v[1][0]);
-  tiling->symm = static_cast<uint64_t>(v[2][0]);
-  tiling->ibPtr = static_cast<uint64_t>(v[3][0]);
-  tiling->statusPtr = static_cast<uint64_t>(v[4][0]);
-  tiling->tracePtr = static_cast<uint64_t>(v[5][0]);
-  tiling->rank = static_cast<uint32_t>(v[6][0]);
-  tiling->epoch = static_cast<uint32_t>(v[7][0]);
-  tiling->packet = static_cast<uint32_t>(v[8][0]);
-  tiling->rows = static_cast<uint32_t>(v[9][0]);
-  tiling->commRows = static_cast<uint32_t>(v[10][0]);
-  tiling->aicCount = static_cast<uint32_t>(v[11][0]);
-  tiling->enabled = static_cast<uint32_t>(v[12][0]);
-  // 去 pad 契约：rows%256==0 + [1024,4096]（4096 = work 区 16MiB 上限），
-  // 部分尾组/末子组原生支持；commRows 仅 1024/512 两档。
-  if ((tiling->commRows != 1024 && tiling->commRows != 512) ||
-      tiling->rows % 256 != 0 || tiling->rows < 1024 || tiling->rows > 4096 ||
-      (tiling->rows + tiling->commRows - 1) / tiling->commRows > 8 ||
-      tiling->aicCount != 8) {
+  tiling->symm = static_cast<uint64_t>(v[1][0]);
+  tiling->statusPtr = static_cast<uint64_t>(v[2][0]);
+  tiling->tracePtr = static_cast<uint64_t>(v[3][0]);
+  tiling->rank = static_cast<uint32_t>(v[4][0]);
+  tiling->epoch = static_cast<uint32_t>(v[5][0]);
+  tiling->rows = static_cast<uint32_t>(v[6][0]);
+  // 去除填充的契约校验：末尾组/末子组允许不足整组行数。
+  if (tiling->rows % kRowsAlign != 0 || tiling->rows < kMinRows
+      || tiling->rows > kMaxRows) {
+    return ge::GRAPH_FAILED;
+  }
+  // 建池下限校验：对称池单侧必须容纳完整布局（work + scratch + 控制区
+  // + seats，见 tiling.h 布局推导段）。
+  if (tiling->symm < kPoolFloor) {
     return ge::GRAPH_FAILED;
   }
   context->SetBlockDim(15);
@@ -48,6 +55,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 
 
 namespace ge {
+// InferShape：输出 y 与输入 x 同形状（y = AllReduce(x @ w^T)，矩阵乘不改变行数，
+// 列数 K 与 N 相等且都为 2048，故形状直接透传）。
 static ge::graphStatus InferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* x_shape = context->GetInputShape(0);
@@ -55,6 +64,7 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
     *y_shape = *x_shape;
     return GRAPH_SUCCESS;
 }
+// InferDataType：输出 y 与输入 x 同数据类型（fp16）。
 static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
 {
     const auto inputDataType = context->GetInputDataType(0);
@@ -71,6 +81,9 @@ namespace ops {
 //   aclnnSmemMmIar310p3 / aclnnSmemMmIar310p3GetWorkspaceSize。
 // 目录/文件/kernel 入口（smem_mm_iar310p3）/torch op
 //（npu_smem_mm_iar_310p3）/vendor（smem_mm_iar_310p3）保持 snake_case。
+// 算子定义：x/w 为输入、y 为预分配输出，7 个 int64 属性承载对称池与协议
+// 参数（含义见 smem_mm_iar_310p3_tiling.h 的字段注解；SDMA 包长/通信子组
+// 行数/矩阵乘核数为 kernel 编译期常量；组完成通知数组在池内 seats 区）。
 class SmemMmIar310p3 : public OpDef {
 public:
     explicit SmemMmIar310p3(const char* name) : OpDef(name)
@@ -92,18 +105,12 @@ public:
             .UnknownShapeFormat({ge::FORMAT_ND});
 
         this->Attr("gva").AttrType(REQUIRED).Int();
-        this->Attr("peerGva").AttrType(REQUIRED).Int();
         this->Attr("symm").AttrType(REQUIRED).Int();
-        this->Attr("ibPtr").AttrType(REQUIRED).Int();
         this->Attr("statusPtr").AttrType(REQUIRED).Int();
         this->Attr("tracePtr").AttrType(REQUIRED).Int();
         this->Attr("rank").AttrType(REQUIRED).Int();
         this->Attr("epoch").AttrType(REQUIRED).Int();
-        this->Attr("packet").AttrType(REQUIRED).Int();
         this->Attr("rows").AttrType(REQUIRED).Int();
-        this->Attr("commRows").AttrType(REQUIRED).Int();
-        this->Attr("aicCount").AttrType(REQUIRED).Int();
-        this->Attr("enabled").AttrType(REQUIRED).Int();
 
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
 

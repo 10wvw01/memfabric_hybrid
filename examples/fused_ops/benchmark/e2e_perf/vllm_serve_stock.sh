@@ -20,7 +20,9 @@ unset ASCEND_RT_VISIBLE_DEVICES
 # Do NOT use ASCEND_RT_VISIBLE_DEVICES here: the remapping makes the smem
 # library see logical ids 0/1, which selects the (asymmetric) device-0
 # window layout and breaks the symmetric pool ("import gva out of window").
-export VLLM_ASCEND_DEVICE_OFFSET=4
+# Workers land on physical devices via the 310P worker device offset
+# (default 4/5; override VLLM_ASCEND_DEVICE_OFFSET for other die pairs).
+export VLLM_ASCEND_DEVICE_OFFSET=${VLLM_ASCEND_DEVICE_OFFSET:-4}
 export MF_SDMA_ORCH_DEPLOY_HELPER=$MFOUT/../tools/aicpu_kernel_deploy/orch_deploy_helper
 export MF_SDMA_ORCH_JSON=$MFOUT/hybm/aicpu_kernel/libmf_sdma_orch_v28.json
 export MEMFABRIC_HYBRID_HOME_PATH=$MFOUT

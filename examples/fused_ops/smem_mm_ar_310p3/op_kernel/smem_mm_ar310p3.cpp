@@ -1,162 +1,46 @@
-// smem_mm_ar310p3 on dav-m200（Ascend 310P3）: TP2 MatMul + AllReduce 通算融合算子
-//（本地归约版。研发期工程名 smem_mm_ar_inline_reduce flavor 10，收尾规整改名
-//  SmemMmAr310p3 / smem_mm_ar310p3；协议逻辑与本仓锁定版本逐字一致）。
-//
-// 结构（一次调用 = 一批 1024 行的调度批次，rows 为 256 对齐的任意 [1024,4096]）：
-//   AIC 侧（block 0..7）：8 核纯矩阵乘座位生产——MM 结果写对称池 work 区，
-//                         尾组实属性行数不足 1024 时 pad 切片核整片跳过，
-//                         组完成通知（座位）无条件发布；
-//   AIV 侧（block 8）   ：通信调度器——逐组等本端座位齐 → 把本端组数据全量
-//                         COPY 进对端 scratch 区 → 发 8 字节就绪旗标 → 排空
-//                         本端完成通知 → 等对端旗标（对端组已落入我 scratch）；
-//   AIV 侧（block 9..12）：4 条本地归约加法车道——逐组轮询对端 peerRdy 旗标 →
-//                         work+scratch 相加 → 直写 y。
-// 无标量 GM 访问：全部 GM 流量经 MTE（DataCopy + UB 暂存）。
+// smem_mm_ar310p3：TP2（两卡各持权重一半）下的 MatMul + AllReduce 融合算子，
+// 本地归约版，运行于 dav-m200（Ascend 310P3）。
+// 一次调用处理 rows 行（256 对齐，[1024,4096]），每 1024 行为一个通信组：
+//   block 0..7   Cube 矩阵乘段（fused_matmul）：结果写池内 work 区，本核
+//                切片完成后无条件发布组完成通知；
+//   block 8      通信调度器：逐组等本端通知齐 → 组数据复制进对端 scratch →
+//                发 8B 就绪标记 → 排空完成通知并确认对端标记；
+//   block 9..12  归约加法分支：逐组轮询对端就绪标记 → work 与 scratch 相加
+//                → 直接写 y；
+//   block 13/14  空闲退出（BlockDim=15）。
+// 文件分层：smem_mm_ar_310p3_tiling.h 池布局（唯一事实源）/
+// smem_mm_ar_310p3_protocol.h 协议常量 / smem_mm_ar_310p3_transport.h 传输
+// 原语 / 本文件三侧编排。全局内存流量一律经 MTE 搬运，不做标量访问。
 #include "kernel_operator.h"
 #include "lib/matmul/matmul_intf.h"
-#include "smem_mm_ar_310p3_tiling.h"
-#include "smem_shm_aicore_base_sdma.h"
+#include "smem_mm_ar_310p3_transport.h"
 
-namespace {
+// 显式文件级 using：AscendC 名字由头文件提供，协议名字由 ar310p3_kernel 提供。
 using namespace AscendC;
+using namespace ar310p3_kernel;
 
-constexpr uint32_t kCores = 8;
-constexpr uint32_t kWidth = 2048;
-constexpr uint64_t kRowBytes = kWidth * 2ULL;
-constexpr uint32_t kCommRows = 1024;
-constexpr uint32_t kMmCoreRows = kCommRows / kCores;
-constexpr uint64_t kGroupBytes = kCommRows * kRowBytes;
-constexpr uint64_t kIbBytes = 8192;
-constexpr uint64_t kDataBytes = 16ULL << 20;
-constexpr uint64_t kScratchOff = kDataBytes;
-constexpr uint64_t kScratchBytes = kDataBytes;
-constexpr uint64_t kCtrlSrcOff = kScratchOff + kScratchBytes;
-constexpr uint64_t kCtrlDstOff = kCtrlSrcOff + 64;
-constexpr uint64_t kPeerRdyOff = kCtrlSrcOff + 512;
-constexpr uint64_t kReadyOff = kCtrlSrcOff + 1024;
-constexpr uint64_t kSumOff = kCtrlSrcOff + 2048;
-constexpr uint32_t kTraceBytes = 4096;
-constexpr uint32_t kTraceU64 = kTraceBytes / 8;
-constexpr uint64_t kTraceMagic = 0x4D325431ULL;
-constexpr uint32_t kTraceHeader = 16;
-constexpr uint32_t kTraceCoreStride = 16;
-constexpr uint32_t kTraceSchedBase = kTraceHeader + kCores * kTraceCoreStride;
-enum Phase : uint32_t { READY = 1, REDUCE = 2, GATHER = 3 };
-
-__aicore__ inline uint64_t DeviceTag(uint32_t phase, uint32_t epoch, uint32_t group, uint32_t packet)
-{
-    return (uint64_t{phase} << 36) | (uint64_t{epoch} << 12) | (uint64_t{group} << 6) | packet;
-}
-
-__aicore__ inline void Flush(__gm__ uint8_t* valid)
-{
-    GlobalTensor<int32_t> fence;
-    fence.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(valid), 16);
-    DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE>(fence);
-}
-
-__aicore__ inline void Check(bool ok, __gm__ uint8_t* status, uint64_t code)
-{
-    if (ok) return;
-    *reinterpret_cast<__gm__ volatile uint64_t*>(status) = code;
-    Flush(status);
-    Trap();
-}
-
-struct Transport {
-    __gm__ uint8_t *res, *work, *peer, *status;
-    uint32_t epoch, packet;
-
-    __aicore__ inline void Send2(uint32_t phase, uint32_t group, uint64_t srcOff, uint64_t dstOff,
-                                 uint64_t bytes, smem_shm_sdma_op_t op)
-    {
-        for (uint64_t b = 0; b < bytes; b += packet) {
-            const uint64_t n = bytes - b < packet ? bytes - b : packet;
-            Check(smem_shm_sdma_signal_at(res, work + srcOff + b, peer + dstOff + b, n,
-                  DeviceTag(phase, epoch, group, static_cast<uint32_t>(b / packet)), op), status, 102);
-        }
-    }
-};
-
-// Poll a range of seat slots of one MM group through MTE (no scalar GM
-// reads). Slot k of group g lives at flags + g*512 + k*64; its epoch value
-// is the first u32 of the slot. Returns poll iterations spent waiting.
-__aicore__ inline uint32_t WaitSeats(LocalTensor<int64_t>& poll, __gm__ uint8_t* flags, uint32_t group,
-                                     uint32_t firstSlot, uint32_t count,
-                                     uint32_t epoch, __gm__ uint8_t* status, uint64_t code)
-{
-    GlobalTensor<int64_t> fg;
-    fg.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(flags + uint64_t{group} * 512), 64);
-    uint32_t spins = 0, delay = 32;
-    while (true) {
-        DataCopy(poll, fg, 64);
-        uint32_t ok = 1;
-        for (uint32_t c = 0; c < count; ++c) {
-            if (static_cast<uint32_t>(poll.GetValue((firstSlot + c) * 8)) != epoch) {
-                ok = 0;
-                break;
-            }
-        }
-        if (ok) return spins;
-        Check(++spins < 100000000, status, code);
-        for (uint32_t i = 0; i < delay; ++i) __asm__ __volatile__("" ::: "memory");
-        if ((spins & 255u) == 0 && delay < 1024) delay <<= 1;
-    }
-}
-
-// 去 pad 契约：MM 组 g 的实属性行数（尾组 < 1024；rows%256 ⟹ 实属性行数为
-// 128 行切片的整数倍 ⇒ 每核切片整实或整 pad，pad 切片核可整片跳过）。
-__aicore__ inline uint32_t RealRowsInGroup(uint32_t rows, uint32_t g)
-{
-    const uint32_t lo = g * kCommRows;
-    return lo + kCommRows <= rows ? kCommRows : rows - lo;
-}
-
-// 去 pad 契约：MM 组 g 的实字节（组基址 = g*kGroupBytes 不变，仅缩长度）。
-__aicore__ inline uint64_t GroupBytesOf(uint32_t rows, uint32_t g)
-{
-    return uint64_t{RealRowsInGroup(rows, g)} * kRowBytes;
-}
-}
-
-extern "C" __global__ __aicore__ void smem_mm_ar310p3(GM_ADDR x, GM_ADDR w, GM_ADDR y,
-                                                       GM_ADDR workspace, GM_ADDR tiling)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_VECTOR_CORE);
-    REGISTER_TILING_DEFAULT(SmemMmAr310p3TilingData);
-    GET_TILING_DATA(td, tiling);
-
-    __gm__ uint8_t* gva = reinterpret_cast<__gm__ uint8_t*>(td.gva);
-    const uint64_t symm = td.symm;
-    const uint32_t rank = td.rank;
-    const uint32_t epoch = td.epoch;
-    const uint32_t packet = td.packet;
-    const uint32_t rows = td.rows;
-    const uint32_t aicCount = td.aicCount;
-    __gm__ uint8_t* status = reinterpret_cast<__gm__ uint8_t*>(td.statusPtr);
-    __gm__ uint8_t* trace = reinterpret_cast<__gm__ uint8_t*>(td.tracePtr);
-
-    if (td.enabled == 0) {
-        // 会话预热波：不执行任何协议动作，直接返回（调用方在首波前以
-        // enabled=0 发射一次并做双端 barrier，用于初始化设备侧资源）。
-        return;
-    }
-
-    // 契约：rows%256==0 + 1024≤rows≤4096（4096 = work 区 16MiB 上限）。
-    // 本地归约协议支持部分尾组/末子组（去 pad 契约，原生 M 直传）。
-    Check((td.commRows == kCommRows || td.commRows == kCommRows / 2) &&
-          rows % 256 == 0 && rows >= kCommRows && rows <= 4 * kCommRows &&
-          symm >= kSumOff + kDataBytes &&
-          packet >= 512 && packet <= (4u << 20) && packet % 512 == 0, status, 1);
-
-    __gm__ uint8_t* work = gva + symm * rank;
-    __gm__ uint8_t* peer = gva + symm * (1 - rank);
-    __gm__ uint8_t* flags = reinterpret_cast<__gm__ uint8_t*>(td.ibPtr) + kIbBytes;
-    const uint32_t groups = (rows + kCommRows - 1) / kCommRows;   // 尾组可部分行
+namespace ar310p3_kernel {
 
 #ifdef __DAV_CUBE__
+// Cube 侧（block 0..7）矩阵乘段：逐组把本核 128 行切片与全量权重相乘写进
+// work 区。行数对齐/范围、池下限等契约由 op_host 在 tiling 期前置校验并拒绝
+// 发射，kernel 侧不重复检查。
+__aicore__ inline void fused_matmul(const SmemMmAr310p3TilingData& tilingData, GM_ADDR x, GM_ADDR w)
+{
+    // rank 0/1 各占池的一半连续区间：work = 池 + rank*symmBytes。
+    __gm__ uint8_t* poolGva = reinterpret_cast<__gm__ uint8_t*>(tilingData.gva);
+    const uint64_t symmBytes = tilingData.symm;
+    const uint32_t epoch = tilingData.epoch;
+    const uint32_t rows = tilingData.rows;
+    __gm__ uint8_t* trace = reinterpret_cast<__gm__ uint8_t*>(tilingData.tracePtr);
+    __gm__ uint8_t* work = poolGva + symmBytes * tilingData.rank;
+    __gm__ uint8_t* seats = work + kSeatsOff;
+    const uint32_t groups = (rows + kCommRows - 1) / kCommRows;   // 末尾组可不足整组
+
     const uint32_t core = static_cast<uint32_t>(GetBlockIdx());
     if (core >= kCores) return;
+    // 静态配置：A 激活 ND、B 权重 NZ 且转置、C 输出 ND，每核切片 128×2048×2048；
+    // tiling 编译期由 Matmul 组件按 L1 容量生成，运行时只填 usedCoreNum。
     using MvA = MatmulType<TPosition::GM, CubeFormat::ND, float16_t, false>;
     using MvB = MatmulType<TPosition::GM, CubeFormat::NZ, float16_t, true>;
     using MvC = MatmulType<TPosition::GM, CubeFormat::ND, float16_t, false>;
@@ -168,6 +52,7 @@ extern "C" __global__ __aicore__ void smem_mm_ar310p3(GM_ADDR x, GM_ADDR w, GM_A
     constexpr MatmulShapeParams kShape = {kMmCoreRows, kWidth, kWidth, 128, 256, 64};
     constexpr MatmulConfig kCfg = GetMMConfig<MatmulConfigMode::CONFIG_NORM>(kShape, kQuant, kBatch, kFunc);
     constexpr static MatmulApiStaticTiling kTiling = GetMatmulApiTiling<MvA, MvB, MvC, MvBias>(kCfg, Impl::L1_SIZE);
+    // mmBuf 是 Matmul 工作区，ioBuf 是组完成通知写入暂存。
     TPipe pipe;
     TBuf<TPosition::VECCALC> mmBuf;
     TBuf<TPosition::VECCALC> ioBuf;
@@ -182,155 +67,181 @@ extern "C" __global__ __aicore__ void smem_mm_ar310p3(GM_ADDR x, GM_ADDR w, GM_A
     Matmul<MvA, MvB, MvC, MvBias, kTiling> mm;
     REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mm, &runtime);
     mm.SetLocalWorkspace(mmBuf.Get<uint8_t>());
-    LocalTensor<int64_t> io = ioBuf.Get<int64_t>();
-    GlobalTensor<int64_t> tg;
-    tg.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(trace), kTraceU64);
-    GlobalTensor<float16_t> wg;
-    wg.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(w), kWidth * kWidth);
+    LocalTensor<int64_t> ub = ioBuf.Get<int64_t>();
+    GlobalTensor<int64_t> traceGm;
+    traceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(trace), kTraceU64);
+    GlobalTensor<float16_t> weightGm;
+    weightGm.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(w), kWidth * kWidth);
     constexpr uint32_t kSliceRows = kMmCoreRows;
     constexpr uint64_t kSliceBytes = kSliceRows * kRowBytes;
-    for (uint32_t g = 0; g < groups; ++g) {
-        const uint64_t off = g * kGroupBytes + core * kSliceBytes;
-        // 去 pad 契约：尾组实属性行数 < 1024 时 pad 切片核跳 MM（x 无 pad 行，
-        // 读越界）；座位无条件发布（pad 座位缺席即死等）。
-        if (core * kMmCoreRows < RealRowsInGroup(rows, g)) {
-            GlobalTensor<float16_t> ag, cg;
-            ag.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(x + off), kSliceRows * kWidth);
-            cg.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(work + off), kSliceRows * kWidth);
-            mm.SetTensorA(ag, false);
-            mm.SetTensorB(wg, true);
+    // 逐组矩阵乘：本核切片位于组基址偏移 core*kSliceBytes。
+    for (uint32_t group = 0; group < groups; ++group) {
+        const uint64_t offset = group * kGroupBytes + core * kSliceBytes;
+        // 去填充契约：切片完全落在末尾组填充区则跳过（x 无填充行，读会越界）；
+        // 组完成通知在下方无条件发布——调度器固定等 8 个通知，缺一个即死等。
+        if (core * kMmCoreRows < real_rows_in_group(rows, group)) {
+            GlobalTensor<float16_t> actGm, mmOutGm;
+            actGm.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(x + offset), kSliceRows * kWidth);
+            mmOutGm.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(work + offset), kSliceRows * kWidth);
+            mm.SetTensorA(actGm, false);
+            mm.SetTensorB(weightGm, true);
             mm.SetOrgShape(kSliceRows, kWidth, kWidth, kWidth, kWidth);
-            mm.IterateAll(cg);
-            Flush(work + off);
+            mm.IterateAll(mmOutGm);
+            // 写完必须刷缓存，调度器与归约分支才能经 MTE 读到新数据。
+            flush(work + offset);
         }
-        io.SetValue(0, static_cast<int64_t>(epoch));
-        GlobalTensor<int64_t> slot;
-        slot.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(flags + uint64_t{g * kCores + core} * 64), 8);
-        DataCopy(slot, io, 8);
-        io.SetValue(8 + g, static_cast<int64_t>(0xA1C00000ULL | (uint64_t{core} << 8) | g));
+        // 组完成通知：本批次 epoch 经 MTE 写进本核槽位（槽布局见 protocol.h）。
+        ub.SetValue(0, static_cast<int64_t>(epoch));
+        GlobalTensor<int64_t> slotGm;
+        slotGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(
+            seats + uint64_t{group * kCores + core} * kFlagSlotBytes), kFlagSlotQwords);
+        DataCopy(slotGm, ub, kFlagSlotQwords);
+        // 诊断标记：记录本核参与了哪一组（写 trace）。
+        ub.SetValue(8 + group, static_cast<int64_t>(0xA1C00000ULL | (uint64_t{core} << 8) | group));
     }
-    DataCopy(tg[kTraceHeader + core * kTraceCoreStride], io[8], kTraceCoreStride);
+    DataCopy(traceGm[kTraceHeader + core * kTraceCoreStride], ub[8], kTraceCoreStride);
+}
 #else
-    (void)x;
-    (void)w;
+// Vector 侧（block 8..12）AllReduce 段。
+__aicore__ inline void allreduce(const SmemMmAr310p3TilingData& tilingData, GM_ADDR y, GM_ADDR workspace)
+{
     (void)workspace;
+    // 本端 work = 池 + rank*symmBytes，对端 peer = 池 + (1-rank)*symmBytes；
+    // status 供运行期失败写错误码（仅 Vector 侧使用）。
+    __gm__ uint8_t* poolGva = reinterpret_cast<__gm__ uint8_t*>(tilingData.gva);
+    const uint64_t symmBytes = tilingData.symm;
+    const uint32_t rank = tilingData.rank;
+    const uint32_t epoch = tilingData.epoch;
+    const uint32_t rows = tilingData.rows;
+    __gm__ uint8_t* status = reinterpret_cast<__gm__ uint8_t*>(tilingData.statusPtr);
+    __gm__ uint8_t* trace = reinterpret_cast<__gm__ uint8_t*>(tilingData.tracePtr);
+    __gm__ uint8_t* work = poolGva + symmBytes * rank;
+    __gm__ uint8_t* peer = poolGva + symmBytes * (1 - rank);
+    __gm__ uint8_t* seats = work + kSeatsOff;
+    const uint32_t groups = (rows + kCommRows - 1) / kCommRows;   // 末尾组可不足整组
+
     const uint32_t globalIdx = static_cast<uint32_t>(GetBlockIdx());
-    const uint32_t localIdx = globalIdx >= aicCount ? globalIdx - aicCount : 0;
-    // AIV 角色布局：block 8 = 通信调度器，block 9..12 = 4 条本地归约加法车道
-    //（block 13/14 空闲退出）。BlockDim = 15。
+    const uint32_t localIdx = globalIdx >= kCores ? globalIdx - kCores : 0;
     if (localIdx >= 5u) return;
+    // 公共准备：轮询暂存 poll、时间戳暂存 stamps、SDMA 传输对象。
     TPipe pipe;
     TBuf<TPosition::VECCALC> ioBuf;
     pipe.InitBuffer(ioBuf, 1024);
-    LocalTensor<int64_t> io = ioBuf.Get<int64_t>();
-    LocalTensor<int64_t> poll = io[0];
-    LocalTensor<int64_t> stamps = io[64];
-    GlobalTensor<int64_t> tg;
-    tg.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(trace), kTraceU64);
-    Transport t{smem_shm_sdma_reserved(gva), work, peer, status, epoch, packet};
+    LocalTensor<int64_t> ub = ioBuf.Get<int64_t>();
+    LocalTensor<int64_t> poll = ub[0];
+    LocalTensor<int64_t> stamps = ub[64];
+    GlobalTensor<int64_t> traceGm;
+    traceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(trace), kTraceU64);
+    Transport transport{smem_shm_sdma_reserved(poolGva), work, peer, status, epoch, kPacket};
     if (localIdx >= 1) {
-        // ------------- 本地归约加法车道 l（block 9..12）-------------
-        // 车道 l 负责每组内 256 行切片：轮询对端 peerRdy[g]（对端组 g 数据已
-        // 落入我 scratch；早于调度器的 ready 确认门）→ work+scratch 相加 →
-        // 直写 y。AIC 侧为纯 MM——归约加法从 AIC 加尾移到 AIV 车道，AIC 腿
-        // 不再被通信链尾的等门自旋钉死。
-        // 调度批次完成语义：kernel 退出 = 全部 block（含车道）完成 ⇒ 跨批次
-        // 安全性与 AIC 加尾结构等同（E2E 拓扑 AR + 同流串行既有论证不变）。
+        // ---------- 归约加法分支（block 9..12）----------
+        // 分支 lane 各负责每组数据的四分之一：轮询对端 peerRdy 标记 → work 与
+        // scratch 相加 → 写 y。Cube 只做矩阵乘，归约在 Vector 侧并行，Cube
+        // 时间不被通信链尾部的等标记空转拖长。
+        // 正确性：本分支对本端 work 无直接门——依赖双方矩阵乘同构 + 对端就绪
+        // 标记天然滞后于其搬运链（见标记 ⇒ 对端数据先落地）。
         const uint32_t lane = localIdx - 1;
         constexpr uint32_t kTailLanes = 4;
         constexpr uint32_t kAddElems = 8192;
         constexpr uint32_t kAddBytes = kAddElems * 2;
-        TQue<TPosition::VECIN, 2> in0, in1;
+        // workIn/peerIn 搬运输入块，outQ 存相加结果，各配 2 级队列做流水。
+        TQue<TPosition::VECIN, 2> workIn, peerIn;
         TQue<TPosition::VECOUT, 2> outQ;
-        pipe.InitBuffer(in0, 2, kAddBytes);
-        pipe.InitBuffer(in1, 2, kAddBytes);
+        pipe.InitBuffer(workIn, 2, kAddBytes);
+        pipe.InitBuffer(peerIn, 2, kAddBytes);
         pipe.InitBuffer(outQ, 2, kAddBytes);
         uint64_t spinSum = 0;
-        for (uint32_t g = 0; g < groups; ++g) {
-            GlobalTensor<int64_t> pf;
-            pf.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(
-                work + kPeerRdyOff + uint64_t{g} * 64), 8);
-            uint32_t spins = 0, delay = 32;
-            while (true) {
-                DataCopy(poll, pf, 8);
-                if (static_cast<uint32_t>(poll.GetValue(0)) == epoch) break;
-                Check(++spins < 100000000, status, 152);
-                for (uint32_t i = 0; i < delay; ++i) __asm__ __volatile__("" ::: "memory");
-                if ((spins & 255u) == 0 && delay < 1024) delay <<= 1;
-            }
-            spinSum += spins;
-            // 组 g 实字节四分（尾组部分行），基址 = 组内车道偏移不变。
-            const uint64_t laneBytes = GroupBytesOf(rows, g) / kTailLanes;
-            const uint64_t base = g * kGroupBytes + uint64_t{lane} * laneBytes;
-            GlobalTensor<float16_t> a, b, dst;
-            a.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(work + base),
+        // 逐组：等对端标记 → 分块相加写 y。y 与池内 work 布局逐字节对齐，
+        // 偏移可直接复用；分支内偏移从组基址起固定，末尾组只缩长度。
+        for (uint32_t group = 0; group < groups; ++group) {
+            spinSum += wait_peer_rdy(poll, work, group, epoch, status);
+            const uint64_t laneBytes = group_bytes_of(rows, group) / kTailLanes;
+            const uint64_t base = group * kGroupBytes + uint64_t{lane} * laneBytes;
+            GlobalTensor<float16_t> workGm, peerGm, dstGm;
+            workGm.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(work + base),
                               laneBytes / 2);
-            b.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(
+            peerGm.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(
                 work + kScratchOff + base), laneBytes / 2);
-            dst.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(
+            dstGm.SetGlobalBuffer(reinterpret_cast<__gm__ float16_t*>(
                 reinterpret_cast<uint64_t>(y) + base), laneBytes / 2);
-            for (uint64_t off = 0; off < laneBytes; off += kAddBytes) {
-                LocalTensor<float16_t> la = in0.AllocTensor<float16_t>();
-                LocalTensor<float16_t> lb = in1.AllocTensor<float16_t>();
-                DataCopy(la, a[off / 2], kAddElems);
-                DataCopy(lb, b[off / 2], kAddElems);
-                in0.EnQue(la); in1.EnQue(lb);
-                LocalTensor<float16_t> va = in0.DeQue<float16_t>();
-                LocalTensor<float16_t> vb = in1.DeQue<float16_t>();
+            // 每次搬 16KiB 进统一缓冲区，相加后直接写 y。
+            for (uint64_t offset = 0; offset < laneBytes; offset += kAddBytes) {
+                LocalTensor<float16_t> workTile = workIn.AllocTensor<float16_t>();
+                LocalTensor<float16_t> peerTile = peerIn.AllocTensor<float16_t>();
+                DataCopy(workTile, workGm[offset / 2], kAddElems);
+                DataCopy(peerTile, peerGm[offset / 2], kAddElems);
+                workIn.EnQue(workTile); peerIn.EnQue(peerTile);
+                LocalTensor<float16_t> workVal = workIn.DeQue<float16_t>();
+                LocalTensor<float16_t> peerVal = peerIn.DeQue<float16_t>();
                 LocalTensor<float16_t> out = outQ.AllocTensor<float16_t>();
-                Add(out, va, vb, kAddElems);
+                Add(out, workVal, peerVal, kAddElems);
                 outQ.EnQue(out);
                 LocalTensor<float16_t> result = outQ.DeQue<float16_t>();
-                DataCopy(dst[off / 2], result, kAddElems);
-                outQ.FreeTensor(result); in0.FreeTensor(va); in1.FreeTensor(vb);
+                DataCopy(dstGm[offset / 2], result, kAddElems);
+                outQ.FreeTensor(result); workIn.FreeTensor(workVal); peerIn.FreeTensor(peerVal);
             }
         }
+        // 本分支等待轮数写进 trace。
         poll.SetValue(0, static_cast<int64_t>(spinSum));
-        DataCopy(tg[kTraceSchedBase + 64 + lane], poll, 8);
+        DataCopy(traceGm[kTraceSchedBase + 64 + lane], poll, kFlagSlotQwords);
         return;
     }
-    // ------------- 通信调度器（block 8）：全交换协议 -------------
-    // 每端把整组数据 COPY 进对端 scratch 区（与对端 MM 无排序冲突：字节不
-    // 相交），归约加法在本地车道执行。无 READY 确认、无 GATHER 回传、无远端
-    // ADD。完成通知只落发送侧，故「对端组已落入我 scratch」信号 = 数据包后
-    // 紧随的 8 字节旗标搬运（orch 按发送方保序）；加法车道轮询该旗标。
-    const uint32_t myPhase = rank == 0 ? REDUCE : GATHER;
-    GlobalTensor<int64_t> myCtrl;
-    myCtrl.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(work + kCtrlSrcOff), 8);
-    for (uint32_t g = 0; g < groups; ++g) {
-        const uint32_t spins = WaitSeats(poll, flags, g, 0, kCores, epoch, status, 131);
-        stamps.SetValue(8 + g * 4 + 0, static_cast<int64_t>(spins));
-        io.SetValue(0, static_cast<int64_t>(epoch));
-        DataCopy(myCtrl, io, 8);
-        // 组 g 实字节（整除契约下 == kGroupBytes，行为不变）。
-        t.Send2(myPhase, g, g * kGroupBytes, kScratchOff + g * kGroupBytes,
-                GroupBytesOf(rows, g), SMEM_SHM_SDMA_OP_COPY);
-        Check(smem_shm_sdma_signal_at(t.res, work + kCtrlSrcOff, peer + kPeerRdyOff + uint64_t{g} * 64,
-              8, DeviceTag(READY, epoch, g, 0), SMEM_SHM_SDMA_OP_COPY), status, 102);
-        // 排空发送侧完成通知直到本组旗标通知出现（数据自通知按 FIFO 先到；
-        // 其余交错内容无害，消费后丢弃）。
+    // ---------- 通信调度器（block 8）：全交换协议 ----------
+    // 两端互把组数据复制进对端 scratch（写向对端的不同区域，字节不相交，
+    // 不与对端矩阵乘互扰），无数据回传、无远端加法。"对端组数据已到我方
+    // scratch"的信号 = 数据包之后紧跟的 8B 就绪标记（orch 按发送方保序，
+    // 标记必晚于数据到达），归约分支轮询该标记即可。
+    // sendPhase 两端取不同阶段号（REDUCE/GATHER），仅为完成通知可诊断区分。
+    const Phase sendPhase = rank == 0 ? Phase::REDUCE : Phase::GATHER;
+    GlobalTensor<int64_t> ctrlSrcGm;
+    ctrlSrcGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(work + kCtrlOff), kFlagSlotQwords);
+    for (uint32_t group = 0; group < groups; ++group) {
+        // 等本端 8 核通知齐，轮数记入 trace。
+        const uint32_t spins = wait_seats(poll, seats, group, 0, kCores, epoch, status,
+                                         ProtocolError::GroupSeatsTimeout);
+        stamps.SetValue(8 + group * 4 + 0, static_cast<int64_t>(spins));
+        // epoch 写本端源控制字（诊断用，不参与协议）。
+        ub.SetValue(0, static_cast<int64_t>(epoch));
+        DataCopy(ctrlSrcGm, ub, kFlagSlotQwords);
+        // 组数据复制进对端 scratch；随后单独发 8B 就绪标记。
+        transport.send_group_copy(sendPhase, group, rows);
+        transport.signal_peer_ready(group);
+        // 排空完成通知直到本组标记包回执：数据通知按发送顺序先到，途中无关
+        // 通知消费即弃；READY 阶段号与数据包（REDUCE/GATHER）位域不同，可精确识别。
         while (true) {
-            const auto m = smem_shm_sdma_wait_at(t.res);
-            Check(m.status == SMEM_SHM_SDMA_MAIL_OK, status, 121);
-            if (m.imm == DeviceTag(READY, epoch, g, 0)) break;
+            const auto notice = smem_shm_sdma_wait_at(transport.sdmaRes);
+            check(notice.status == SMEM_SHM_SDMA_MAIL_OK, status, ProtocolError::MailStatusNotOk);
+            if (notice.imm == device_tag(Phase::READY, epoch, group, 0)) break;
         }
-        // 轮询对端写入我区的旗标：对端组数据已在我 scratch。
-        GlobalTensor<int64_t> pf;
-        pf.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(work + kPeerRdyOff + uint64_t{g} * 64), 8);
-        uint32_t spins2 = 0, delay = 32;
-        while (true) {
-            DataCopy(poll, pf, 8);
-            if (static_cast<uint32_t>(poll.GetValue(0)) == epoch) break;
-            Check(++spins2 < 100000000, status, 152);
-            for (uint32_t i = 0; i < delay; ++i) __asm__ __volatile__("" ::: "memory");
-            if ((spins2 & 255u) == 0 && delay < 1024) delay <<= 1;
-        }
-        GlobalTensor<int64_t> rslot;
-        rslot.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(work + kReadyOff + uint64_t{g} * 64), 8);
-        DataCopy(rslot, io, 8);
+        // 对端标记已到我方 peerRdy 槽，本端归约分支随时可相加。
+        wait_peer_rdy(poll, work, group, epoch, status);
+        // 本端就绪标记写 ready 槽（诊断用，对端不读）。
+        GlobalTensor<int64_t> readySlotGm;
+        readySlotGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(
+            work + kReadyOff + uint64_t{group} * kFlagSlotBytes), kFlagSlotQwords);
+        DataCopy(readySlotGm, ub, kFlagSlotQwords);
     }
-    Check(smem_shm_sdma_quiet_at(t.res), status, 105);
-    DataCopy(tg[0], stamps, 8);
-    DataCopy(tg[kTraceSchedBase], stamps[8], 8 + groups * 4);
+    // 排空队列确保无遗留未决通知；trace 头写 magic，调度器轮数段入 trace。
+    check(smem_shm_sdma_quiet_at(transport.sdmaRes), status, ProtocolError::QuietFail);
+    ub.SetValue(0, static_cast<int64_t>(kTraceMagic));
+    DataCopy(traceGm[0], ub, kFlagSlotQwords);
+    DataCopy(traceGm[kTraceSchedBase], stamps[8], 8 + groups * 4);
+}
+#endif
+
+}  // namespace ar310p3_kernel
+
+// kernel 入口。Cube/Vector 两侧由 __DAV_CUBE__ 宏在编译期分开，
+// 各自只编译本侧函数。
+extern "C" __global__ __aicore__ void smem_mm_ar310p3(GM_ADDR x, GM_ADDR w, GM_ADDR y,
+                                                       GM_ADDR workspace, GM_ADDR tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_VECTOR_CORE);
+    REGISTER_TILING_DEFAULT(SmemMmAr310p3TilingData);
+    GET_TILING_DATA(tilingData, tiling);
+#ifdef __DAV_CUBE__
+    fused_matmul(tilingData, x, w);
+#else
+    allreduce(tilingData, y, workspace);
 #endif
 }

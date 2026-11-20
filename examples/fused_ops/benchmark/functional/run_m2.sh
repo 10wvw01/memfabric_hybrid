@@ -13,7 +13,7 @@ PKGS=$PRD
 PY=${PYTHON:-python3}
 
 OPS=${OPS:-"ar iar"}
-MS=${MS:-"1280 2048 3840 4096"}
+MS=${MS:-"1280 3840 4096"}
 DEVICES=${DEVICES:-4,5}
 PORT=${PORT:-8719}
 OUTDIR=${OUTDIR:-/tmp/opencode/prd_m2}

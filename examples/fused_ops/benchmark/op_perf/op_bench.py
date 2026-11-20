@@ -28,14 +28,12 @@ loops. Per rank writes into --outdir:
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import re
 import sys
 import time
 
-import numpy as np
 import torch
 import torch_npu
 import torch.distributed as dist
@@ -117,14 +115,8 @@ def route_evidence(trace_path: str, path: str, iters: int) -> dict:
     return {"anchor": anchor, "stride": stride, "mm": mm, "mm_n": mm_n,
             "td_n": td_n, "hccl_n": hccl_n, "smem_n": smem_n}
 
-SMEM_SO = os.environ.get(
-    "MIXFABRIC_SDK_OUT", "/home/w00804146/310P_2/memfabric_hybrid/output"
-) + "/smem/lib64/libmf_smem.so"
-
 WIDTH = 2048            # K == N per rank at TP2
-COMM_ROWS = 1024        # communication granularity in rows
-MAX_ROWS = 4096         # work/scratch/sum areas are 16MiB each
-EPOCH_BASE = 1000
+MAX_ROWS = 4096         # kernel work-area capacity (session facade re-exports)
 
 p = argparse.ArgumentParser()
 p.add_argument("--path", choices=["stock", "ar", "iar"], required=True,
@@ -162,63 +154,18 @@ dist.init_process_group(backend="hccl",
                         world_size=2, rank=RANK)
 
 if a.path != "stock":
-    # smem session（与 serve 内 SmemMm310P3Session 同序列）
-    smem = ctypes.CDLL(SMEM_SO, mode=ctypes.RTLD_GLOBAL)
-
-    class SmemConfig(ctypes.Structure):
-        _fields_ = [("shmInitTimeout", ctypes.c_uint32),
-                    ("shmCreateTimeout", ctypes.c_uint32),
-                    ("controlOperationTimeout", ctypes.c_uint32),
-                    ("startConfigStoreServer", ctypes.c_bool),
-                    ("flags", ctypes.c_uint32)]
-
-    smem.smem_init.argtypes = [ctypes.c_uint32]
-    smem.smem_shm_config_init.argtypes = [ctypes.POINTER(SmemConfig)]
-    smem.smem_shm_init.argtypes = [ctypes.c_char_p, ctypes.c_uint32,
-                                   ctypes.c_uint32, ctypes.c_uint16,
-                                   ctypes.POINTER(SmemConfig)]
-    smem.smem_shm_create.argtypes = [ctypes.c_uint32, ctypes.c_uint32,
-                                     ctypes.c_uint32, ctypes.c_uint64,
-                                     ctypes.c_uint32, ctypes.c_uint32,
-                                     ctypes.POINTER(ctypes.c_void_p)]
-    smem.smem_shm_create.restype = ctypes.c_void_p
-    smem.smem_shm_sdma_get_workspace.argtypes = [ctypes.c_void_p]
-    smem.smem_shm_sdma_get_workspace.restype = ctypes.c_void_p
-    smem.smem_shm_get_symmetric_size.argtypes = [ctypes.c_void_p]
-    smem.smem_shm_get_symmetric_size.restype = ctypes.c_uint64
-    smem.smem_shm_control_allgather.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                                ctypes.c_uint32, ctypes.c_void_p,
-                                                ctypes.c_uint32]
-    smem.smem_shm_control_barrier.argtypes = [ctypes.c_void_p]
-    smem.smem_shm_destroy.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-
-    assert smem.smem_init(0) == 0
-    cfg = SmemConfig()
-    assert smem.smem_shm_config_init(ctypes.byref(cfg)) == 0
-    cfg.startConfigStoreServer = RANK == 0
-    assert smem.smem_shm_init(a.store_url.encode(), 2, RANK, dev,
-                              ctypes.byref(cfg)) == 0
-    base = ctypes.c_void_p()
-    pool = smem.smem_shm_create(0, 2, RANK, 64 << 20, 2, 0, ctypes.byref(base))
-    assert pool and base.value and smem.smem_shm_sdma_get_workspace(pool)
-    gva = base.value
-    symm = smem.smem_shm_get_symmetric_size(pool)
-    geo = np.zeros((2, 4), dtype=np.uint64)
-    mine = np.array([gva, symm, 0, symm], dtype=np.uint64)
-    assert smem.smem_shm_control_allgather(pool, mine.ctypes.data, 32,
-                                           geo.ctypes.data, 64) == 0
-    peer_gva = int(geo[1 - RANK][0])
-    assert peer_gva == gva, f"asymmetric windows! {gva:x} vs {peer_gva:x}"
-
-    # 融合臂：xops wheel 延后到池建成后再导入
+    # smem 会话：xops 会话封装层（建池/几何校验/通道/epoch 内管全在层内，
+    # 与 vllm serve 的会话同序列——含 status.zero_() 每调用清零）。
     if a.path == "ar":
-        import xops_ar_310p3  # noqa: F401  (registers torch_npu.npu_smem_mm_ar_310p3)
+        import xops_ar_310p3 as xops
     else:
-        import xops_iar_310p3  # noqa: F401  (registers torch_npu.npu_smem_mm_iar_310p3)
+        import xops_iar_310p3 as xops
+    sess = xops.SmemSession(device=dev, rank=RANK, store_url=a.store_url)
+    gva = sess.gva
+    symm = sess.symm
 else:
-    pool = None
-    smem = None
-    gva = peer_gva = symm = 0
+    sess = None
+    gva = symm = 0
 
 # ---- tensors --------------------------------------------------------------
 x = (torch.randn(M, WIDTH, device=device) * 0.1).to(torch.float16)
@@ -233,29 +180,11 @@ if a.path != "stock":
         f"fused path M={M} outside [1024,4096] or not 256-aligned"
     rows = M
     y_p = torch.zeros(M, WIDTH, dtype=torch.float16, device=device)
-    ib = torch.zeros(16384, dtype=torch.uint8, device=device)
-    status = torch.zeros(64, dtype=torch.uint8, device=device)
-    trace_buf = torch.zeros(512, dtype=torch.int64, device=device)
-
-# 包大小 env 可覆盖（默认 1MB=1048576；4194304=子组单封 4MB）。
-PKT = int(os.environ.get("SMEM_MM_310P3_PACKET", str(1024 * 1024)))
-
-epoch = [EPOCH_BASE]
 
 
-def fused_call(enabled=1):
-    epoch[0] += 1
-    status.zero_()                  # 协议必需；无 staging 拷贝（原生 M）
-    if a.path == "ar":
-        torch_npu.npu_smem_mm_ar_310p3(
-            x, w_nz, y_p, gva, peer_gva, symm,
-            ib.data_ptr(), status.data_ptr(), trace_buf.data_ptr(),
-            RANK, epoch[0], PKT, rows, COMM_ROWS, 8, enabled)
-    else:
-        torch_npu.npu_smem_mm_iar_310p3(
-            x, w_nz, y_p, gva, peer_gva, symm,
-            ib.data_ptr(), status.data_ptr(), trace_buf.data_ptr(),
-            RANK, epoch[0], PKT, rows, COMM_ROWS, 8, enabled)
+def fused_call():
+    # 封装层内：status 清零 + epoch 递增 + 算子发射；无 staging 拷贝（原生 M）
+    sess.launch(x, w_nz, rows, out=y_p)
 
 
 def stock_call():
@@ -275,15 +204,13 @@ log(f"path={a.path} M={M} iters={a.iters} reps={a.reps}"
 
 # ---- cold first wave (fused only; watchdog-contaminated, reference) -------
 if a.path != "stock":
-    for _ in range(2):              # protocol prewarm: disabled waves
-        fused_call(enabled=0)
-        torch.npu.synchronize()
-    smem.smem_shm_control_barrier(pool)
+    torch.npu.synchronize()
+    sess.barrier()
     t0 = time.perf_counter()
     call()
     torch.npu.synchronize()
     cold_ms = (time.perf_counter() - t0) * 1e3
-    smem.smem_shm_control_barrier(pool)
+    sess.barrier()
     log(f"cold-1st {cold_ms:.1f} ms (watchdog-contaminated, reference only)")
 
 # ---- warmup ---------------------------------------------------------------
@@ -396,7 +323,7 @@ for rep in range(1, a.reps + 1):
 
 summary = {
     "path": a.path, "m": M, "iters": a.iters, "rank": RANK,
-    "packet": PKT, "gva": gva, "cold_ms": cold_ms, "route": route_rep1,
+    "packet": 1024 * 1024, "gva": gva, "cold_ms": cold_ms, "route": route_rep1,
     "reps": reps_out,
 }
 out_json = os.path.join(a.outdir, f"summary_rank{RANK}.json")
@@ -408,9 +335,7 @@ log(f"summary -> {out_json}")
 # destructors abort at process exit ("terminate called without an active
 # exception", core dumped).
 if a.path != "stock":
-    smem.smem_shm_control_barrier(pool)
-    smem.smem_shm_destroy(pool, 0)
-    pool = None
+    sess.teardown()
     log("pool destroyed cleanly")
 
 dist.barrier()

@@ -31,11 +31,13 @@ source $GA/set_env.sh
 # 泄漏进 serve 后设备 4/5 被重映射掉 → set_device(4) Invalid device ID。
 # serve 必须看到真实物理 id，此处无条件 unset 兜底。
 unset ASCEND_RT_VISIBLE_DEVICES
-# Workers land on physical devices 4/5 via the 310P worker device offset.
-# Do NOT use ASCEND_RT_VISIBLE_DEVICES here: the remapping makes the smem
-# library see logical ids 0/1, which selects the (asymmetric) device-0
-# window layout and breaks the symmetric pool ("import gva out of window").
-export VLLM_ASCEND_DEVICE_OFFSET=4
+# Workers land on physical devices via the 310P worker device offset
+# (default 4/5; override VLLM_ASCEND_DEVICE_OFFSET for other die pairs,
+# e.g. 2 for devices 2/3 — card 16384). Do NOT use
+# ASCEND_RT_VISIBLE_DEVICES here: the remapping makes the smem library see
+# logical ids 0/1, which selects the (asymmetric) device-0 window layout
+# and breaks the symmetric pool ("import gva out of window").
+export VLLM_ASCEND_DEVICE_OFFSET=${VLLM_ASCEND_DEVICE_OFFSET:-4}
 export ASCEND_CUSTOM_OPP_PATH=$PKG
 export MF_SDMA_ORCH_DEPLOY_HELPER=$MFOUT/../tools/aicpu_kernel_deploy/orch_deploy_helper
 export MF_SDMA_ORCH_JSON=$MFOUT/hybm/aicpu_kernel/libmf_sdma_orch_v28.json

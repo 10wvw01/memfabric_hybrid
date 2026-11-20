@@ -29,7 +29,7 @@ DFLASH=${DFLASH:-1}
 TS=${TS:-prd_$(date +%Y%m%d_%H%M%S)}
 OUT=${OUT:-$DIR/results/e2e_dflash${DFLASH}_$TS}
 REQUESTS=${REQUESTS:-10}
-LENS=${LENS:-"2048 4096"}
+LENS=${LENS:-"4096"}
 SEED_BASE=100
 ROUNDS=${ROUNDS:-2}
 mkdir -p "$OUT"

@@ -2,6 +2,16 @@
 #ifndef TORCHNPU_TORCH_NPU_CSRC_ATEN_OPS_OP_API_PTA_COMMON_H_
 #define TORCHNPU_TORCH_NPU_CSRC_ATEN_OPS_OP_API_PTA_COMMON_H_
 
+// ops_common.h：自定义算子 PyTorch 适配层的公共机制，源自 torch_npu 插件
+// 的 op_api PTA 模板。本文件与具体算子无关，提供三块能力：
+//   1. aclnn 符号解析——GetOpApiFuncAddr 按优先级在自定义算子包、默认
+//      vendors 目录、CANN 特性库、libopapi.so 中查找符号；
+//   2. 参数类型转换——ConvertType 重载族把 at::Tensor/at::Scalar/int64_t 等
+//      转成 aclTensor/aclScalar 等 ACL 类型，Release 族负责析构；
+//   3. 两段式发射宏 EXEC_NPU_CMD_V1——先调 GetWorkspaceSize 查询工作区，
+//      再异步下发真正的 aclnn 调用（与 torch_npu 内置算子的下发路径一致）。
+// 算子自己的宿主入口在 npu_smem_mm_ar_310p3.cpp，只调用本文件的宏。
+
 #include <fstream>
 #include <sys/stat.h>
 #include <dlfcn.h>
@@ -52,6 +62,8 @@ typedef aclBoolArray *(*_aclCreateBoolArray)(const bool *value, uint64_t size);
 typedef aclTensorList *(*_aclCreateTensorList)(const aclTensor *const *value, uint64_t size);
 typedef aclScalarList *(*_aclCreateScalarList)(const aclScalar *const *value, uint64_t size);
 
+// ---- aclCreate/aclDestroy 函数指针类型 ----
+// acl 层对象不进 ABI 头，这里按签名手工声明函数指针，再经 dlsym 取地址。
 typedef int (*_aclDestroyTensor)(const aclTensor *tensor);
 typedef int (*_aclDestroyScalar)(const aclScalar *scalar);
 typedef int (*_aclDestroyIntArray)(const aclIntArray *array);
@@ -63,8 +75,9 @@ typedef int (*_aclDestroyScalarList)(const aclScalarList *array);
 using OpApiFunc = int (*)(void *, uint64_t, aclOpExecutor *, const aclrtStream);
 
 
+// ---- 常量与环境变量 ----
 const int N = 32;
-// npu tensor max size
+// SmallVector 预留的形状维度容量
 const int SIZE = 8;
 
 namespace {
@@ -74,7 +87,10 @@ namespace {
   constexpr int64_t NCDHW_DIM_NUM = 5;
 }
 
-// dtype convert map
+// ---- at::ScalarType 到 aclDataType 的映射表 ----
+// BuildATenToAclTable：按 at::ScalarType 枚举下标建查表，torch 数据类型
+// 一一映射到 ACL 数据类型；ACL 没有对应类型的填 ACL_DT_UNDEFINED，
+// 后续 ConvertType 会把未定义类型的张量直接拒绝掉。
 inline const std::array<aclDataType, static_cast<size_t>(at::ScalarType::NumOptions) + 1>
 BuildATenToAclTable(){
   std::array<aclDataType, static_cast<size_t>(at::ScalarType::NumOptions) + 1> t{};
@@ -106,7 +122,8 @@ BuildATenToAclTable(){
 
 inline const auto kATenScalarTypeToAclDataTypeTable = BuildATenToAclTable();
 
-// load aclnn api so
+// ---- 路径与动态库辅助函数 ----
+// split_str：按分隔符切分字符串（用于切分路径列表）。
 static std::vector<std::string> split_str(std::string s, const std::string &del)
 {
     int end = s.find(del);
@@ -120,6 +137,7 @@ static std::vector<std::string> split_str(std::string s, const std::string &del)
     return path_list;
 }
 
+// is_file_exist：判断路径是否存在（含空串与超长保护）。
 static bool is_file_exist(const std::string &path)
 {
     if (path.empty() || path.size() > PATH_MAX) {
@@ -128,6 +146,7 @@ static bool is_file_exist(const std::string &path)
     return (access(path.c_str(), F_OK) == 0) ? true : false;
 }
 
+// real_path：解析符号链接得到绝对路径；解析失败返回空串。
 inline  std::string real_path(const std::string &path)
 {
     if (path.empty() || path.size() > PATH_MAX) {
@@ -140,6 +159,8 @@ inline  std::string real_path(const std::string &path)
     return std::string(realPath);
 }
 
+// get_custom_lib_path：从 ASCEND_CUSTOM_OPP_PATH 环境变量生成自定义算子包
+// 的 op_api/lib 目录列表（变量支持冒号分隔的多路径）。未配置则返回空表。
 inline std::vector<std::string> get_custom_lib_path()
 {
     char *ascend_custom_opppath = std::getenv("ASCEND_CUSTOM_OPP_PATH");
@@ -151,11 +172,12 @@ inline std::vector<std::string> get_custom_lib_path()
     }
 
     std::string ascend_custom_opppath_str(ascend_custom_opppath);
-    // split string with ":"
+    // 按冒号切分为多个路径
     custom_lib_path_list = split_str(ascend_custom_opppath_str, ":");
     if (custom_lib_path_list.empty()) {
         return std::vector<std::string>();
     }
+    // 每个路径追加算子包 op_api 库的固定子目录
     for (auto &it : custom_lib_path_list) {
         it = it + "/op_api/lib/";
     }
@@ -163,6 +185,8 @@ inline std::vector<std::string> get_custom_lib_path()
     return custom_lib_path_list;
 }
 
+// get_default_custom_lib_path：读取 CANN 默认 vendors 目录的 config.ini，
+// 按 load_priority 配置项生成默认加载顺序下的 op_api/lib 路径列表。
 inline std::vector<std::string> get_default_custom_lib_path()
 {
     char *ascend_opp_path = std::getenv("ASCEND_OPP_PATH");
@@ -196,7 +220,7 @@ inline std::vector<std::string> get_default_custom_lib_path()
     std::string head = "load_priority=";
     line.erase(0, head.length());
 
-    // split string with ","
+    // 按逗号切分加载优先级名单
     default_vendors_list = split_str(line, ",");
     if (default_vendors_list.empty()) {
         return std::vector<std::string>();
@@ -213,6 +237,9 @@ extern const std::vector<std::string> g_default_custom_lib_path;
 void *GetOpApiFuncAddrFromFeatureLib(const char *api_name);
 
 
+// ---- 动态库符号查找 ----
+// GetOpApiLibName / GetCustOpApiLibName：CANN 主 opapi 库与自定义算子包
+// 库的文件名。
 inline const char *GetOpApiLibName(void)
 {
     return "libopapi.so";
@@ -223,6 +250,8 @@ inline const char *GetCustOpApiLibName(void)
     return "libcust_opapi.so";
 }
 
+// GetOpApiFuncAddrInLib：在已打开的动态库句柄里按符号名取函数地址，
+// 失败时记告警日志。
 inline void *GetOpApiFuncAddrInLib(void *handler, const char *libName, const char *apiName)
 {
     auto funcAddr = dlsym(handler, apiName);
@@ -232,6 +261,7 @@ inline void *GetOpApiFuncAddrInLib(void *handler, const char *libName, const cha
     return funcAddr;
 }
 
+// GetOpApiLibHandler：按库名打开动态库（懒加载模式），失败时记告警日志。
 inline void *GetOpApiLibHandler(const char *libName)
 {
     auto handler = dlopen(libName, RTLD_LAZY);
@@ -242,7 +272,8 @@ inline void *GetOpApiLibHandler(const char *libName)
 }
 
 
-// get aclnn api from loaded so
+// GET_OP_API_FUNC_FROM_FEATURE_LIB：打开指定特性库并在其中查找符号，
+// 找到即返回；每个库的句柄只打开一次（static）。
 #define GET_OP_API_FUNC_FROM_FEATURE_LIB(lib_handler, lib_name, api_name)                                              \
     static auto lib_handler = GetOpApiLibHandler(lib_name);                                                            \
     if ((lib_handler) != nullptr) {                                                                                    \
@@ -252,9 +283,19 @@ inline void *GetOpApiLibHandler(const char *libName)
         }                                                                                                              \
     }
 
+// GET_OP_API_FUNC：把符号名解析成对应签名的函数指针（签名须先用
+// typedef _##apiName 声明过）。
 #define GET_OP_API_FUNC(apiName) \
   reinterpret_cast<_##apiName>(GetOpApiFuncAddr(#apiName))
 
+// GetOpApiFuncAddr：aclnn 符号解析主入口，按以下优先级逐层查找，
+// 任一层命中即返回：
+//   1. ASCEND_CUSTOM_OPP_PATH 指定的自定义算子包（libcust_opapi.so）
+//   2. CANN 默认 vendors 目录（按 config.ini 的加载优先级）
+//   3. CANN 特性库（libopapi_math/nn/cv/transformer/legacy.so）
+//   4. CANN 主库 libopapi.so
+//   5. ops_common.cpp 里的其余特性库（infer/train/sparse/fft/rand）
+// 全部未命中返回空指针，调用方负责判空。
 inline void *GetOpApiFuncAddr(const char *apiName)
 {
     if (!g_custom_lib_path.empty()) {
@@ -312,7 +353,8 @@ inline void *GetOpApiFuncAddr(const char *apiName)
 }
 
 
-// convert args
+// ---- 参数搬运与类型转换 ----
+// CopyTensorHostToDevice：CPU 张量经页锁定内存复制到 NPU。
 inline at::Tensor CopyTensorHostToDevice(const at::Tensor &cpu_tensor) {
   at::Tensor cpuPinMemTensor = cpu_tensor.pin_memory();
   int deviceIndex = 0;
@@ -320,6 +362,7 @@ inline at::Tensor CopyTensorHostToDevice(const at::Tensor &cpu_tensor) {
                             cpuPinMemTensor.scalar_type(), true, true);
 }
 
+// CopyScalarToDevice：标量先转张量再复制到 NPU（包装标量场景使用）。
 inline at::Tensor CopyScalarToDevice(const c10::Scalar &cpu_scalar,
                                      at::ScalarType scalar_data_type) {
   return CopyTensorHostToDevice(
@@ -327,11 +370,15 @@ inline at::Tensor CopyScalarToDevice(const c10::Scalar &cpu_scalar,
 }
 
 
-// Identity passthrough for a pre-built aclTensor (e.g. hand-constructed with
-// custom format/storage metadata). Ownership stays with EXEC_NPU_CMD_V1's
-// ReleaseConvertTypes (aclDestroyTensor).
+// ConvertType(aclTensor*)：手工构造好的 aclTensor 直接透传
+//（例如 npu_smem_mm_ar_310p3.cpp 里“ND 标记 + NZ 存储”的 w 张量）。
+// 所有权归 EXEC_NPU_CMD_V1 的 ReleaseConvertTypes（内部调 aclDestroyTensor）。
 inline aclTensor *ConvertType(aclTensor *t) { return t; }
 
+// ConvertType(const at::Tensor&)：torch 张量转 aclTensor。
+// 处理三件事：① 数据类型经映射表转 ACL 类型（无对应类型则报错）；
+// ② 布局——NPU 张量按其物理格式（2=ND、29=FRACTAL_NZ）填写，CPU 张量
+// 按维数猜 NCL/NCHW/NCDHW；③ 包装标量（0 维数字）先复制上设备再构造。
 inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
   static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
   if (aclCreateTensor == nullptr) {
@@ -348,7 +395,7 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
       acl_data_type != ACL_DT_UNDEFINED,
       std::string(c10::toString(scalar_data_type)) + " has not been supported")
   c10::SmallVector<int64_t, 5> storageDims;
-  // if acl_data_type is ACL_STRING, storageDims is empty.
+  // 存储维度按“存储字节数 / 单元素字节数”填写；ACL_STRING 无存储维度。
   auto itemsize = at_tensor.itemsize();
   if (itemsize == 0) {
     AT_ERROR("When ConvertType, tensor item size of cannot be zero.");
@@ -360,6 +407,7 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
 
   const auto dimNum = at_tensor.sizes().size();
   aclFormat format = ACL_FORMAT_ND;
+  // NPU 张量：按物理格式标记（2=ND、29=FRACTAL_NZ），其余一律按 ND。
   if (torch_npu::utils::is_npu(at_tensor)) {
     auto npu_format = at_npu::native::get_npu_format(at_tensor);
     switch (npu_format) {
@@ -373,6 +421,7 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
         format = ACL_FORMAT_ND;
     }
   } else {
+    // CPU 张量：没有物理格式信息，按维数对应 NCL/NCHW/NCDHW。
     switch (dimNum) {
       case 3:
         format = ACL_FORMAT_NCL;
@@ -389,6 +438,7 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
   }
 
   if (at_tensor.unsafeGetTensorImpl()->is_wrapped_number()) {
+    // 包装标量：torch 把 0 维数字包装成张量传入，先复制上设备再构造。
     c10::Scalar expScalar = at_tensor.item();
     at::Tensor aclInput = CopyScalarToDevice(expScalar, scalar_data_type);
     return aclCreateTensor(aclInput.sizes().data(), aclInput.sizes().size(),
@@ -406,6 +456,8 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
   return acl_tensor;
 }
 
+// ConvertType(at::Scalar)：标量转 aclScalar，仅支持 double/long/bool/
+// complex-double 四种（足够覆盖本算子用到的类型），其余返回空。
 inline aclScalar *ConvertType(const at::Scalar &at_scalar) {
   static const auto aclCreateScalar = GET_OP_API_FUNC(aclCreateScalar);
   if (aclCreateScalar == nullptr) {
@@ -447,6 +499,8 @@ inline aclScalar *ConvertType(const at::Scalar &at_scalar) {
   return acl_scalar;
 }
 
+// ---- ConvertType 其余重载：数组/列表/可选值/标量值 ----
+// IntArrayRef 与 SymInt 数组转 aclIntArray。
 inline aclIntArray *ConvertType(const at::IntArrayRef &at_array) {
   static const auto aclCreateIntArray = GET_OP_API_FUNC(aclCreateIntArray);
   if (aclCreateIntArray == nullptr) {
@@ -456,6 +510,7 @@ inline aclIntArray *ConvertType(const at::IntArrayRef &at_array) {
   return array;
 }
 
+// 固定长度 bool 数组转 aclBoolArray。
 template <std::size_t N>
 inline aclBoolArray *ConvertType(const std::array<bool, N> &value) {
   static const auto aclCreateBoolArray = GET_OP_API_FUNC(aclCreateBoolArray);
@@ -467,6 +522,7 @@ inline aclBoolArray *ConvertType(const std::array<bool, N> &value) {
   return array;
 }
 
+// 变长 bool 数组转 aclBoolArray。
 inline aclBoolArray *ConvertType(const at::ArrayRef<bool> &value) {
   static const auto aclCreateBoolArray = GET_OP_API_FUNC(aclCreateBoolArray);
   if (aclCreateBoolArray == nullptr) {
@@ -477,6 +533,7 @@ inline aclBoolArray *ConvertType(const at::ArrayRef<bool> &value) {
   return array;
 }
 
+// SymInt 数组（torch.compile 符号形状）先落成具体 int 数组再转 aclIntArray。
 inline aclIntArray *ConvertType(const at::ArrayRef<c10::SymInt> &at_array)
 {
     static const auto aclCreateIntArray = GET_OP_API_FUNC(aclCreateIntArray);
@@ -488,6 +545,7 @@ inline aclIntArray *ConvertType(const at::ArrayRef<c10::SymInt> &at_array)
     return array;
 }
 
+// 张量列表：逐个转 aclTensor 后打包成 aclTensorList。
 inline aclTensorList *ConvertType(const at::TensorList &at_tensor_list) {
   static const auto aclCreateTensorList = GET_OP_API_FUNC(aclCreateTensorList);
   if (aclCreateTensorList == nullptr) {
@@ -503,6 +561,7 @@ inline aclTensorList *ConvertType(const at::TensorList &at_tensor_list) {
   return acl_tensor_list;
 }
 
+// 标量列表：逐个转 aclScalar 后打包成 aclScalarList。
 inline aclScalarList *ConvertType(const at::ArrayRef<at::Scalar> &at_scalar_list)
 {
     static const auto aclCreateScalarList = GET_OP_API_FUNC(aclCreateScalarList);
@@ -518,6 +577,9 @@ inline aclScalarList *ConvertType(const at::ArrayRef<at::Scalar> &at_scalar_list
     return acl_scalar_list;
 }
 
+// ---- optional/平凡类型的转换 ----
+// 有值的 optional 解包后按内部类型转换，空值统一转成空指针（ACL 用
+// 空指针表示“参数未传”）。
 inline aclTensor *ConvertType(const c10::optional<at::Tensor> &opt_tensor) {
   if (opt_tensor.has_value() && opt_tensor.value().defined()) {
     return ConvertType(opt_tensor.value());
@@ -550,6 +612,8 @@ inline aclIntArray *ConvertType(const c10::OptionalArrayRef<c10::SymInt> &opt_ar
     return nullptr;
 }
 
+// ---- 平凡类型直接透传 ----
+// char*/int64_t/float 本身就是 ACL 接口形参类型，原样返回。
 inline char *ConvertType(char *ptr) {
     return ptr;
 }
@@ -562,12 +626,15 @@ inline float ConvertType(float value) {
     return value;
 }
 
+// at::ScalarType 经映射表转 aclDataType。
 inline aclDataType ConvertType(const at::ScalarType scalarType) {
   return kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(scalarType)];
 }
 
 
-// add declare from other hpp
+// ---- TensorWrapper：携带显式 ACL 数据类型的张量包装 ----
+// 某些算子需要 torch 类型与 ACL 类型不一致（如 bf16 张量按 fp16 传），
+// 用包装结构把目标类型一并传进来。
 typedef struct {
     const at::Tensor& tensor_;
     aclDataType dtype;
@@ -580,8 +647,10 @@ typedef struct {
 
 
 c10::SmallVector<int64_t, SIZE> array_to_small_vector(c10::IntArrayRef shape);
-// add declare from other hpp
 
+// ConvertType(TensorWrapper)：按包装里指定的 ACL 类型构造 aclTensor。
+// 布局处理：非基础格式（如 NZ）的 NPU 张量直接取其物理格式描述与存储
+// 维度；基础格式按维数对应 NCL/NCHW/NCDHW。
 inline aclTensor *ConvertType(const TensorWrapper &tensor_r)
 {
     static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
@@ -607,14 +676,16 @@ inline aclTensor *ConvertType(const TensorWrapper &tensor_r)
     const auto dimNum = at_tensor.sizes().size();
     aclFormat format = ACL_FORMAT_ND;
     if (!at_npu::native::FormatHelper::IsOpInputBaseFormat(at_tensor)) {
+        // 非基础格式（FRACTAL_NZ 等）：直接取张量自带的格式与存储维度描述。
         format = torch_npu::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.npu_format_;
-        // if acl_data_type is ACL_STRING, storageDims is empty.
+        // ACL_STRING 类型没有存储维度。
         if (acl_data_type != ACL_STRING) {
             TORCH_CHECK(at_tensor.itemsize() > 0, "the itemsize of tensor must be greater than 0.",
                 OPS_ERROR(ErrCode::VALUE));
             storageDims = torch_npu::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.storage_sizes_;
         }
     } else {
+        // 基础格式：按维数对应 NCL/NCHW/NCDHW。
         switch (dimNum) {
             case NCL_DIM_NUM:
                 format = ACL_FORMAT_NCL;
@@ -628,7 +699,7 @@ inline aclTensor *ConvertType(const TensorWrapper &tensor_r)
             default:
                 format = ACL_FORMAT_ND;
         }
-        // if acl_data_type is ACL_STRING, storageDims is empty.
+        // ACL_STRING 类型没有存储维度。
         if (acl_data_type != ACL_STRING) {
             TORCH_CHECK(at_tensor.itemsize() > 0, "the itemsize of tensor must be greater than 0.",
                         OPS_ERROR(ErrCode::VALUE));
@@ -643,6 +714,7 @@ inline aclTensor *ConvertType(const TensorWrapper &tensor_r)
     return acl_tensor;
 }
 
+// ConvertType(TensorListWrapper)：按包装类型逐个转换后打包成 aclTensorList。
 inline aclTensorList *ConvertType(const TensorListWrapper &tensor_list_wrapper)
 {
     static const auto aclCreateTensorList = GET_OP_API_FUNC(aclCreateTensorList);
@@ -660,12 +732,17 @@ inline aclTensorList *ConvertType(const TensorListWrapper &tensor_list_wrapper)
 }
 
 
+// 泛型兜底：其余类型（枚举、整数等）不需要转换，原样透传。
 template <typename T>
 T ConvertType(T value) {
   return value;
 }
 
 
+// ---- 两段式调用的函数签名适配 ----
+// ConvertToOpApiFunc：把“参数元组的各成员类型”展开成 aclnn 函数指针的
+// 形参列表（GetWorkspaceSize 与真正调用的签名相同），返回转换后的
+// 函数指针。两次重载只是把 index_sequence 展开封装掉。
 template <typename Tuple, size_t... I>
 auto ConvertToOpApiFunc(const Tuple &params, void *opApiAddr,
                         std::index_sequence<I...>) {
@@ -683,7 +760,9 @@ auto ConvertToOpApiFunc(const Tuple &params, void *opApiAddr) {
 }
 
 
-// add release for all type
+// ---- Release 族：ACL 对象的析构 ----
+// 每个 aclCreate 出来的对象在 EXEC_NPU_CMD_V1 调用完成后必须销毁；
+// 平凡类型（int64_t 等）的 Release 是空操作（模板兜底在下方）。
 inline void Release(aclTensor *p) {
   static const auto aclDestroyTensor = GET_OP_API_FUNC(aclDestroyTensor);
   if (aclDestroyTensor == nullptr) {
@@ -748,12 +827,16 @@ void CallRelease(Tuple t, std::index_sequence<I...>) {
   (void)std::initializer_list<int>{(Release(std::get<I>(t)), 0)...};
 }
 
+// ReleaseConvertTypes：把参数元组里的每个成员逐个 Release。
+// EXEC_NPU_CMD_V1 的真正调用完成后由它统一回收所有 acl 对象。
 template <typename Tuple>
 void ReleaseConvertTypes(Tuple &t) {
   static constexpr auto size = std::tuple_size<Tuple>::value;
   CallRelease(t, std::make_index_sequence<size>{});
 }
 
+// ConvertTypes：把本次调用的全部实参逐个 ConvertType，打包成元组
+//（后两个成员固定是 workspaceSize 指针与 executor 指针，由宏追加）。
 template <typename... Ts>
 constexpr auto ConvertTypes(Ts &... args) {
   return std::make_tuple(ConvertType(args)...);
@@ -771,7 +854,9 @@ auto call(Function f, Tuple t) {
 }
 
 
-// for cache
+// ---- PTA 内存/缓存钩子 ----
+// 这些符号由 CANN 侧提供，用于每次调用前后的线程本地大页内存与
+// aclnn 缓存初始化/回收；取不到地址时宏内会判空跳过，不影响主流程。
 typedef int (*InitHugeMemThreadLocal)(void *, bool);
 typedef void (*UnInitHugeMemThreadLocal)(void *, bool);
 typedef void (*ReleaseHugeMem)(void *, bool);
@@ -780,6 +865,7 @@ typedef void (*SetPTAHashKey)(uint64_t);
 typedef void (*UnInitPTACacheThreadLocal)();
 
 
+// UnInitCacheThreadLocal：调用结束后回收线程本地的 aclnn 缓存。
 inline void UnInitCacheThreadLocal()
 {
     static const auto unInitPTACacheThreadLocalAddr = GetOpApiFuncAddr("UnInitPTACacheThreadLocal");
@@ -791,6 +877,20 @@ inline void UnInitCacheThreadLocal()
 }
 
 
+// EXEC_NPU_CMD_V1：两段式 aclnn 调用宏（与 torch_npu 内置算子同款路径）。
+// 用法：EXEC_NPU_CMD_V1(aclnnXxx, 实参...)，展开后按顺序做五件事：
+//   1. 符号解析：取 aclnnXxxGetWorkspaceSize / aclnnXxx 以及内存、缓存
+//      钩子的函数地址（static，进程内只解析一次）；
+//   2. 调用前准备：初始化线程本地大页内存与 aclnn 缓存；
+//   3. 参数转换：全部实参 ConvertType 成 ACL 类型（末尾自动补上
+//      workspaceSize 指针和 executor 指针两个出参），先同步调用
+//      GetWorkspaceSize 拿到工作区大小；
+//   4. 异步下发：工作区非零时分配 NPU 字节张量，然后把真正的 aclnn
+//      调用包成闭包经 OpCommand::RunOpApiV2 投到当前 NPU 流上——
+//      调用本身是异步的，流同步由外部控制；
+//   5. 调用后回收：闭包内先释放全部 ACL 对象与大页内存，宏尾部再回收
+//      线程本地缓存。
+// 宿主线程立即返回；kernel 完成顺序由流保证。
 #define EXEC_NPU_CMD_V1(aclnn_api, ...)                                                                                \
     do {                                                                                                               \
         static const auto getWorkspaceSizeFuncAddr = GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                  \

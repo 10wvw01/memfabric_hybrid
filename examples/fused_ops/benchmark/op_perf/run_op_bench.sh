@@ -15,7 +15,7 @@ PRD=$(cd "$DIR/../.." && pwd)
 
 TS=${TS:-$(date +%Y%m%d_%H%M%S)}
 OUTROOT=${OUTROOT:-$DIR/results/$TS}
-MS=${MS:-"1280 3840"}
+MS=${MS:-"1280 3840 4096"}
 PATHS=${PATHS:-"stock ar iar"}
 REPS=${REPS:-3}
 ITERS=${ITERS:-30}

@@ -9,21 +9,25 @@
 # ----------------------------------------------------------------------------------------------------------
 
 if ("${CMAKE_BUILD_TYPE}x" STREQUAL "Debugx")
+    # Debug 构建关闭优化并带调试信息。
     npu_op_kernel_options(ascendc_kernels ALL OPTIONS -g -O0)
 endif()
 
-# memfabric_hybrid 设备侧 SDK 头文件（smem_shm_aicore_base_sdma.h 等）include 路径。
-# 默认值指向本工作区已安装位置；如 SDK 安装在别处，构建前设置环境变量
-# MEMFABRIC_SDK_INC 指向 <memfabric output>/include/smem/device 同级目录即可覆盖。
+# memfabric_hybrid 设备侧 SDK 头文件（smem_shm_aicore_base_sdma.h 等）的
+# include 路径。默认指向本工作区已安装位置；如 SDK 安装在别处，构建前
+# 设置环境变量 MEMFABRIC_SDK_INC 指向 <memfabric output>/include/smem/device
+# 的同级目录即可覆盖。
 if(DEFINED ENV{MEMFABRIC_SDK_INC})
     set(SMEM_SDK_INC $ENV{MEMFABRIC_SDK_INC})
 else()
     set(SMEM_SDK_INC /home/w00804146/310P/a3ut-20261029/memfabric-sdk/include/smem/device)
 endif()
 
+# 把 include 路径传给内核编译。
 npu_op_kernel_options(ascendc_kernels ALL OPTIONS
     -I${SMEM_SDK_INC})
 
+# 内核源码在当前目录（op_kernel/），tiling 结构来自 op_host 的库。
 npu_op_kernel_sources(ascendc_kernels
     KERNEL_DIR ./
 )

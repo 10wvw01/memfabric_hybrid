@@ -1,4 +1,4 @@
-# branchmark — smem_mm 融合算子功能与性能验证工程
+# benchmark — smem_mm 融合算子功能与性能验证工程
 
 本目录是 `prd_code` 两个融合算子（`smem_mm_ar_310p3` 本地归约 / `smem_mm_iar_310p3`
 硬件归约）的**功能测验 + 性能测验**工程，覆盖两级口径：
@@ -12,14 +12,16 @@
 
 ## 前置依赖配置（所有实验通用）
 
-1. **设备纪律：只用物理 4/5**（38144 卡，TP=2 双 die）。跑前确认空闲：
+1. **设备纪律：用物理 6/7 die 对**（43520 卡，TP=2 双 die；4/5 = 38144 卡
+   引擎层故障待复位，恢复后同样可用）。跑前确认空闲：
 
    ```bash
-   npu-smi info | awk '/38144/{getline; print $8}'   # 两行均 < 3000MB 视为空闲
+   npu-smi info -i 43520 -t usages   # 双 die DDR<20% 且大页<500 视为空闲
    ```
 
    其它设备上可能有他人任务，禁止触碰；`ASCEND_RT_VISIBLE_DEVICES` 一律 unset
-   （脚本已内置）。
+   （脚本已内置）；die 对经 `DEVICES`（M2/op_bench）或
+   `VLLM_ASCEND_DEVICE_OFFSET`（serve）指定。
 
 2. **算子包与 wheel 已构建安装**（见各算子 README 的编译部署教程）：
 
@@ -30,7 +32,7 @@
    脚本已内置）。
 
 4. **memfabric_hybrid v28-orch 产物**位于
-   `/home/w00804146/310P_2/memfabric_hybrid/output`（orch 已部署到
+   `<工作区>/memfabric_hybrid/output`（orch 已部署到
    `/usr/lib64/aicpu_kernels/`；若环境刚复位，首次跑会由部署助手自动装载）。
 
 5. **E2E 实验额外**：vllm-ascend 为 editable 安装的 `prd_code/vllm-ascend`（或
@@ -42,8 +44,8 @@
 
 | 文件 | 能力 |
 |---|---|
-| `m2_xops_test.py` | M2 单 rank 进程体：池引导 → 预热波（enabled=0）→ 正式波 → golden 逐位比对（y 张量直读；数据为 one-hot x × 小整数 w，双 rank 和为序无关 → 逐位一致）。`--op ar\|iar` 选算子 |
-| `run_m2.sh` | M2 矩阵启动器：`{ar,iar} × M{1280,2048,3840,4096}` 逐格双 rank 拉起，逐格 ASCEND_CUSTOM_OPP_PATH 切包，PASS 判据 = 双 rank exit 0；`OPS/MS/DEVICES` 可覆盖 |
+| `m2_xops_test.py` | M2 单 rank 进程体：池引导 → **会话层不校验暖机波**（预热门已随 2026-11-19 ABI 减参删除；首次 kernel 发射存在冷首发数据竞态窗口，正式校验前两端锁步发射一次不校验的暖机调度批次）→ 正式波 → golden 逐位比对（y 张量直读；数据为 one-hot x × 小整数 w，双 rank 和为序无关 → 逐位一致）。`--op ar\|iar` 选算子 |
+| `run_m2.sh` | M2 矩阵启动器：`{ar,iar} × M{1280,3840,4096}` 逐格双 rank 拉起，逐格 ASCEND_CUSTOM_OPP_PATH 切包，PASS 判据 = 双 rank exit 0；`OPS/MS/DEVICES` 可覆盖 |
 | `e2e_functional_test.py` | 对运行中的 serve 发长 prompt（触发融合路径）+ 短 prompt（触发 fallback 路径），检查答案正确性（巴黎/算术/东京三问） |
 
 **跑法**：
@@ -68,9 +70,10 @@ python3 functional/e2e_functional_test.py
 **跑法**：
 
 ```bash
-bash op_perf/run_op_bench.sh                       # 默认 M="1280 3840"，全三臂
-MS="1280 3840 4096" bash op_perf/run_op_bench.sh   # 自定义档位
+bash op_perf/run_op_bench.sh                       # 默认 M="1280 3840 4096"，全三臂
+MS="1280 3840" bash op_perf/run_op_bench.sh        # 自定义档位
 PATHS="stock ar" bash op_perf/run_op_bench.sh      # 自定义臂
+DEVICES=6,7 REPS=3 ITERS=30 bash op_perf/run_op_bench.sh   # 自定义设备/重复/迭代
 # 结果落 op_perf/results/<时间戳>/{arm}_m<M>/；跑完自动打印报告
 ```
 
@@ -81,7 +84,7 @@ PATHS="stock ar" bash op_perf/run_op_bench.sh      # 自定义臂
 
 | 文件 | 能力 |
 |---|---|
-| `run_e2e_matrix.sh` | 三臂 TTFT 矩阵编排：S1（stock）/ F10（ar）/ F11（iar），每臂 fresh serve → 6 标记核验（接管证据）→ 逐长度 ttft_bench（1 cold + 2 warmup + 10 测量）→ round 1 附加每长度 1 个 profile 请求；round 2 反序确认轮。`DFLASH=1/0` 切部署块型（on=1280×3+256 / off=3840+256），两轮同 seed 配对分析 |
+| `run_e2e_matrix.sh` | 三臂 TTFT 矩阵编排：S1（stock）/ F10（ar）/ F11（iar），每臂 fresh serve → 6 标记核验（接管证据）→ 逐长度 ttft_bench（1 cold + 2 warmup + 10 测量；默认 LENS="4096"——E2E 口径只测 4096）→ round 1 附加每长度 1 个 profile 请求；round 2 反序确认轮。`DFLASH=1/0` 切部署块型（on=1280×3+256 / off=3840+256），两轮同 seed 配对分析 |
 | `vllm_serve_stock.sh` | stock 基线 serve（无融合；additional_config 全关） |
 | `vllm_serve_smem.sh` | 融合 serve：`SMEM_OP=ar\|iar` 选算子（切 ASCEND_CUSTOM_OPP_PATH + 使能配置）；`DFLASH=0` 切 dflash-off |
 | `ttft_bench.py` | 单臂 TTFT 计时（HTTP 发出 → 首 SSE 块，perf_counter 墙钟；1 cold + 2 warmup + 10 测量，`--seed-base` 保证跨臂同 prompt 配对） |

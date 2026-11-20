@@ -12,9 +12,12 @@ run13 四组实验的代码版本），只含生产代码，不含研发期实�
 | `smem_mm_ar_310p3` | **本地归约**：全量 COPY 交换 + AIV 车道本地加法 | smem_mm_ar_inline_reduce flavor 10 | 部署默认；实测整体占优（makespan 口径） |
 | `smem_mm_iar_310p3` | **硬件归约**：ADD_FP16 半交换（SDMA 途中加法）+ 旗标收敛 | smem_mm_ar_inline_reduce flavor 11 | 通信侧 AIV 更短，矩阵乘侧带宽争用更小 |
 
-适用边界（实测结论，随工程交付如实携带）：算子级 M≥2048 正收益、M=3840 约
-+15%；E2E 满载（压测）为负收益**禁部署**，单请求/低载在噪声带内持平——部署
-价值定位在 prefill TTFT 低载场景，默认不启用、按需开启。
+适用边界（实测结论，随工程交付如实携带）：算子级同会话三臂对比（run33，
+2026-11-20，6/7 die 对，慢侧 span P50）**M=2048 ar −39.3% / iar −36.8%，
+M=4096 ar −15.8% / iar −13.5%**；M<2048 档位劣化（沿用实测边界，部署由
+wrapper M≥1280 门槛控制）。E2E 满载（压测）为负收益**禁部署**，单请求/
+低载在噪声带内持平——部署价值定位在 prefill TTFT 低载场景，默认不启用、
+按需开启。
 
 ## 目录介绍
 
@@ -22,7 +25,7 @@ run13 四组实验的代码版本），只含生产代码，不含研发期实�
 |---|---|
 | `smem_mm_ar_310p3/` | 融合算子（本地归约版）：CANN 算子工程（op_host/op_kernel/构建件）+ xops torch 扩展；README 含输入输出规格说明、编译部署教程、memfabric_hybrid 依赖教程 |
 | `smem_mm_iar_310p3/` | 融合算子（硬件归约版）：结构同上 |
-| `branchmark/` | 功能测验 + 性能测验工程（算子级 / E2E 级），README 含每个实验的跑法、判据与前置依赖 |
+| `benchmark/` | 功能测验 + 性能测验工程（算子级 / E2E 级），README 含每个实验的跑法、判据与前置依赖 |
 | `vllm-ascend/` | 仅装载上述两个融合算子的 vllm-ascend 源码 checkout（接入层） |
 | `README.md` | 本文件：工程总览与跑通路径 |
 
@@ -37,7 +40,7 @@ run13 四组实验的代码版本），只含生产代码，不含研发期实�
 | vllm-ascend | 本目录 `vllm-ascend/`（0.19.1rc2.dev 系） | editable 安装；C 扩展编译期链 CANN——**换 CANN 必重编** |
 | xops wheels | `xops_smem_mm_ar_310p3` / `xops_smem_mm_iar_310p3` | 由各算子目录 `xops/` 构建安装 |
 | 模型 | `/home/models/Qwen/Qwen3.6-35B-A3B-w8a8` | `--quantization ascend --dtype float16`；hidden=2048 与算子 K=N=2048 硬编码吻合 |
-| 设备 | Ascend 310P3 单卡双 die，**TP=2** | 实验只用物理 **4/5**（38144 卡）；设备 0 布局不对称禁用；禁止 `ASCEND_RT_VISIBLE_DEVICES`（一律 `VLLM_ASCEND_DEVICE_OFFSET=4`） |
+| 设备 | Ascend 310P3 单卡双 die，**TP=2** | 实验用 die 对 **6/7**（43520 卡，`VLLM_ASCEND_DEVICE_OFFSET=6`）或 4/5（38144 卡，`OFFSET=4`，当前引擎层故障待复位）；设备 0/1 布局不对称禁用；禁止 `ASCEND_RT_VISIBLE_DEVICES`（一律 `VLLM_ASCEND_DEVICE_OFFSET` 指定 die 对基号） |
 
 ## 从零跑通（快速路径）
 
@@ -59,15 +62,15 @@ done
 # 3) 安装 vllm-ascend（editable，含 C 扩展；本副本已带预编译产物可直接用）
 cd vllm-ascend && pip install -e . --no-build-isolation && cd ..
 
-# 4) 功能验证（M2 双 rank 逐位对拍，全 PASS 才继续）
-cd branchmark/functional && bash run_m2.sh && cd ../..
+# 4) 功能验证（M2 双 rank 逐位对拍，全 PASS 才继续；默认 die 对 4/5，可 DEVICES 覆盖）
+cd benchmark/functional && DEVICES=6,7 bash run_m2.sh && cd ../..
 
 # 5) 算子级性能（stock vs ar vs iar，对照报告看 Δ 与路由证据）
-cd branchmark/op_perf && bash run_op_bench.sh && cd ../..
+cd benchmark/op_perf && DEVICES=6,7 bash run_op_bench.sh && cd ../..
 
-# 6) E2E：起一个融合 serve（SMEM_OP=ar 或 iar）
-cd branchmark/e2e_perf
-SMEM_OP=ar bash vllm_serve_smem.sh &        # 等待 /health OK
+# 6) E2E：起一个融合 serve（SMEM_OP=ar 或 iar；OFFSET 指定 die 对基号）
+cd benchmark/e2e_perf
+SMEM_OP=ar VLLM_ASCEND_DEVICE_OFFSET=6 bash vllm_serve_smem.sh &   # 等待 /health OK
 python3 ../functional/e2e_functional_test.py   # 生成正确性冒烟
 bash run_e2e_matrix.sh                          # 完整三臂 TTFT 矩阵
 ```
@@ -118,11 +121,11 @@ vllm serve /home/models/Qwen/Qwen3.6-35B-A3B-w8a8 \
   --additional-config '{"enable_smem_mm_ar_310p3":true, ...}'   # 或 enable_smem_mm_iar_310p3
 ```
 
-**运行期环境必须**（完整脚本见 `branchmark/e2e_perf/vllm_serve_smem.sh`，含全
+**运行期环境必须**（完整脚本见 `benchmark/e2e_perf/vllm_serve_smem.sh`，含全
 部环境变量）：
 
 ```bash
-export VLLM_ASCEND_DEVICE_OFFSET=4          # 落物理 4/5；禁止 VISIBLE_DEVICES
+export VLLM_ASCEND_DEVICE_OFFSET=6          # 落物理 6/7（或 4=4/5）；禁止 VISIBLE_DEVICES
 export ASCEND_CUSTOM_OPP_PATH=<...>/vendors/smem_mm_ar_310p3    # 或 iar 包
 export MF_SDMA_ORCH_JSON=<memfabric output>/hybm/aicpu_kernel/libmf_sdma_orch_v28.json
 export MF_SDMA_ORCH_DEPLOY_HELPER=<memfabric>/tools/aicpu_kernel_deploy/orch_deploy_helper
@@ -138,7 +141,7 @@ export LD_LIBRARY_PATH=<memfabric output>/smem/lib64:...:$ASCEND_CUSTOM_OPP_PATH
 
 - 算子级：msprof 设备侧 span P50（慢侧 rank）；池驻留时 host 墙钟无效。
 - E2E：TTFT 单请求配对（同 seed 两轮正反序）；±1% 为噪声带。
-- 详见 `branchmark/README.md` 判据节。
+- 详见 `benchmark/README.md` 判据节。
 
 ## 已知边界（如实携带，勿越线部署）
 

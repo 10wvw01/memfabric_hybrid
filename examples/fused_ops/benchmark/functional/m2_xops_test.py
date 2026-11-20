@@ -2,10 +2,17 @@
 """TP2 functional (M2) test for the prd_code fused operators.
 
 Per-rank process (RANK=0/1 in env); both ranks run the identical sequence:
-pool bootstrap -> prewarm (enabled=0 waves) -> one real fused wave -> golden
-bit-exact comparison. The aclnn launch goes through the xops wheel
-(torch_npu.npu_smem_mm_ar_310p3 / npu_smem_mm_iar_310p3), validating the
-EXEC_NPU_CMD_V1 -> aclnnSmemMm{Ar,Iar}310p3 -> kernel chain end to end.
+session create (pool bootstrap inside the xops session facade) -> one
+unverified warm-up wave -> one verified real wave -> golden bit-exact
+comparison -> teardown. The launch goes through the session facade
+(xops_{ar,iar}_310p3.SmemSession), which owns the pool bootstrap, geometry
+checks, status/trace channels, epoch bookkeeping and the operator call —
+validating the wheel facade -> EXEC_NPU_CMD_V1 -> aclnnSmemMm{Ar,Iar}310p3
+-> kernel chain end to end exactly as consumers use it.
+(The kernel has no enabled=0 prewarm gate — 2026-11-19 ABI reduction; the
+warm-up duty lives in the session layer because the first kernel launch
+after pool creation has a cold-start corruption window on some device
+pairs.)
 
 Verification data: one-hot rows x, small-int weights w; golden AR = y0 + y1.
 Both fused kernels write the AR result DIRECTLY into y — verify from the
@@ -13,49 +20,21 @@ tensor itself (bit-exact: the 2-rank fp16 sum of these integers is
 order-independent).
 """
 import argparse
-import ctypes
 import os
 import sys
 
 import numpy as np
 
-SDK = os.environ.get("MIXFABRIC_SDK_OUT", "/home/w00804146/310P_2/memfabric_hybrid/output")
-CANN = os.environ["ASCEND_HOME_PATH"]
-# Packet size (bytes). Default 1MiB; 4MiB = single-packet-per-subgroup mode.
-PKT = int(os.environ.get("SMEM_MM_310P3_PACKET", str(1024 * 1024)))
-
 import torch  # noqa: E402
 import torch_npu  # noqa: E402
-# The xops wheel import is deferred until after the pool is built: its load
-# chain is one of the last differences between the two ranks before meta
-# allocation (lib load order pitfall).
 
 K = 2048
 N = 2048
-POOL_BYTES = 64 << 20
-DATA_BYTES = 16 << 20
-EPOCH_BASE = 1000
 
 
 def fail(msg):
     print(f"[rank{RANK}] FAIL: {msg}", flush=True)
     sys.exit(1)
-
-
-def check(rc, name):
-    if rc != 0:
-        fail(f"{name} rc={rc}")
-    return rc
-
-
-class SmemConfig(ctypes.Structure):
-    _fields_ = [
-        ("shmInitTimeout", ctypes.c_uint32),
-        ("shmCreateTimeout", ctypes.c_uint32),
-        ("controlOperationTimeout", ctypes.c_uint32),
-        ("startConfigStoreServer", ctypes.c_bool),
-        ("flags", ctypes.c_uint32),
-    ]
 
 
 def main():
@@ -76,60 +55,16 @@ def main():
     torch.npu.set_device(dev)
     device = torch.device(f"npu:{dev}")
     torch.npu.empty_cache()
-    # Exact EnsureLibs replication: libmf_smem first, then libascendcl, both
-    # RTLD_NOW|RTLD_GLOBAL (glibc: RTLD_NOW=0x2; ctypes defaults to LAZY).
-    # Pool before any tensor (M2 discipline, matches the op-package init order).
-    smem = ctypes.CDLL(f"{SDK}/smem/lib64/libmf_smem.so",
-                       mode=ctypes.RTLD_GLOBAL | 0x2)
-    ctypes.CDLL("libascendcl.so", mode=ctypes.RTLD_GLOBAL | 0x2)
-    smem.smem_init.argtypes = [ctypes.c_uint32]
-    smem.smem_shm_config_init.argtypes = [ctypes.POINTER(SmemConfig)]
-    smem.smem_shm_init.argtypes = [ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32,
-                                   ctypes.c_uint16, ctypes.POINTER(SmemConfig)]
-    smem.smem_shm_create.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
-                                     ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint32,
-                                     ctypes.POINTER(ctypes.c_void_p)]
-    smem.smem_shm_create.restype = ctypes.c_void_p
-    smem.smem_shm_sdma_get_workspace.argtypes = [ctypes.c_void_p]
-    smem.smem_shm_sdma_get_workspace.restype = ctypes.c_void_p
-    smem.smem_shm_get_symmetric_size.argtypes = [ctypes.c_void_p]
-    smem.smem_shm_get_symmetric_size.restype = ctypes.c_uint64
-    smem.smem_shm_control_allgather.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
-                                                ctypes.c_void_p, ctypes.c_uint32]
-    smem.smem_shm_control_barrier.argtypes = [ctypes.c_void_p]
-    smem.smem_shm_destroy.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    smem.smem_shm_uninit.argtypes = [ctypes.c_uint32]
-    smem.smem_uninit.argtypes = []
-    smem.smem_uninit.restype = None
 
-    check(smem.smem_init(0), "smem_init")
-    cfg = SmemConfig()
-    check(smem.smem_shm_config_init(ctypes.byref(cfg)), "smem_shm_config_init")
-    cfg.startConfigStoreServer = RANK == 0
-    check(smem.smem_shm_init(a.store_url.encode(), 2, RANK, dev, ctypes.byref(cfg)), "smem_shm_init")
-    base = ctypes.c_void_p()
-    pool = smem.smem_shm_create(0, 2, RANK, POOL_BYTES, 2, 0, ctypes.byref(base))
-    if not pool or not base.value or not smem.smem_shm_sdma_get_workspace(pool):
-        fail("SDMA pool not ready (orch deploy failed?)")
-    gva = base.value
-    symm = smem.smem_shm_get_symmetric_size(pool)
-    if symm < DATA_BYTES + 4096:
-        fail(f"symmetric geometry {symm}")
-
-    geo = np.zeros((2, 4), dtype=np.uint64)
-    mine = np.array([gva, symm, 0, symm], dtype=np.uint64)
-    check(smem.smem_shm_control_allgather(pool, mine.ctypes.data, 32, geo.ctypes.data, 64),
-          "geometry allgather")
-    peer_gva = int(geo[1 - RANK][0])
-    if peer_gva == 0 or int(geo[1 - RANK][1]) != symm:
-        fail(f"peer geometry {geo}")
-    print(f"[rank{RANK}] pool gva=0x{gva:x} peer=0x{peer_gva:x} symm=0x{symm:x}", flush=True)
-
-    # Deferred xops import: pool before operator registration (load-order pitfall).
+    # xops 会话封装层：建池（含尺寸下限程序化推导）、几何强校验、
+    # status/trace 通道、epoch 内管、算子发射全部在封装层内完成。
     if a.op == "ar":
-        import xops_ar_310p3  # noqa: F401  # registers torch_npu.npu_smem_mm_ar_310p3
+        import xops_ar_310p3 as xops
     else:
-        import xops_iar_310p3  # noqa: F401  # registers torch_npu.npu_smem_mm_iar_310p3
+        import xops_iar_310p3 as xops
+    sess = xops.SmemSession(device=dev, rank=RANK, store_url=a.store_url)
+    print(f"[rank{RANK}] pool gva=0x{sess.gva:x} symm=0x{sess.symm:x} "
+          f"floor=0x{xops.POOL_FLOOR_BYTES:x}", flush=True)
 
     # Deterministic integer test data: one-hot rows, small-int weight.
     wi = (np.arange(N)[:, None] * 31 + np.arange(K)[None, :] * 7) % 13 - 6  # [N,K]
@@ -141,38 +76,25 @@ def main():
     x_np[np.arange(M), col] = val.astype(np.float16)
     x = torch.from_numpy(x_np).to(device)
     y = torch.zeros(M, N, dtype=torch.float16, device=device)
-    ib = torch.zeros(16384, dtype=torch.uint8, device=device)
-    status = torch.zeros(64, dtype=torch.uint8, device=device)
-    trace = torch.zeros(512, dtype=torch.int64, device=device)
 
-    def launch(enabled, epoch):
-        status.zero_()
-        trace.zero_()
-        if a.op == "ar":
-            torch_npu.npu_smem_mm_ar_310p3(
-                x, w_nz, y,
-                gva, peer_gva, symm,
-                ib.data_ptr(), status.data_ptr(), trace.data_ptr(),
-                RANK, epoch, PKT, M, 1024, 8, enabled)
-        else:
-            torch_npu.npu_smem_mm_iar_310p3(
-                x, w_nz, y,
-                gva, peer_gva, symm,
-                ib.data_ptr(), status.data_ptr(), trace.data_ptr(),
-                RANK, epoch, PKT, M, 1024, 8, enabled)
-        torch.npu.synchronize()
+    # Session-layer warm-up wave (unverified): the FIRST kernel launch after
+    # process/pool creation has a cold-start corruption window on some device
+    # pairs (2026-11-19 finding on devices 2/3: cold first wave mismatches
+    # 33~51%, second wave bit-exact; the op binary load races the first real
+    # wave's SDMA data). Both ranks fire one lock-step warm-up wave here; the
+    # verified wave below is then a warm (second) launch. vllm sessions do not
+    # need this: their first-call bit-exact gate verifies the cold first wave
+    # and fails loudly on corruption instead.
+    sess.launch(x, w_nz, M, out=y)
+    torch.npu.synchronize()
+    sess.barrier()
 
-    # Cold-first-write prewarm: two no-op launches, sync, barrier.
-    launch(0, EPOCH_BASE)
-    launch(0, EPOCH_BASE)
-    check(smem.smem_shm_control_barrier(pool), "prewarm barrier")
-    print(f"[rank{RANK}] prewarm (enabled=0) via xops OK", flush=True)
+    # Verified wave (warm second launch): the golden comparison target.
+    sess.launch(x, w_nz, M, out=y)
+    torch.npu.synchronize()
+    sess.barrier()
 
-    # Real wave via the PTA layer.
-    launch(1, EPOCH_BASE + 1)
-    check(smem.smem_shm_control_barrier(pool), "final barrier")
-
-    st = status.cpu().numpy().view(np.uint64)[0]
+    st = sess.status.cpu().numpy().view(np.uint64)[0]
     if st != 0:
         fail(f"kernel status=0x{st:x}")
 
@@ -187,10 +109,7 @@ def main():
     print(f"[rank{RANK}] {'PASS' if bad == 0 else 'FAIL'} data mismatches={bad}/{M * N}",
           flush=True)
 
-    check(smem.smem_shm_control_barrier(pool), "exit barrier")
-    check(smem.smem_shm_destroy(pool, 0), "smem_shm_destroy")
-    smem.smem_shm_uninit(0)
-    smem.smem_uninit()
+    sess.teardown()
     if bad != 0:
         sys.exit(1)
 

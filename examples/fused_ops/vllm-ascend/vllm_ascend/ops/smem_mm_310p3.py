@@ -1,10 +1,10 @@
 # ----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# This program is free software; you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
-# Please refer to the License for details. You may not use this file except in compliance with the License.
+# Please refer to the License for details. You should not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 """smem_mm_310p3: TP2 MatMul + AllReduce fusion over the MemFabric SDMA pool.
@@ -21,25 +21,31 @@ enable_smem_mm_iar_310p3 (or the deprecated env vars registered in envs.py).
 Enabling both is refused loudly before any pool is created.
 
 Chain per worker process:
-  SmemMm310P3Session  - smem pool bootstrap (ctypes) + epoch counter + device bufs
+  SmemMm310P3Session  - thin delegation to the session facade shipped inside
+                      the operator wheel (pool bootstrap with a size derived
+                      from the operator's exported layout floor, same-base
+                      geometry checks, status/trace channels, epoch
+                      bookkeeping); created at early bootstrap so the pool
+                      window reservation is the FIRST device allocation of
+                      the worker
   SmemMm310P3RowParallelOp - wraps a RowParallelLinear; native-M direct launch
-                     (no-pad contract: no pad buffers, no staging copy,
-                     y allocated per call); the fused kernel writes the AR
-                     result directly into y.
+                      (no-pad contract: no pad buffers, no staging copy,
+                      y allocated per call); the fused kernel writes the AR
+                      result directly into y.
 
 Kernel contract (see prd_code/smem_mm_ar_310p3 README):
   x [M,K] fp16 ND contiguous, w [N,K] fp16 FRACTAL_NZ, y [M,N] fp16 ND;
   K == N == 2048; M % 256 == 0 within [1024, 4096] (partial tail MM group /
-  partial last comm subgroup supported); 13 int64 attrs.
+  partial last comm subgroup supported); 7 int64 attrs (SDMA packet size /
+  comm granularity / AIC count are compile-time constants inside the kernel;
+  the seat array lives in the pool's seats area — ibPtr was removed with the
+  2026-11-19 pool-layout-ownership change).
 """
 
 from __future__ import annotations
 
-import ctypes
 import logging
-import math
 import os
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -51,10 +57,12 @@ from vllm.config import ModelConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
 
-# Kernel geometry constraints (must match op_kernel/smem_mm_ar310p3.cpp).
+# Kernel geometry constraints. Single source: the operator's tiling header,
+# exported programmatically by the xops wheel and cross-checked at session
+# creation (_check_op_contract). These local copies exist only for routing
+# checks that run before the wheel is imported.
 SMEM_MM_310P3_WIDTH = 2048           # K == N (hidden size per rank at TP2)
-SMEM_MM_310P3_COMM_ROWS = 1024       # communication granularity in rows
-SMEM_MM_310P3_MAX_ROWS = 4096        # work/scratch/sum areas are 16MiB each
+SMEM_MM_310P3_MAX_ROWS = 4096        # kernel work-area capacity
 # Kernel-side lower bound of the no-pad contract: rows % 256 == 0 within
 # [KERNEL_MIN_ROWS, MAX_ROWS] (partial tail MM group / partial last comm subgroup).
 SMEM_MM_310P3_KERNEL_MIN_ROWS = 1024
@@ -64,7 +72,6 @@ SMEM_MM_310P3_KERNEL_MIN_ROWS = 1024
 # no-pad contract. With the native-M launch a 1280-row chunk runs as its own
 # wave — no pad-to-2048 tax.
 SMEM_MM_310P3_MIN_ROWS = int(os.environ.get("SMEM_MM_310P3_MIN_ROWS", 1280))
-SMEM_MM_310P3_PACKET = 1024 * 1024   # recommended packet size (1MiB)
 # Deprecated env aliases (bench convenience): explicit operator pick on top of
 # the config keys.
 SMEM_MM_310P3_OP = os.environ.get("SMEM_MM_310P3_OP", "")
@@ -145,186 +152,89 @@ def early_bootstrap_smem_mm_310p3(device: int, rank: int, vllm_config) -> None:
     if not ok:
         logger.warning("smem_mm_310p3 disabled: %s.", why)
         return
-    # The xops wheels register torch_npu.npu_smem_mm_{ar,iar}_310p3 at import
-    # time; the worker process does not import them anywhere else.
-    if op == "ar":
-        import xops_ar_310p3  # noqa: F401
-    else:
-        import xops_iar_310p3  # noqa: F401
     SmemMm310P3Session.get_or_create(device, rank, op)
     logger.info("smem_mm_310p3 early session bootstrap done (dev=%d rank=%d op=%s)",
                 device, rank, op)
 
 
-def _smem_lib_path() -> Optional[str]:
-    candidates = [
-        os.environ.get("MIXFABRIC_SDK_OUT", ""),
-        "/usr/local/memfabric_hybrid",
-    ]
-    for root in candidates:
-        for sub in ("smem/lib64", "aarch64-linux/lib64", "lib64"):
-            p = os.path.join(root, sub, "libmf_smem.so") if root else None
-            if p and os.path.exists(p):
-                return p
-    return None
-
-
-class _SmemApi:
-    """ctypes binding of the memfabric smem session API."""
-
-    def __init__(self, so_path: str):
-        self.lib = ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
-
-        class SmemConfig(ctypes.Structure):
-            _fields_ = [
-                ("shmInitTimeout", ctypes.c_uint32),
-                ("shmCreateTimeout", ctypes.c_uint32),
-                ("controlOperationTimeout", ctypes.c_uint32),
-                ("startConfigStoreServer", ctypes.c_bool),
-                ("flags", ctypes.c_uint32),
-            ]
-
-        self.SmemConfig = SmemConfig
-        lib = self.lib
-        lib.smem_init.argtypes = [ctypes.c_uint32]
-        lib.smem_shm_config_init.argtypes = [ctypes.POINTER(SmemConfig)]
-        lib.smem_shm_init.argtypes = [ctypes.c_char_p, ctypes.c_uint32,
-                                      ctypes.c_uint32, ctypes.c_uint16,
-                                      ctypes.POINTER(SmemConfig)]
-        lib.smem_shm_create.argtypes = [ctypes.c_uint32, ctypes.c_uint32,
-                                        ctypes.c_uint32, ctypes.c_uint64,
-                                        ctypes.c_uint32, ctypes.c_uint32,
-                                        ctypes.POINTER(ctypes.c_void_p)]
-        lib.smem_shm_create.restype = ctypes.c_void_p
-        lib.smem_shm_sdma_get_workspace.argtypes = [ctypes.c_void_p]
-        lib.smem_shm_sdma_get_workspace.restype = ctypes.c_void_p
-        lib.smem_shm_get_symmetric_size.argtypes = [ctypes.c_void_p]
-        lib.smem_shm_get_symmetric_size.restype = ctypes.c_uint64
-        lib.smem_shm_control_allgather.argtypes = [ctypes.c_void_p,
-                                                   ctypes.c_void_p,
-                                                   ctypes.c_uint32,
-                                                   ctypes.c_void_p,
-                                                   ctypes.c_uint32]
-        lib.smem_shm_control_barrier.argtypes = [ctypes.c_void_p]
-        lib.smem_shm_destroy.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        lib.smem_shm_uninit.argtypes = [ctypes.c_uint32]
-        lib.smem_uninit.argtypes = []
-        lib.smem_uninit.restype = None
+def _check_op_contract(xops) -> None:
+    """Version-skew guard: fail loudly if this module's routing constants
+    disagree with the operator package's exported kernel contract (the single
+    source of these numbers is the operator's tiling header, exported
+    programmatically by the wheel)."""
+    mismatch = []
+    if xops.KERNEL_WIDTH != SMEM_MM_310P3_WIDTH:
+        mismatch.append(f"width {xops.KERNEL_WIDTH} != {SMEM_MM_310P3_WIDTH}")
+    if xops.KERNEL_MAX_ROWS != SMEM_MM_310P3_MAX_ROWS:
+        mismatch.append(
+            f"max_rows {xops.KERNEL_MAX_ROWS} != {SMEM_MM_310P3_MAX_ROWS}")
+    if xops.KERNEL_MIN_ROWS != SMEM_MM_310P3_KERNEL_MIN_ROWS:
+        mismatch.append(
+            f"min_rows {xops.KERNEL_MIN_ROWS} != "
+            f"{SMEM_MM_310P3_KERNEL_MIN_ROWS}")
+    if mismatch:
+        raise RuntimeError(
+            "smem_mm_310p3 contract mismatch between vllm wiring and the "
+            f"operator wheel: {'; '.join(mismatch)} — reinstall the xops "
+            "wheel matching this vllm-ascend build")
 
 
 @dataclass
 class SmemMm310P3Session:
-    """Per-worker smem session. Create once via get_or_create()."""
+    """Per-worker smem session. Create once via get_or_create().
+
+    Thin delegation to the session facade shipped inside the operator wheel
+    (xops_{ar,iar}_310p3.SmemSession): pool bootstrap with a size derived
+    from the operator's exported layout floor, same-base geometry checks,
+    status/trace channels and epoch bookkeeping all live in the facade. This
+    wrapper keeps the vllm-side concerns (operator selection, device/rank
+    routing, early-bootstrap timing) and nothing else — no second copy of
+    pool or ABI knowledge lives here.
+    """
 
     device: int
     rank: int                      # smem rank id (0/1), == TP rank in pool
     op: str                        # "ar" (local reduction) / "iar" (hardware reduction)
-    world_size: int = 2
-
-    _pool: object = field(default=None, repr=False)
-    _gva: int = 0
-    _peer_gva: int = 0
-    _symm: int = 0
-    _epoch: int = 1000
-    _api: Optional[_SmemApi] = None
-    _ib: Optional[torch.Tensor] = None
-    _status: Optional[torch.Tensor] = None
-    _trace: Optional[torch.Tensor] = None
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _inner: object = field(default=None, repr=False)
 
     @classmethod
-    def get_or_create(cls, device: int, rank: int, op: str = "ar") -> "SmemMm310P3Session":
+    def get_or_create(cls, device: int, rank: int,
+                      op: str = "ar") -> "SmemMm310P3Session":
         global _SESSION
         if _SESSION is None:
+            # The xops wheels register torch_npu.npu_smem_mm_{ar,iar}_310p3 at
+            # import time and ship the session facade; the worker process does
+            # not import them anywhere else.
+            if op == "ar":
+                import xops_ar_310p3 as xops
+            elif op == "iar":
+                import xops_iar_310p3 as xops
+            else:
+                raise RuntimeError(f"smem_mm_310p3: unknown op {op!r}")
+            _check_op_contract(xops)
+            inner = xops.SmemSession.get_or_create(device=device, rank=rank)
             _SESSION = cls(device=device, rank=rank, op=op)
-            _SESSION.bootstrap()
+            _SESSION._inner = inner
+            # Marker line required by the E2E takeover-verification
+            # discipline (6 markers = 2 workers x session up / installed
+            # on 40 / verified bit-exact; grep must not depend on /health).
+            logger.info("smem_mm_310p3 session up: op=%s rank=%d dev=%d "
+                        "gva=0x%x symm=0x%x", op, rank, device,
+                        inner.gva, inner.symm)
         return _SESSION
 
-    def bootstrap(self) -> None:
-        import numpy as np  # only for the allgather staging buffer
-
-        so = _smem_lib_path()
-        if so is None:
-            raise RuntimeError(
-                "smem_mm_310p3 enabled but libmf_smem.so not found; set "
-                "MIXFABRIC_SDK_OUT to the memfabric output root (containing "
-                "smem/lib64/libmf_smem.so)")
-        api = _SmemApi(so)
-        self._api = api
-        lib = api.lib
-
-        rc = lib.smem_init(0)
-        if rc != 0:
-            raise RuntimeError(f"smem_mm_310p3 smem_init rc={rc}")
-        cfg = api.SmemConfig()
-        rc = lib.smem_shm_config_init(ctypes.byref(cfg))
-        if rc != 0:
-            raise RuntimeError(f"smem_mm_310p3 smem_shm_config_init rc={rc}")
-        cfg.startConfigStoreServer = self.rank == 0
-        store_url = os.environ.get("SMEM_MM_310P3_STORE_URL", "tcp://127.0.0.1:8730")
-        rc = lib.smem_shm_init(store_url.encode(), self.world_size, self.rank,
-                               self.device, ctypes.byref(cfg))
-        if rc != 0:
-            raise RuntimeError(f"smem_mm_310p3 smem_shm_init rc={rc}")
-
-        base = ctypes.c_void_p()
-        pool = lib.smem_shm_create(0, self.world_size, self.rank,
-                                   64 << 20, 2, 0, ctypes.byref(base))
-        if not pool or not base.value or not lib.smem_shm_sdma_get_workspace(pool):
-            raise RuntimeError("smem_mm_310p3 SDMA pool not ready (orch deploy failed)")
-        self._pool = pool
-        self._gva = base.value
-        self._symm = lib.smem_shm_get_symmetric_size(pool)
-
-        geo = np.zeros((self.world_size, 4), dtype=np.uint64)
-        mine = np.array([self._gva, self._symm, 0, self._symm], dtype=np.uint64)
-        rc = lib.smem_shm_control_allgather(pool, mine.ctypes.data, 32,
-                                            geo.ctypes.data, 64)
-        if rc != 0:
-            raise RuntimeError(f"smem_mm_310p3 geometry allgather rc={rc}")
-        self._peer_gva = int(geo[1 - self.rank][0])
-        if self._peer_gva == 0 or int(geo[1 - self.rank][1]) != self._symm:
-            raise RuntimeError(f"smem_mm_310p3 peer geometry invalid: {geo.tolist()}")
-
-        dev = torch.device(f"npu:{self.device}")
-        self._ib = torch.zeros(16384, dtype=torch.uint8, device=dev)
-        self._status = torch.zeros(64, dtype=torch.uint8, device=dev)
-        self._trace = torch.zeros(512, dtype=torch.int64, device=dev)
-        logger.info("smem_mm_310p3 session up: op=%s rank=%d dev=%d gva=0x%x "
-                    "peer=0x%x symm=0x%x", self.op, self.rank, self.device,
-                    self._gva, self._peer_gva, self._symm)
+    @property
+    def gva(self) -> int:
+        """Local symmetric-pool base VA (diagnostics)."""
+        return self._inner.gva
 
     def launch(self, x: torch.Tensor, w_nz: torch.Tensor, y: torch.Tensor,
                rows: int) -> None:
         """Fire one fused wave; x/y are [rows, 2048] fp16 contiguous (native M, no padding)."""
-        with self._lock:
-            self._epoch += 1
-            epoch = self._epoch
-        self._status.zero_()
-        if self.op == "ar":
-            torch_npu.npu_smem_mm_ar_310p3(
-                x, w_nz, y,
-                self._gva, self._peer_gva, self._symm,
-                self._ib.data_ptr(), self._status.data_ptr(),
-                self._trace.data_ptr(),
-                self.rank, epoch, SMEM_MM_310P3_PACKET, rows, SMEM_MM_310P3_COMM_ROWS,
-                8, 1)
-        else:
-            torch_npu.npu_smem_mm_iar_310p3(
-                x, w_nz, y,
-                self._gva, self._peer_gva, self._symm,
-                self._ib.data_ptr(), self._status.data_ptr(),
-                self._trace.data_ptr(),
-                self.rank, epoch, SMEM_MM_310P3_PACKET, rows, SMEM_MM_310P3_COMM_ROWS,
-                8, 1)
+        self._inner.launch(x, w_nz, rows, out=y)
 
     def teardown(self) -> None:
-        if self._pool is not None:
-            self._api.lib.smem_shm_control_barrier(self._pool)
-            self._api.lib.smem_shm_destroy(self._pool, 0)
-            self._api.lib.smem_shm_uninit(0)
-            self._api.lib.smem_uninit()
-            self._pool = None
+        self._inner.teardown()
 
 
 _SESSION: Optional[SmemMm310P3Session] = None
