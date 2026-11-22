@@ -10,33 +10,17 @@
  * See the Mulan PSL v2 for more details.
  */
 
-/* hybm_sdma_orchestrator.h — 310P AICore×AICPU 协同模式传输准备(进程级单例 + 引用计数)
- *
- * 邮箱化: host 侧 submit/wait 数据面 API 废止(搬运由 AICore 经
- * smem_shm_sdma_put/get/quiet 设备侧自驱), 本类职责收敛为:
- *   1. 传输准备(CP 流/工作区/epoch kernel 加载, 含设备侧自动部署);
- *   2. ConfigureOrch: 段尾保留区初始化(双环清零) + epoch 参数装配 + 首轮内联下发
- *      (失败立即报错返回) + 监督线程启动;
- *   3. StopEpoch: 写停止标志 → 停监督线程 → kernel ≤1ms 自退 → 同步确认 → 读结果区诊断。
- *
- * 执行模型(按时长分轮运行, 2026-10-12 定案): 每轮时长默认 15s
- * (MF_SDMA_ORCH_EPOCH_BUDGET_S 可调, 4294967295=永不退出的诊断模式), kernel 到点
- * 自退后监督线程重新拉起新一轮(环+游标语义零丢失, 换轮间隙约 100ms)。
- * 为什么不一次下发跑到停止: host 侧全设备同步(torch_npu 分配显存时内部触发)会等
- * 所有流的全部任务, 流标志与独立上下文均无法豁免(CP_PROCESS_USE 流拒收本进程
- * 任务下发 507000), 永不退出的 kernel 必阻塞它(serve 实测死因 507017)。
- * 分轮运行后全设备同步最多等当前轮剩余(<15s)。launch json 为 KFCKernel(type 5),
- * 设备侧系统监控不给该类型计时——轮超时无 28s 强制结束风险。
- *
- * 生命周期: 多池共享进程级资源, Acquire/Release 引用计数; ConfigureOrch 一次绑定
- * (约束: 每进程单 SDMA 池, 双环位于首个配置池的段尾保留区)。
- */
+// 310P SDMA服务使用独立Context；后台线程更新健康序号并监测服务状态。
+// 停止时确认请求和SDMA均结束后释放资源，失败时保留所属对象。
 #ifndef MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H
 #define MEM_FABRIC_HYBRID_HYBM_SDMA_ORCH_PREP_H
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
+#include <condition_variable>
+#include "hybm_sdma_service_options.h"
 
 #include "dl_acl_api.h"
 #include "hybm_common_include.h"
@@ -45,27 +29,27 @@
 namespace ock {
 namespace mf {
 /* 工作区布局(哨兵退役——戳 SQE 的源改为到达邮件像首字段) */
-constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;         /* 工作区总尺寸 */
-constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 0;      /* epoch 结果区 64B(诊断) */
-constexpr uint64_t HYBM_SDMA_ORCH_WS_OVF_OFF = 64;        /* SQE overflow 目标 64B */
-constexpr uint64_t HYBM_SDMA_ORCH_WS_STOP_OFF = 128;      /* 停止标志 8B(工作区自有, 销毁序安全) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_SIZE = 4096;    /* 工作区总尺寸 */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_RESULT_OFF = 0; /* epoch 结果区 64B(诊断) */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_OVF_OFF = 64;   /* SQE overflow 目标 64B */
+constexpr uint64_t HYBM_SDMA_ORCH_WS_STOP_OFF = 128; /* 停止标志 8B(工作区自有, 销毁序安全) */
 
-/* 停止同步上限(秒): StopEpoch 写停止标志后 kernel 正常 ≤1ms 自退。
- * 0 = 永不超时(attr 值经 ConvertTimeoutToInner(0)=MAX_UINT64; 缺省 attr 则为默认
- * 超时 ≈6.4s 会误杀长时任务——507017, 故 attr 不可省略且必须显式置 0)。
- * 任何有限 attr 值都会在到达时把任务标记为超时(507017, host 侧语义, 设备侧不杀)
- * 导致监督线程的 sync 提前返回、不等 kernel 退出。每轮时长由主机报时驱动
- * (kernel 读递增计数, 见 hybm_sdma_contract.h), 不经 attr。设备故障(kernel 卡在
- * HAL 调用)时 sync 不返回、销毁挂起——已接受的取舍 */
+// kernel自行处理停止及超时，runtime的任务超时属性保持为0。
 constexpr uint32_t HYBM_SDMA_ORCH_LAUNCH_TIMEOUT_NEVER_S = 0;
 
 class SdmaOrchestrator { // 协同模式传输准备单例(所有可变状态在 mutex_ 内维护)
 public:
-    static SdmaOrchestrator &GetInstance();     /* 进程级单例入口 */
+    static SdmaOrchestrator &GetInstance(); /* 进程级单例入口 */
 
     /* 显式禁用读取(env MF_SDMA_ORCH_DISABLE, 取值 "1"/"on" 为禁用);
      * 310P+SDMA 位默认启用协同(A3 配方必败, 协同为唯一可用链路) */
     static bool Disabled() noexcept;
+
+    bool HasUnconfirmedResources() const noexcept
+    {
+        return (stopFlag_.load() && !workerDone_.load()) ||
+               (epochLaunched_.load() && workerDone_.load() && !releaseConfirmed_.load());
+    }
 
     /* 引用计数 +1; 首次进入执行传输准备(CP 流→工作区→kernel 含自动部署) */
     Result Acquire(uint16_t devId);
@@ -97,19 +81,26 @@ public:
         return workspace_.load(std::memory_order_acquire);
     }
 
-    /* 停止搬运 epoch kernel(幂等): 写停止标志 → kernel ≤1ms 自退 → 同步确认 → 读结果区诊断。
+    /* 停止服务并确认已提交SDMA结束；超时返回错误并保留资源。
      * 段拆除路径必须先于段 VA 解除映射调用(kernel 轮询段内环, VA 先拆会设备侧访问异常) */
-    void StopEpoch();
+    bool IsBoundTo(uint64_t address, uint64_t bytes) const noexcept
+    {
+        const auto base = boundReservation_.load();
+        return base != 0 && address <= base && base - address < bytes;
+    }
+
+    Result StopEpoch();
+    Result GetServiceStatus(HybmSdmaOrchResult &result);
 
 private:
     SdmaOrchestrator() = default;
-    Result InitOnce(uint16_t devId);       /* 全量初始化入口(锁内) */
-    Result InitCpStream(uint16_t devId);   /* CP 流 + sqId/streamId/dieId */
-    Result AllocWorkspace();               /* 工作区分配与清零 */
+    Result InitOnce(uint16_t devId);     /* 全量初始化入口(锁内) */
+    Result InitCpStream(uint16_t devId); /* CP 流 + sqId/streamId/dieId */
+    Result AllocWorkspace();             /* 工作区分配与清零 */
     Result PrepareRuntimeJson(const std::string &jsonPath, std::string &runtimeJson);
     static Result ResolveOrchestratorJson(const std::string &directory, std::string &jsonPath);
-    Result LoadOrchestratorKernel();       /* json 解析 + 部署探测 + 自动部署后加载 */
-    Result TryLoadKernel(const std::string &jsonPath);   /* 单次加载尝试(日志由调用方分层记) */
+    Result LoadOrchestratorKernel();                   /* json 解析 + 部署探测 + 自动部署后加载 */
+    Result TryLoadKernel(const std::string &jsonPath); /* 单次加载尝试(日志由调用方分层记) */
     Result DeployOrchestratorKernel(const std::string &kernelDir, const std::string &launchJsonPath); /* 自动部署 */
     Result MigrateViaCustChannel(const std::string &dir, uint64_t &soSize); /* CUST 通道迁移落盘 */
     Result LoadKfcChannel(aclrtFuncHandle &fh); /* KFC 通道装载(临时 json→mode=0 加载→句柄) */
@@ -118,37 +109,61 @@ private:
     Result VerifyDeployment(const std::string &hostSo);
     Result CheckDeploymentResult(const void *bytes, size_t size, bool allowPresent = false);
     Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 提交设备内复制 */
-    Result LaunchEpoch(void *stream);     /* 单轮下发到指定流(首轮 ConfigureOrch 内联, 后续由监督线程) */
-    void SupervisorLoop();                 /* 监督线程: 每 100ms 写报时计数+读结果区, 发现当前轮退出即重新拉起 */
-    void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
-    void Cleanup();                        /* 逆序清理(锁内, 归零时) */
+    Result LaunchEpoch(void *stream); /* 单轮下发到指定流(首轮 ConfigureOrch 内联, 后续由监督线程) */
+    Result InitControl();
+    Result CopyControl(uint64_t device, void *host, size_t bytes, uint32_t kind);
+    Result ReadServiceResult(HybmSdmaOrchResult &result);
+    Result StartServiceWorker();
+    Result WaitServiceWorker();
+    Result RetryServiceStop();
+    void RecordHostFailure(uint32_t reason);
+    Result RunService();
+    Result PollService();
+    Result UpdateServiceControl(bool &stopWritten, std::chrono::steady_clock::time_point &deadline,
+                                std::chrono::steady_clock::time_point &nextHeartbeat);
+    Result HandleServiceResult(const HybmSdmaOrchResult &result, bool &finished);
+    void SupervisorLoop();          /* 更新健康序号、报告错误；有限轮次正常到期后重新提交 */
+    Result DestroyEpochResources(); /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
+    void Cleanup();                 /* 逆序清理(锁内, 归零时) */
 
-    uint32_t hostPid_{0};           // CANN 迁移目录及本次设备 SO 名称使用的宿主机 PID
-    std::string deviceSoName_;      // 本次加载专用的设备文件名
+    std::atomic<uint64_t> boundReservation_{0};
+    HybmSdmaOrchResult cachedResult_{};
+    SdmaServiceOptions serviceOptions_{};
+    void *serviceContext_{nullptr};
+    void *controlStream_{nullptr};
+    void *controlHost_{nullptr};
+    bool controlPending_{false};
+    std::mutex workerMutex_;
+    std::mutex stopMutex_;
+    std::condition_variable workerChanged_;
+    std::atomic<bool> workerDone_{true};
+    std::atomic<bool> releaseConfirmed_{true};
+    std::atomic<Result> startResult_{BM_NOT_INITIALIZED};
+    std::atomic<Result> workerResult_{BM_OK};
+    uint32_t hostPid_{0};      // CANN 迁移目录及本次设备 SO 名称使用的宿主机 PID
+    std::string deviceSoName_; // 本次加载专用的设备文件名
     uint64_t deployNonce_{0};
-    bool deviceSoOwned_{false};     // 仅清理本次部署创建的文件
-    std::mutex mutex_;              /* 保护 refCount_ 与初始化/清理串行(ready_/workspace_ 另以原子保护) */
-    uint32_t refCount_{0};          /* HYBM 初始化及实体共同持有引用 */
-    bool configured_{false};        /* 保留区已配置 + 搬运 kernel 已下发(ConfigureOrch 一次绑定) */
-    bool epochLaunched_{false};     /* 搬运 kernel 在运行(StopEpoch 幂等性: 停过即不再重复停) */
-    HybmSdmaOrchParam epochParam_{}; /* epoch kernel 参数(ConfigureOrch 装配) */
-    uint16_t devId_{0};             /* host 设备号(首次 Acquire 绑定) */
-    uint32_t dieId_{0};             /* die 号 = devId_ % 2 */
-    uint32_t sqId_{0};              /* CP 流 SQ id */
-    int32_t streamId_{0};           /* CP 流 id(SQE 的 rt_stream_id) */
-    void *cpStream_{nullptr};       /* CP 流句柄(DEVICE_USE_ONLY) */
-    void *launchStream_{nullptr};   /* KFC 部署通道流(init 期专用; epoch 不用——见 epochStream_) */
-    void *epochStream_{nullptr};    /* 搬运 kernel 提交流(普通流, 每轮任务下发于此;
-                                      * 曾尝试带隔离标志建流使全设备同步看不见它, 实测装机版本无效且
-                                      * 拒收任务下发, 已回退——见平台事实 2026-10-12 条目) */
+    bool deviceSoOwned_{false}; // 仅清理本次部署创建的文件
+    std::mutex mutex_;          /* 保护 refCount_ 与初始化/清理串行(ready_/workspace_ 另以原子保护) */
+    uint32_t refCount_{0};      /* HYBM 初始化及实体共同持有引用 */
+    bool configured_{false};    /* 保留区已配置 + 搬运 kernel 已下发(ConfigureOrch 一次绑定) */
+    std::atomic<bool> epochLaunched_{false}; /* 搬运 kernel 在运行(StopEpoch 幂等性: 停过即不再重复停) */
+    HybmSdmaOrchParam epochParam_{};         /* epoch kernel 参数(ConfigureOrch 装配) */
+    uint16_t devId_{0};                      /* host 设备号(首次 Acquire 绑定) */
+    uint32_t dieId_{0};                      /* die 号 = devId_ % 2 */
+    uint32_t sqId_{0};                       /* CP 流 SQ id */
+    int32_t streamId_{0};                    /* CP 流 id(SQE 的 rt_stream_id) */
+    void *cpStream_{nullptr};                /* CP 流句柄(DEVICE_USE_ONLY) */
+    void *launchStream_{nullptr};         /* KFC 部署通道流(init 期专用; epoch 不用——见 epochStream_) */
+    void *epochStream_{nullptr};          // 独立服务Context中的AICPU任务流
     aclrtBinHandle binHandle_{nullptr};   /* AICPU kernel 二进制句柄 */
     aclrtFuncHandle funcHandle_{nullptr}; /* HybmSdmaOrchEpoch 函数句柄 */
-    aclrtBinHandle custBinHandle_{nullptr}; /* CUST 迁移句柄(保活: 持至进程退出) */
+    aclrtBinHandle custBinHandle_{nullptr};  /* CUST 迁移句柄(保活: 持至进程退出) */
     aclrtFuncHandle kfcFuncHandle_{nullptr}; /* KFC 通道句柄缓存(首次装载后复用, 免每次部署重装) */
-    std::atomic<bool> ready_{false};       /* 就绪标志(原子: 无锁读与锁内写并发) */
-    std::atomic<uint64_t> workspace_{0};   /* 工作区设备地址(原子: 同上) */
-    std::atomic<bool> stopFlag_{false};    /* 监督线程退出标志(StopEpoch 置位) */
-    std::thread supervisor_;               /* 监督线程(分轮模式启动: 写报时计数/读结果区/换轮; 永不退出诊断模式不启动) */
+    std::atomic<bool> ready_{false};         /* 就绪标志(原子: 无锁读与锁内写并发) */
+    std::atomic<uint64_t> workspace_{0};     /* 工作区设备地址(原子: 同上) */
+    std::atomic<bool> stopFlag_{false};      /* 监督线程退出标志(StopEpoch 置位) */
+    std::thread supervisor_; /* 服务维护线程，停止请求及资源确认统一在该线程执行 */
 };
 } // namespace mf
 } // namespace ock

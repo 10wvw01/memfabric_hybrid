@@ -692,19 +692,19 @@ TEST_F(SmemShmTest, smem_shm_entry_init_steps_create_unreserve_free_slice)
     EXPECT_EQ(ret, SM_OK);
     EXPECT_EQ(entry.entity_, kEntity);
 
-    // 3) InitStepUnreserveMemory: 即使失败也要把 gva_ 清空
+    // 释放失败时保留映射和slice，后续仍可重试。
     entry.gva_ = reinterpret_cast<void *>(UT_INVALID_HANDLE_ADDR);
     MOCKER_CPP(hybm_unreserve_mem_space, int32_t(*)(hybm_entity_t, uint32_t)).stubs().will(returnValue(-1));
     entry.InitStepUnreserveMemory();
-    EXPECT_EQ(entry.gva_, nullptr);
+    EXPECT_EQ(entry.gva_, reinterpret_cast<void *>(UT_INVALID_HANDLE_ADDR));
 
-    // 4) InitStepFreeSlice: free 失败也会把 slice_ 置空
+    // slice释放失败时保留句柄。
     entry.slice_ = reinterpret_cast<hybm_mem_slice_t>(UT_SLICE_ADDR);
     MOCKER_CPP(hybm_free_local_memory, int32_t(*)(hybm_entity_t, hybm_mem_slice_t, uint32_t, uint32_t))
         .stubs()
         .will(returnValue(-1));
     entry.InitStepFreeSlice();
-    EXPECT_EQ(entry.slice_, nullptr);
+    EXPECT_EQ(entry.slice_, reinterpret_cast<hybm_mem_slice_t>(UT_SLICE_ADDR));
 }
 
 TEST_F(SmemShmTest, smem_shm_entry_get_reach_info_paths)

@@ -84,6 +84,7 @@ SMEM_SHM_INLINE_AICORE uint64_t SdmaReadCell(__gm__ uint8_t *res, uint64_t off)
     AscendC::GlobalTensor<int32_t> t;
     t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cell), 2);
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t);
+    AscendC::PipeBarrier<PIPE_ALL>();
     return *reinterpret_cast<__gm__ volatile uint64_t *>(cell);
 }
 
@@ -92,9 +93,16 @@ SMEM_SHM_INLINE_AICORE void SdmaWriteCell(__gm__ uint8_t *res, uint64_t off, uin
 {
     __gm__ uint8_t *cell = res + off;
     *reinterpret_cast<__gm__ volatile uint64_t *>(cell) = v;
+    AscendC::PipeBarrier<PIPE_ALL>();
     AscendC::GlobalTensor<int32_t> t;
     t.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cell), 2);
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t);
+    AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+SMEM_SHM_INLINE_AICORE uint64_t SdmaServiceState(const smem_shm_sdma_ctx_t &ctx)
+{
+    return SdmaReadCell(ctx.res, SMEM_SHM_SDMA_RS_SERVICE);
 }
 
 /* ============================ 公开 API ============================ */
@@ -143,7 +151,9 @@ SMEM_SHM_INLINE_AICORE bool SdmaResolveQueue(const smem_shm_sdma_ctx_t &ctx, __g
     }
     const uint64_t usable = ctx.phys - SMEM_SHM_SDMA_RESERVED;
     const uint64_t offset = reinterpret_cast<uint64_t>(isGet ? src : dst) - remoteSeg;
-    if (offset >= usable || len > usable - offset) { return false; }
+    if (offset >= usable || len > usable - offset) {
+        return false;
+    }
     if (signal) {
         const uint64_t addr = reinterpret_cast<uint64_t>(signal);
         if (get || (addr & 7) || addr < remoteSeg || addr - remoteSeg >= usable || usable - (addr - remoteSeg) < 8) {
@@ -160,6 +170,8 @@ SMEM_SHM_INLINE_AICORE bool SdmaReserveRequest(const smem_shm_sdma_ctx_t &ctx, u
     const uint64_t headOff = SMEM_SHM_SDMA_RS_REQ_HEAD + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
     uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
     for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; ++i) {
+        if (SdmaServiceState(ctx) != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING))
+            return false;
         if (tail - SdmaReadCell(ctx.res, headOff) < SMEM_SHM_SDMA_RS_REQ_SLOTS)
             break;
         SdmaPollBackoff(i, delay);
@@ -201,10 +213,18 @@ SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ 
         return true;
     uint32_t queue = 0;
     uint64_t tail = 0;
-    if (!SdmaResolveQueue(ctx, src, dst, len, op, get, signal, queue) || !SdmaReserveRequest(ctx, queue, tail))
+    if (!SdmaResolveQueue(ctx, src, dst, len, op, get, signal, queue))
         return false;
-    SdmaPublishRequest(ctx, queue, tail, src, dst, len, op, signal, value);
-    return true;
+    const uint64_t publishing = SMEM_SHM_SDMA_RS_PUBLISHING + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
+    SdmaWriteCell(ctx.res, publishing, 1);
+    AscendC::PipeBarrier<PIPE_ALL>();
+    const bool accepted =
+        SdmaServiceState(ctx) == SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING) && SdmaReserveRequest(ctx, queue, tail);
+    if (accepted)
+        SdmaPublishRequest(ctx, queue, tail, src, dst, len, op, signal, value);
+    AscendC::PipeBarrier<PIPE_ALL>();
+    SdmaWriteCell(ctx.res, publishing, 0);
+    return accepted;
 }
 
 /* put/get 的零长度请求直接成功，不修改队列。
@@ -213,15 +233,14 @@ SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ 
  * NBI 成功表示请求已提交；quiet 或同步接口成功表示 GM 传输完成。
  * 调用方负责源和目标缓存维护，并确认远端源数据就绪。
  * quiet 仅等待调用 block 的传输；远端消费完成由应用协议确认。 */
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_nbi_at(const smem_shm_sdma_ctx_t &ctx,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes,
-    smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_nbi_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
+                                                     uint64_t bytes, smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
 {
     return SdmaSubmitAt(ctx, src, dst, bytes, op, false);
 }
 
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get_nbi_at(const smem_shm_sdma_ctx_t &ctx,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get_nbi_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
+                                                     uint64_t bytes)
 {
     return SdmaSubmitAt(ctx, src, dst, bytes, SMEM_SHM_SDMA_OP_COPY, true);
 }
@@ -234,8 +253,7 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(const smem_shm_sdma_ctx_t &ct
     for (uint32_t pr = 0; pr < peerCnt; pr++) {
         /* v31: 逐发送队列判定——队列 = (对端环下标, 本 block), 各队列末封戳到即该队列全部到 */
         const uint64_t tail = SdmaReadCell(ctx.res, SMEM_SHM_SDMA_RS_REQ_TAIL +
-                                                        static_cast<uint64_t>(SmemShmSdmaQueueIdx(pr,
-                                                                                                  ctx.block)) *
+                                                        static_cast<uint64_t>(SmemShmSdmaQueueIdx(pr, ctx.block)) *
                                                             SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
         if (tail == 0) {
             continue; /* 该环从未投递 */
@@ -244,16 +262,18 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(const smem_shm_sdma_ctx_t &ct
         uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
         bool landed = false;
         for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; i++) {
-            const uint64_t stamp = SdmaReadCell(ctx.res,
-                                                 SMEM_SHM_SDMA_RS_QUIET +
-                                                     static_cast<uint64_t>(SmemShmSdmaQueueIdx(pr,
-                                                                                               ctx.block)) *
-                                                         SMEM_SHM_SDMA_RS_QUIET_STRIDE +
-                                                     ((tail - 1) % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8);
+            const uint64_t stamp = SdmaReadCell(ctx.res, SMEM_SHM_SDMA_RS_QUIET +
+                                                             static_cast<uint64_t>(SmemShmSdmaQueueIdx(pr, ctx.block)) *
+                                                                 SMEM_SHM_SDMA_RS_QUIET_STRIDE +
+                                                             ((tail - 1) % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8);
             if (stamp == expect) { /* 该环末封已落地(FIFO 序即该环全部) */
                 landed = true;
                 break;
             }
+            const uint64_t state = SdmaServiceState(ctx);
+            if (state != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING) &&
+                state != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_DRAINING))
+                return false;
             SdmaPollBackoff(i, delay);
         }
         if (!landed) {
@@ -263,38 +283,36 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(const smem_shm_sdma_ctx_t &ct
     return true; /* 全部有投递的环均已到齐 */
 }
 
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_at(const smem_shm_sdma_ctx_t &ctx,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes, smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
+                                                 uint64_t bytes, smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
 {
     return bytes == 0 || (smem_shm_sdma_put_nbi_at(ctx, src, dst, bytes, op) && smem_shm_sdma_quiet_at(ctx));
 }
 
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_nbi(__gm__ void *gva,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes, smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_nbi(__gm__ void *gva, __gm__ void *src, __gm__ void *dst, uint64_t bytes,
+                                                  smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
 {
     return smem_shm_sdma_put_nbi_at(smem_shm_sdma_ctx(gva), src, dst, bytes, op);
 }
 
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put(__gm__ void *gva,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes, smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put(__gm__ void *gva, __gm__ void *src, __gm__ void *dst, uint64_t bytes,
+                                              smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
 {
     return smem_shm_sdma_put_at(smem_shm_sdma_ctx(gva), src, dst, bytes, op);
 }
 
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get_at(const smem_shm_sdma_ctx_t &ctx,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
+                                                 uint64_t bytes)
 {
     return bytes == 0 || (smem_shm_sdma_get_nbi_at(ctx, src, dst, bytes) && smem_shm_sdma_quiet_at(ctx));
 }
 
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get_nbi(__gm__ void *gva,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get_nbi(__gm__ void *gva, __gm__ void *src, __gm__ void *dst, uint64_t bytes)
 {
     return smem_shm_sdma_get_nbi_at(smem_shm_sdma_ctx(gva), src, dst, bytes);
 }
 
-SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get(__gm__ void *gva,
-    __gm__ void *src, __gm__ void *dst, uint64_t bytes)
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get(__gm__ void *gva, __gm__ void *src, __gm__ void *dst, uint64_t bytes)
 {
     return smem_shm_sdma_get_at(smem_shm_sdma_ctx(gva), src, dst, bytes);
 }

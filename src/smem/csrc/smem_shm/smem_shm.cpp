@@ -359,6 +359,10 @@ SMEM_API void smem_shm_uninit(uint32_t flags)
     }
 
     SmemShmEntryManager::Instance().Destroy();
+    if (SmemShmEntryManager::Instance().HasEntries()) {
+        SM_LOG_AND_SET_LAST_ERROR("shm uninit retained because pool shutdown is incomplete");
+        return;
+    }
     hybm_uninit();
     g_smemShmInited = false;
     SM_LOG_INFO("smem_shm_uninit finished");
@@ -419,4 +423,17 @@ SMEM_API void *smem_shm_sdma_get_workspace(smem_shm_t handle) // 工作区查询
         return nullptr; // 未就绪/无效返回 NULL
     }
     return entry->SdmaGetWorkspace(); // 转发工作区查询
+}
+
+SMEM_API int32_t smem_shm_sdma_get_status(smem_shm_t handle, smem_shm_sdma_status_t *status)
+{
+    SM_VALIDATE_RETURN(status != nullptr, "SDMA status output is null", SM_INVALID_PARAM);
+    SmemShmEntryPtr entry = nullptr;
+    auto ret = SmemShmEntryManager::Instance().GetEntryByPtr(reinterpret_cast<uintptr_t>(handle), entry);
+    SM_VALIDATE_RETURN(ret == SM_OK && entry != nullptr, "invalid SDMA status handle", SM_INVALID_PARAM);
+    hybm_sdma_status_t result{};
+    ret = hybm_sdma_get_status(&result);
+    if (ret == 0)
+        *status = {result.state, result.error, result.releaseConfirmed, 0, result.instance};
+    return ret;
 }

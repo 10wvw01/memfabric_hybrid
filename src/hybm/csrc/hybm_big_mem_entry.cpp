@@ -46,8 +46,13 @@ HYBM_API void hybm_destroy_entity(hybm_entity_t e, uint32_t flags)
     if (entity == nullptr) {
         return;
     }
+    if (entity->PrepareSdmaRelease() != BM_OK) {
+        BM_LOG_ERROR("entity retained after failed shutdown, flags: " << flags);
+        return;
+    }
     entity->UnInitialize();
-    MemEntityFactory::Instance().RemoveEngine(e);
+    if (!MemEntityFactory::Instance().RemoveEngine(e))
+        BM_LOG_ERROR("entity retained by factory, flags: " << flags);
 }
 
 HYBM_API int32_t hybm_reserve_mem_space(hybm_entity_t e, uint32_t flags)

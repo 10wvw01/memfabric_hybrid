@@ -189,17 +189,26 @@ int32_t hybm_gva_to_va(uint64_t gva, hybm_mem_type vaMemType, uint64_t *va);
 /**
  * @brief 310P AICore×AICPU 协同模式信息(进程级, 机制见 docs/310p/机制档案.md)
  */
-typedef struct {           /* 进程级协同模式就绪信息(SdmaOrchestrator 单例的查询快照) */
-    uint64_t workspace;     /* 协同工作区设备地址(非空 = 协同就绪) */
-} hybm_sdma_info_t; /* 仅就绪判定(数据面设备侧自驱, SQE 装配已内聚 epoch kernel) */
+typedef struct {        /* 进程级协同模式就绪信息(SdmaOrchestrator 单例的查询快照) */
+    uint64_t workspace; /* 协同工作区设备地址(非空 = 协同就绪) */
+} hybm_sdma_info_t;     /* 仅就绪判定(数据面设备侧自驱, SQE 装配已内聚 epoch kernel) */
 
 /**
  * @brief 查询协同模式就绪信息(未就绪返回非 0)
  * @param info            [out] 就绪信息
  * @return 0 if successful
  */
-int32_t hybm_sdma_get_info(hybm_sdma_info_t *info); // 未就绪(开关关/初始化失败)返回非 0
+typedef struct {
+    uint32_t state; // 0 STARTING、1 RUNNING、2 DRAINING、3 STOPPED、4 FAILED
+    uint32_t error;
+    uint32_t releaseConfirmed;
+    uint32_t reserved;
+    uint64_t instance;
+} hybm_sdma_status_t;
 
+// 查询服务线程最近发布的状态，服务失败后仍可调用。
+int32_t hybm_sdma_get_status(hybm_sdma_status_t *status);
+int32_t hybm_sdma_get_info(hybm_sdma_info_t *info); // 未就绪(开关关/初始化失败)返回非 0
 
 #ifdef __cplusplus
 }

@@ -30,8 +30,9 @@ SqContext *hardwareContext;
 uint32_t hardwareHead;
 std::vector<uint16_t> executedTasks;
 } // namespace
-extern "C" int SdmaCapacitySleep(useconds_t)
+extern "C" int SdmaCapacitySleep(useconds_t delay)
 {
+    clockNowNs += static_cast<uint64_t>(delay) * 1000;
     ++sleepCount;
     return 0;
 }
@@ -113,7 +114,7 @@ TEST_F(SdmaSqCapacityTest, PollingBudgetUsesElapsedTimeInsteadOfScanCount)
     EXPECT_EQ(sleepCount, 0U);
 }
 
-TEST_F(SdmaSqCapacityTest, PollingClockIsSampledAndHeartbeatStillExpires)
+TEST_F(SdmaSqCapacityTest, PollingClockIsSampledAndHeartbeatDoesNotDefineEpoch)
 {
     EpochBudget budget{};
     param.epochBudgetS = 2;
@@ -123,7 +124,7 @@ TEST_F(SdmaSqCapacityTest, PollingClockIsSampledAndHeartbeatStillExpires)
     EXPECT_EQ(clockCalls, 1U);
     auto *heartbeat = reinterpret_cast<uint64_t *>(workspace.data() + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF);
     *heartbeat = 20;
-    EXPECT_EQ(checkEpochBudget(result, budget, 2), 1);
+    EXPECT_EQ(checkEpochBudget(result, budget, 2), 0);
     EXPECT_EQ(clockCalls, 1U);
 }
 
@@ -139,15 +140,17 @@ TEST_F(SdmaSqCapacityTest, PollingClockErrorsAreReported)
     EXPECT_EQ(checkEpochBudget(result, budget, 0), -1370);
 }
 
-TEST_F(SdmaSqCapacityTest, ResidentPollingDoesNotRequireClockOrHeartbeat)
+TEST_F(SdmaSqCapacityTest, ResidentStartupRequiresClockButHasNoEpochDeadline)
 {
     EpochBudget budget{};
     param.epochBudgetS = ock::mf::HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT;
     clockFailure = true;
+    EXPECT_EQ(initEpochBudget(&param, budget), 1370);
+    clockFailure = false;
     ASSERT_EQ(initEpochBudget(&param, budget), 0);
     auto *result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
     EXPECT_EQ(checkEpochBudget(result, budget, 0), 0);
-    EXPECT_EQ(clockCalls, 0U);
+    EXPECT_EQ(clockCalls, 2U);
 }
 
 TEST_F(SdmaSqCapacityTest, FullQueuePublishesPendingTasksAndRefreshesHead)
@@ -238,8 +241,7 @@ protected:
 
     void SetMail(bool isGet, uint64_t imm = 0)
     {
-        auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(
-            param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+        auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
         const uint64_t local = param.poolBaseGva + 4096;
         const uint64_t remote = param.poolBaseGva + param.symSize + 8192;
         *mail = {isGet ? remote : local, isGet ? local : remote, (80 * 1024) | (1ULL << 63), imm};
@@ -358,7 +360,8 @@ TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
 {
     const uint64_t seq = SMEM_SHM_SDMA_RS_STAGE_SLOTS;
     auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING +
-        (seq % SMEM_SHM_SDMA_RS_REQ_SLOTS) * sizeof(ock::mf::HybmSdmaReqMail));
+                                                              (seq % SMEM_SHM_SDMA_RS_REQ_SLOTS) *
+                                                                  sizeof(ock::mf::HybmSdmaReqMail));
     *mail = {param.poolBaseGva + 4096, param.poolBaseGva + param.symSize + 8192, (1ULL << 63) | 4, 0};
     const uint64_t stage = param.resBase + SMEM_SHM_SDMA_RS_STAGE;
     storeCell(stage, 99);
@@ -528,5 +531,112 @@ TEST_F(SdmaSqCapacityTest, SignalGroupPreservesNonzeroDoorbellOnWrap)
     EXPECT_EQ(publishedTail, 1U);
 }
 
+class SdmaServiceTest : public SdmaSqCapacityTest {
+protected:
+    std::vector<uint64_t> pool = std::vector<uint64_t>(SMEM_SHM_SDMA_RESERVED / 8, 0);
+    uint64_t stop = 0;
+    void SetUp() override
+    {
+        SdmaSqCapacityTest::SetUp();
+        param.resBase = reinterpret_cast<uint64_t>(pool.data());
+        param.stopAddr = reinterpret_cast<uint64_t>(&stop);
+        param.hostLeaseMs = 10000;
+        param.stopTimeoutMs = 5000;
+    }
+};
+
+TEST_F(SdmaServiceTest, MissingHostExpiresUsingDeviceTime)
+{
+    EXPECT_EQ(checkService(&param, &context), 0);
+    clockNowNs += 9999000000ULL;
+    EXPECT_EQ(checkService(&param, &context), 0);
+    clockNowNs += 1000000ULL;
+    EXPECT_EQ(checkService(&param, &context), 1380);
+}
+
+TEST_F(SdmaServiceTest, ChangedHeartbeatRenewsLease)
+{
+    ASSERT_EQ(checkService(&param, &context), 0);
+    clockNowNs += 9000000000ULL;
+    storeCell(param.resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF, 2);
+    EXPECT_EQ(checkService(&param, &context), 0);
+    clockNowNs += 9000000000ULL;
+    EXPECT_EQ(checkService(&param, &context), 0);
+    clockNowNs += 1000000000ULL;
+    EXPECT_EQ(checkService(&param, &context), 1380);
+}
+
+TEST_F(SdmaServiceTest, ExplicitStopClosesAdmissionAndHasDeadline)
+{
+    stop = 1;
+    EXPECT_EQ(checkService(&param, &context), 0);
+    EXPECT_TRUE(context.closing);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_SERVICE), SmemShmSdmaServiceWord(SMEM_SHM_SDMA_DRAINING));
+    clockNowNs += 5000000000ULL;
+    EXPECT_EQ(checkService(&param, &context), 1367);
+}
+
+TEST_F(SdmaServiceTest, ClockFailureFailsServiceCheck)
+{
+    clockFailure = true;
+    EXPECT_EQ(checkService(&param, &context), 1370);
+}
+
+TEST_F(SdmaServiceTest, EmptyServiceCanConfirmNormalStop)
+{
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
+    EXPECT_TRUE(finishService(&param, &context, 0, heads, false));
+}
+
+TEST_F(SdmaServiceTest, ActivePublisherPreventsReleaseUntilDeadline)
+{
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_PUBLISHING, 1);
+    EXPECT_FALSE(finishService(&param, &context, 0, heads, false));
+}
+
+TEST_F(SdmaServiceTest, MissingCompletionPreventsRelease)
+{
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
+    heads[0] = 1;
+    EXPECT_FALSE(finishService(&param, &context, 0, heads, true));
+}
+
+TEST_F(SdmaServiceTest, SubmittedCompletionPermitsFailureConfirmation)
+{
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
+    heads[0] = 1;
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_QUIET, 1);
+    EXPECT_TRUE(finishService(&param, &context, 0, heads, true));
+}
+
+TEST_F(SdmaServiceTest, UnpublishedSqesKeepCompletionUncertain)
+{
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
+    context.pending = true;
+    EXPECT_FALSE(finishService(&param, &context, 0, heads, true));
+}
+
+TEST_F(SdmaServiceTest, MissingSdmaProgressHasElapsedTimeDeadline)
+{
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
+    heads[0] = 1;
+    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+    clockNowNs += 1000000000ULL;
+    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 1385);
+}
+
+TEST_F(SdmaServiceTest, CompletionProgressRenewsDeadlineAndAllowsStampWrap)
+{
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
+    heads[0] = 65;
+    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+    clockNowNs += 900000000ULL;
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_QUIET, 65);
+    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+    EXPECT_EQ(context.completed[0], 65U);
+    clockNowNs += 2000000000ULL;
+    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+}
 
 #endif

@@ -39,6 +39,7 @@ public:
     ~SmemShmEntry() override;
 
     int32_t Initialize(hybm_options &options);
+    Result Shutdown();
 
     void SetConfig(const smem_shm_config_t &config);
 

@@ -24,7 +24,7 @@
  *   5. smem 层 sdma 协同 API 的无效 handle 拒绝
  */
 #include <gtest/gtest.h> // googletest 框架
-#include <cstddef>      // offsetof
+#include <cstddef>       // offsetof
 #include <vector>
 
 #include <filesystem>
@@ -37,10 +37,10 @@
 #include "hybm_sdma_orchestrator.h" // 被测单例
 #undef private
 
-#include "hybm_big_mem.h" // 被测 C API 声明(hybm_sdma_*)
-#include "hybm_define.h"  // BM_OK/BM_INVALID_PARAM 等错误码
-#include "smem.h"         // smem 层公共定义(SMEM_OK)
-#include "smem_shm.h"     // 被测 smem 层 sdma 协同 API 声明
+#include "hybm_big_mem.h"         // 被测 C API 声明(hybm_sdma_*)
+#include "hybm_define.h"          // BM_OK/BM_INVALID_PARAM 等错误码
+#include "smem.h"                 // smem 层公共定义(SMEM_OK)
+#include "smem_shm.h"             // 被测 smem 层 sdma 协同 API 声明
 #include "smem_shm_sdma_layout.h" // 共享布局头(单一事实源, 无 AscendC 可进 host UT)
 
 namespace ock { // MemFabric 总命名空间
@@ -312,6 +312,190 @@ TEST_F(SdmaDeployTest, CopyCommandAlwaysCopiesAndFitsOriginalBuffer)
     EXPECT_LT(commands[0].size(), 512U);
 }
 
+TEST(SdmaServiceOptionsTest, DefaultAndLegacyModes)
+{
+    SdmaServiceOptions options;
+    ASSERT_TRUE(ResolveSdmaOptions("", "", "", "", options));
+    EXPECT_EQ(options.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+    EXPECT_EQ(options.leaseMs, 10000U);
+    EXPECT_EQ(options.stopMs, 5000U);
+    ASSERT_TRUE(ResolveSdmaOptions("", "0", "", "", options));
+    EXPECT_EQ(options.epochSeconds, 15U);
+    ASSERT_TRUE(ResolveSdmaOptions("", "2", "", "", options));
+    EXPECT_EQ(options.epochSeconds, 2U);
+    ASSERT_TRUE(ResolveSdmaOptions("", "4294967295", "", "", options));
+    EXPECT_EQ(options.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+    ASSERT_TRUE(ResolveSdmaOptions("resident", "2", "", "", options));
+    EXPECT_EQ(options.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+}
+
+TEST(SdmaServiceOptionsTest, InvalidModesAndTimeoutsAreRejected)
+{
+    SdmaServiceOptions options;
+    EXPECT_FALSE(ResolveSdmaOptions("other", "", "", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("epoch", "4294967295", "", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "", "0", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "", "2999", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "", "-1", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "", "10000", "999", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "", "10000", "4294967295", options));
+    ASSERT_TRUE(ResolveSdmaOptions("epoch", "bad", "", "", options));
+    EXPECT_EQ(options.epochSeconds, 15U);
+}
+
+TEST_F(SdmaDeployTest, UnconfirmedDeviceReferencesPreventCleanup)
+{
+    prep.epochLaunched_ = true;
+    prep.releaseConfirmed_ = false;
+    prep.workspace_ = 4096;
+    prep.workerResult_ = BM_TIMEOUT;
+    MOCKER(DlAclApi::AclrtFree).expects(never());
+    EXPECT_EQ(prep.StopEpoch(), BM_TIMEOUT);
+    EXPECT_EQ(prep.workspace_.load(), 4096U);
+    prep.workspace_ = 0;
+    prep.epochLaunched_ = false;
+}
+
+TEST_F(SdmaDeployTest, ConfigureFailureRestoresCallerContext)
+{
+    prep.serviceContext_ = reinterpret_cast<void *>(1);
+    MOCKER(DlAclApi::AclrtGetCurrentContext).expects(once()).will(invoke(+[](void **ctx) {
+        *ctx = reinterpret_cast<void *>(2);
+        return BM_OK;
+    }));
+    MOCKER(DlAclApi::AclrtSetCurrentContext).expects(exactly(2)).will(returnValue(BM_OK));
+    EXPECT_EQ(prep.ConfigureOrch(0, 0, 0, 0, 0), BM_INVALID_PARAM);
+    prep.serviceContext_ = nullptr;
+}
+
+TEST_F(SdmaDeployTest, WorkerTimeoutReturnsWithoutJoiningActiveThread)
+{
+    prep.serviceOptions_.stopMs = 1;
+    prep.workerDone_ = false;
+    std::atomic<bool> finish{false};
+    prep.supervisor_ = std::thread([&finish] {
+        while (!finish.load())
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    EXPECT_EQ(prep.StopEpoch(), BM_TIMEOUT);
+    EXPECT_TRUE(prep.supervisor_.joinable());
+    finish = true;
+    prep.supervisor_.join();
+    prep.workerDone_ = true;
+}
+
+TEST_F(SdmaDeployTest, OldServiceInstanceIsRejected)
+{
+    prep.epochParam_.instance = 2;
+    HybmSdmaOrchResult result{};
+    result.magic = HYBM_SDMA_ORCH_RESULT_MAGIC;
+    result.instance = 1;
+    bool finished = false;
+    MOCKER(DlAclApi::AclrtSynchronizeStreamWithTimeout).expects(never());
+    EXPECT_EQ(prep.HandleServiceResult(result, finished), BM_ERROR);
+    EXPECT_FALSE(finished);
+}
+
+TEST_F(SdmaDeployTest, FailedServiceIsReportedWithoutReplayingRequests)
+{
+    prep.epochParam_.instance = 2;
+    HybmSdmaOrchResult result{};
+    result.magic = HYBM_SDMA_ORCH_RESULT_MAGIC;
+    result.instance = 2;
+    result.serviceState = SMEM_SHM_SDMA_FAILED;
+    result.exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
+    result.mainRet = 1380;
+    result.releaseConfirmed = 1;
+    bool finished = false;
+    MOCKER(DlAclApi::AclrtSynchronizeStreamWithTimeout).expects(once()).will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::ReadServiceResult, int32_t(*)(SdmaOrchestrator *, HybmSdmaOrchResult &))
+        .stubs()
+        .with(any(), outBound(result))
+        .will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::LaunchEpoch, int32_t(*)(SdmaOrchestrator *, void *)).expects(never());
+    EXPECT_EQ(prep.HandleServiceResult(result, finished), BM_ERROR);
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(prep.releaseConfirmed_);
+    HybmSdmaOrchResult snapshot{};
+    EXPECT_EQ(prep.GetServiceStatus(snapshot), BM_OK);
+    EXPECT_EQ(snapshot.mainRet, 1380U);
+    EXPECT_EQ(snapshot.instance, 2U);
+}
+
+TEST_F(SdmaDeployTest, TerminalStatusIsReadAgainAfterStreamCompletion)
+{
+    prep.epochParam_.instance = 2;
+    HybmSdmaOrchResult observed{};
+    observed.magic = HYBM_SDMA_ORCH_RESULT_MAGIC;
+    observed.instance = 2;
+    observed.exitReason = HYBM_SDMA_ORCH_EXIT_STOP;
+    observed.serviceState = SMEM_SHM_SDMA_DRAINING;
+    HybmSdmaOrchResult completed = observed;
+    completed.serviceState = SMEM_SHM_SDMA_STOPPED;
+    completed.releaseConfirmed = 1;
+    bool finished = false;
+    MOCKER(DlAclApi::AclrtSynchronizeStreamWithTimeout).expects(once()).will(returnValue(BM_OK));
+    MOCKER_CPP(&SdmaOrchestrator::ReadServiceResult, int32_t(*)(SdmaOrchestrator *, HybmSdmaOrchResult &))
+        .expects(once())
+        .with(any(), outBound(completed))
+        .will(returnValue(BM_OK));
+    EXPECT_EQ(prep.HandleServiceResult(observed, finished), BM_OK);
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(prep.releaseConfirmed_);
+    EXPECT_EQ(prep.cachedResult_.serviceState, SMEM_SHM_SDMA_STOPPED);
+}
+
+TEST_F(SdmaDeployTest, HostTimeoutIsVisibleInStatusSnapshot)
+{
+    prep.cachedResult_.magic = HYBM_SDMA_ORCH_RESULT_MAGIC;
+    prep.cachedResult_.serviceState = SMEM_SHM_SDMA_RUNNING;
+    prep.RecordHostFailure(1383);
+    HybmSdmaOrchResult snapshot{};
+    EXPECT_EQ(prep.GetServiceStatus(snapshot), BM_OK);
+    EXPECT_EQ(snapshot.serviceState, SMEM_SHM_SDMA_FAILED);
+    EXPECT_EQ(snapshot.mainRet, 1383U);
+    EXPECT_EQ(snapshot.releaseConfirmed, 0U);
+}
+
+TEST_F(SdmaDeployTest, ServiceBindingDistinguishesRejectedPool)
+{
+    prep.boundReservation_ = 0x1800;
+    EXPECT_TRUE(prep.IsBoundTo(0x1000, 0x1000));
+    EXPECT_FALSE(prep.IsBoundTo(0x2000, 0x1000));
+    EXPECT_FALSE(prep.IsBoundTo(0x1000, 0x800));
+}
+
+TEST_F(SdmaDeployTest, CompletionTimeoutRetainsEpochStream)
+{
+    prep.epochStream_ = reinterpret_cast<void *>(1);
+    MOCKER(DlAclApi::AclrtSynchronizeStreamWithTimeout).expects(once()).will(returnValue(BM_TIMEOUT));
+    MOCKER(DlAclApi::AclrtDestroyStream).expects(never());
+    EXPECT_EQ(prep.DestroyEpochResources(), BM_TIMEOUT);
+    EXPECT_NE(prep.epochStream_, nullptr);
+    prep.epochStream_ = nullptr;
+}
+
+TEST_F(SdmaDeployTest, CompletionConfirmedBeforeDestroyingEpochStream)
+{
+    prep.epochStream_ = reinterpret_cast<void *>(1);
+    MOCKER(DlAclApi::AclrtSynchronizeStreamWithTimeout).expects(once()).will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtDestroyStream).expects(once()).will(returnValue(BM_OK));
+    EXPECT_EQ(prep.DestroyEpochResources(), BM_OK);
+    EXPECT_EQ(prep.epochStream_, nullptr);
+}
+
+TEST_F(SdmaDeployTest, CleanupRetainsWorkspaceWhenCompletionIsUnconfirmed)
+{
+    prep.epochStream_ = reinterpret_cast<void *>(1);
+    prep.workspace_ = 4096;
+    MOCKER(DlAclApi::AclrtSynchronizeStreamWithTimeout).expects(once()).will(returnValue(BM_TIMEOUT));
+    MOCKER(DlAclApi::AclrtFree).expects(never());
+    prep.Cleanup();
+    EXPECT_EQ(prep.workspace_.load(), 4096U);
+    prep.workspace_ = 0;
+    prep.epochStream_ = nullptr;
+}
+
 TEST_F(SdmaDeployTest, CleanupConfirmsAbsenceAfterUnconfirmedShellResult)
 {
     prep.launchStream_ = reinterpret_cast<void *>(1);
@@ -480,23 +664,23 @@ TEST_F(SdmaArtifactDirectoryTest, RejectsDirectoryInPlaceOfKernelFile)
 TEST(SdmaOrchestratorTest, AcquireFailsCleanlyAndRetriable)
 {
     auto &prep = SdmaOrchestrator::GetInstance(); // 被测单例
-    for (int round = 0; round < 2; round++) { /* 两次: 验证失败后可重试无残留 */
-        auto ret = prep.Acquire(0); // 设备 0(stub 环境必然初始化失败)
-        EXPECT_NE(ret, BM_OK) << "round " << round << ": UT stub 环境下 Acquire 必须失败"; // 必须失败
-        EXPECT_FALSE(prep.Ready()) << "round " << round << ": 失败后不得置 ready"; // 不得就绪
+    for (int round = 0; round < 2; round++) {     /* 两次: 验证失败后可重试无残留 */
+        auto ret = prep.Acquire(0);               // 设备 0(stub 环境必然初始化失败)
+        EXPECT_NE(ret, BM_OK) << "round " << round << ": UT stub 环境下 Acquire 必须失败";         // 必须失败
+        EXPECT_FALSE(prep.Ready()) << "round " << round << ": 失败后不得置 ready";                 // 不得就绪
         EXPECT_EQ(prep.GetRefCountForTest(), 0U) << "round " << round << ": 失败后引用计数须归零"; // 计数归零
     }
     /* Release 幂等(refCount 已为 0 时为 no-op, 不得崩溃) */
-    prep.Release(); // 第一次(计数已 0)
-    prep.Release(); // 第二次(幂等不崩溃)
+    prep.Release();                           // 第一次(计数已 0)
+    prep.Release();                           // 第二次(幂等不崩溃)
     EXPECT_EQ(prep.GetRefCountForTest(), 0U); // 计数仍为 0
 }
 
 /* 用例 2: 未就绪时 C API 拒绝(就绪门控的外显语义; 数据面 API 已废止) */
 TEST(SdmaOrchestratorTest, CApiRejectWhenNotReady)
 {
-    hybm_sdma_info_t info = {}; // 就绪信息出参
-    EXPECT_NE(hybm_sdma_get_info(&info), BM_OK); // 未就绪须拒绝
+    hybm_sdma_info_t info = {};                    // 就绪信息出参
+    EXPECT_NE(hybm_sdma_get_info(&info), BM_OK);   // 未就绪须拒绝
     EXPECT_NE(hybm_sdma_get_info(nullptr), BM_OK); /* 出参 null 拒绝 */
 }
 
@@ -542,18 +726,18 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
     EXPECT_EQ(SMEM_SHM_SDMA_RS_STAGE + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_STAGE_STRIDE,
               SMEM_SHM_SDMA_RS_PEER_RINGS);
     /* 到达子环: 队列内区块不重叠 + 全部落保留区内(含最深一队列的游标) */
-    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_MAIL, SMEM_SHM_SDMA_RS_PEER_STAMP + 8U * 512U);           // 邮件不压戳
-    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_HEAD, SMEM_SHM_SDMA_RS_PEER_MAIL + 32U * 512U);           // 游标不压邮件
+    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_MAIL, SMEM_SHM_SDMA_RS_PEER_STAMP + 8U * 512U); // 邮件不压戳
+    EXPECT_GE(SMEM_SHM_SDMA_RS_PEER_HEAD, SMEM_SHM_SDMA_RS_PEER_MAIL + 32U * 512U); // 游标不压邮件
     EXPECT_LE(SMEM_SHM_SDMA_RS_PEER_RINGS + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_PEER_STRIDE,
-              SMEM_SHM_SDMA_RESERVED);                                                        // 全落在 1.25MB 内
+              SMEM_SHM_SDMA_RESERVED); // 全落在 1.25MB 内
     /* v23 缓存行分隔纪律(共行回写竞态=并发邮件丢失挂死类根因; 多 block 并发写同区各槽独占行) */
     for (uint64_t v : {SMEM_SHM_SDMA_RS_REQ_TAIL, SMEM_SHM_SDMA_RS_REQ_HEAD, SMEM_SHM_SDMA_RS_QUIET,
                        SMEM_SHM_SDMA_RS_STAGE, SMEM_SHM_SDMA_RS_PEER_RINGS}) {
         EXPECT_EQ(v & 0x3FU, 0U) << "base 0x" << std::hex << v;
     }
-    for (uint64_t v : {SMEM_SHM_SDMA_RS_REQ_RING_STRIDE, SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
-                       SMEM_SHM_SDMA_RS_QUIET_STRIDE, SMEM_SHM_SDMA_RS_STAGE_STRIDE,
-                       SMEM_SHM_SDMA_RS_PEER_STRIDE, SMEM_SHM_SDMA_RS_PEER_MAIL, SMEM_SHM_SDMA_RS_PEER_HEAD}) {
+    for (uint64_t v : {SMEM_SHM_SDMA_RS_REQ_RING_STRIDE, SMEM_SHM_SDMA_RS_CURSOR_STRIDE, SMEM_SHM_SDMA_RS_QUIET_STRIDE,
+                       SMEM_SHM_SDMA_RS_STAGE_STRIDE, SMEM_SHM_SDMA_RS_PEER_STRIDE, SMEM_SHM_SDMA_RS_PEER_MAIL,
+                       SMEM_SHM_SDMA_RS_PEER_HEAD}) {
         EXPECT_EQ(v & 0x3FU, 0U) << "stride 0x" << std::hex << v;
     }
     /* 暂存槽数 > 单队列在途上界(SQ 环深/4——每封 4 支 SQE ①⓪②③) */
@@ -562,7 +746,7 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
     EXPECT_GT(SMEM_SHM_SDMA_RS_PEER_SLOTS, 64U + 1024U / 4U);
     /* 环深度契约 */
     EXPECT_EQ(SMEM_SHM_SDMA_RS_REQ_SLOTS, 64U);   // 每队列请求环 64
-    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 512U);  // 每队列到达子环 512
+    EXPECT_EQ(SMEM_SHM_SDMA_RS_PEER_SLOTS, 512U); // 每队列到达子环 512
     /* 队列下标编码不变式: (对端, block) 双射 [0, 队列数) */
     for (uint32_t own = 0; own < SMEM_SHM_SDMA_MAX_RANKS; own++) {
         std::vector<uint32_t> seen(SMEM_SHM_SDMA_QUEUE_COUNT, 0);
@@ -578,15 +762,14 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
         }
         for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
             /* 在用槽位(block < MAX_BLOCKS)恰好一次; 预留槽位(8..15)无映射恒零 */
-            EXPECT_EQ(seen[q],
-                      (q % SMEM_SHM_SDMA_QUEUES_PER_PEER < SMEM_SHM_SDMA_MAX_BLOCKS) ? 1U : 0U)
+            EXPECT_EQ(seen[q], (q % SMEM_SHM_SDMA_QUEUES_PER_PEER < SMEM_SHM_SDMA_MAX_BLOCKS) ? 1U : 0U)
                 << "own:" << own << " q:" << q;
         }
     }
     /* 工作区布局(result/ovf/stop) */
-    EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);                       // ovf 在 result 后
-    EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U);                   // stop 不压 ovf
-    EXPECT_LE(HYBM_SDMA_ORCH_WS_STOP_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);                       // 落在 4KB 内
+    EXPECT_GT(HYBM_SDMA_ORCH_WS_OVF_OFF, HYBM_SDMA_ORCH_WS_RESULT_OFF);     // ovf 在 result 后
+    EXPECT_GE(HYBM_SDMA_ORCH_WS_STOP_OFF, HYBM_SDMA_ORCH_WS_OVF_OFF + 64U); // stop 不压 ovf
+    EXPECT_LE(HYBM_SDMA_ORCH_WS_STOP_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);     // 落在 4KB 内
     /* 心跳槽(v11 时限时钟): 不压 stop(可紧邻), 落在 4KB 内 */
     EXPECT_GE(HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF, HYBM_SDMA_ORCH_WS_STOP_OFF + 8U);
     EXPECT_LE(HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF + 8U, HYBM_SDMA_ORCH_WS_SIZE);
@@ -597,10 +780,10 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 {
     /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部追加 rank/rsv/poolBaseGva), 80B */
-    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 80U);
-    EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U); // 第 4 个 u32 槽位
-    EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);       // 保留区基址(定位原点)
-    EXPECT_EQ(offsetof(HybmSdmaOrchParam, rank), 64U);          // v29 追加: 本端 rank
+    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 96U);
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U);     // 第 4 个 u32 槽位
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);          // 保留区基址(定位原点)
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, rank), 64U);             // v29 追加: 本端 rank
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, poolBaseGva), 80U - 8U); // v29 追加: 池窗口基址
     /* 永不退出的专用值: 全 F(不判报时/无循环上限, 跑到停止/错误); 与默认值 0 语义区分 */
     EXPECT_EQ(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, 0xFFFFFFFFu);
@@ -611,6 +794,17 @@ TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 }
 
 /* 用例 4: smem 层就绪判定 API 的无效 handle 拒绝(不依赖任何初始化; 仅存 host API) */
+TEST(SdmaServiceLayoutTest, HostControlsDoNotShareDiagnosticCacheLines)
+{
+    EXPECT_NE(HYBM_SDMA_ORCH_WS_STOP_OFF / 64, HYBM_SDMA_ORCH_WS_DBG_DOORBELL_OFF / 64);
+    EXPECT_NE(HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF / 64, HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF / 64);
+    EXPECT_EQ(HYBM_SDMA_ORCH_WS_DBG_RING_OFF % 64, 0U);
+    EXPECT_LE(HYBM_SDMA_ORCH_WS_DBG_RING_OFF + HYBM_SDMA_ORCH_DBG_RING_SLOTS * sizeof(HybmSdmaOrchDbgMail),
+              HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF & ~uint64_t(63));
+    EXPECT_LE(SMEM_SHM_SDMA_RS_PUBLISHING + SMEM_SHM_SDMA_QUEUE_COUNT * SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
+              SMEM_SHM_SDMA_RESERVED);
+}
+
 TEST(SmemShmSdmaApiTest, InvalidHandleRejected)
 {
     EXPECT_EQ(smem_shm_sdma_get_workspace(nullptr), nullptr); // 工作区返回 NULL(就绪判定)

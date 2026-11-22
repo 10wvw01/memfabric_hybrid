@@ -11,6 +11,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <mockcpp/mockcpp.hpp>
 
 #define private public
 #include "smem_shm_entry_manager.h"
@@ -48,7 +49,7 @@ TEST_F(SmemShmEntryManagerTest, CreateEntryById_NewId_ReturnsOkAndValidEntry)
 {
     auto &mgr = SmemShmEntryManager::Instance();
     SmemShmEntryPtr entry;
-    Result ret = mgr.CreateEntryById(1, entry); // 1
+    ock::smem::Result ret = mgr.CreateEntryById(1, entry); // 1
     EXPECT_EQ(ret, SM_OK);
     EXPECT_NE(entry, nullptr);
     EXPECT_EQ(entry->Id(), 1U);              // 1U
@@ -67,7 +68,7 @@ TEST_F(SmemShmEntryManagerTest, CreateEntryById_DuplicateId_ReturnsDuplicated)
     ASSERT_EQ(mgr.CreateEntryById(1, entry), SM_OK);
 
     SmemShmEntryPtr dupEntry;
-    Result ret = mgr.CreateEntryById(1, dupEntry); // 1
+    ock::smem::Result ret = mgr.CreateEntryById(1, dupEntry); // 1
     EXPECT_EQ(ret, SM_DUPLICATED_OBJECT);
     EXPECT_EQ(dupEntry, nullptr); // out param not set on failure
 }
@@ -109,7 +110,7 @@ TEST_F(SmemShmEntryManagerTest, CreateEntryById_NotInited_ReturnsError)
     mgr.inited_ = false;
 
     SmemShmEntryPtr entry;
-    Result ret = mgr.CreateEntryById(1, entry); // 1
+    ock::smem::Result ret = mgr.CreateEntryById(1, entry); // 1
     EXPECT_NE(ret, SM_OK);
     EXPECT_EQ(entry, nullptr);
 }
@@ -127,7 +128,7 @@ TEST_F(SmemShmEntryManagerTest, GetEntryById_ExistingId_ReturnsEntry)
     ASSERT_EQ(mgr.CreateEntryById(42, created), SM_OK); // 42
 
     SmemShmEntryPtr found;
-    Result ret = mgr.GetEntryById(42, found); // 42
+    ock::smem::Result ret = mgr.GetEntryById(42, found); // 42
     EXPECT_EQ(ret, SM_OK);
     EXPECT_EQ(found, created);
     EXPECT_EQ(found->Id(), 42U);
@@ -141,7 +142,7 @@ TEST_F(SmemShmEntryManagerTest, GetEntryById_NonExistentId_ReturnsNotFound)
 {
     auto &mgr = SmemShmEntryManager::Instance();
     SmemShmEntryPtr found;
-    Result ret = mgr.GetEntryById(999, found); // 999
+    ock::smem::Result ret = mgr.GetEntryById(999, found); // 999
     EXPECT_EQ(ret, SM_OBJECT_NOT_EXISTS);
 }
 
@@ -155,7 +156,7 @@ TEST_F(SmemShmEntryManagerTest, GetEntryById_NotInited_ReturnsError)
     mgr.inited_ = false;
 
     SmemShmEntryPtr found;
-    Result ret = mgr.GetEntryById(1, found); // 1
+    ock::smem::Result ret = mgr.GetEntryById(1, found); // 1
     EXPECT_NE(ret, SM_OK);
 }
 
@@ -173,7 +174,7 @@ TEST_F(SmemShmEntryManagerTest, GetEntryByPtr_ExistingPtr_ReturnsEntry)
 
     uintptr_t rawPtr = reinterpret_cast<uintptr_t>(created.Get());
     SmemShmEntryPtr found;
-    Result ret = mgr.GetEntryByPtr(rawPtr, found);
+    ock::smem::Result ret = mgr.GetEntryByPtr(rawPtr, found);
     EXPECT_EQ(ret, SM_OK);
     EXPECT_EQ(found, created);
 }
@@ -186,7 +187,7 @@ TEST_F(SmemShmEntryManagerTest, GetEntryByPtr_NonExistentPtr_ReturnsNotFound)
 {
     auto &mgr = SmemShmEntryManager::Instance();
     SmemShmEntryPtr found;
-    Result ret = mgr.GetEntryByPtr(0xDEADBEEF, found);
+    ock::smem::Result ret = mgr.GetEntryByPtr(0xDEADBEEF, found);
     EXPECT_EQ(ret, SM_OBJECT_NOT_EXISTS);
 }
 
@@ -200,7 +201,7 @@ TEST_F(SmemShmEntryManagerTest, GetEntryByPtr_NotInited_ReturnsError)
     mgr.inited_ = false;
 
     SmemShmEntryPtr found;
-    Result ret = mgr.GetEntryByPtr(0x1234, found);
+    ock::smem::Result ret = mgr.GetEntryByPtr(0x1234, found);
     EXPECT_NE(ret, SM_OK);
 }
 
@@ -218,7 +219,7 @@ TEST_F(SmemShmEntryManagerTest, RemoveEntryByPtr_ExistingPtr_RemovesAndReturnsOk
     ASSERT_EQ(mgr.entryIdMap_.size(), 1U);
 
     uintptr_t rawPtr = reinterpret_cast<uintptr_t>(entry.Get());
-    Result ret = mgr.RemoveEntryByPtr(rawPtr);
+    ock::smem::Result ret = mgr.RemoveEntryByPtr(rawPtr);
     EXPECT_EQ(ret, SM_OK);
     EXPECT_TRUE(mgr.entryIdMap_.empty());
     EXPECT_TRUE(mgr.ptr2EntryMap_.empty());
@@ -231,7 +232,7 @@ TEST_F(SmemShmEntryManagerTest, RemoveEntryByPtr_ExistingPtr_RemovesAndReturnsOk
 TEST_F(SmemShmEntryManagerTest, RemoveEntryByPtr_NonExistentPtr_ReturnsNotFound)
 {
     auto &mgr = SmemShmEntryManager::Instance();
-    Result ret = mgr.RemoveEntryByPtr(0xFFFFFFFF);
+    ock::smem::Result ret = mgr.RemoveEntryByPtr(0xFFFFFFFF);
     EXPECT_EQ(ret, SM_OBJECT_NOT_EXISTS);
 }
 
@@ -244,7 +245,7 @@ TEST_F(SmemShmEntryManagerTest, RemoveEntryByPtr_NotInited_ReturnsError)
     auto &mgr = SmemShmEntryManager::Instance();
     mgr.inited_ = false;
 
-    Result ret = mgr.RemoveEntryByPtr(0x1234);
+    ock::smem::Result ret = mgr.RemoveEntryByPtr(0x1234);
     EXPECT_NE(ret, SM_OK);
 }
 
@@ -312,4 +313,22 @@ TEST_F(SmemShmEntryManagerTest, Instance_Singleton_SameInstance)
     auto &mgr1 = SmemShmEntryManager::Instance();
     auto &mgr2 = SmemShmEntryManager::Instance();
     EXPECT_EQ(&mgr1, &mgr2);
+}
+
+TEST_F(SmemShmEntryManagerTest, ShutdownFailureRetainsHandleAndManager)
+{
+    auto &mgr = SmemShmEntryManager::Instance();
+    SmemShmEntryPtr entry;
+    ASSERT_EQ(mgr.CreateEntryById(17, entry), SM_OK);
+    auto method = &SmemShmEntry::Shutdown;
+    auto shutdown = reinterpret_cast<ock::smem::Result (*)(SmemShmEntry *)>(method);
+    MOCKER(shutdown).stubs().will(returnValue(-7));
+    EXPECT_EQ(mgr.RemoveEntryByPtr(reinterpret_cast<uintptr_t>(entry.Get())), -7);
+    EXPECT_EQ(mgr.entryIdMap_.size(), 1U);
+    EXPECT_EQ(mgr.ptr2EntryMap_.size(), 1U);
+    mgr.Destroy();
+    EXPECT_TRUE(mgr.inited_);
+    EXPECT_EQ(mgr.ptr2EntryMap_.size(), 1U);
+    GlobalMockObject::verify();
+    EXPECT_EQ(mgr.RemoveEntryByPtr(reinterpret_cast<uintptr_t>(entry.Get())), SM_OK);
 }

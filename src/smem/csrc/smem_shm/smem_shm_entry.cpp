@@ -40,35 +40,51 @@ SmemShmEntry::SmemShmEntry(uint32_t id) : id_{id}, entity_{nullptr}, gva_{nullpt
 
 SmemShmEntry::~SmemShmEntry()
 {
-    if (globalGroup_ != nullptr) {
-        globalGroup_->GroupSnClean();
-        globalGroup_ = nullptr;
-    }
-    uint32_t flags = 0;
-    if (entity_ != nullptr && slice_ != nullptr) {
-        hybm_free_local_memory(entity_, slice_, 1, flags);
-    }
+    (void)Shutdown();
+}
 
+Result SmemShmEntry::Shutdown()
+{
+    std::lock_guard<std::mutex> guard(entryMutex_);
+    if (entity_ != nullptr && slice_ != nullptr) {
+        auto ret = hybm_free_local_memory(entity_, slice_, 1, 0);
+        if (ret != 0) {
+            SM_LOG_ERROR("shm slice retained after failed shutdown, shmId: " << id_ << " ret: " << ret);
+            return ret;
+        }
+        slice_ = nullptr;
+    }
     if (entity_ != nullptr && gva_ != nullptr) {
-        hybm_unreserve_mem_space(entity_, 0);
+        auto ret = hybm_unreserve_mem_space(entity_, 0);
+        if (ret != 0) {
+            SM_LOG_ERROR("shm mapping retained after failed shutdown, shmId: " << id_ << " ret: " << ret);
+            return ret;
+        }
         gva_ = nullptr;
     }
-
     if (entity_ != nullptr) {
         hybm_destroy_entity(entity_, 0);
         entity_ = nullptr;
     }
+    if (globalGroup_ != nullptr) {
+        globalGroup_->GroupSnClean();
+        globalGroup_ = nullptr;
+    }
+    inited_ = false;
+    return SM_OK;
 }
 
 static void ReleaseAfterFailed(hybm_entity_t entity, hybm_mem_slice_t slice, void *reservedMem)
 {
     uint32_t flags = 0;
     if (entity != nullptr && slice != 0) {
-        hybm_free_local_memory(entity, slice, 1, flags);
+        if (hybm_free_local_memory(entity, slice, 1, flags) != 0)
+            return;
     }
 
     if (entity != nullptr) {
-        hybm_unreserve_mem_space(entity, flags);
+        if (hybm_unreserve_mem_space(entity, flags) != 0)
+            return;
     }
 
     if (entity != nullptr) {
@@ -186,7 +202,8 @@ void SmemShmEntry::InitStepUnreserveMemory()
     if (ret != 0) {
         SM_LOG_WARN("unable to unreserve mem space: " << ret);
     }
-    gva_ = nullptr;
+    if (ret == 0)
+        gva_ = nullptr;
 }
 
 int32_t SmemShmEntry::InitStepAllocSlice()
@@ -208,7 +225,8 @@ void SmemShmEntry::InitStepFreeSlice()
     if (ret != 0) {
         SM_LOG_WARN("unable to free mem slice: " << ret);
     }
-    slice_ = nullptr;
+    if (ret == 0)
+        slice_ = nullptr;
 }
 
 int32_t SmemShmEntry::InitStepExchangeSlice()
@@ -335,9 +353,9 @@ Result SmemShmEntry::GetReachInfo(uint32_t remoteRank, uint32_t &reachInfo) cons
  * smem_shm_sdma_put/get/quiet 设备侧自驱; 仅保留工作区查询(就绪判定)。 */
 void *SmemShmEntry::SdmaGetWorkspace() const // 工作区查询
 {
-    hybm_sdma_info_t info = {}; // 就绪信息快照(零初始化)
+    hybm_sdma_info_t info = {};           // 就绪信息快照(零初始化)
     if (hybm_sdma_get_info(&info) != 0) { // 未就绪(开关关/初始化失败)
-        return nullptr; /* 未就绪(开关关/初始化失败), 上层以 nullptr 判定 */
+        return nullptr;                   /* 未就绪(开关关/初始化失败), 上层以 nullptr 判定 */
     }
     return reinterpret_cast<void *>(info.workspace); // 返回工作区设备地址
 }

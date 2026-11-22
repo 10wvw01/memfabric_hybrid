@@ -25,13 +25,27 @@ HYBM_API int32_t hybm_sdma_get_info(hybm_sdma_info_t *info) // 查询就绪信�
 {
     if (info == nullptr) { // 出参指针空校验
         BM_LOG_ERROR("sdma orch get info failed: info is null");
-        return BM_INVALID_PARAM;                               // 参数非法
+        return BM_INVALID_PARAM; // 参数非法
     }
     auto &prep = SdmaOrchestrator::GetInstance(); // 单例引用
-    if (!prep.Ready()) {                         // 未就绪
+    if (!prep.Ready()) {                          // 未就绪
         BM_LOG_ERROR("sdma orch not ready (switch off or init failed)");
-        return BM_NOT_INITIALIZED;                                     // 未初始化
+        return BM_NOT_INITIALIZED; // 未初始化
     }
     info->workspace = prep.GetWorkspace(); // 填工作区设备地址(非空 = 协同就绪)
-    return BM_OK;                     // 查询成功
+    return BM_OK;                          // 查询成功
+}
+
+HYBM_API int32_t hybm_sdma_get_status(hybm_sdma_status_t *status)
+{
+    if (status == nullptr) {
+        BM_LOG_ERROR("SDMA status output is null");
+        return BM_INVALID_PARAM;
+    }
+    HybmSdmaOrchResult result{};
+    auto ret = SdmaOrchestrator::GetInstance().GetServiceStatus(result);
+    if (ret != BM_OK)
+        return ret;
+    *status = {result.serviceState, result.mainRet, result.releaseConfirmed, 0, result.instance};
+    return BM_OK;
 }

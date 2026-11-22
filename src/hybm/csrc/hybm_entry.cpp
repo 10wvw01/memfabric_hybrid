@@ -82,12 +82,16 @@ static inline Result hybm_load_library()
 }
 
 // 保持初始化引用，避免实体销毁后再次部署，并在库卸载前释放设备文件和流。
-static void hybm_release_init_sdma()
+static Result hybm_release_init_sdma()
 {
     if (g_sdmaInitHeld) {
+        auto ret = SdmaOrchestrator::GetInstance().StopEpoch();
+        if (ret != BM_OK)
+            return ret;
         SdmaOrchestrator::GetInstance().Release();
         g_sdmaInitHeld = false;
     }
+    return BM_OK;
 }
 
 static Result hybm_prepare_init_sdma(uint16_t deviceId, uint64_t flags)
@@ -160,7 +164,7 @@ HYBM_API int32_t hybm_init(uint16_t deviceId, uint64_t flags)
         ptracer_uninit();
         DlApi::CleanupLibrary();
         BM_LOG_ERROR("hybm initialization failed, deviceId: " << deviceId << " flags: 0x" << std::hex << flags
-                                                            << " ret: " << ret);
+                                                              << " ret: " << ret);
         return BM_ERROR;
     }
 
@@ -182,7 +186,11 @@ HYBM_API void hybm_uninit()
         return;
     }
 
-    hybm_release_init_sdma();
+    if (hybm_release_init_sdma() != BM_OK) {
+        initialized = 1;
+        BM_LOG_ERROR("hybm retained because SDMA shutdown is incomplete");
+        return;
+    }
     if (!g_metaCleanupPending) {
         ptracer_uninit();
     }
@@ -403,7 +411,7 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
     auto localAccessRet = DlAclApi::AclrtMemSetAccess(va, alignedSize, &localDesc, 1);
     if (localAccessRet != 0) {
         BM_LOG_ERROR("AclrtMemSetAccess(local) failed, ret:" << localAccessRet << " deviceId:" << deviceId
-                                                              << " va:" << va << " size:" << alignedSize);
+                                                             << " va:" << va << " size:" << alignedSize);
         DlAclApi::AclrtUnmapMem(va);
         DlAclApi::AclrtReleaseMemAddress(va);
         DlAclApi::AclrtFreePhysical(handle);

@@ -43,6 +43,7 @@ public:
     StorePtr GetStoreClient() const;
 
     void Destroy();
+    bool HasEntries();
 
 private:
     std::mutex entryMutex_;

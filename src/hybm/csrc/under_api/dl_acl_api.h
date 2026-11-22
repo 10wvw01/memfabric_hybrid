@@ -153,6 +153,7 @@ using aclrtDestroyContextFunc = int (*)(void *);
 using aclrtSetStreamAttributeFunc = int (*)(void *, aclrtStreamAttr, aclrtStreamAttrValue *);
 using aclrtDestroyStreamFunc = int (*)(void *);
 using aclrtSynchronizeStreamFunc = int (*)(void *);
+using aclrtSynchronizeStreamWithTimeoutFunc = int (*)(void *, int32_t);
 using aclrtMallocFunc = int32_t (*)(void **, size_t, uint32_t);
 using aclrtFreeFunc = int (*)(void *);
 using aclrtMallocHostFunc = int32_t (*)(void **, size_t);
@@ -193,8 +194,8 @@ using aclrtKernelArgsFinalizeFunc = int32_t (*)(aclrtArgsHandle);
 using aclrtLaunchKernelWithConfigFunc = int32_t (*)(aclrtFuncHandle, uint32_t, void *, aclrtLaunchKernelCfg *,
                                                     aclrtArgsHandle, void *);
 /* host args 版 launch(KFC 通道用; placeHolderArray 仅传 nullptr, 以 void* 镜像声明) */
-using aclrtLaunchKernelWithHostArgsFunc = int32_t (*)(aclrtFuncHandle, uint32_t, void *,
-                                                      aclrtLaunchKernelCfg *, void *, size_t, void *, size_t);
+using aclrtLaunchKernelWithHostArgsFunc = int32_t (*)(aclrtFuncHandle, uint32_t, void *, aclrtLaunchKernelCfg *, void *,
+                                                      size_t, void *, size_t);
 
 using aclrtDrvMemHandle = void *;
 using aclrtContext = void *;
@@ -424,6 +425,15 @@ public:
         return pAclrtDestroyStream(stream);
     }
 
+    static inline Result AclrtSynchronizeStreamWithTimeout(void *stream, int32_t timeout)
+    {
+        if (pAclrtSynchronizeStreamWithTimeout == nullptr) {
+            BM_LOG_ERROR("aclrtSynchronizeStreamWithTimeout unavailable");
+            return BM_UNDER_API_UNLOAD;
+        }
+        return pAclrtSynchronizeStreamWithTimeout(stream, timeout);
+    }
+
     static inline Result AclrtSynchronizeStream(void *stream)
     {
         if (pAclrtSynchronizeStream == nullptr) {
@@ -486,16 +496,15 @@ public:
     }
 
     /* host args 版 kernel 提交(KFC 通道: 命令串作为 host args 透传设备 OS 执行) */
-    static inline Result AclrtLaunchKernelWithHostArgs(aclrtFuncHandle funcHandle, uint32_t numBlocks,
-                                                       void *stream, aclrtLaunchKernelCfg *cfg, void *hostArgs,
-                                                       size_t argsSize, void *placeHolderArray,
-                                                       size_t placeHolderNum)
+    static inline Result AclrtLaunchKernelWithHostArgs(aclrtFuncHandle funcHandle, uint32_t numBlocks, void *stream,
+                                                       aclrtLaunchKernelCfg *cfg, void *hostArgs, size_t argsSize,
+                                                       void *placeHolderArray, size_t placeHolderNum)
     {
         if (pAclrtLaunchKernelWithHostArgs == nullptr) {
             return BM_UNDER_API_UNLOAD;
         }
-        return pAclrtLaunchKernelWithHostArgs(funcHandle, numBlocks, stream, cfg, hostArgs, argsSize,
-                                              placeHolderArray, placeHolderNum);
+        return pAclrtLaunchKernelWithHostArgs(funcHandle, numBlocks, stream, cfg, hostArgs, argsSize, placeHolderArray,
+                                              placeHolderNum);
     }
 
     static inline Result AclrtMalloc(void **ptr, size_t count, uint32_t type)
@@ -837,6 +846,7 @@ private:
     static aclrtSetStreamAttributeFunc pAclrtSetStreamAttribute;
     static aclrtDestroyStreamFunc pAclrtDestroyStream;
     static aclrtSynchronizeStreamFunc pAclrtSynchronizeStream;
+    static aclrtSynchronizeStreamWithTimeoutFunc pAclrtSynchronizeStreamWithTimeout;
     static aclrtBinaryLoadFromFileFunc pAclrtBinaryLoadFromFile;
     static aclrtBinaryGetFunctionFunc pAclrtBinaryGetFunction;
     static aclrtKernelArgsInitFunc pAclrtKernelArgsInit;

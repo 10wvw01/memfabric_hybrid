@@ -106,6 +106,10 @@ Result MemEntityDefault::InitTagManager()
 
 int32_t MemEntityDefault::Initialize(const hybm_options *options) noexcept
 {
+    if (orchAcquired_ && SdmaOrchestrator::GetInstance().HasUnconfirmedResources()) {
+        BM_LOG_ERROR("entity has unconfirmed SDMA references, entityId: " << id_);
+        return BM_ERROR;
+    }
     BM_ASSERT_LOG_AND_RETURN(!initialized_, "the object is initialized.", BM_OK);
     BM_ASSERT_LOG_AND_RETURN((id_ >= 0 && (uint32_t)(id_) < HYBM_ENTITY_NUM_MAX),
                              "input entity id is invalid, input: " << id_
@@ -131,6 +135,19 @@ int32_t MemEntityDefault::Initialize(const hybm_options *options) noexcept
     initialized_ = true;
     BM_LOG_INFO("Initialize success: " << options_);
     return BM_OK;
+}
+
+bool MemEntityDefault::OwnsSdmaService() const noexcept
+{
+    if (!orchAcquired_ || hbmGva_ == nullptr)
+        return false;
+    const auto address = reinterpret_cast<uint64_t>(hbmGva_) + options_.maxHBMSize * options_.rankId;
+    return SdmaOrchestrator::GetInstance().IsBoundTo(address, options_.deviceVASpace);
+}
+
+Result MemEntityDefault::PrepareSdmaRelease() noexcept
+{
+    return OwnsSdmaService() ? SdmaOrchestrator::GetInstance().StopEpoch() : BM_OK;
 }
 
 void MemEntityDefault::UnInitialize() noexcept
@@ -179,11 +196,14 @@ int32_t MemEntityDefault::UnReserveMemorySpace() noexcept
         return BM_OK;
     }
 
-    if (orchAcquired_) {
+    if (OwnsSdmaService()) {
         /* 先停常驻 epoch kernel 再解除段 VA 映射: kernel 轮询段尾保留区的请求环,
          * VA 先拆会设备侧访问异常(kernel 异常退出且丢失退出诊断); 池销毁路径
          * (smem_shm_destroy→hybm_unreserve_mem_space)早于编排器 Release, 故在此拦停 */
-        SdmaOrchestrator::GetInstance().StopEpoch();
+        auto stopRet = SdmaOrchestrator::GetInstance().StopEpoch();
+        if (stopRet != BM_OK) {
+            return stopRet;
+        }
     }
     if (hbmSegment_ != nullptr) {
         hbmSegment_->UnReserveMemorySpace();
@@ -242,7 +262,7 @@ int32_t MemEntityDefault::AllocLocalMemory(uint64_t size, hybm_mem_type mType, u
     }
 
     ret = UpdateHybmDeviceInfo(0); // meta 刷新(含 physSize 槽; ret 复用外层声明)
-    if (ret != BM_OK) {             // meta 刷新失败
+    if (ret != BM_OK) {            // meta 刷新失败
         return ret;
     }
     return ConfigureOrchOnce(slice); // 段就绪后装配邮箱保留区+常驻 kernel(幂等)
@@ -256,19 +276,19 @@ Result MemEntityDefault::ConfigureOrchOnce(hybm_mem_slice_t slice)
         return BM_OK;                        // 幂等返回
     }
     if (options_.rankCount > SMEM_SHM_SDMA_MAX_RANKS) { // 到达环布局按 MAX_RANKS-1 设计
-        BM_LOG_ERROR("orch rankCount exceeds layout limit, rankCount: " << options_.rankCount
-                     << " maxRanks: " << SMEM_SHM_SDMA_MAX_RANKS << " entityId: " << id_
+        BM_LOG_ERROR("orch rankCount exceeds layout limit, rankCount: "
+                     << options_.rankCount << " maxRanks: " << SMEM_SHM_SDMA_MAX_RANKS << " entityId: " << id_
                      << " rankId: " << options_.rankId); // 根因: 布局上限/实体/rank
         return BM_INVALID_PARAM;
     }
     const uint64_t ownSeg = reinterpret_cast<uint64_t>(hbmGva_) + options_.maxHBMSize * options_.rankId; // 本端段基址
     const uint64_t poolBase = reinterpret_cast<uint64_t>(hbmGva_); // 池窗口基址(固定起点, 各 rank 一致)
-    auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace,
-                                                              options_.maxHBMSize, options_.rankId,
-                                                              poolBase); // 保留区+常驻 kernel(含对端环路由)
+    auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace, options_.maxHBMSize,
+                                                             options_.rankId,
+                                                             poolBase); // 保留区+常驻 kernel(含对端环路由)
     if (ret != BM_OK) { // 配置失败(单池约束/非 2 幂 symm/清零失败/rank 越限)
-        BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: "
-                     << options_.rankId << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段
+        BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: " << options_.rankId
+                                                    << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段
         return ret;
     }
     orchConfigured_ = true; // 绑定完成
@@ -350,12 +370,17 @@ int32_t MemEntityDefault::FreeLocalMemory(hybm_mem_slice_t slice, uint32_t flags
         return BM_OK;
     }
 
-    if (orchAcquired_ && orchConfigured_ && orchSlice_ == slice) {
+    if (OwnsSdmaService() && (!orchConfigured_ || orchSlice_ == slice)) {
         /* 协同池 slice 释放前先停常驻 epoch kernel: kernel 轮询该 slice 段尾保留区
          * 的请求环, 释放含 VA 解除映射, 先释放会设备侧访问异常(kernel 异常退出
          * 丢诊断, 并连锁 507899); 池销毁(smem_shm_destroy)早于编排器 Release, 故
          * 须在此拦停(StopEpoch 幂等, 后续 Release/UnReserve 再调为空操作) */
-        SdmaOrchestrator::GetInstance().StopEpoch();
+        auto stopRet = SdmaOrchestrator::GetInstance().StopEpoch();
+        if (stopRet != BM_OK) {
+            return stopRet;
+        }
+        orchConfigured_ = false;
+        orchSlice_ = nullptr;
     }
 
     if (transportManager_ != nullptr && !(options_.bmDataOpType & HYBM_DOP_TYPE_AIV_SDMA)) {
@@ -841,9 +866,8 @@ int32_t MemEntityDefault::CopyData(hybm_copy_params &params, hybm_data_copy_dire
     int32_t curDevice = -1;
     DlAclApi::AclrtGetDevice(&curDevice);
     BM_LOG_INFO("CopyData enter: direction=" << direction << " curDevice=" << curDevice
-                                             << " entityDevId=" << options_.devId
-                                             << " src=" << VaToStr(params.src) << " dest=" << VaToStr(params.dest)
-                                             << " size=" << params.dataSize);
+                                             << " entityDevId=" << options_.devId << " src=" << VaToStr(params.src)
+                                             << " dest=" << VaToStr(params.dest) << " size=" << params.dataSize);
 
     ret = BM_OK;
     std::pair<uint32_t, uint32_t> p2pInfo;
@@ -1114,9 +1138,9 @@ void MemEntityDefault::SetHybmDeviceInfo(HybmDeviceMeta &info)
     info.physSize = options_.deviceVASpace; /* 段物理大小(设备侧邮箱保留区定位) */
     /* 310P 协同模式: 工作区复用 sdmaWorkSpace 槽(A3 血统同概念, 平台互斥不同时写);
      * 未就绪保持零值(host 侧以 smem_shm_sdma_get_workspace(handle) 非空判定可用) */
-    if (orchAcquired_) { // 本 entity 持有协同(InitTransManager 已 Acquire)
+    if (orchAcquired_) {                              // 本 entity 持有协同(InitTransManager 已 Acquire)
         auto &prep = SdmaOrchestrator::GetInstance(); // 进程级单例(多 entity 共享同一份协同资源)
-        if (prep.Ready()) { // 协同就绪: 填充真实工作区
+        if (prep.Ready()) {                           // 协同就绪: 填充真实工作区
             info.sdmaWorkSpace = prep.GetWorkspace(); // 工作区设备地址(result/overflow)
         }
     }
@@ -1314,15 +1338,16 @@ Result MemEntityDefault::InitTransManager()
             /* 310P 协同模式: 改做编排准备(CP 流+工作区+kernel, 失败即报错不静默);
              * meta 由 SetHybmDeviceInfo 填充 */
             BM_LOG_INFO("310P sdma orchestrator: device-initiated SDMA instead of SdmaTransportManager, "
-                        "entityId: " << id_ << " devId: " << options_.devId);
+                        "entityId: "
+                        << id_ << " devId: " << options_.devId);
             auto ret = SdmaOrchestrator::GetInstance().Acquire(options_.devId); // 首次进入做全量初始化(引用计数+1)
             if (ret != BM_OK) { // 准备失败(CP 流/工作区/kernel 任一不过)
                 BM_LOG_ERROR("sdma orchestrator acquire failed, ret: " << ret << " devId: " << options_.devId
-                                                                  << " entityId: " << id_);
+                                                                       << " entityId: " << id_);
                 return ret;
             }
             orchAcquired_ = true; // 标记本 entity 持有, ReleaseResources 对称 Release
-            return BM_OK;            // 协同模式不创建 SdmaTransportManager
+            return BM_OK;         // 协同模式不创建 SdmaTransportManager
         }
         // 非 310P 或开关关闭: 走 A3 等平台的 SDMA TransportManager 原路径
         transportManager_ = transport::TransportManager::Create(transport::TT_SDMA, tagManager_);
@@ -1448,8 +1473,8 @@ int32_t MemEntityDefault::SetThreadAclDevice()
         return ret;
     }
     isSetDevice_ = devId;
-    BM_LOG_INFO("SetThreadAclDevice: deviceId=" << devId << " success (was "
-             << (isSetDevice_ == -1 ? "unset" : std::to_string(isSetDevice_)) << ")");
+    BM_LOG_INFO("SetThreadAclDevice: deviceId="
+                << devId << " success (was " << (isSetDevice_ == -1 ? "unset" : std::to_string(isSetDevice_)) << ")");
     return BM_OK;
 }
 
@@ -1458,11 +1483,14 @@ void MemEntityDefault::ReleaseResources()
     if (!initialized_) {
         return;
     }
+    if (PrepareSdmaRelease() != BM_OK) {
+        return;
+    }
     dataOperator_.reset();
     if (orchAcquired_) { // 本 entity 曾 Acquire 协同资源
         /* 与 InitTransManager 的 Acquire 对称(进程级单例引用计数, 归零才真正释放) */
         SdmaOrchestrator::GetInstance().Release(); // 引用计数-1, 归零逆序清理 CP 流/工作区
-        orchAcquired_ = false; // 清标记防重复 Release
+        orchAcquired_ = false;                     // 清标记防重复 Release
     }
     if (transportManager_ != nullptr) {
         transportManager_->CloseDevice();

@@ -51,6 +51,8 @@ public:
 
     int32_t Initialize(const hybm_options *options) noexcept override;
     void UnInitialize() noexcept override;
+    Result PrepareSdmaRelease() noexcept;
+    bool OwnsSdmaService() const noexcept;
 
     int32_t ReserveMemorySpace() noexcept override;
     int32_t UnReserveMemorySpace() noexcept override;
@@ -118,8 +120,8 @@ private:
     std::shared_ptr<MemSegment> dramSegment_{nullptr};
     std::shared_ptr<DataOperator> dataOperator_;
     bool transportPrepared_{false};
-    bool orchAcquired_{false};  // 310P 协同模式: InitTransManager 已 Acquire, UnInit 需对称 Release
-    bool orchConfigured_{false}; // 段尾保留区已配置(ConfigureOrchOnce 一次绑定)
+    bool orchAcquired_{false};            // 310P 协同模式: InitTransManager 已 Acquire, UnInit 需对称 Release
+    bool orchConfigured_{false};          // 段尾保留区已配置(ConfigureOrchOnce 一次绑定)
     hybm_mem_slice_t orchSlice_{nullptr}; // 协同绑定的池 slice(释放前须先停常驻 kernel, 环在该 slice 内)
     Result ConfigureOrchOnce(hybm_mem_slice_t slice); /* 段就绪后装配邮箱保留区+常驻 kernel(幂等) */
     std::mutex importMutex_;

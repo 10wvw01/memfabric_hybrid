@@ -104,6 +104,7 @@ add_custom_command( # 编排 kernel so 编译(hcc 交叉编译)
         ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # kernel 源文件
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_orch_kernel.cc # 依赖: kernel 源
             ${CMAKE_CURRENT_SOURCE_DIR}/hybm_sdma_contract.h # 依赖: wire 契约头
+            ${PROJECT_HYBM_SRC_BASE}/../smem/include/device/smem_shm_sdma_layout.h
     COMMENT "Compiling 310P sdma orchestrator kernel (libmf_sdma_orch.so)"
 )
 

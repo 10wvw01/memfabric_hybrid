@@ -11,12 +11,19 @@
 */
 #include "hybm_entity_factory.h"
 #include "hybm_entity_default.h"
+#include <vector>
 
 namespace ock {
 namespace mf {
 MemEntityFactory::~MemEntityFactory()
 {
     for (const auto &engine : engines_) {
+        if (engine.second->PrepareSdmaRelease() != BM_OK) {
+            // 故障线程仍可能引用实体资源，保留到进程退出。
+            static auto *retained = new std::vector<EngineImplPtr>;
+            retained->push_back(engine.second);
+            continue;
+        }
         engine.second->UnReserveMemorySpace();
         engine.second->UnInitialize();
     }
@@ -48,8 +55,10 @@ bool MemEntityFactory::RemoveEngine(hybm_entity_t entity)
     }
 
     auto id = pos->second;
-    enginesFromAddress_.erase(pos);
     auto engine = engines_.find(id);
+    if (engine != engines_.end() && engine->second->PrepareSdmaRelease() != BM_OK)
+        return false;
+    enginesFromAddress_.erase(pos);
     if (engine != engines_.end()) {
         engine->second->UnReserveMemorySpace();
         engine->second->UnInitialize();

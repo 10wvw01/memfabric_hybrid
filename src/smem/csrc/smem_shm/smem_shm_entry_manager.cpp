@@ -126,6 +126,10 @@ Result SmemShmEntryManager::RemoveEntryByPtr(uintptr_t ptr)
 
     /* assign to a tmp ptr and remove from map */
     auto entry = iter->second;
+    SM_ASSERT_RETURN(entry != nullptr, SM_ERROR);
+    auto closeRet = entry->Shutdown();
+    if (closeRet != SM_OK)
+        return closeRet;
     ptr2EntryMap_.erase(iter);
 
     /* remove from id set */
@@ -144,10 +148,21 @@ struct TransportAddressExchange {
     TransportAddressExchange(uint32_t rk, uint64_t addr) : rankId{rk}, address{addr} {}
 };
 
+bool SmemShmEntryManager::HasEntries()
+{
+    std::lock_guard<std::mutex> guard(entryMutex_);
+    return !ptr2EntryMap_.empty();
+}
+
 void SmemShmEntryManager::Destroy()
 {
     std::lock_guard<std::mutex> guard(entryMutex_);
-    // Release entries not explicitly destroyed before uninit (destructor frees hybm resources).
+    for (const auto &item : ptr2EntryMap_) {
+        if (item.second->Shutdown() != SM_OK) {
+            SM_LOG_ERROR("shm manager retained because shutdown is incomplete");
+            return;
+        }
+    }
     ptr2EntryMap_.clear();
     entryIdMap_.clear();
     inited_ = false;

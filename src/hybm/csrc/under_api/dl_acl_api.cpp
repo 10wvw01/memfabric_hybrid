@@ -39,6 +39,7 @@ aclrtDestroyContextFunc DlAclApi::pAclrtDestroyContext = nullptr;
 aclrtSetStreamAttributeFunc DlAclApi::pAclrtSetStreamAttribute = nullptr;
 aclrtDestroyStreamFunc DlAclApi::pAclrtDestroyStream = nullptr;
 aclrtSynchronizeStreamFunc DlAclApi::pAclrtSynchronizeStream = nullptr;
+aclrtSynchronizeStreamWithTimeoutFunc DlAclApi::pAclrtSynchronizeStreamWithTimeout = nullptr;
 aclrtBinaryLoadFromFileFunc DlAclApi::pAclrtBinaryLoadFromFile = nullptr;
 aclrtBinaryGetFunctionFunc DlAclApi::pAclrtBinaryGetFunction = nullptr;
 aclrtKernelArgsInitFunc DlAclApi::pAclrtKernelArgsInit = nullptr;
@@ -126,6 +127,8 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     DL_LOAD_SYM(pAclrtSetStreamAttribute, aclrtSetStreamAttributeFunc, rtHandle, "aclrtSetStreamAttribute");
     DL_LOAD_SYM(pAclrtDestroyStream, aclrtDestroyStreamFunc, rtHandle, "aclrtDestroyStream");
     DL_LOAD_SYM(pAclrtSynchronizeStream, aclrtSynchronizeStreamFunc, rtHandle, "aclrtSynchronizeStream");
+    DL_LOAD_SYM_OPTIONAL(pAclrtSynchronizeStreamWithTimeout, aclrtSynchronizeStreamWithTimeoutFunc, rtHandle,
+                         "aclrtSynchronizeStreamWithTimeout");
     DL_LOAD_SYM_OPTIONAL(pAclrtBinaryLoadFromFile, aclrtBinaryLoadFromFileFunc, rtHandle, "aclrtBinaryLoadFromFile");
     DL_LOAD_SYM_OPTIONAL(pAclrtBinaryGetFunction, aclrtBinaryGetFunctionFunc, rtHandle, "aclrtBinaryGetFunction");
     DL_LOAD_SYM_OPTIONAL(pAclrtKernelArgsInit, aclrtKernelArgsInitFunc, rtHandle, "aclrtKernelArgsInit");
@@ -228,6 +231,7 @@ void DlAclApi::CleanupLibrary()
     pAclrtCreateStreamWithConfig = nullptr;
     pAclrtDestroyStream = nullptr;
     pAclrtSynchronizeStream = nullptr;
+    pAclrtSynchronizeStreamWithTimeout = nullptr;
     pAclrtBinaryLoadFromFile = nullptr;
     pAclrtBinaryGetFunction = nullptr;
     pAclrtKernelArgsInit = nullptr;

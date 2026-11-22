@@ -80,7 +80,10 @@ smem_shm_t smem_shm_create(uint32_t id, uint32_t rankSize, uint32_t rankId, uint
 uint64_t smem_shm_get_symmetric_size(smem_shm_t handle);
 
 /**
- * @brief Destroy shm object
+ * @brief Destroy shm object after confirming its SDMA service has stopped.
+ *
+ * Before destroying a distributed pool, all ranks must finish communication.
+ * A failed shutdown retains the handle and referenced buffers for a later retry.
  *
  * @param handle           [in] the shm object to be destroyed
  * @param flags            [in] optional flags
@@ -231,6 +234,17 @@ void smem_shm_global_exit(smem_shm_t handle, int status);
  * @param handle           [in] shm object
  * @return 工作区设备地址; 协同模式未就绪时返回 NULL
  */
+typedef struct {
+    uint32_t state; // 0 STARTING、1 RUNNING、2 DRAINING、3 STOPPED、4 FAILED
+    uint32_t error;
+    uint32_t releaseConfirmed;
+    uint32_t reserved;
+    uint64_t instance;
+} smem_shm_sdma_status_t;
+
+// 查询服务线程的状态快照；通过state和error判断服务异常。
+int32_t smem_shm_sdma_get_status(smem_shm_t handle, smem_shm_sdma_status_t *status);
+
 void *smem_shm_sdma_get_workspace(smem_shm_t handle); // 未就绪返回 NULL
 
 #ifdef __cplusplus
