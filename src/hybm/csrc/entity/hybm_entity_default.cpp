@@ -263,9 +263,9 @@ Result MemEntityDefault::ConfigureOrchOnce(hybm_mem_slice_t slice)
     }
     const uint64_t ownSeg = reinterpret_cast<uint64_t>(hbmGva_) + options_.maxHBMSize * options_.rankId; // 本端段基址
     const uint64_t poolBase = reinterpret_cast<uint64_t>(hbmGva_); // 池窗口基址(固定起点, 各 rank 一致)
-    auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace,
-                                                              options_.maxHBMSize, options_.rankId,
-                                                              poolBase); // 保留区+常驻 kernel(含对端环路由)
+    auto ret = SdmaOrchestrator::GetInstance().ConfigureOrch(ownSeg, options_.deviceVASpace, options_.maxHBMSize,
+                                                             options_.rankId, poolBase,
+                                                             options_.rankCount); // 保留区+常驻 kernel(含对端环路由)
     if (ret != BM_OK) { // 配置失败(单池约束/非 2 幂 symm/清零失败/rank 越限)
         BM_LOG_ERROR("configure orch failed, ret: " << ret << " entityId: " << id_ << " rankId: "
                      << options_.rankId << " ownSeg: 0x" << std::hex << ownSeg); // 根因: ret/实体/段

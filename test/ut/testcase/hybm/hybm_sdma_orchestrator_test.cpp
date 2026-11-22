@@ -596,12 +596,13 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 /* 用例 3b: 契约不变式(KFCKernel/type 5 不受设备侧 28s 强制结束约束; v11: 按时长分轮+主机报时) */
 TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 {
-    /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部追加 rank/rsv/poolBaseGva), 80B */
+    /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部使用 rank/rankCount/poolBaseGva), 80B */
     EXPECT_EQ(sizeof(HybmSdmaOrchParam), 80U);
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U); // 第 4 个 u32 槽位
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);       // 保留区基址(定位原点)
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, rank), 64U);          // v29 追加: 本端 rank
-    EXPECT_EQ(offsetof(HybmSdmaOrchParam, poolBaseGva), 80U - 8U); // v29 追加: 池窗口基址
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, rankCount), 68U);
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, poolBaseGva), 72U); // v29 追加: 池窗口基址
     /* 永不退出的专用值: 全 F(不判报时/无循环上限, 跑到停止/错误); 与默认值 0 语义区分 */
     EXPECT_EQ(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, 0xFFFFFFFFu);
     EXPECT_NE(HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT, HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S);
@@ -615,5 +616,40 @@ TEST(SmemShmSdmaApiTest, InvalidHandleRejected)
 {
     EXPECT_EQ(smem_shm_sdma_get_workspace(nullptr), nullptr); // 工作区返回 NULL(就绪判定)
 }
+TEST(SdmaScanConfigTest, RejectsInvalidWorldBeforeAccessingDeviceMemory)
+{
+    MOCKER(DlAclApi::AclrtMemset).expects(never());
+    MOCKER(DlAclApi::AclrtCreateStream).expects(never());
+    SdmaOrchestrator prep;
+    constexpr uint64_t base = 0x100000000ULL;
+    constexpr uint64_t segment = 1ULL << 30;
+    const std::pair<uint32_t, uint32_t> cases[] = {
+        {0, 0}, {0, 5}, {1, 1}, {4, 4}, {UINT32_MAX, 2}, {0, UINT32_MAX}};
+    for (const auto &entry : cases) {
+        EXPECT_EQ(prep.ConfigureOrch(base, segment, segment, entry.first, base, entry.second), BM_INVALID_PARAM);
+        EXPECT_FALSE(prep.configured_);
+    }
+    GlobalMockObject::verify();
+}
+
+TEST(SdmaScanConfigTest, PassesActualWorldAndRankToEpochParameters)
+{
+    constexpr uint64_t base = 0x100000000ULL;
+    constexpr uint64_t segment = 1ULL << 30;
+    for (uint32_t world = 1; world <= SMEM_SHM_SDMA_MAX_RANKS; ++world) {
+        for (uint32_t rank = 0; rank < world; ++rank) {
+            SdmaOrchestrator prep;
+            MOCKER(DlAclApi::AclrtMemset).expects(once()).will(returnValue(BM_OK));
+            MOCKER(DlAclApi::AclrtCreateStream).expects(once()).will(returnValue(BM_ERROR));
+            EXPECT_EQ(prep.ConfigureOrch(base + rank * segment, segment, segment, rank, base, world), BM_ERROR);
+            EXPECT_EQ(prep.epochParam_.rankCount, world);
+            EXPECT_EQ(prep.epochParam_.rank, rank);
+            EXPECT_EQ(prep.epochParam_.poolBaseGva, base);
+            EXPECT_FALSE(prep.configured_);
+            GlobalMockObject::verify();
+        }
+    }
+}
+
 } // namespace mf
 } // namespace ock

@@ -634,10 +634,19 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         finishResult(result);
         return 1;
     }
+    if (p->rankCount == 0 || p->rankCount > SMEM_SHM_SDMA_MAX_RANKS || p->rank >= p->rankCount) {
+        result->mainRet = 1330;
+        result->exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
+        finishResult(result);
+        return 1;
+    }
+    const uint32_t scanCount = (p->rankCount - 1) * SMEM_SHM_SDMA_MAX_BLOCKS;
+    uint32_t nextScan = 0;
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     /* 每队列消费起点(v31: 队列按对端×block 划分, 各队列独立游标持久于保留区, 换轮零丢失) */
     uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT];
-    for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
+    for (uint32_t ordinal = 0; ordinal < scanCount; ++ordinal) {
+        const uint32_t q = HybmSdmaScanQueue(ordinal);
         heads[q] = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
     }
     EpochBudget budget{};
@@ -662,12 +671,12 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         uint32_t batch = 0;
         bool errored = false;
         bool progressed = true;
-        /* 24 队列轮转消费: 每轮扫描全部队列各取一封, 直至批满或一轮零消费——任一队列
-         * 不会长期占满批处理名额导致其他队列得不到处理, 队列内仍严格 FIFO
-         * (完成状态按对端×block 隔离, 跨队列无序约束) */
+        // 起点跨批次保留；每轮每队列至多消费一条，批满后从下一队列继续。
         while (progressed && batch < kDoorbellBatch) {
             progressed = false;
-            for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT && batch < kDoorbellBatch; q++) {
+            for (uint32_t visited = 0; visited < scanCount && batch < kDoorbellBatch; ++visited) {
+                const uint32_t q = HybmSdmaScanQueue(nextScan);
+                nextScan = HybmSdmaNextScan(nextScan, scanCount);
                 const uint64_t tail = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_TAIL +
                                                q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
                 if (heads[q] == tail) { // 该队列空
