@@ -43,6 +43,9 @@ typedef struct {
     uint32_t controlOperationTimeout; /* control operation timeout, i.e. barrier, allgather,topology_can_reach etc,
                                          default 120 second (min is 1, max is SMEM_BM_TIMEOUT_MAX) */
     bool startConfigStoreServer;      /* whether to start config store, default true */
+    uint16_t sdmaProducerMask;        /* 310P SDMA: allowed logical blocks, default 0x00FF.
+                                        Bits 0..7 select AI Core, bits 8..14 select Vector Core.
+                                        Nonzero subset of 0x7FFF; fixed until shm uninit. */
     uint32_t flags;                   /* other flag, default 0 */
 } smem_shm_config_t;
 

@@ -147,6 +147,7 @@ typedef struct {
     char tagOpInfo[256];
     hybm_tls_config tlsOption;
     int dramShmFd;
+    uint32_t sdmaProducerMask; /* 310P SHMEM logical block mask; zero selects the default 0x00FF. */
 } hybm_options;
 
 typedef enum {
