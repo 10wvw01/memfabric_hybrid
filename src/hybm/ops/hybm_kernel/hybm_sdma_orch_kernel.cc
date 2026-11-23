@@ -505,6 +505,43 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
               seq + 1); // reqHead[q] 推进
     return 0;
 }
+struct ScanContext {
+    uint32_t count;
+    uint32_t next;
+    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT];
+};
+
+// 只用本遍已读取的tail判断积压，已观察到的请求处理完后提交当前批次。
+template <typename ReadTail>
+int32_t consumeBatch(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid,
+                     ScanContext &scan, uint32_t &batch, const ReadTail &readTail)
+{
+    using namespace ock::mf;
+    constexpr uint32_t kDoorbellBatch = 8;
+    batch = 0;
+    bool backlog = true;
+    while (backlog && batch < kDoorbellBatch) {
+        backlog = false;
+        for (uint32_t visited = 0; visited < scan.count && batch < kDoorbellBatch; ++visited) {
+            const uint32_t q = HybmSdmaScanQueue(scan.next);
+            scan.next = HybmSdmaNextScan(scan.next, scan.count);
+            const uint64_t tail = readTail(q);
+            if (scan.heads[q] == tail) {
+                continue;
+            }
+            const int32_t ret = consumeOneMail(p, ctx, ssid, q, scan.heads[q]);
+            if (ret != 0) {
+                return ret;
+            }
+            ++scan.heads[q];
+            ++ctx->result->consumed;
+            ++batch;
+            backlog |= scan.heads[q] < tail;
+        }
+    }
+    return 0;
+}
+
 struct EpochBudget {
     bool resident;
     uint64_t heartbeatTicks;
@@ -634,11 +671,19 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         finishResult(result);
         return 1;
     }
+    if (p->rankCount == 0 || p->rankCount > SMEM_SHM_SDMA_MAX_RANKS || p->rank >= p->rankCount) {
+        result->mainRet = 1330;
+        result->exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
+        finishResult(result);
+        return 1;
+    }
+    ScanContext scan{};
+    scan.count = (p->rankCount - 1) * SMEM_SHM_SDMA_MAX_BLOCKS;
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     /* 每队列消费起点(v31: 队列按对端×block 划分, 各队列独立游标持久于保留区, 换轮零丢失) */
-    uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT];
-    for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
-        heads[q] = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
+    for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
+        const uint32_t q = HybmSdmaScanQueue(ordinal);
+        scan.heads[q] = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
     }
     EpochBudget budget{};
     if (initEpochBudget(p, budget) != 0) {
@@ -647,7 +692,6 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         finishResult(result);
         return 1;
     }
-    constexpr uint32_t kDoorbellBatch = 8; // 攒批上限(环内积压时 N 封一铃降 HAL 开销; 单封场景批=1)
     for (uint64_t loops = 0;; ++loops) {
         const int32_t state = checkEpochBudget(result, budget, loops);
         if (state != 0) {
@@ -660,36 +704,12 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
             break;
         }
         uint32_t batch = 0;
-        bool errored = false;
-        bool progressed = true;
-        /* 24 队列轮转消费: 每轮扫描全部队列各取一封, 直至批满或一轮零消费——任一队列
-         * 不会长期占满批处理名额导致其他队列得不到处理, 队列内仍严格 FIFO
-         * (完成状态按对端×block 隔离, 跨队列无序约束) */
-        while (progressed && batch < kDoorbellBatch) {
-            progressed = false;
-            for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT && batch < kDoorbellBatch; q++) {
-                const uint64_t tail = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_TAIL +
-                                               q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
-                if (heads[q] == tail) { // 该队列空
-                    continue;
-                }
-                ret = consumeOneMail(p, &ctx, ssid, q, heads[q]); // heads[q] 即该队列序号, 不敲铃
-                if (ret != 0) {
-                    result->mainRet = static_cast<uint32_t>(ret);
-                    result->exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
-                    errored = true;
-                    break;
-                }
-                heads[q]++;
-                result->consumed++;
-                batch++;
-                progressed = true;
-            }
-            if (errored) {
-                break;
-            }
-        }
-        if (errored) {
+        ret = consumeBatch(p, &ctx, ssid, scan, batch, [p](uint32_t q) {
+            return loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_TAIL + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
+        });
+        if (ret != 0) {
+            result->mainRet = static_cast<uint32_t>(ret);
+            result->exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
             (void)flushBatchDoorbell(p, &ctx); // 已入环部分尽力冲出
             break;
         }
