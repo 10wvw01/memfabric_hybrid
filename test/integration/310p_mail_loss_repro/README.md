@@ -44,7 +44,7 @@ AICPU epoch 可配置为较短时间，持续传输跨越 kernel 重启。
 | EX09_CHUNK_BYTES | 131072 | 每块字节数，至少 8、4 字节对齐，总数据不超过 16 MiB |
 | EX09_BATCH_GENS | 1 | 每次 kernel 的轮数，大于 1 时在设备内协调复用 |
 | EX09_GEN_DELAY_US | 0 | kernel 启动之间的等待微秒数 |
-| EX09_EPOCH_BUDGET_S | 1 | AICPU epoch 秒数 |
+| MF_SDMA_ORCH_MODE | 1 | 本脚本默认每轮1秒；resident为常驻，正整数为每轮秒数 |
 | EX09_WAIT_BUDGET | 10000000 | 单个应用状态等待的轮询预算 |
 | EX09_STALL_S | 60 | Host 检查进度停滞的超时秒数 |
 

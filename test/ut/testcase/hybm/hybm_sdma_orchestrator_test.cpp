@@ -24,7 +24,9 @@
  *   5. smem 层 sdma 协同 API 的无效 handle 拒绝
  */
 #include <gtest/gtest.h> // googletest 框架
-#include <cstddef>       // offsetof
+#include <array>
+#include <cstdlib>
+#include <cstddef> // offsetof
 #include <vector>
 
 #include <filesystem>
@@ -312,35 +314,99 @@ TEST_F(SdmaDeployTest, CopyCommandAlwaysCopiesAndFitsOriginalBuffer)
     EXPECT_LT(commands[0].size(), 512U);
 }
 
-TEST(SdmaServiceOptionsTest, DefaultAndLegacyModes)
+TEST(SdmaServiceOptionsTest, DefaultAndExplicitResidentModes)
 {
     SdmaServiceOptions options;
-    ASSERT_TRUE(ResolveSdmaOptions("", "", "", "", options));
-    EXPECT_EQ(options.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
-    EXPECT_EQ(options.leaseMs, 10000U);
-    EXPECT_EQ(options.stopMs, 5000U);
-    ASSERT_TRUE(ResolveSdmaOptions("", "0", "", "", options));
-    EXPECT_EQ(options.epochSeconds, 15U);
-    ASSERT_TRUE(ResolveSdmaOptions("", "2", "", "", options));
-    EXPECT_EQ(options.epochSeconds, 2U);
-    ASSERT_TRUE(ResolveSdmaOptions("", "4294967295", "", "", options));
-    EXPECT_EQ(options.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
-    ASSERT_TRUE(ResolveSdmaOptions("resident", "2", "", "", options));
-    EXPECT_EQ(options.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+    for (const auto *mode : {"", "resident"}) {
+        ASSERT_TRUE(ResolveSdmaOptions(mode, "", "", options));
+        EXPECT_EQ(options.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+        EXPECT_EQ(options.leaseMs, 10000U);
+        EXPECT_EQ(options.stopMs, 5000U);
+    }
 }
 
-TEST(SdmaServiceOptionsTest, InvalidModesAndTimeoutsAreRejected)
+TEST(SdmaServiceOptionsTest, NumericModeSelectsEpochSeconds)
 {
     SdmaServiceOptions options;
-    EXPECT_FALSE(ResolveSdmaOptions("other", "", "", "", options));
-    EXPECT_FALSE(ResolveSdmaOptions("epoch", "4294967295", "", "", options));
-    EXPECT_FALSE(ResolveSdmaOptions("", "", "0", "", options));
-    EXPECT_FALSE(ResolveSdmaOptions("", "", "2999", "", options));
-    EXPECT_FALSE(ResolveSdmaOptions("", "", "-1", "", options));
-    EXPECT_FALSE(ResolveSdmaOptions("", "", "10000", "999", options));
-    EXPECT_FALSE(ResolveSdmaOptions("", "", "10000", "4294967295", options));
-    ASSERT_TRUE(ResolveSdmaOptions("epoch", "bad", "", "", options));
-    EXPECT_EQ(options.epochSeconds, 15U);
+    for (const uint32_t seconds : {1U, 2U, 15U, 4294967294U}) {
+        ASSERT_TRUE(ResolveSdmaOptions(std::to_string(seconds), "", "", options));
+        EXPECT_EQ(options.epochSeconds, seconds);
+        EXPECT_EQ(options.leaseMs, 10000U);
+        EXPECT_EQ(options.stopMs, 5000U);
+    }
+}
+
+TEST(SdmaServiceOptionsTest, InvalidModesAreRejected)
+{
+    SdmaServiceOptions options;
+    for (const auto *mode : {"epoch", "other", "Resident", "0", "-1", "+1", " 1", "1 ", "1\n", "1.5", "15s",
+                             "4294967295", "4294967296", "18446744073709551616"}) {
+        EXPECT_FALSE(ResolveSdmaOptions(mode, "", "", options)) << mode;
+    }
+}
+
+TEST(SdmaServiceOptionsTest, InvalidTimeoutsAreRejected)
+{
+    SdmaServiceOptions options;
+    EXPECT_FALSE(ResolveSdmaOptions("", "0", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "2999", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "-1", "", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "10000", "999", options));
+    EXPECT_FALSE(ResolveSdmaOptions("", "10000", "4294967295", options));
+    ASSERT_TRUE(ResolveSdmaOptions("2", "3000", "1000", options));
+    EXPECT_EQ(options.leaseMs, 3000U);
+    EXPECT_EQ(options.stopMs, 1000U);
+}
+
+class SdmaServiceEnvTest : public SdmaDeployTest {
+protected:
+    void SetUp() override
+    {
+        SdmaDeployTest::SetUp();
+        for (size_t i = 0; i < names.size(); ++i) {
+            const auto *value = std::getenv(names[i]);
+            present[i] = value != nullptr;
+            if (value != nullptr)
+                saved[i] = value;
+            unsetenv(names[i]);
+        }
+    }
+    void TearDown() override
+    {
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (present[i])
+                setenv(names[i], saved[i].c_str(), 1);
+            else
+                unsetenv(names[i]);
+        }
+        SdmaDeployTest::TearDown();
+    }
+    const std::array<const char *, 4> names = {"MF_SDMA_ORCH_MODE", "MF_SDMA_ORCH_EPOCH_BUDGET_S",
+                                               "MF_SDMA_ORCH_HOST_LEASE_MS", "MF_SDMA_ORCH_STOP_TIMEOUT_MS"};
+    std::array<bool, 4> present{};
+    std::array<std::string, 4> saved{};
+};
+
+TEST_F(SdmaServiceEnvTest, LegacyBudgetDoesNotChangeDefaultMode)
+{
+    MOCKER(DlAclApi::AclrtCreateContext).expects(exactly(4)).will(returnValue(BM_ERROR));
+    for (const auto *value : {"0", "15", "4294967295", "bad"}) {
+        ASSERT_EQ(setenv("MF_SDMA_ORCH_EPOCH_BUDGET_S", value, 1), 0);
+        EXPECT_EQ(prep.InitOnce(0), BM_ERROR);
+        EXPECT_EQ(prep.serviceOptions_.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+    }
+}
+
+TEST_F(SdmaServiceEnvTest, ExplicitModeControlsServiceDespiteLegacyBudget)
+{
+    ASSERT_EQ(setenv("MF_SDMA_ORCH_EPOCH_BUDGET_S", "15", 1), 0);
+    MOCKER(DlAclApi::AclrtCreateContext).expects(exactly(2)).will(returnValue(BM_ERROR));
+    ASSERT_EQ(setenv("MF_SDMA_ORCH_MODE", "resident", 1), 0);
+    EXPECT_EQ(prep.InitOnce(0), BM_ERROR);
+    EXPECT_EQ(prep.serviceOptions_.epochSeconds, HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT);
+    ASSERT_EQ(setenv("MF_SDMA_ORCH_MODE", "2", 1), 0);
+    EXPECT_EQ(prep.InitOnce(0), BM_ERROR);
+    EXPECT_EQ(prep.serviceOptions_.epochSeconds, 2U);
 }
 
 TEST_F(SdmaDeployTest, UnconfirmedDeviceReferencesPreventCleanup)

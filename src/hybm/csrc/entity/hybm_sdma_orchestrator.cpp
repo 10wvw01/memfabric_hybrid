@@ -166,9 +166,8 @@ void SdmaOrchestrator::Release()
 Result SdmaOrchestrator::InitOnce(uint16_t devId)
 {
     devId_ = devId;
-    if (!ResolveSdmaOptions(ServiceEnv("MF_SDMA_ORCH_MODE"), ServiceEnv("MF_SDMA_ORCH_EPOCH_BUDGET_S"),
-                            ServiceEnv("MF_SDMA_ORCH_HOST_LEASE_MS"), ServiceEnv("MF_SDMA_ORCH_STOP_TIMEOUT_MS"),
-                            serviceOptions_)) {
+    if (!ResolveSdmaOptions(ServiceEnv("MF_SDMA_ORCH_MODE"), ServiceEnv("MF_SDMA_ORCH_HOST_LEASE_MS"),
+                            ServiceEnv("MF_SDMA_ORCH_STOP_TIMEOUT_MS"), serviceOptions_)) {
         BM_LOG_ERROR("invalid SDMA service configuration, devId: " << devId);
         return BM_INVALID_PARAM;
     }

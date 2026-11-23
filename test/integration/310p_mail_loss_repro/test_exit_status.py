@@ -152,7 +152,7 @@ class MailLossExitStatusTest(unittest.TestCase):
             EX09_GEN_DELAY_US="0",
             EX09_STALL_S="0" if mode == "stall" else "60",
             MF_SDMA_ORCH_DIR=str(ARGS.kernel_dir),
-            MF_SDMA_ORCH_EPOCH_BUDGET_S="1",
+            MF_SDMA_ORCH_MODE="1",
         )
         if mode != "normal":
             env["EX09_TEST_MODE"] = mode

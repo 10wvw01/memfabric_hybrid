@@ -6,12 +6,18 @@ MF在host进程内持有独立服务Context。服务Context中的AICPU任务消�
 
 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| MF_SDMA_ORCH_MODE | resident | resident持续运行；epoch有限轮次 |
+| MF_SDMA_ORCH_MODE | resident | resident持续运行；正整数表示有限轮次的秒数，范围1～4294967294 |
 | MF_SDMA_ORCH_HOST_LEASE_MS | 10000 | host健康序号不变的最长时间，最小3000毫秒 |
 | MF_SDMA_ORCH_STOP_TIMEOUT_MS | 5000 | 服务停止和排空预算，最小1000毫秒 |
-| MF_SDMA_ORCH_EPOCH_BUDGET_S | 15 | 有限轮次时长 |
 
-仅设置旧预算时，有限值选择epoch，0选择15秒，4294967295选择带健康租约的resident。显式MODE优先；epoch与4294967295组合初始化失败。host每秒更新健康序号，设备通过单调时间判断失联。长时间暂停整个host进程也会触发失联。
+模式由MF_SDMA_ORCH_MODE统一选择，未设置或值为空时默认常驻。设置resident表示常驻，设置15表示每轮运行15秒；0、负数、epoch及其他非法值会导致初始化失败。host每秒更新健康序号，设备通过单调时间判断失联。长时间暂停整个host进程也会触发失联。
+
+    export MF_SDMA_ORCH_MODE=resident
+
+有限轮次示例：
+
+    export MF_SDMA_ORCH_MODE=15
+
 
 ## 停止和释放
 
@@ -29,6 +35,6 @@ smem_shm_destroy失败时句柄继续保留，应用停止使用该池并保留�
 
 Host库、AICPU SO及AICore头文件需配套更新。Host/AICPU握手校验协议和本次启动标识；使用新头文件重新编译AICore kernel。请求环、完成戳及暂存槽原有偏移保持不变，新增控制字段使用保留区空闲范围。工作区的host停止标志和健康序号与AICPU诊断分占缓存行，避免缓存写回覆盖对方更新。
 
-回退时设置MF_SDMA_ORCH_MODE=epoch以及MF_SDMA_ORCH_EPOCH_BUDGET_S=15。有限轮次同样启用租约和资源释放保护。故障资源得到确认或由外部平台恢复后再创建新实例。
+切换为每轮15秒的有限轮次时，设置MF_SDMA_ORCH_MODE=15。有限轮次同样启用租约和资源释放保护。故障资源得到确认或由外部平台恢复后再创建新实例。
 
 诊断记录包含设备号、服务实例、错误码、资源确认及最后SQ状态。记录源码提交、实际加载SO摘要和运行配置，可将故障对应到具体产物。设备管理查询使用有限等待，查询失败后保存原始日志并由平台处理。

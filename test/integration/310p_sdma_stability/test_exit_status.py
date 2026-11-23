@@ -135,7 +135,7 @@ class StabilityExitStatusTest(unittest.TestCase):
             TEST_DEVICE_BASE=str(ARGS.device_base),
             STRESS_ROUNDS="7",
             MF_SDMA_ORCH_DIR=str(ARGS.kernel_dir),
-            MF_SDMA_ORCH_EPOCH_BUDGET_S="1",
+            MF_SDMA_ORCH_MODE="1",
         )
         if mode != "normal":
             env["STABILITY_TEST_MODE"] = mode

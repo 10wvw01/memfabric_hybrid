@@ -114,11 +114,11 @@ run_example()
         exit 1
     fi
     export MF_SDMA_ORCH_DIR="${MF_SDMA_ORCH_DIR:-$KERNEL_DIR}"
-    export MF_SDMA_ORCH_EPOCH_BUDGET_S="${EX09_EPOCH_BUDGET_S:-1}"
+    export MF_SDMA_ORCH_MODE="${MF_SDMA_ORCH_MODE:-1}"
     export MF_LOG_LEVEL="${MF_LOG_LEVEL:-INFO}"
     export LD_LIBRARY_PATH="$CANN_LIB:$MPI_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     local base="${EX09_DEVICE_BASE:-4}"
-    echo "[run.sh] 运行: device=$base/$((base + 1)) AICPU单次运行时间=${MF_SDMA_ORCH_EPOCH_BUDGET_S}s kernel_dir=$MF_SDMA_ORCH_DIR"
+    echo "[run.sh] 运行: device=$base/$((base + 1)) AICPU运行模式=${MF_SDMA_ORCH_MODE} kernel_dir=$MF_SDMA_ORCH_DIR"
     if [ "$(id -u)" -eq 0 ]; then
         exec "$MPI_RUN" --allow-run-as-root -np 2 bash -c \
             "DEVICE_ID=\$(( $base + \$OMPI_COMM_WORLD_RANK )) exec $EX_BIN"
