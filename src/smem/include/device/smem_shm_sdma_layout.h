@@ -58,7 +58,7 @@ constexpr uint64_t SMEM_SHM_SDMA_SIGNAL_FLAG = 1ULL << 39;
 // 服务状态及发布标志位于保留区尾部，各写入方独占缓存行。
 constexpr uint64_t SMEM_SHM_SDMA_RS_SERVICE = 0x1F0000;
 constexpr uint64_t SMEM_SHM_SDMA_RS_PUBLISHING = 0x1F0040;
-constexpr uint32_t SMEM_SHM_SDMA_PROTOCOL = 0x5D0A0009;
+constexpr uint32_t SMEM_SHM_SDMA_PROTOCOL = 0x5D0A000A;
 constexpr uint32_t SMEM_SHM_SDMA_STARTING = 0;
 constexpr uint32_t SMEM_SHM_SDMA_RUNNING = 1;
 constexpr uint32_t SMEM_SHM_SDMA_DRAINING = 2;

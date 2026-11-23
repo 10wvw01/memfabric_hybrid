@@ -745,7 +745,7 @@ Result SdmaOrchestrator::CheckDeploymentResult(const void *bytes, size_t size, b
 }
 
 Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
-                                       uint64_t poolBaseGva)
+                                       uint64_t poolBaseGva, uint32_t rankCount)
 {
     std::lock_guard<std::mutex> guard(mutex_);
     ServiceContextGuard context(serviceContext_);
@@ -759,10 +759,11 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
         BM_LOG_ERROR("symSize not power of two, symSize: " << symSize);
         return BM_INVALID_PARAM;
     }
-    if (ownRank >= SMEM_SHM_SDMA_MAX_RANKS) { // 到达环按 MAX_RANKS-1 设计, 超限无环可路由
-        BM_LOG_ERROR("orch rank exceeds layout limit, rank: " << ownRank << " maxRanks: " << SMEM_SHM_SDMA_MAX_RANKS);
+    if (rankCount == 0 || rankCount > SMEM_SHM_SDMA_MAX_RANKS || ownRank >= rankCount) {
+        BM_LOG_ERROR("invalid orch ranks, rank: " << ownRank << " rankCount: " << rankCount);
         return BM_INVALID_PARAM;
     }
+
     if (poolBaseGva == 0 || ownSegGva < poolBaseGva) { // 池窗口基址(对端 rank 路由原点)
         BM_LOG_ERROR("orch pool base invalid, poolBaseGva: 0x" << std::hex << poolBaseGva << std::dec
                                                                << " ownSegGva: 0x" << std::hex << ownSegGva);
@@ -805,8 +806,8 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     epochParam_.resultAddr = wsBase + HYBM_SDMA_ORCH_WS_RESULT_OFF;
     epochParam_.symSize = symSize;
     epochParam_.physSize = physSize;
-    epochParam_.rank = ownRank;            /* v29: 请求环/到达环路由(本端视角) */
-    epochParam_.rsv = 0;                   /* 填充显式置 0 */
+    epochParam_.rank = ownRank; /* v29: 请求环/到达环路由(本端视角) */
+    epochParam_.rankCount = rankCount;
     epochParam_.poolBaseGva = poolBaseGva; /* v29: dstSeg → 目的 rank 的换算原点(路由复核) */
     /* 首轮内联下发: 失败立即报错(池创建失败, 调用方可重试)——监督线程只负责后续重拉,
      * 不得吞掉首轮失败造成池看似就绪实则无消费者的静默半死 */

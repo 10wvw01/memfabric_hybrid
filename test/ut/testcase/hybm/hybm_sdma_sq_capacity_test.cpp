@@ -370,6 +370,182 @@ TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
     EXPECT_EQ(context.sqTail, 0U);
 }
 
+class SdmaBatchTest : public SdmaDirectionTest {
+protected:
+    alignas(64) std::array<uint8_t, 64 * kSqeSize> batchRing{};
+    ScanContext scan{};
+    uint32_t batch = 0;
+    uint32_t reads = 0;
+    bool publishAfterSnapshot = false;
+
+    void SetUp() override
+    {
+        SdmaDirectionTest::SetUp();
+        context.sqBase = reinterpret_cast<uint64_t>(batchRing.data());
+        context.sqDepth = 64;
+        context.result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
+        scan.count = 8;
+        param.rankCount = 2;
+    }
+
+    void Publish(uint32_t queue, uint32_t count)
+    {
+        const uint64_t peer = SmemShmSdmaQueuePeerRing(queue) + 1;
+        for (uint32_t seq = 0; seq < count; ++seq) {
+            auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING +
+                                                                      queue * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE +
+                                                                      seq * sizeof(ock::mf::HybmSdmaReqMail));
+            *mail = {param.poolBaseGva + 4096 + seq * 4, param.poolBaseGva + peer * param.symSize + 8192,
+                     (1ULL << 63) | 4, 0};
+        }
+        storeCell(param.resBase + SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, count);
+    }
+
+    int32_t Run()
+    {
+        return consumeBatch(&param, &context, 0, scan, batch, [this](uint32_t queue) {
+            ++reads;
+            const uint64_t tail =
+                loadCell(param.resBase + SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
+            if (publishAfterSnapshot && queue == 7) {
+                Publish(0, 2);
+                publishAfterSnapshot = false;
+            }
+            return tail;
+        });
+    }
+};
+
+TEST_F(SdmaBatchTest, EmptyPassDoesNotSubmitRequests)
+{
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 0U);
+    EXPECT_EQ(reads, 8U);
+    EXPECT_EQ(context.sqTail, 0U);
+    EXPECT_EQ(configCount, 0U);
+}
+
+TEST_F(SdmaBatchTest, SingleLowQueueNeedsOnePass)
+{
+    Publish(0, 1);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(reads, 8U);
+    EXPECT_EQ(scan.heads[0], 1U);
+    EXPECT_EQ(context.result->consumed, 1U);
+}
+
+TEST_F(SdmaBatchTest, SingleHighQueueNeedsOnePass)
+{
+    Publish(7, 1);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(reads, 8U);
+    EXPECT_EQ(scan.heads[7], 1U);
+}
+
+TEST_F(SdmaBatchTest, SingleLastPeerQueueNeedsOnePass)
+{
+    scan.count = 24;
+    param.rankCount = 4;
+    Publish(39, 1);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(reads, 24U);
+    EXPECT_EQ(scan.heads[39], 1U);
+}
+
+TEST_F(SdmaBatchTest, ObservedBacklogFillsBatchAndPreservesFifo)
+{
+    Publish(0, 8);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 8U);
+    EXPECT_EQ(reads, 57U);
+    EXPECT_EQ(scan.next, 1U);
+    EXPECT_EQ(scan.heads[0], 8U);
+    for (uint32_t seq = 0; seq < 8; ++seq) {
+        uint64_t source = 0;
+        std::memcpy(&source, batchRing.data() + seq * 2 * kSqeSize + 32, 8);
+        EXPECT_EQ(source, param.poolBaseGva + 4096 + seq * 4);
+    }
+}
+
+TEST_F(SdmaBatchTest, PartialBatchStopsAfterObservedRequestsDrain)
+{
+    Publish(0, 3);
+    Publish(7, 2);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 5U);
+    EXPECT_EQ(reads, 24U);
+    EXPECT_EQ(scan.heads[0], 3U);
+    EXPECT_EQ(scan.heads[7], 2U);
+}
+
+TEST_F(SdmaBatchTest, RequestsPublishedAfterSnapshotRemainForNextBatch)
+{
+    Publish(0, 1);
+    publishAfterSnapshot = true;
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(reads, 8U);
+    EXPECT_EQ(scan.heads[0], 1U);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(reads, 16U);
+    EXPECT_EQ(scan.heads[0], 2U);
+}
+
+TEST_F(SdmaBatchTest, BackloggedLowQueuesDoNotBlockLastPeer)
+{
+    scan.count = 24;
+    param.rankCount = 4;
+    for (uint32_t queue = 0; queue < 8; ++queue) {
+        Publish(queue, 2);
+    }
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 8U);
+    EXPECT_EQ(scan.next, 8U);
+    Publish(39, 1);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 8U);
+    EXPECT_EQ(scan.heads[39], 1U);
+    EXPECT_EQ(scan.next, 7U);
+}
+
+TEST_F(SdmaBatchTest, FullBatchesContinueAcrossAllPeers)
+{
+    scan.count = 24;
+    param.rankCount = 4;
+    for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
+        Publish(ock::mf::HybmSdmaScanQueue(ordinal), 1);
+    }
+    for (uint32_t iteration = 0; iteration < 3; ++iteration) {
+        ASSERT_EQ(Run(), 0);
+        EXPECT_EQ(batch, 8U);
+    }
+    EXPECT_EQ(reads, 24U);
+    EXPECT_EQ(scan.next, 0U);
+    for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
+        EXPECT_EQ(scan.heads[ock::mf::HybmSdmaScanQueue(ordinal)], 1U);
+    }
+}
+
+TEST_F(SdmaBatchTest, FailedRequestRetainsHeadAndAlreadyPreparedRequests)
+{
+    Publish(0, 1);
+    Publish(1, 1);
+    auto *invalid = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING +
+                                                                 SMEM_SHM_SDMA_RS_REQ_RING_STRIDE);
+    invalid->len &= UINT32_MAX;
+    EXPECT_EQ(Run(), 1334);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(scan.heads[0], 1U);
+    EXPECT_EQ(scan.heads[1], 0U);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(flushBatchDoorbell(&param, &context), 0);
+    EXPECT_EQ(publishedTail, 2U);
+}
+
 class SdmaDeployVerifyTest : public testing::Test {
 protected:
     std::array<unsigned char, 8192> bytes{};
@@ -459,13 +635,6 @@ TEST_F(SdmaDeployVerifyTest, CleanupRequiresTargetToBeAbsent)
     ASSERT_EQ(HybmSdmaVerifyDeploy(&param), 0U);
     EXPECT_EQ(result.status, 0U);
     EXPECT_EQ(result.nonce, param.nonce);
-}
-
-#else
-#include <gtest/gtest.h>
-TEST(SdmaSqCapacityTest, RequiresAarch64CacheInstructions)
-{
-    GTEST_SKIP() << "AICPU cache instructions require AArch64";
 }
 
 TEST_F(SdmaDirectionTest, PutSignalOrdersDataNotificationAndCompletion)
@@ -637,6 +806,13 @@ TEST_F(SdmaServiceTest, CompletionProgressRenewsDeadlineAndAllowsStampWrap)
     EXPECT_EQ(context.completed[0], 65U);
     clockNowNs += 2000000000ULL;
     EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+}
+
+#else
+#include <gtest/gtest.h>
+TEST(SdmaSqCapacityTest, RequiresAarch64CacheInstructions)
+{
+    GTEST_SKIP() << "AICPU cache instructions require AArch64";
 }
 
 #endif

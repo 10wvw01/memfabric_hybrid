@@ -56,9 +56,9 @@ struct HybmSdmaOrchParam {
     uint64_t symSize;      /* 对称段大小(对端段基址掩码算术用, 须 2 的幂) */
     uint64_t physSize;     /* 段物理大小(对端保留区定位用) */
     /* v29 4-rank 化: reqBase/quietBase 合并为 resBase(请求环/完成戳均由保留区基址+布局常量定位),
-     * 尾部追加 rank/rsv/poolBaseGva; 布局锁 80B, wire 变更由 KVER bump 隔离旧设备缓存 */
+     * 尾部使用 rank/rankCount/poolBaseGva; 追加租约与实例后布局为96B，通过协议标识检查配套产物 */
     uint32_t rank;        /* 本端 rank 号(请求环下标 = PeerRingIdx(rank, 目的 rank)) */
-    uint32_t rsv;         /* 填充对齐(显式置 0) */
+    uint32_t rankCount;   /* 世界大小，决定有效对端队列范围 */
     uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
     uint32_t hostLeaseMs;
     uint32_t stopTimeoutMs;
@@ -129,6 +129,17 @@ static_assert(sizeof(HybmSdmaOrchDbgMail) == 64, "DbgMail 尺寸漂移"); /* 布
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 常驻服务仍检查host租约、停止及错误 */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_CLOCK_INTERVAL = 64; /* 稀疏读取单调时钟，限制每轮实际时长 */
+
+// 紧凑扫描编号映射到稀疏队列，保留每对端block 8..15的预留位置。
+inline uint32_t HybmSdmaScanQueue(uint32_t ordinal)
+{
+    return SmemShmSdmaQueueIdx(ordinal / SMEM_SHM_SDMA_MAX_BLOCKS, ordinal % SMEM_SHM_SDMA_MAX_BLOCKS);
+}
+
+inline uint32_t HybmSdmaNextScan(uint32_t ordinal, uint32_t count)
+{
+    return ordinal + 1 == count ? 0 : ordinal + 1;
+}
 
 } // namespace mf
 } // namespace ock

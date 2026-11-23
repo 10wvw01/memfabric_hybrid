@@ -58,7 +58,7 @@ public:
      * v29 4-rank 化: ownRank/poolBaseGva 供 epoch kernel 做对端到达环路由
      * (peerRank = (dstSeg - poolBaseGva)/symSize, 环下标按收发双方 rank 压缩) */
     Result ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
-                         uint64_t poolBaseGva);
+                         uint64_t poolBaseGva, uint32_t rankCount);
 
     /* 引用计数 -1; 归零停止监督线程并逆序清理 */
     void Release();
