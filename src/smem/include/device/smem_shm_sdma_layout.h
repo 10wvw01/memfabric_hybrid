@@ -54,12 +54,24 @@ constexpr uint64_t SMEM_SHM_SDMA_RS_STAGE_STRIDE = 0x4000; /* 队列间距(512×
 constexpr uint64_t SMEM_SHM_SDMA_RS_SIGNAL = 0xDF800;
 constexpr uint64_t SMEM_SHM_SDMA_RS_SIGNAL_STRIDE = 0x400;
 constexpr uint64_t SMEM_SHM_SDMA_SIGNAL_FLAG = 1ULL << 39;
+// 初始化后保持不变，与游标及通知参数分开占用缓存行。
+constexpr uint64_t SMEM_SHM_SDMA_RS_PRODUCER_MASK = 0xEF800;
+static_assert(SMEM_SHM_SDMA_RS_SIGNAL + 48 * SMEM_SHM_SDMA_RS_SIGNAL_STRIDE <=
+              SMEM_SHM_SDMA_RS_PRODUCER_MASK, "producer mask overlaps signal parameters");
+static_assert(SMEM_SHM_SDMA_RS_PRODUCER_MASK + 64 <= SMEM_SHM_SDMA_RESERVED, "producer mask exceeds reserved area");
 
 /* ---- 协同模式规模上限 ---- */
 constexpr uint32_t SMEM_SHM_SDMA_MAX_RANKS = 4;  /* rank 上限(8-rank 全互联被每卡 8 个 P2P 槽位硬约束否定) */
 constexpr uint32_t SMEM_SHM_SDMA_MAX_PEERS = SMEM_SHM_SDMA_MAX_RANKS - 1;
-constexpr uint32_t SMEM_SHM_SDMA_MAX_BLOCKS = 8; /* 每 die AICore block 数(<<<N>>> 启动上限) */
-constexpr uint32_t SMEM_SHM_SDMA_QUEUES_PER_PEER = 16; /* 每对端队列槽位(block 0..7 在用, 8..15 预留) */
+constexpr uint32_t SMEM_SHM_SDMA_MAX_BLOCKS = 8; /* 默认 AI Core 生产者数 */
+constexpr uint32_t SMEM_SHM_SDMA_AICORE_PRODUCER_MASK = 0x00FF; /* bit 0..7: AI Core */
+constexpr uint32_t SMEM_SHM_SDMA_VECTOR_PRODUCER_MASK = 0xFF00; /* bit 8..15: Vector */
+constexpr uint32_t SMEM_SHM_SDMA_RESERVED_PRODUCER_MASK = 0x8000; /* bit 15 保留，禁止提交 */
+constexpr uint32_t SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK = SMEM_SHM_SDMA_AICORE_PRODUCER_MASK;
+constexpr uint32_t SMEM_SHM_SDMA_VALID_PRODUCER_MASK =
+    (SMEM_SHM_SDMA_AICORE_PRODUCER_MASK | SMEM_SHM_SDMA_VECTOR_PRODUCER_MASK) &
+    ~SMEM_SHM_SDMA_RESERVED_PRODUCER_MASK;
+constexpr uint32_t SMEM_SHM_SDMA_QUEUES_PER_PEER = 16; /* 每对端队列容量，block 15 保留 */
 constexpr uint32_t SMEM_SHM_SDMA_QUEUE_COUNT = 48; /* 邮箱队列总数(对端 × 槽位, hcomm 48 同规模) */
 
 /* 原到达区偏移保留用于布局兼容；通知参数使用其起始部分。 */
@@ -83,9 +95,19 @@ SMEM_SHM_SDMA_LAYOUT_FN uint32_t SmemShmSdmaPeerRankOf(uint32_t ownRank, uint32_
     return (ringIdx < ownRank) ? ringIdx : (ringIdx + 1U);
 }
 
+SMEM_SHM_SDMA_LAYOUT_FN bool SmemShmSdmaProducerMaskValid(uint32_t mask)
+{
+    return mask != 0 && (mask & ~SMEM_SHM_SDMA_VALID_PRODUCER_MASK) == 0;
+}
+
+SMEM_SHM_SDMA_LAYOUT_FN bool SmemShmSdmaProducerAllowed(uint32_t mask, uint32_t block)
+{
+    return block < SMEM_SHM_SDMA_QUEUES_PER_PEER &&
+           (mask & SMEM_SHM_SDMA_VALID_PRODUCER_MASK & (1U << block)) != 0;
+}
+
 /* (对端环下标, block 下标) → 队列下标: 对端环下标 × 每对端队列数(16) + block。
- * 16 为 2 的幂, 乘除编译为移位/与(AICore 侧无除法开销); 预留槽位(8..15)无邮件,
- * AICPU 轮询恒空扫, 无路由副作用。 */
+ * block 0..14 的提交权限由初始化掩码决定。 */
 SMEM_SHM_SDMA_LAYOUT_FN uint32_t SmemShmSdmaQueueIdx(uint32_t peerRingIdx, uint32_t blockIdx)
 {
     return peerRingIdx * SMEM_SHM_SDMA_QUEUES_PER_PEER + blockIdx;

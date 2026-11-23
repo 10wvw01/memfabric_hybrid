@@ -135,6 +135,7 @@ typedef enum aclrtMemMallocPolicy {
 } aclrtMemMallocPolicy;
 
 using aclrtSetDeviceFunc = int32_t (*)(int32_t);
+using aclrtGetDeviceInfoFunc = int32_t (*)(uint32_t, int32_t, int64_t *);
 using aclrtGetDeviceFunc = int32_t (*)(int32_t *);
 using aclrtDeviceEnablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
 using aclrtDeviceDisablePeerAccessFunc = int32_t (*)(int32_t, uint32_t);
@@ -286,6 +287,14 @@ public:
             return BM_OK;
         }
         return pAclrtSetDevice(deviceId);
+    }
+
+    static inline Result AclrtGetDeviceInfo(uint32_t deviceId, int32_t attr, int64_t *value)
+    {
+        if (pAclrtGetDeviceInfo == nullptr) {
+            return BM_DL_FUNCTION_FAILED;
+        }
+        return pAclrtGetDeviceInfo(deviceId, attr, value);
     }
 
     static inline Result AclrtGetDevice(int32_t *deviceId)
@@ -819,6 +828,7 @@ private:
     static const char *gAscendAclLibName;
 
     static aclrtSetDeviceFunc pAclrtSetDevice;
+    static aclrtGetDeviceInfoFunc pAclrtGetDeviceInfo;
     static aclrtGetDeviceFunc pAclrtGetDevice;
     static aclrtDeviceEnablePeerAccessFunc pAclrtDeviceEnablePeerAccess;
     static aclrtDeviceDisablePeerAccessFunc pAclrtDeviceDisablePeerAccess;

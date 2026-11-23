@@ -701,8 +701,37 @@ Result SdmaOrchestrator::CheckDeploymentResult(const void *bytes, size_t size, b
     return BM_OK;
 }
 
+Result SdmaOrchestrator::ValidateProducerMask(uint32_t producerMask) const
+{
+    if (!SmemShmSdmaProducerMaskValid(producerMask)) {
+        BM_LOG_ERROR("invalid SDMA producerMask: " << producerMask << " devId: " << devId_);
+        return BM_INVALID_PARAM;
+    }
+    if ((producerMask & ~SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK) == 0) {
+        return BM_OK;
+    }
+    constexpr int32_t kAiCoreCountAttr = 101; // aclrtDevAttr::ACL_DEV_ATTR_AICORE_CORE_NUM
+    constexpr int32_t kVectorCoreCountAttr = 201; // aclrtDevAttr::ACL_DEV_ATTR_VECTOR_CORE_NUM
+    int64_t aiCores = 0;
+    int64_t vectorCores = 0;
+    const auto aiRet = DlAclApi::AclrtGetDeviceInfo(devId_, kAiCoreCountAttr, &aiCores);
+    const auto vectorRet = DlAclApi::AclrtGetDeviceInfo(devId_, kVectorCoreCountAttr, &vectorCores);
+    if (aiRet != BM_OK || vectorRet != BM_OK || aiCores != 8 || vectorCores < 1 || vectorCores > 7) {
+        BM_LOG_ERROR("SDMA Vector configuration unsupported, devId: " << devId_ << " aiCores: " << aiCores
+                     << " vectorCores: " << vectorCores << " aiRet: " << aiRet << " vectorRet: " << vectorRet);
+        return BM_INVALID_PARAM;
+    }
+    const uint32_t availableMask = (1U << (8 + static_cast<uint32_t>(vectorCores))) - 1;
+    if ((producerMask & ~availableMask) != 0) {
+        BM_LOG_ERROR("SDMA producerMask exceeds available cores, mask: " << producerMask
+                     << " availableMask: " << availableMask << " devId: " << devId_);
+        return BM_INVALID_PARAM;
+    }
+    return BM_OK;
+}
+
 Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
-                                       uint64_t poolBaseGva, uint32_t rankCount)
+                                       uint64_t poolBaseGva, uint32_t rankCount, uint32_t producerMask)
 {
     std::lock_guard<std::mutex> guard(mutex_);
     if (configured_) { /* 约束: 双环一次绑定, 每进程单 SDMA 池 */
@@ -723,6 +752,11 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
                                                                << " ownSegGva: 0x" << std::hex << ownSegGva);
         return BM_INVALID_PARAM;
     }
+    producerMask = producerMask == 0 ? SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK : producerMask;
+    const auto maskRet = ValidateProducerMask(producerMask);
+    if (maskRet != BM_OK) {
+        return maskRet;
+    }
     const uint64_t resBase = ownSegGva + physSize - SMEM_SHM_SDMA_RESERVED;
     // 保留区整体清零(双环/游标/戳/停止标志从零起步)
     auto ret = DlAclApi::AclrtMemset(reinterpret_cast<void *>(resBase), SMEM_SHM_SDMA_RESERVED, 0,
@@ -730,6 +764,14 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     if (ret != BM_OK) {
         BM_LOG_ERROR("memset orch reserved failed, ret: " << ret << " resBase: 0x" << std::hex << resBase
                                                           << " size: " << SMEM_SHM_SDMA_RESERVED);
+        return ret;
+    }
+    const uint64_t deviceMask = producerMask;
+    ret = DlAclApi::AclrtMemcpy(reinterpret_cast<void *>(resBase + SMEM_SHM_SDMA_RS_PRODUCER_MASK),
+                                sizeof(deviceMask), &deviceMask, sizeof(deviceMask), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != BM_OK) {
+        BM_LOG_ERROR("write SDMA producerMask failed, ret: " << ret << " mask: " << producerMask
+                     << " devId: " << devId_);
         return ret;
     }
     epochParam_ = HybmSdmaOrchParam{};
@@ -748,6 +790,7 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     epochParam_.physSize = physSize;
     epochParam_.rank = ownRank;             /* v29: 请求环/到达环路由(本端视角) */
     epochParam_.rankCount = rankCount;
+    epochParam_.producerMask = producerMask;
     epochParam_.poolBaseGva = poolBaseGva; /* v29: dstSeg → 目的 rank 的换算原点(路由复核) */
     /* 首轮内联下发: 失败立即报错(池创建失败, 调用方可重试)——监督线程只负责后续重拉,
      * 不得吞掉首轮失败造成池看似就绪实则无消费者的静默半死 */

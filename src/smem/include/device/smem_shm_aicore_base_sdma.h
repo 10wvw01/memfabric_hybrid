@@ -34,7 +34,8 @@ struct smem_shm_sdma_ctx_t {
     uint64_t phys;       /* 段物理大小 */
     uint32_t rank;       /* 本端 rank */
     uint32_t rankSize;   /* 世界大小 */
-    uint32_t block;      /* 本 AICore block 号(GetBlockIdx, 队列下标 block 维) */
+    uint32_t block;      /* GetBlockIdx，混合kernel的逻辑block号 */
+    uint32_t producerMask = SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK;
 };
 
 #ifdef __cplusplus
@@ -108,6 +109,7 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
     c.phys = smem_shm_get_phys_size(0);
     c.res = static_cast<__gm__ uint8_t *>(gva) + c.symm * c.rank + (c.phys - SMEM_SHM_SDMA_RESERVED);
     c.block = static_cast<uint32_t>(AscendC::GetBlockIdx()); /* v31: 队列按 block 划分 */
+    c.producerMask = static_cast<uint32_t>(SdmaReadCell(c.res, SMEM_SHM_SDMA_RS_PRODUCER_MASK));
     return c;
 }
 
@@ -137,7 +139,7 @@ SMEM_SHM_INLINE_AICORE bool SdmaResolveQueue(const smem_shm_sdma_ctx_t &ctx, __g
     const int64_t segOff = static_cast<int64_t>(remoteSeg - ownSeg) / static_cast<int64_t>(ctx.symm);
     const int64_t peer = static_cast<int64_t>(ctx.rank) + segOff;
     const int64_t rankBound = ctx.rankSize < SMEM_SHM_SDMA_MAX_RANKS ? ctx.rankSize : SMEM_SHM_SDMA_MAX_RANKS;
-    if (segOff == 0 || peer < 0 || peer >= rankBound || ctx.block >= SMEM_SHM_SDMA_MAX_BLOCKS ||
+    if (segOff == 0 || peer < 0 || peer >= rankBound || !SmemShmSdmaProducerAllowed(ctx.producerMask, ctx.block) ||
         srcRemote == dstRemote || isGet != get || (isGet && op != SMEM_SHM_SDMA_OP_COPY)) {
         return false;
     }
@@ -230,6 +232,10 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_get_nbi_at(const smem_shm_sdma_ctx_t &
  * v29: 逐环判定——每环末封戳到即该环全部到(SQ FIFO 序), 全环到齐即全部到。 */
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(const smem_shm_sdma_ctx_t &ctx)
 {
+    if (!SmemShmSdmaProducerAllowed(ctx.producerMask, ctx.block) || ctx.rankSize == 0 ||
+        ctx.rankSize > SMEM_SHM_SDMA_MAX_RANKS || ctx.rank >= ctx.rankSize) {
+        return false;
+    }
     const uint32_t peerCnt = smem_shm_sdma_peer_cnt(ctx);
     for (uint32_t pr = 0; pr < peerCnt; pr++) {
         /* v31: 逐发送队列判定——队列 = (对端环下标, 本 block), 各队列末封戳到即该队列全部到 */
