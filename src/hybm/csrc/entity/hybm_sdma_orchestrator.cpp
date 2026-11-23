@@ -791,6 +791,7 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     epochParam_.rank = ownRank;             /* v29: 请求环/到达环路由(本端视角) */
     epochParam_.rankCount = rankCount;
     epochParam_.producerMask = producerMask;
+    epochParam_.flags = env::MF_SDMA_ORCH_DEBUG_MAIL == "1" ? HYBM_SDMA_ORCH_FLAG_DEBUG_MAIL : 0;
     epochParam_.poolBaseGva = poolBaseGva; /* v29: dstSeg → 目的 rank 的换算原点(路由复核) */
     /* 首轮内联下发: 失败立即报错(池创建失败, 调用方可重试)——监督线程只负责后续重拉,
      * 不得吞掉首轮失败造成池看似就绪实则无消费者的静默半死 */

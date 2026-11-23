@@ -139,3 +139,15 @@ TEST(SdmaScanTest, ReservedVectorBitRejectsConfigurationAndPreservesQueueList)
         }
     }
 }
+
+TEST(SdmaScanTest, BatchSizeValidationRejectsOverflowAndInvalidCounts)
+{
+    EXPECT_TRUE(SmemShmSdmaBatchSizeValid(4, 1));
+    EXPECT_TRUE(SmemShmSdmaBatchSizeValid(2048, 64));
+    EXPECT_FALSE(SmemShmSdmaBatchSizeValid(0, 8));
+    EXPECT_FALSE(SmemShmSdmaBatchSizeValid(3, 8));
+    EXPECT_FALSE(SmemShmSdmaBatchSizeValid(4, 0));
+    EXPECT_FALSE(SmemShmSdmaBatchSizeValid(4, 65));
+    EXPECT_FALSE(SmemShmSdmaBatchSizeValid(UINT32_MAX - 3ULL, 2));
+    EXPECT_FALSE(SmemShmSdmaBatchSizeValid(UINT64_MAX - 3ULL, 8));
+}

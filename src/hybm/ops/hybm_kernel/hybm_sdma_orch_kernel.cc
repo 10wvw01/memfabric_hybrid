@@ -208,7 +208,6 @@ int32_t reserveSqeSpace(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, uint3
         return 1363;
     }
     for (uint32_t retry = 0; retry < kSqFullRetry; ++retry) {
-        usleep(kSqFullBackoffUs);
         uint32_t liveHead = 0;
         if (cp1QueryProp(p->devId, c->sqId, DRV_SQCQ_PROP_SQ_HEAD, &liveHead, nullptr) != 0) {
             return 1363;
@@ -217,6 +216,7 @@ int32_t reserveSqeSpace(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, uint3
         if (available() >= count) {
             return 0;
         }
+        usleep(kSqFullBackoffUs);
     }
     return 1363;
 }
@@ -355,15 +355,71 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
     storeCell(ws + ock::mf::HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF, cnt + 1);
 }
 
+// 仅合并调用方显式声明为同一批次的连续请求，末尾通知和完成序号随最后一条请求保留。
+uint32_t mergeBatchRequests(const ock::mf::HybmSdmaOrchParam *p, uint32_t queue, uint64_t seq, uint64_t tail,
+                            ock::mf::HybmSdmaReqMail &mail)
+{
+    uint32_t count = 1;
+    const uint64_t boundary = SMEM_SHM_SDMA_BATCH_END_FLAG | SMEM_SHM_SDMA_SIGNAL_FLAG;
+    while ((mail.imm & SMEM_SHM_SDMA_BATCH_FLAG) && !(mail.imm & boundary) && seq + count < tail &&
+           count < SMEM_SHM_SDMA_RS_REQ_SLOTS) {
+        const uint64_t addr = p->resBase + SMEM_SHM_SDMA_RS_REQ_RING + queue * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE +
+                              ((seq + count) % SMEM_SHM_SDMA_RS_REQ_SLOTS) * sizeof(ock::mf::HybmSdmaReqMail);
+        cacheInvalidateLine(addr & ~uintptr_t(63));
+        const auto *ptr = reinterpret_cast<const volatile ock::mf::HybmSdmaReqMail *>(addr);
+        ock::mf::HybmSdmaReqMail next{ptr->src, ptr->dst, ptr->len, ptr->imm};
+        const uint64_t length = mail.len & UINT32_MAX;
+        const uint64_t nextLength = next.len & UINT32_MAX;
+        if (!(next.len & (1ULL << 63)) || (next.len & 0x7FFFFFFF00000000ULL) || nextLength == 0 ||
+            length + nextLength > UINT32_MAX || mail.src > UINT64_MAX - length || mail.dst > UINT64_MAX - length ||
+            next.src != mail.src + length || next.dst != mail.dst + length || ((mail.imm ^ next.imm) & ~boundary) ||
+            ((next.imm & SMEM_SHM_SDMA_SIGNAL_FLAG) && !(next.imm & SMEM_SHM_SDMA_BATCH_END_FLAG))) {
+            break;
+        }
+        mail.len = (length + nextLength) | (1ULL << 63);
+        mail.imm = next.imm;
+        ++count;
+    }
+    return count;
+}
+
+// 暂存槽只在需要完成戳的请求中使用，槽内序号标识上一次实际使用者。
+int32_t prepareCompletionStage(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint64_t seq, uint64_t stageSlot,
+                               uint64_t quietStamp, bool hasSignal, uint64_t signalValue)
+{
+    if (seq >= SMEM_SHM_SDMA_RS_STAGE_SLOTS) {
+        const uint64_t previousOwner = loadCell(stageSlot);
+        if (previousOwner != 0 && loadCell(quietStamp) < previousOwner) {
+            if (flushBatchDoorbell(p, ctx) != 0) {
+                return 1390;
+            }
+            uint32_t tries = 0;
+            while (loadCell(quietStamp) < previousOwner) {
+                if (++tries == 10000) {
+                    return 1366;
+                }
+                usleep(100);
+            }
+        }
+    }
+    auto *stage = reinterpret_cast<uint64_t *>(stageSlot);
+    stage[0] = seq + 1;
+    if (hasSignal) {
+        stage[1] = signalValue;
+    }
+    cacheFlushLine(stageSlot & ~uintptr_t(63));
+    return 0;
+}
+
 // 数据传输与本端完成按 SQ FIFO 顺序执行。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
                       const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t quietStampSlot,
-                      uint8_t sqeOpcode, uint64_t signalDst = 0)
+                      uint8_t sqeOpcode, uint64_t signalDst = 0, bool completion = true)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
     // 整组预留，包含尾值回绕为零时的占位描述符。
-    const uint32_t descriptors = (mail.len ? 1U : 0U) + (signalDst ? 1U : 0U) + 1U;
+    const uint32_t descriptors = (mail.len ? 1U : 0U) + (signalDst ? 1U : 0U) + (completion ? 1U : 0U);
     const uint32_t count = ((ctx->sqTail + descriptors) % ctx->sqDepth == 0) ? descriptors + 1 : descriptors;
     if (reserveSqeSpace(p, ctx, count) != 0) {
         return 1360;
@@ -394,6 +450,9 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
             return 1362;
         }
     }
+    if (!completion) {
+        return 0;
+    }
     buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + descriptors - 1), stageSlot, quietStampSlot, 8,
                       p->devId, p->overflowAddr, ssid); // ③ 完成戳(源=同一暂存槽首, FIFO 序即全部到)
     if (submitSqe(p, ctx, sqe) != 0) {
@@ -417,7 +476,7 @@ int32_t flushBatchDoorbell(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
 
 // 消费请求并推进本端游标；队列标识对端和发起 block。
 int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint32_t queueIdx,
-                       uint64_t seq)
+                       uint64_t seq, uint64_t tail = 0, uint32_t *consumed = nullptr)
 {
     using namespace ock::mf;
     const uint64_t reqSlot = p->resBase + SMEM_SHM_SDMA_RS_REQ_RING + queueIdx * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE +
@@ -427,12 +486,20 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     HybmSdmaReqMail mail = {rm->src, rm->dst, rm->len, rm->imm}; // 快照(后续槽可复用)
     if ((mail.len & (1ULL << 63)) == 0) { return 1334; }
     if ((mail.len & 0x7FFFFFFF00000000ULL) != 0) { return 1331; }
+    const uint32_t mailCount = mergeBatchRequests(p, queueIdx, seq, tail, mail);
+    seq += mailCount - 1;
     mail.len &= UINT32_MAX;
     if (((mail.src | mail.dst | mail.len) & 3) != 0) {
         return 1332;
     }
     const bool hasSignal = (mail.imm & SMEM_SHM_SDMA_SIGNAL_FLAG) != 0;
-    mail.imm &= ~SMEM_SHM_SDMA_SIGNAL_FLAG;
+    const bool batched = (mail.imm & SMEM_SHM_SDMA_BATCH_FLAG) != 0;
+    const bool batchEnd = (mail.imm & SMEM_SHM_SDMA_BATCH_END_FLAG) != 0;
+    if ((batchEnd && !batched) || (batched && hasSignal && !batchEnd)) {
+        return 1333;
+    }
+    const bool completion = !batched || batchEnd;
+    mail.imm &= ~(SMEM_SHM_SDMA_SIGNAL_FLAG | SMEM_SHM_SDMA_BATCH_FLAG | SMEM_SHM_SDMA_BATCH_END_FLAG);
     if (mail.len == 0 && !hasSignal) {
         return 1332;
     }
@@ -461,9 +528,8 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     const uint64_t usable = p->physSize - SMEM_SHM_SDMA_RESERVED;
     const uint64_t remoteOffset = remoteAddr - peerSegExpect;
     if (peerSeg != peerSegExpect || remoteOffset >= usable || mail.len > usable - remoteOffset ||
-        (isGet && (dstSeg == peerSegExpect || sqeOpcode != 0)) ||
-        (sqeOpcode != 0 && sqeOpcode != HYBM_SDMA_SQE_OP_FP32_ADD &&
-         sqeOpcode != HYBM_SDMA_SQE_OP_FP16_ADD)) {
+        (isGet && (dstSeg == peerSegExpect || sqeOpcode != 0 || batched)) ||
+        (sqeOpcode != 0 && sqeOpcode != HYBM_SDMA_SQE_OP_FP32_ADD && sqeOpcode != HYBM_SDMA_SQE_OP_FP16_ADD)) {
         return 1330;
     }
     if (hasSignal && (isGet || (signalDst & 7) || signalDst < peerSegExpect || signalDst - peerSegExpect >= usable ||
@@ -472,35 +538,29 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     }
     const uint64_t stageSlot = p->resBase + SMEM_SHM_SDMA_RS_STAGE + queueIdx * SMEM_SHM_SDMA_RS_STAGE_STRIDE +
                                 (seq % SMEM_SHM_SDMA_RS_STAGE_SLOTS) * sizeof(HybmSdmaReqMail);
-    const uint32_t descriptors = (mail.len ? 1U : 0U) + (hasSignal ? 1U : 0U) + 1U;
+    const uint32_t descriptors = (mail.len ? 1U : 0U) + (hasSignal ? 1U : 0U) + (completion ? 1U : 0U);
     const uint32_t count = (ctx->sqTail + descriptors) % ctx->sqDepth == 0 ? descriptors + 1 : descriptors;
     if (reserveSqeSpace(p, ctx, count) != 0) { return 1360; }
-    // 前次传输完成前，暂存槽仍是 DMA 源，不能覆盖。
-    if (seq >= SMEM_SHM_SDMA_RS_STAGE_SLOTS) {
-        const uint64_t previous = seq - SMEM_SHM_SDMA_RS_STAGE_SLOTS;
-        const uint64_t previousStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET +
-            queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
-            (previous % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8;
-        if (flushBatchDoorbell(p, ctx) != 0) { return 1390; }
-        uint32_t tries = 0;
-        while (loadCell(previousStamp) < previous + 1) {
-            if (++tries == 10000) { return 1366; }
-            usleep(100);
+    const uint64_t quietStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET + queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
+                                (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8;
+    if (completion) {
+        const auto stageRet = prepareCompletionStage(p, ctx, seq, stageSlot, quietStamp, hasSignal, signalValue);
+        if (stageRet != 0) {
+            return stageRet;
         }
     }
-    uint64_t *st = reinterpret_cast<uint64_t *>(stageSlot);
-    if (hasSignal) { st[1] = signalValue; }
-    st[0] = seq + 1; // 戳值(1 基; 0 保留为"空", 区分序号 0 与未写入槽位)，供完成描述符读取
-    cacheFlushLine(stageSlot & ~static_cast<uintptr_t>(63)); // 32B 对齐单行, 刷出(SQE 可读)
-    const uint64_t quietStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET + queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
-                                (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8; // 本端完成戳槽(队列内)
     const uint64_t tailBefore = ctx->sqTail;
-    auto ret =
-        issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode, signalDst);
+    auto ret = issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode,
+                             signalDst, completion);
     if (ret != 0) {
         return ret;
     }
-    dbgLogMail(p, seq, mail, tailBefore, ctx->sqTail); // v15 逐单日志(最后写, 失败路径不记)
+    if (p->flags & HYBM_SDMA_ORCH_FLAG_DEBUG_MAIL) {
+        dbgLogMail(p, seq, mail, tailBefore, ctx->sqTail);
+    }
+    if (consumed) {
+        *consumed = mailCount;
+    }
     storeCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + queueIdx * SMEM_SHM_SDMA_RS_CURSOR_STRIDE,
               seq + 1); // reqHead[q] 推进
     return 0;
@@ -530,12 +590,13 @@ int32_t consumeBatch(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16
             if (scan.heads[q] == tail) {
                 continue;
             }
-            const int32_t ret = consumeOneMail(p, ctx, ssid, q, scan.heads[q]);
+            uint32_t mailCount = 1;
+            const int32_t ret = consumeOneMail(p, ctx, ssid, q, scan.heads[q], tail, &mailCount);
             if (ret != 0) {
                 return ret;
             }
-            ++scan.heads[q];
-            ++ctx->result->consumed;
+            scan.heads[q] += mailCount;
+            ctx->result->consumed += mailCount;
             ++batch;
             backlog |= scan.heads[q] < tail;
         }

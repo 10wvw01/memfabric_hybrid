@@ -19,6 +19,7 @@
 | `MF_HYBM_RDMA_FORCE_UNREGISTERED` | 0 | 强制RDMA跳过内存注册检查路径。设为非0值时，`BatchDataCopy`直接走未注册路径发起RDMA读写。 |
 | `MF_SDMA_ORCH_DIR` | 空 | 310P SDMA 编排产物目录。递归查找同一子目录中的 `libmf_sdma_orch.so`、`libmf_sdma_orch.json`、`libmf_sdma_orch_launch.json`。缺少完整三件套、找到多套、目录无效或扫描失败时初始化失败，不回退其他路径。目录自身可为符号链接，子目录符号链接不递归跟随。须在加载库前设置。未设置时依次从库安装目录、当前目录自动发现。 |
 | `MF_SDMA_ORCH_EPOCH_BUDGET_S` | 15 | 协同搬运kernel的每轮时长上限（秒）。到点自退后由库内监督线程重新拉起（环+游标语义零丢失）。取值：1~600按秒设限；0或非法值用默认15；4294967295=永不退出诊断模式（会阻塞任何全设备同步如torch_npu分配器内部同步，仅诊断用）。为什么默认15：上限决定全设备同步的等待上界（须等到当前轮跑完），下限受换轮开销约束（间隙约100ms），15s为实测权衡值。 |
+| `MF_SDMA_ORCH_DEBUG_MAIL` | 0 | 设置为 1 时记录每次 SDMA 提交的请求、地址、长度及 SQ 游标。默认关闭逐请求记录；错误返回、退出原因和当前 epoch 消费数继续保存在工作区。 |
 | `MF_SDMA_ORCH_DISABLE` | 空（默认启用） | 310P上显式禁用设备发起SDMA协同模式（仅诊断用）。设为`1`或`on`时建池不走协同路径，`smem_shm_sdma_get_workspace`返回NULL。 |
 | `MF_LOG_LEVEL` | 无 | MemFabric日志级别，取值范围0-4（0:DEBUG, 1:INFO, 2:WARN, 3:ERROR, 4:OFF）。**仅Python接口下生效，bm/shm场景不生效。** |
 | `MF_CONFIG_STORE_URL` | 无（必填） | MemFabric Store URL，用于Transfer Engine初始化时连接配置存储。格式如`tcp://ip:port`。 |

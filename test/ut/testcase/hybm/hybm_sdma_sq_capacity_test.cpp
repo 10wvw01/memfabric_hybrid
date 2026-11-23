@@ -156,6 +156,7 @@ TEST_F(SdmaSqCapacityTest, FullQueuePublishesPendingTasksAndRefreshesHead)
     EXPECT_EQ(configCount, 1U);
     EXPECT_EQ(queryCount, 1U);
     EXPECT_EQ(context.sqHead, 2U);
+    EXPECT_EQ(sleepCount, 0U);
     EXPECT_EQ(context.sqTail, 0U);
     EXPECT_EQ(ring[0], 0xA5);
 }
@@ -396,6 +397,36 @@ protected:
                      (1ULL << 63) | 4, 0};
         }
         storeCell(param.resBase + SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, count);
+    }
+
+    void PublishBatched(uint32_t count, uint64_t start = 0, bool signal = false)
+    {
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint64_t seq = start + i;
+            auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING +
+                                                                      (seq % SMEM_SHM_SDMA_RS_REQ_SLOTS) *
+                                                                          sizeof(ock::mf::HybmSdmaReqMail));
+            const bool last = i + 1 == count;
+            const uint64_t flags = SMEM_SHM_SDMA_BATCH_FLAG | (last ? SMEM_SHM_SDMA_BATCH_END_FLAG : 0) |
+                                   (last && signal ? SMEM_SHM_SDMA_SIGNAL_FLAG : 0);
+            *mail = {param.poolBaseGva + 4096 + i * 4, param.poolBaseGva + param.symSize + 8192 + i * 4,
+                     (1ULL << 63) | 4, flags};
+        }
+        const uint64_t end = start + count - 1;
+        if (signal) {
+            const uint64_t addr = param.resBase + SMEM_SHM_SDMA_RS_SIGNAL + (end % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 16;
+            storeCell(addr, param.poolBaseGva + param.symSize + 65536);
+            storeCell(addr + 8, 42);
+        }
+        scan.heads[0] = start;
+        storeCell(param.resBase + SMEM_SHM_SDMA_RS_REQ_TAIL, start + count);
+    }
+
+    uint64_t BatchAddress(uint32_t descriptor, uint32_t offset)
+    {
+        uint64_t value = 0;
+        std::memcpy(&value, batchRing.data() + descriptor * kSqeSize + offset, sizeof(value));
+        return value;
     }
 
     int32_t Run()
@@ -740,6 +771,171 @@ TEST_F(SdmaSqCapacityTest, SignalGroupPreservesNonzeroDoorbellOnWrap)
     EXPECT_EQ(context.sqTail, 1U);
     ASSERT_EQ(flushBatchDoorbell(&param, &context), 0);
     EXPECT_EQ(publishedTail, 1U);
+}
+
+TEST_F(SdmaDirectionTest, CompletedStageReuseDoesNotPublishUnrelatedTasks)
+{
+    SetMail(false);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE, 1);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_QUIET, 1);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, SMEM_SHM_SDMA_RS_STAGE_SLOTS), 0);
+    EXPECT_EQ(configCount, 0U);
+    EXPECT_EQ(sleepCount, 0U);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE), 513U);
+}
+
+TEST_F(SdmaDirectionTest, DeferredRequestPreservesPreviousStageOwner)
+{
+    SetMail(false, SMEM_SHM_SDMA_BATCH_FLAG);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE, 99);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, SMEM_SHM_SDMA_RS_STAGE_SLOTS), 0);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE), 99U);
+    EXPECT_EQ(context.sqTail, 1U);
+    EXPECT_EQ(configCount, 0U);
+}
+
+TEST_F(SdmaDirectionTest, BatchEndCanReusePreviouslyUnusedStageSlot)
+{
+    SetMail(false, SMEM_SHM_SDMA_BATCH_FLAG | SMEM_SHM_SDMA_BATCH_END_FLAG);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, SMEM_SHM_SDMA_RS_STAGE_SLOTS), 0);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(sleepCount, 0U);
+}
+
+TEST_F(SdmaDirectionTest, RejectsBatchEndWithoutBatchAndBatchedGet)
+{
+    SetMail(false, SMEM_SHM_SDMA_BATCH_END_FLAG);
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1333);
+    SetMail(true, SMEM_SHM_SDMA_BATCH_FLAG | SMEM_SHM_SDMA_BATCH_END_FLAG);
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+    EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaDirectionTest, MailTraceIsOptional)
+{
+    SetMail(false);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    const uint64_t countAddr = param.resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_DBG_RING_CNT_OFF;
+    EXPECT_EQ(loadCell(countAddr), 0U);
+    param.flags = ock::mf::HYBM_SDMA_ORCH_FLAG_DEBUG_MAIL;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(loadCell(countAddr), 1U);
+}
+
+TEST_F(SdmaBatchTest, ContinuousBatchUsesOnePayloadAndOneFinalCompletion)
+{
+    PublishBatched(8);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(context.result->consumed, 8U);
+    EXPECT_EQ(scan.heads[0], 8U);
+    EXPECT_EQ(context.sqTail, 2U);
+    uint32_t length = 0;
+    std::memcpy(&length, batchRing.data() + 28, sizeof(length));
+    EXPECT_EQ(length, 32U);
+    EXPECT_EQ(BatchAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET + 7 * 8);
+}
+
+TEST_F(SdmaBatchTest, FinalSignalUsesLastRequestParameters)
+{
+    PublishBatched(8, 0, true);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(context.sqTail, 3U);
+    EXPECT_EQ(BatchAddress(1, 40), param.poolBaseGva + param.symSize + 65536);
+    EXPECT_EQ(BatchAddress(2, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET + 7 * 8);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE + 7 * 32 + 8), 42U);
+}
+
+TEST_F(SdmaBatchTest, SeparateBatchesKeepSeparateCompletionBoundaries)
+{
+    PublishBatched(4);
+    auto *mails = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mails[1].imm |= SMEM_SHM_SDMA_BATCH_END_FLAG;
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 2U);
+    EXPECT_EQ(context.result->consumed, 4U);
+    EXPECT_EQ(context.sqTail, 4U);
+    EXPECT_EQ(BatchAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET + 8);
+    EXPECT_EQ(BatchAddress(3, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET + 24);
+}
+
+TEST_F(SdmaBatchTest, DestinationGapStopsCoalescingAndPreservesFinalCompletion)
+{
+    PublishBatched(3);
+    auto *mails = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mails[2].dst += 4;
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 2U);
+    EXPECT_EQ(context.sqTail, 3U);
+    EXPECT_EQ(BatchAddress(2, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET + 16);
+}
+
+TEST_F(SdmaBatchTest, PartialPublicationCompletesWhenEndArrives)
+{
+    PublishBatched(2);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_REQ_TAIL, 1);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(context.sqTail, 1U);
+    EXPECT_EQ(scan.heads[0], 1U);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_REQ_TAIL, 2);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(context.sqTail, 3U);
+    EXPECT_EQ(context.result->consumed, 2U);
+    EXPECT_EQ(BatchAddress(2, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET + 8);
+}
+
+TEST_F(SdmaBatchTest, BatchCanCrossSoftwareRingWrap)
+{
+    PublishBatched(4, 62);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(scan.heads[0], 66U);
+    EXPECT_EQ(context.result->consumed, 4U);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(BatchAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET + 8);
+}
+
+TEST_F(SdmaBatchTest, InvalidLengthInLaterRequestIsNotHiddenByCoalescing)
+{
+    PublishBatched(2);
+    auto *mails = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mails[1].len |= 1ULL << 40;
+    EXPECT_EQ(Run(), 1331);
+    EXPECT_EQ(context.result->consumed, 1U);
+    EXPECT_EQ(scan.heads[0], 1U);
+}
+
+TEST_F(SdmaDirectionTest, StageReuseWaitsForItsActualPreviousOwner)
+{
+    SetMail(false, SMEM_SHM_SDMA_BATCH_FLAG | SMEM_SHM_SDMA_BATCH_END_FLAG);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE, 1);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_QUIET, 1);
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 2 * SMEM_SHM_SDMA_RS_STAGE_SLOTS), 0);
+    EXPECT_EQ(sleepCount, 0U);
+    EXPECT_EQ(configCount, 0U);
+    EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_STAGE), 1025U);
+}
+
+TEST_F(SdmaBatchTest, OperationChangeStopsCoalescing)
+{
+    PublishBatched(2);
+    auto *mails = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mails[1].imm |= (0x5244ULL << 48) | (0x02ULL << 40);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 2U);
+    EXPECT_EQ(context.sqTail, 3U);
+    EXPECT_EQ(batchRing[16], 0U);
+    EXPECT_EQ(batchRing[kSqeSize + 16], 2U);
+}
+
+TEST_F(SdmaBatchTest, OrdinaryContinuousRequestsKeepPerRequestCompletion)
+{
+    Publish(0, 2);
+    auto *mails = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase + SMEM_SHM_SDMA_RS_REQ_RING);
+    mails[1].dst += 4;
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 2U);
+    EXPECT_EQ(context.sqTail, 4U);
+    EXPECT_EQ(context.result->consumed, 2U);
 }
 
 #else

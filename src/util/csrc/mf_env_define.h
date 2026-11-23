@@ -70,6 +70,8 @@ inline const std::string MF_CONFIG_STORE_PORT_END =
 inline const std::string MF_SDMA_ORCH_DISABLE = GetEnvStr("MF_SDMA_ORCH_DISABLE"); // SdmaOrchestrator::Disabled 读取
 // 编排产物目录；递归查找同目录中的 SO、迁移 JSON 和 launch JSON。
 inline const std::string MF_SDMA_ORCH_DIR = GetEnvStr("MF_SDMA_ORCH_DIR");
+// 设置为 1 时记录每次 SDMA 提交，默认关闭。
+inline const std::string MF_SDMA_ORCH_DEBUG_MAIL = GetEnvStr("MF_SDMA_ORCH_DEBUG_MAIL");
 // 搬运 kernel 每轮时长秒数(缺省 15): 到点自退后由监督线程重新拉起(环+游标零丢失)。
 // 4294967295=永不退出(诊断用; 会阻塞任何全设备同步, 见平台事实 2026-10-12 定案条目)
 inline const std::string MF_SDMA_ORCH_EPOCH_BUDGET_S = GetEnvStr("MF_SDMA_ORCH_EPOCH_BUDGET_S"); // ConfigureOrch 读取

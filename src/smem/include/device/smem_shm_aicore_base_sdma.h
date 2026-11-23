@@ -171,7 +171,7 @@ SMEM_SHM_INLINE_AICORE bool SdmaReserveRequest(const smem_shm_sdma_ctx_t &ctx, u
 
 SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, uint32_t queue, uint64_t tail,
                                                __gm__ void *src, __gm__ void *dst, uint64_t len, smem_shm_sdma_op_t op,
-                                               __gm__ uint64_t *signal, uint64_t value)
+                                               __gm__ uint64_t *signal, uint64_t value, uint64_t flags = 0)
 {
     __gm__ uint8_t *slot = ctx.res + SMEM_SHM_SDMA_RS_REQ_RING + queue * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE +
                            (tail % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 32;
@@ -188,7 +188,7 @@ SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, u
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 8) = reinterpret_cast<uint64_t>(dst);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 16) = len | (1ULL << 63);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 24) =
-        (opcode ? SdmaEncodeOp(opcode) : 0) | (signal ? SMEM_SHM_SDMA_SIGNAL_FLAG : 0);
+        (opcode ? SdmaEncodeOp(opcode) : 0) | (signal ? SMEM_SHM_SDMA_SIGNAL_FLAG : 0) | flags;
     AscendC::GlobalTensor<int32_t> gm;
     gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(gm);
@@ -207,6 +207,59 @@ SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ 
         return false;
     SdmaPublishRequest(ctx, queue, tail, src, dst, len, op, signal, value);
     return true;
+}
+
+// 预留整个批次，保证参数或队列空间检查失败时尚未发布任何请求。
+SMEM_SHM_INLINE_AICORE bool SdmaReserveBatch(const smem_shm_sdma_ctx_t &ctx, uint32_t queue, uint32_t count,
+                                             uint64_t &tail)
+{
+    tail = SdmaReadCell(ctx.res, SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
+    const uint64_t headOff = SMEM_SHM_SDMA_RS_REQ_HEAD + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
+    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
+    for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; ++i) {
+        if (tail - SdmaReadCell(ctx.res, headOff) <= SMEM_SHM_SDMA_RS_REQ_SLOTS - count)
+            return true;
+        SdmaPollBackoff(i, delay);
+    }
+    return false;
+}
+
+SMEM_SHM_INLINE_AICORE bool SdmaSubmitBatchAt(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
+                                              uint64_t bytes, uint32_t count, smem_shm_sdma_op_t op,
+                                              __gm__ uint64_t *signal = nullptr, uint64_t value = 0)
+{
+    if (!SmemShmSdmaBatchSizeValid(bytes, count))
+        return false;
+    uint32_t queue = 0;
+    uint64_t tail = 0;
+    if (!SdmaResolveQueue(ctx, src, dst, bytes * count, op, false, signal, queue) ||
+        !SdmaReserveBatch(ctx, queue, count, tail))
+        return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        const bool last = i + 1 == count;
+        const uint64_t flags = SMEM_SHM_SDMA_BATCH_FLAG | (last ? SMEM_SHM_SDMA_BATCH_END_FLAG : 0);
+        SdmaPublishRequest(ctx, queue, tail + i, static_cast<__gm__ uint8_t *>(src) + i * bytes,
+                           static_cast<__gm__ uint8_t *>(dst) + i * bytes, bytes, op, last ? signal : nullptr, value,
+                           flags);
+    }
+    return true;
+}
+
+// 连续等长分块作为一个批次提交，quiet 确认整个批次完成；通知在最后一块数据完成后发布。
+// count 为 1～64；bytes 按 4 字节对齐，批次总长度不超过 UINT32_MAX。
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_batch_nbi_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src,
+                                                           __gm__ void *dst, uint64_t bytes, uint32_t count,
+                                                           smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+{
+    return SdmaSubmitBatchAt(ctx, src, dst, bytes, count, op);
+}
+
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal_batch_nbi_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src,
+                                                                  __gm__ void *dst, uint64_t bytes, uint32_t count,
+                                                                  __gm__ uint64_t *signal, uint64_t value,
+                                                                  smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+{
+    return signal && SdmaSubmitBatchAt(ctx, src, dst, bytes, count, op, signal, value);
 }
 
 /* put/get 的零长度请求直接成功，不修改队列。

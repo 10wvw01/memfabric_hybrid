@@ -32,7 +32,8 @@ struct HybmSdmaReqMail {  /* 传输请求(AICore→AICPU) */
 };
 
 /* 操作编码：COPY 为零；ADD 的 [63:48] 为协议标识，[47:40] 为硬件操作码。
- * bit39表示携带SET通知；消费端去掉通知标记后校验数据操作编码。
+ * bit39表示携带SET通知，bit38/37标识显式批次及批次末尾。
+ * 消费端合并批次内连续同类请求，并在批次末尾发布 quiet 完成戳。
  */
 constexpr uint64_t HYBM_SDMA_IMM_MAGIC = 0x5244ULL; /* 'RD' */
 constexpr uint8_t HYBM_SDMA_SQE_OP_FP32_ADD = 0x02; /* FP32 累加: dst += src */
@@ -59,8 +60,9 @@ struct HybmSdmaOrchParam {
     uint32_t rankCount;   /* 世界大小，决定有效对端队列范围 */
     uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
     uint32_t producerMask; /* 允许提交的逻辑block，与设备元数据一致 */
-    uint32_t reserved;
+    uint32_t flags;        /* 可选提交组诊断，见 HYBM_SDMA_ORCH_FLAG_DEBUG_MAIL */
 };
+constexpr uint32_t HYBM_SDMA_ORCH_FLAG_DEBUG_MAIL = 1U;
 static_assert(sizeof(HybmSdmaOrchParam) == 88, "Param 尺寸漂移");
 
 // 部署与清理确认使用独立参数，结果必须携带本次nonce。
@@ -82,7 +84,7 @@ struct HybmSdmaDeployResult {
 struct HybmSdmaOrchResult {
     uint32_t magic;       /* 存活魔数(kernel 执行过) */
     uint32_t mainRet;     /* 主返回码(0=成功/1=失败) */
-    uint32_t consumed;    /* 本 epoch 消费邮件数(低 16 位有效) */
+    uint32_t consumed;    /* 本 epoch 消费的软件请求数 */
     uint32_t exitReason;  /* 退出原因(0=时限/1=停止/2=错误) */
     uint64_t headAfter;   /* 逐单日志: 退出时 SQ head 采样 */
 };
@@ -114,8 +116,8 @@ constexpr uint64_t HYBM_SDMA_ORCH_WS_DBG_RING_OFF = 184;     /* 60 × 64B 环形
 constexpr uint32_t HYBM_SDMA_ORCH_DBG_RING_SLOTS = 60;       /* (4096-184-32)/64 */
 constexpr uint64_t HYBM_SDMA_ORCH_WS_PAD_SCRATCH_OFF = 4088; /* 8B: 尾值防 0 占位 SQE 的暂存地址 */
 struct HybmSdmaOrchDbgMail {                                  /* 单条逐单日志(64B, 单缓存行) */
-    uint64_t seq;         /* 消费的请求序号 */
-    uint64_t reqF0;       /* 请求槽读回 4 字(原文; 全 0=读到空请求, 写到错误地址特征) */
+    uint64_t seq;                                             /* 本次提交组末条软件请求的序号 */
+    uint64_t reqF0; /* 实际下发组的源、目标、长度和操作；合并后记录连续区间 */
     uint64_t reqF1;
     uint64_t reqF2;
     uint64_t reqF3;

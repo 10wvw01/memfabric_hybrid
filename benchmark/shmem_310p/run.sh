@@ -16,7 +16,7 @@ backends="${BACKEND:-both}"
 if [[ "$backends" == both ]]; then
  backends="mf-signal hccl"
 elif [[ "$backends" == all ]]; then
- backends="mf-sync mf-nbi mf-signal mf-signal-nbi hccl"
+ backends="mf-sync mf-nbi mf-signal mf-signal-nbi mf-batch-nbi mf-batch-signal-nbi hccl"
 fi
 for backend in $backends; do
  mkdir -p "$LOG_DIR/$backend"
