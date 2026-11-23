@@ -71,6 +71,110 @@ AICore 通过请求队列提交操作，AICPU 扫描队列并组织 SDMA 执行�
 [AICPU kernel](../../src/hybm/ops/hybm_kernel/hybm_sdma_orch_kernel.cc) 与
 [就绪通知封装](../../examples/memory_pool/01_basic/sdma_ready.h)。
 
+### 矩阵大小、chunk 大小与请求字节数的计算
+
+这里的 **chunk 是一次数据 API 调用搬运的连续片段**。
+CHUNKS 表示每个 block 在每个阶段提交多少个这样的片段；每个片段的大小由矩阵形状、
+数据类型、BLOCKS 和 CHUNKS 共同决定。四种 MF 模式采用同样的数据划分，
+差别在于提交后的等待方式及通知组织。
+
+**第一步：将矩阵形状换算为每个 rank 的输入字节数。**
+
+设方阵边长为 D，元素个数为 D×D。每个 FP32 元素占 4 字节，因此完整矩阵大小为：
+
+```text
+元素个数 = D × D
+N = D × D × sizeof(float) = D × D × 4 字节
+1 KiB = 1,024 字节
+1 MiB = 1,048,576 字节
+```
+
+两个 rank 各自持有一个完整输入矩阵，原地 AllReduce 结束后各自得到同样大小的结果矩阵。
+
+| 矩阵形状 | 每个 rank 的 FP32 元素数 | 每个 rank 的完整矩阵 N（字节） | N（MiB） | 每个 rank 每阶段发送 N/2（字节） |
+|---|---:|---:|---:|---:|
+| 256×256 | 65,536 | 262,144 | 0.25 | 131,072 |
+| 512×512 | 262,144 | 1,048,576 | 1 | 524,288 |
+| 1024×1024 | 1,048,576 | 4,194,304 | 4 | 2,097,152 |
+| 2048×2048 | 4,194,304 | 16,777,216 | 16 | 8,388,608 |
+| 4096×4096 | 16,777,216 | 67,108,864 | 64 | 33,554,432 |
+
+**第二步：按双 rank 的半区分工除以 2。**
+
+本基准固定 TP=2，将连续矩阵缓冲区分为前、后两半，每半占 N/2 字节。
+设 rank 0 的输入为 [A0, A1]，rank 1 的输入为 [B0, B1]，下标 0、1 表示前、后半区：
+
+| 阶段 | rank 0 发送的内容 | rank 1 发送的内容 | 每个 rank 本阶段发送的数据量 |
+|---|---|---|---|
+| ReduceScatter | 将 A1 发送到 rank 1，在 B1 上执行 ADD_FP32 | 将 B0 发送到 rank 0，在 A0 上执行 ADD_FP32 | N/2 字节 |
+| AllGather | 将本端已求和的 A0+B0 复制到 rank 1 | 将本端已求和的 A1+B1 复制到 rank 0 | N/2 字节 |
+
+分母中的 2 来自这两个 rank 对前、后半区的分工：每个 rank 在每个阶段发送一半矩阵。
+ReduceScatter 结束后，rank 0 负责前半区的求和结果，rank 1 负责后半区的求和结果；
+AllGather 再交换这两份结果，使双方都得到完整矩阵。
+所以每阶段的数据量为 N/2，每个 rank 一轮的累计发送量为 N/2+N/2=N 字节。
+
+**第三步：分给 BLOCKS 个 AICore block，再拆成 CHUNKS 条请求。**
+
+每个阶段的 N/2 字节先均分给 BLOCKS 个 block，各 block 处理独立片段；
+每个 block 再将自己的片段均分为 CHUNKS 个 chunk，每个 chunk 提交一条数据请求。
+计算顺序与 [main.asc](main.asc) 的 `runSize`、`submit` 和 `reducePhase` 对应：
+
+```text
+matrixBytes   = D × D × 4                         # runSize 中的 bytes，即 N
+half          = matrixBytes / 2                  # submit 传给 kernel 的 half
+bytesPerBlock = half / BLOCKS                    # 一个 block 在一个阶段负责的数据量
+chunkBytes    = bytesPerBlock / CHUNKS            # reducePhase 每次传给数据 API 的 bytes
+              = N / (2 × BLOCKS × CHUNKS)
+```
+
+设 block 编号为 blockId，分块编号为 chunkId；own 和 peer 分别为本端、对端共享段的起始地址。
+每个分块在两端使用相同的字节偏移：
+
+```text
+if phase == ReduceScatter:
+    halfIndex = 1 - rank   # 发送对端负责的半区
+else:                     # AllGather
+    halfIndex = rank       # 发送本端负责的求和结果半区
+offset = halfIndex × half + blockId × bytesPerBlock + chunkId × chunkBytes
+src = own + offset
+dst = peer + offset
+bytes = chunkBytes
+```
+
+其中 blockId 取 0～BLOCKS−1，chunkId 取 0～CHUNKS−1。
+ReduceScatter 将这些字节按 FP32 做 ADD，AllGather 按同样大小做 COPY。
+四种 MF 模式的数据 API 都传入上述 chunkBytes；携带通知的最后一条请求采用相同的数据字节数。
+
+**以 4096×4096、BLOCKS=8、CHUNKS=8 为例：**
+
+```text
+完整矩阵：4096 × 4096 × 4 = 67,108,864 字节 = 64 MiB
+每个 rank 每阶段：67,108,864 / 2 = 33,554,432 字节 = 32 MiB
+每个 block 每阶段：33,554,432 / 8 = 4,194,304 字节 = 4 MiB
+每条数据请求：4,194,304 / 8 = 524,288 字节 = 512 KiB
+
+每个 rank 每阶段：8 × 8 = 64 条数据请求
+每个 rank 两个阶段：2 × 64 = 128 条数据请求
+累计发送矩阵数据：128 × 524,288 = 67,108,864 字节 = 64 MiB
+```
+
+本次四组配置下，每条数据请求的矩阵数据字节数如下，括号中给出 KiB 换算值：
+
+| 矩阵形状 | BLOCKS/CHUNKS=1/1 | BLOCKS/CHUNKS=1/8 | BLOCKS/CHUNKS=8/1 | BLOCKS/CHUNKS=8/8 |
+|---|---:|---:|---:|---:|
+| 256×256 | 131,072（128 KiB） | 16,384（16 KiB） | 16,384（16 KiB） | 2,048（2 KiB） |
+| 512×512 | 524,288（512 KiB） | 65,536（64 KiB） | 65,536（64 KiB） | 8,192（8 KiB） |
+| 1024×1024 | 2,097,152（2,048 KiB） | 262,144（256 KiB） | 262,144（256 KiB） | 32,768（32 KiB） |
+| 2048×2048 | 8,388,608（8,192 KiB） | 1,048,576（1,024 KiB） | 1,048,576（1,024 KiB） | 131,072（128 KiB） |
+| 4096×4096 | 33,554,432（32,768 KiB） | 4,194,304（4,096 KiB） | 4,194,304（4,096 KiB） | 524,288（512 KiB） |
+
+1/8 和 8/1 的 chunk 字节数相同：前者由一个 block 提交 8 条数据请求，
+后者由 8 个 block 各提交一条，使用的队列和提交组织不同。
+这些矩阵及分块配置均能整除，且每条数据请求的长度均满足 4 字节对齐。
+上述字节数统计矩阵数据；独立 SET 通知写入 8 字节通知值，
+put_signal 的数据参数仍为 chunkBytes，通知值随同该数据请求组织。
+
 下面每个 MF 时序图展示一个 rank、一个 block 的执行；对端同时执行相同流程。
 数据由 Host DMA 恢复，AllReduce kernel 通过 SDMA 操作这些数据。
 
