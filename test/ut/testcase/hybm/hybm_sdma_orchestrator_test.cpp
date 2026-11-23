@@ -597,7 +597,8 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 {
     /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部使用 rank/rankCount/poolBaseGva), 80B */
-    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 80U);
+    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 88U);
+    EXPECT_EQ(offsetof(HybmSdmaOrchParam, producerMask), 80U);
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U); // 第 4 个 u32 槽位
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);       // 保留区基址(定位原点)
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, rank), 64U);          // v29 追加: 本端 rank
@@ -640,6 +641,7 @@ TEST(SdmaScanConfigTest, PassesActualWorldAndRankToEpochParameters)
         for (uint32_t rank = 0; rank < world; ++rank) {
             SdmaOrchestrator prep;
             MOCKER(DlAclApi::AclrtMemset).expects(once()).will(returnValue(BM_OK));
+            MOCKER(DlAclApi::AclrtMemcpy).expects(once()).will(returnValue(BM_OK));
             MOCKER(DlAclApi::AclrtCreateStream).expects(once()).will(returnValue(BM_ERROR));
             EXPECT_EQ(prep.ConfigureOrch(base + rank * segment, segment, segment, rank, base, world), BM_ERROR);
             EXPECT_EQ(prep.epochParam_.rankCount, world);
@@ -649,6 +651,67 @@ TEST(SdmaScanConfigTest, PassesActualWorldAndRankToEpochParameters)
             GlobalMockObject::verify();
         }
     }
+}
+
+TEST(SdmaProducerConfigTest, DefaultAvoidsOptionalDeviceQuery)
+{
+    SdmaOrchestrator prep;
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).expects(never());
+    EXPECT_EQ(prep.ValidateProducerMask(0xFF), BM_OK);
+    EXPECT_EQ(prep.ValidateProducerMask(1), BM_OK);
+    EXPECT_EQ(prep.ValidateProducerMask(0), BM_INVALID_PARAM);
+    EXPECT_EQ(prep.ValidateProducerMask(0x8000), BM_INVALID_PARAM);
+    EXPECT_EQ(prep.ValidateProducerMask(0xFF00), BM_INVALID_PARAM);
+    EXPECT_EQ(prep.ValidateProducerMask(0xFFFF), BM_INVALID_PARAM);
+    GlobalMockObject::verify();
+}
+
+TEST(SdmaProducerConfigTest, ChecksVectorCapabilityAndRequestedBits)
+{
+    SdmaOrchestrator prep;
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).stubs().with(any(), eq(101), any())
+        .will(invoke(+[](uint32_t, int32_t, int64_t *v) { *v = 8; return 0; }));
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).stubs().with(any(), eq(201), any())
+        .will(invoke(+[](uint32_t, int32_t, int64_t *v) { *v = 7; return 0; }));
+    EXPECT_EQ(prep.ValidateProducerMask(0x7F00), BM_OK);
+    EXPECT_EQ(prep.ValidateProducerMask(0x7FFF), BM_OK);
+    GlobalMockObject::verify();
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).stubs().with(any(), eq(101), any())
+        .will(invoke(+[](uint32_t, int32_t, int64_t *v) { *v = 8; return 0; }));
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).stubs().with(any(), eq(201), any())
+        .will(invoke(+[](uint32_t, int32_t, int64_t *v) { *v = 1; return 0; }));
+    EXPECT_EQ(prep.ValidateProducerMask(0x100), BM_OK);
+    EXPECT_EQ(prep.ValidateProducerMask(0x4000), BM_INVALID_PARAM);
+    GlobalMockObject::verify();
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).stubs().will(returnValue(BM_ERROR));
+    EXPECT_EQ(prep.ValidateProducerMask(0x7FFF), BM_INVALID_PARAM);
+    GlobalMockObject::verify();
+}
+
+TEST(SdmaProducerConfigTest, PropagatesConfiguredMaskToEpoch)
+{
+    SdmaOrchestrator prep;
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).stubs().with(any(), eq(101), any())
+        .will(invoke(+[](uint32_t, int32_t, int64_t *v) { *v = 8; return 0; }));
+    MOCKER(DlAclApi::AclrtGetDeviceInfo).stubs().with(any(), eq(201), any())
+        .will(invoke(+[](uint32_t, int32_t, int64_t *v) { *v = 7; return 0; }));
+    MOCKER(DlAclApi::AclrtMemset).expects(once()).will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtMemcpy).expects(once()).will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).expects(once()).will(returnValue(BM_ERROR));
+    EXPECT_EQ(prep.ConfigureOrch(1ULL << 30, 1ULL << 30, 1ULL << 30, 0, 1ULL << 30, 2, 0x7FFF), BM_ERROR);
+    EXPECT_EQ(prep.epochParam_.producerMask, 0x7FFFU);
+    GlobalMockObject::verify();
+}
+
+TEST(SdmaProducerConfigTest, FailedDeviceMaskWritePreventsEpochLaunch)
+{
+    SdmaOrchestrator prep;
+    MOCKER(DlAclApi::AclrtMemset).expects(once()).will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtMemcpy).expects(once()).will(returnValue(BM_ERROR));
+    MOCKER(DlAclApi::AclrtCreateStream).expects(never());
+    EXPECT_EQ(prep.ConfigureOrch(1ULL << 30, 1ULL << 30, 1ULL << 30, 0, 1ULL << 30, 2), BM_ERROR);
+    EXPECT_FALSE(prep.configured_);
+    GlobalMockObject::verify();
 }
 
 } // namespace mf

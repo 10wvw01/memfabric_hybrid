@@ -509,6 +509,7 @@ struct ScanContext {
     uint32_t count;
     uint32_t next;
     uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT];
+    uint32_t queues[SMEM_SHM_SDMA_QUEUE_COUNT];
 };
 
 // 只用本遍已读取的tail判断积压，已观察到的请求处理完后提交当前批次。
@@ -523,7 +524,7 @@ int32_t consumeBatch(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16
     while (backlog && batch < kDoorbellBatch) {
         backlog = false;
         for (uint32_t visited = 0; visited < scan.count && batch < kDoorbellBatch; ++visited) {
-            const uint32_t q = HybmSdmaScanQueue(scan.next);
+            const uint32_t q = scan.queues[scan.next];
             scan.next = HybmSdmaNextScan(scan.next, scan.count);
             const uint64_t tail = readTail(q);
             if (scan.heads[q] == tail) {
@@ -671,18 +672,19 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         finishResult(result);
         return 1;
     }
-    if (p->rankCount == 0 || p->rankCount > SMEM_SHM_SDMA_MAX_RANKS || p->rank >= p->rankCount) {
+    if (p->rankCount == 0 || p->rankCount > SMEM_SHM_SDMA_MAX_RANKS || p->rank >= p->rankCount ||
+        !SmemShmSdmaProducerMaskValid(p->producerMask)) {
         result->mainRet = 1330;
         result->exitReason = HYBM_SDMA_ORCH_EXIT_ERROR;
         finishResult(result);
         return 1;
     }
     ScanContext scan{};
-    scan.count = (p->rankCount - 1) * SMEM_SHM_SDMA_MAX_BLOCKS;
+    scan.count = HybmSdmaBuildScanQueues(p->rankCount, p->producerMask, scan.queues);
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
     /* 每队列消费起点(v31: 队列按对端×block 划分, 各队列独立游标持久于保留区, 换轮零丢失) */
     for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
-        const uint32_t q = HybmSdmaScanQueue(ordinal);
+        const uint32_t q = scan.queues[ordinal];
         scan.heads[q] = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
     }
     EpochBudget budget{};

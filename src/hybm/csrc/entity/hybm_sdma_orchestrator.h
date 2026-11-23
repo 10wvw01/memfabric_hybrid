@@ -74,7 +74,8 @@ public:
      * v29 4-rank 化: ownRank/poolBaseGva 供 epoch kernel 做对端到达环路由
      * (peerRank = (dstSeg - poolBaseGva)/symSize, 环下标按收发双方 rank 压缩) */
     Result ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, uint64_t symSize, uint32_t ownRank,
-                         uint64_t poolBaseGva, uint32_t rankCount);
+                         uint64_t poolBaseGva, uint32_t rankCount,
+                         uint32_t producerMask = SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK);
 
     /* 引用计数 -1; 归零停止监督线程并逆序清理 */
     void Release();
@@ -118,6 +119,7 @@ private:
     Result VerifyDeployment(const std::string &hostSo);
     Result CheckDeploymentResult(const void *bytes, size_t size, bool allowPresent = false);
     Result CopyToSearchPath(const std::string &deviceSoName, uint64_t soSize); /* 提交设备内复制 */
+    Result ValidateProducerMask(uint32_t producerMask) const;
     Result LaunchEpoch(void *stream);     /* 单轮下发到指定流(首轮 ConfigureOrch 内联, 后续由监督线程) */
     void SupervisorLoop();                 /* 监督线程: 每 100ms 写报时计数+读结果区, 发现当前轮退出即重新拉起 */
     void DestroyEpochResources();          /* epoch 流 teardown(先同步确认退出再销毁; 幂等) */
