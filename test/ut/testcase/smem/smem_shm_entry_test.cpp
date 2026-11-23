@@ -76,3 +76,13 @@ TEST_F(SmemShmEntryTest, GetReachInfo_NullEntity_ReturnsNotStarted)
     auto ret = entry_->GetReachInfo(0, reachInfo); // 0
     EXPECT_EQ(ret, SM_NOT_STARTED);
 }
+
+TEST_F(SmemShmEntryTest, ProducerMaskDefaultsAndConfigAreRetained)
+{
+    EXPECT_EQ(entry_->extraConfig_.sdmaProducerMask, 0xFFU);
+    smem_shm_config_t config{};
+    ASSERT_EQ(smem_shm_config_init(&config), 0);
+    config.sdmaProducerMask = 0x7FFF;
+    entry_->SetConfig(config);
+    EXPECT_EQ(entry_->extraConfig_.sdmaProducerMask, 0x7FFFU);
+}

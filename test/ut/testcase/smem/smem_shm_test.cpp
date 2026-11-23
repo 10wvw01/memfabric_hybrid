@@ -891,3 +891,17 @@ TEST_F(SmemShmTest, smem_shm_global_exit_invalid_handle)
 
     smem_shm_uninit(0);
 }
+
+TEST(SmemShmProducerMaskTest, InitializationRejectsInvalidMasksBeforeConnecting)
+{
+    smem_shm_config_t config{};
+    ASSERT_EQ(smem_shm_config_init(&config), 0);
+    EXPECT_EQ(config.sdmaProducerMask, 0xFFU);
+    EXPECT_EQ(sizeof(smem_shm_config_t), 20U);
+    EXPECT_EQ(offsetof(smem_shm_config_t, sdmaProducerMask), 14U);
+    EXPECT_EQ(offsetof(smem_shm_config_t, flags), 16U);
+    for (uint32_t mask : {0U, 0x8000U, 0xFF00U, 0xFFFFU, 0x10000U, UINT32_MAX}) {
+        config.sdmaProducerMask = mask;
+        EXPECT_EQ(smem_shm_init("tcp://127.0.0.1:1", 2, 0, 0, &config), SM_INVALID_PARAM);
+    }
+}
