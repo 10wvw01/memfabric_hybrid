@@ -107,3 +107,35 @@ TEST(SdmaScanTest, InvalidMaskAndWorldDoNotWriteScanList)
     EXPECT_FALSE(SmemShmSdmaProducerAllowed(0x7FFF, 16));
     EXPECT_FALSE(SmemShmSdmaProducerAllowed(0x7FFF, UINT32_MAX));
 }
+
+TEST(SdmaScanTest, ProducerFieldsCoverTwoBytesWithLastVectorBitReserved)
+{
+    EXPECT_EQ(SMEM_SHM_SDMA_AICORE_PRODUCER_MASK, 0x00FFU);
+    EXPECT_EQ(SMEM_SHM_SDMA_VECTOR_PRODUCER_MASK, 0xFF00U);
+    EXPECT_EQ(SMEM_SHM_SDMA_RESERVED_PRODUCER_MASK, 0x8000U);
+    EXPECT_EQ(SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK, 0x00FFU);
+    EXPECT_EQ(SMEM_SHM_SDMA_VALID_PRODUCER_MASK, 0x7FFFU);
+    for (uint32_t block = 0; block < 16; ++block) {
+        EXPECT_EQ(SmemShmSdmaProducerAllowed(SMEM_SHM_SDMA_AICORE_PRODUCER_MASK, block), block < 8);
+        EXPECT_EQ(SmemShmSdmaProducerAllowed(SMEM_SHM_SDMA_VECTOR_PRODUCER_MASK, block), block >= 8 && block < 15);
+        EXPECT_EQ(SmemShmSdmaProducerAllowed(0xFFFF, block), block < 15);
+    }
+    EXPECT_FALSE(SmemShmSdmaProducerAllowed(0xFFFF, 16));
+    EXPECT_FALSE(SmemShmSdmaProducerAllowed(0xFFFF, UINT32_MAX));
+}
+
+TEST(SdmaScanTest, ReservedVectorBitRejectsConfigurationAndPreservesQueueList)
+{
+    for (const uint32_t mask : {0x8000U, 0xFF00U, 0xFFFFU}) {
+        EXPECT_FALSE(SmemShmSdmaProducerMaskValid(mask));
+        EXPECT_FALSE(SmemShmSdmaProducerAllowed(mask, 15));
+        std::array<uint32_t, SMEM_SHM_SDMA_QUEUE_COUNT> queues;
+        queues.fill(UINT32_MAX);
+        for (uint32_t ranks = 1; ranks <= 4; ++ranks) {
+            EXPECT_EQ(ock::mf::HybmSdmaBuildScanQueues(ranks, mask, queues.data()), 0U);
+        }
+        for (auto q : queues) {
+            EXPECT_EQ(q, UINT32_MAX);
+        }
+    }
+}

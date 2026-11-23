@@ -661,6 +661,8 @@ TEST(SdmaProducerConfigTest, DefaultAvoidsOptionalDeviceQuery)
     EXPECT_EQ(prep.ValidateProducerMask(1), BM_OK);
     EXPECT_EQ(prep.ValidateProducerMask(0), BM_INVALID_PARAM);
     EXPECT_EQ(prep.ValidateProducerMask(0x8000), BM_INVALID_PARAM);
+    EXPECT_EQ(prep.ValidateProducerMask(0xFF00), BM_INVALID_PARAM);
+    EXPECT_EQ(prep.ValidateProducerMask(0xFFFF), BM_INVALID_PARAM);
     GlobalMockObject::verify();
 }
 

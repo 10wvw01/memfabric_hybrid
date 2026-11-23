@@ -65,6 +65,7 @@ extern "C" __global__ __aicore__ void vectorQueues(GM_ADDR base, GM_ADDR status,
         Maintain(row);
         auto invalid = ctx;
         invalid.block = 15;
+        invalid.producerMask |= SMEM_SHM_SDMA_RESERVED_PRODUCER_MASK;
         ok = ok && RejectDisabled(invalid, own, peer, flag);
         invalid.block = UINT32_MAX;
         ok = ok && RejectDisabled(invalid, own, peer, flag);

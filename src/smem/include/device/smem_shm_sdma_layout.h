@@ -64,8 +64,13 @@ static_assert(SMEM_SHM_SDMA_RS_PRODUCER_MASK + 64 <= SMEM_SHM_SDMA_RESERVED, "pr
 constexpr uint32_t SMEM_SHM_SDMA_MAX_RANKS = 4;  /* rank 上限(8-rank 全互联被每卡 8 个 P2P 槽位硬约束否定) */
 constexpr uint32_t SMEM_SHM_SDMA_MAX_PEERS = SMEM_SHM_SDMA_MAX_RANKS - 1;
 constexpr uint32_t SMEM_SHM_SDMA_MAX_BLOCKS = 8; /* 默认 AI Core 生产者数 */
-constexpr uint32_t SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK = 0x00FF;
-constexpr uint32_t SMEM_SHM_SDMA_VALID_PRODUCER_MASK = 0x7FFF;
+constexpr uint32_t SMEM_SHM_SDMA_AICORE_PRODUCER_MASK = 0x00FF; /* bit 0..7: AI Core */
+constexpr uint32_t SMEM_SHM_SDMA_VECTOR_PRODUCER_MASK = 0xFF00; /* bit 8..15: Vector */
+constexpr uint32_t SMEM_SHM_SDMA_RESERVED_PRODUCER_MASK = 0x8000; /* bit 15 保留，禁止提交 */
+constexpr uint32_t SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK = SMEM_SHM_SDMA_AICORE_PRODUCER_MASK;
+constexpr uint32_t SMEM_SHM_SDMA_VALID_PRODUCER_MASK =
+    (SMEM_SHM_SDMA_AICORE_PRODUCER_MASK | SMEM_SHM_SDMA_VECTOR_PRODUCER_MASK) &
+    ~SMEM_SHM_SDMA_RESERVED_PRODUCER_MASK;
 constexpr uint32_t SMEM_SHM_SDMA_QUEUES_PER_PEER = 16; /* 每对端队列容量，block 15 保留 */
 constexpr uint32_t SMEM_SHM_SDMA_QUEUE_COUNT = 48; /* 邮箱队列总数(对端 × 槽位, hcomm 48 同规模) */
 
@@ -97,7 +102,8 @@ SMEM_SHM_SDMA_LAYOUT_FN bool SmemShmSdmaProducerMaskValid(uint32_t mask)
 
 SMEM_SHM_SDMA_LAYOUT_FN bool SmemShmSdmaProducerAllowed(uint32_t mask, uint32_t block)
 {
-    return block < 15 && (mask & (1U << block)) != 0;
+    return block < SMEM_SHM_SDMA_QUEUES_PER_PEER &&
+           (mask & SMEM_SHM_SDMA_VALID_PRODUCER_MASK & (1U << block)) != 0;
 }
 
 /* (对端环下标, block 下标) → 队列下标: 对端环下标 × 每对端队列数(16) + block。

@@ -10,7 +10,15 @@ smem_shm_init(storeUrl, worldSize, rankId, deviceId, &config);
 ```
 
 Python使用`memfabric_hybrid.shm.ShmConfig.sdma_producer_mask`。掩码在本次初始化到uninit期间固定，
-随后创建的通信池继承配置。支持非零的0x7FFF子集；0x7F00允许Vector队列8～14，
+随后创建的通信池继承配置。掩码按两个8位段划分：
+
+| 位段 | 位段掩码 | 用途 |
+|---|---|---|
+| bit0～7 | 0x00FF | AI Core |
+| bit8～15 | 0xFF00 | Vector，其中bit15预留且必须为0 |
+
+bit15对应的队列槽继续预留，初始化和设备提交都拒绝使用该位。
+有效掩码支持非零的0x7FFF子集；0x7F00允许当前7个Vector使用队列8～14，
 0x7FFF允许AI Core与Vector共同提交。核的启动方式与实际工作分配由调用kernel决定。
 每条队列由唯一执行主体生产；多个并发kernel须由调用方保证相同block队列不并发写入。
 扩大掩码只改变提交权限和扫描集合，不会自动启动更多核。开放高编号队列时校验设备核数。

@@ -549,7 +549,8 @@ control operation timeout, i.e. barrier, allgather, topology_can_reach etc, defa
 whether to start config store, default true)")
         .def_readwrite("flags", &smem_shm_config_t::flags, "other flags, default 0")
         .def_readwrite("sdma_producer_mask", &smem_shm_config_t::sdmaProducerMask,
-                       "310P SDMA logical producer mask, default 0x00FF; bits 8..14 enable Vector Core queues");
+                       "310P SDMA producer mask, default 0x00FF; AI Core bits 0..7, Vector field bits 8..15; "
+                       "bit 15 is reserved and must be zero");
 }
 
 void DefineBmConfig(py::module_ &m)
