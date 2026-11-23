@@ -197,9 +197,8 @@ int32_t MemEntityDefault::UnReserveMemorySpace() noexcept
     }
 
     if (OwnsSdmaService()) {
-        /* 先停常驻 epoch kernel 再解除段 VA 映射: kernel 轮询段尾保留区的请求环,
-         * VA 先拆会设备侧访问异常(kernel 异常退出且丢失退出诊断); 池销毁路径
-         * (smem_shm_destroy→hybm_unreserve_mem_space)早于编排器 Release, 故在此拦停 */
+        // AICPU持续读取共享池尾部的请求队列，解除地址映射前需要先停止服务。
+        // 停止失败时保留映射，等待后续确认。
         auto stopRet = SdmaOrchestrator::GetInstance().StopEpoch();
         if (stopRet != BM_OK) {
             return stopRet;
@@ -371,10 +370,8 @@ int32_t MemEntityDefault::FreeLocalMemory(hybm_mem_slice_t slice, uint32_t flags
     }
 
     if (OwnsSdmaService() && (!orchConfigured_ || orchSlice_ == slice)) {
-        /* 协同池 slice 释放前先停常驻 epoch kernel: kernel 轮询该 slice 段尾保留区
-         * 的请求环, 释放含 VA 解除映射, 先释放会设备侧访问异常(kernel 异常退出
-         * 丢诊断, 并连锁 507899); 池销毁(smem_shm_destroy)早于编排器 Release, 故
-         * 须在此拦停(StopEpoch 幂等, 后续 Release/UnReserve 再调为空操作) */
+        // AICPU仍可能读取该内存片或执行关联的SDMA传输，释放前先确认服务停止。
+        // 停止失败时保留内存片，避免传输访问已释放的内存。
         auto stopRet = SdmaOrchestrator::GetInstance().StopEpoch();
         if (stopRet != BM_OK) {
             return stopRet;
@@ -1135,9 +1132,9 @@ void MemEntityDefault::SetHybmDeviceInfo(HybmDeviceMeta &info)
         info.qpInfoAddress = 0UL;
         info.sdmaWorkSpace = 0UL;
     }
-    info.physSize = options_.deviceVASpace; /* 段物理大小(设备侧邮箱保留区定位) */
-    /* 310P 协同模式: 工作区复用 sdmaWorkSpace 槽(A3 血统同概念, 平台互斥不同时写);
-     * 未就绪保持零值(host 侧以 smem_shm_sdma_get_workspace(handle) 非空判定可用) */
+    // 每个rank的设备内存段大小，用于计算段尾请求队列等控制数据的起始地址。
+    info.physSize = options_.deviceVASpace;
+    /* 310P 协同模式: 工作区复用 sdmaWorkSpace slot */
     if (orchAcquired_) {                              // 本 entity 持有协同(InitTransManager 已 Acquire)
         auto &prep = SdmaOrchestrator::GetInstance(); // 进程级单例(多 entity 共享同一份协同资源)
         if (prep.Ready()) {                           // 协同就绪: 填充真实工作区
