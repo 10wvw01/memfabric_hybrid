@@ -142,6 +142,11 @@ MemFabric跨机访问数据流和控制流如下图所示(昇腾A3超节点):
 
  👆 性能测试参考 [benchmark](./benchmark/bm/README.md)
 
+### 310P 单卡双 die 通信测试
+
+- [AllReduce 与 HCCL 基线对比](./benchmark/shmem_310p/README.md)：四种 MF 实现的接口、时序图、采样状态和 HCCL 汇总表。
+- [单 AICore 接口性能测试](./benchmark/shmem_api_310p/README.md)：独立测试 put、get、通知、quiet 及 FP32/FP16 累加。
+
 ## 🔍目录结构
 
 ```text
