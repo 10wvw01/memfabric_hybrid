@@ -56,6 +56,7 @@ constexpr uint64_t SMEM_SHM_SDMA_POLL_MAX_ITER = 100000000ULL;
 constexpr uint64_t SMEM_SHM_SDMA_SPIN_ITERS = 4096;
 constexpr uint32_t SMEM_SHM_SDMA_BACKOFF_START = 64;
 constexpr uint32_t SMEM_SHM_SDMA_BACKOFF_MAX = 16384;
+constexpr uint32_t SMEM_SHM_SDMA_STATE_POLL_INTERVAL = 64;
 
 /* 轮询退避(delay 由调用方持有渐增; 空转以编译屏障防优化) */
 SMEM_SHM_INLINE_AICORE void SdmaPollBackoff(uint64_t iter, uint32_t &delay)
@@ -170,13 +171,14 @@ SMEM_SHM_INLINE_AICORE bool SdmaReserveRequest(const smem_shm_sdma_ctx_t &ctx, u
     const uint64_t headOff = SMEM_SHM_SDMA_RS_REQ_HEAD + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
     uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
     for (uint64_t i = 0; i < SMEM_SHM_SDMA_POLL_MAX_ITER; ++i) {
-        if (SdmaServiceState(ctx) != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING))
-            return false;
         if (tail - SdmaReadCell(ctx.res, headOff) < SMEM_SHM_SDMA_RS_REQ_SLOTS)
-            break;
+            return true;
+        if (i % SMEM_SHM_SDMA_STATE_POLL_INTERVAL == 0 &&
+            SdmaServiceState(ctx) != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING))
+            return false;
         SdmaPollBackoff(i, delay);
     }
-    return tail - SdmaReadCell(ctx.res, headOff) < SMEM_SHM_SDMA_RS_REQ_SLOTS;
+    return false;
 }
 
 SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, uint32_t queue, uint64_t tail,
@@ -217,12 +219,10 @@ SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ 
         return false;
     const uint64_t publishing = SMEM_SHM_SDMA_RS_PUBLISHING + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE;
     SdmaWriteCell(ctx.res, publishing, 1);
-    AscendC::PipeBarrier<PIPE_ALL>();
     const bool accepted =
         SdmaServiceState(ctx) == SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING) && SdmaReserveRequest(ctx, queue, tail);
     if (accepted)
         SdmaPublishRequest(ctx, queue, tail, src, dst, len, op, signal, value);
-    AscendC::PipeBarrier<PIPE_ALL>();
     SdmaWriteCell(ctx.res, publishing, 0);
     return accepted;
 }
@@ -270,10 +270,12 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_quiet_at(const smem_shm_sdma_ctx_t &ct
                 landed = true;
                 break;
             }
-            const uint64_t state = SdmaServiceState(ctx);
-            if (state != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING) &&
-                state != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_DRAINING))
-                return false;
+            if (i % SMEM_SHM_SDMA_STATE_POLL_INTERVAL == 0) {
+                const uint64_t state = SdmaServiceState(ctx);
+                if (state != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_RUNNING) &&
+                    state != SmemShmSdmaServiceWord(SMEM_SHM_SDMA_DRAINING))
+                    return false;
+            }
             SdmaPollBackoff(i, delay);
         }
         if (!landed) {

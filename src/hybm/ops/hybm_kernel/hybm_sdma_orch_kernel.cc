@@ -191,13 +191,10 @@ void publishService(const ock::mf::HybmSdmaOrchParam *p, uint32_t state)
 }
 
 // 内层等待继承同一个停止截止时间，避免各等待依次耗尽独立预算。
-int32_t checkService(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx)
+int32_t checkServiceAtTime(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint64_t now)
 {
     if (p->hostLeaseMs == 0)
         return 0;
-    uint64_t now = 0;
-    if (readMonotonicNs(now) != 0)
-        return 1370;
     if (ctx->closing)
         return now >= ctx->closeDeadlineNs ? 1367 : 0;
     if (loadCell(p->stopAddr) != 0) {
@@ -242,7 +239,7 @@ int32_t reserveSqeSpace(const ock::mf::HybmSdmaOrchParam *p, SqContext *c, uint3
         uint64_t now = 0;
         if (readMonotonicNs(now) != 0 || now - started >= 1000000000ULL)
             return 1363;
-        if (checkService(p, c) != 0)
+        if (checkServiceAtTime(p, c, now) != 0)
             return 1367;
         usleep(kSqFullBackoffUs);
         uint32_t liveHead = 0;
@@ -528,7 +525,7 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
         }
         while (loadCell(previousStamp) < previous + 1) {
             uint64_t now = 0;
-            if (checkService(p, ctx) != 0 || readMonotonicNs(now) != 0 || now - started >= 1000000000ULL) {
+            if (readMonotonicNs(now) != 0 || checkServiceAtTime(p, ctx, now) != 0 || now - started >= 1000000000ULL) {
                 return 1366;
             }
             usleep(100);
@@ -635,12 +632,12 @@ int32_t checkEpochBudget(const volatile ock::mf::HybmSdmaOrchResult *result, con
     return now >= budget.deadlineNs ? 1 : 0;
 }
 
-int32_t checkTransferProgress(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, const uint64_t *heads)
+int32_t checkTransferProgress(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, const ScanContext &scan,
+                              uint64_t now)
 {
-    uint64_t now = 0;
-    if (readMonotonicNs(now) != 0)
-        return 1370;
-    for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; ++q) {
+    const auto *heads = scan.heads;
+    for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
+        const uint32_t q = ock::mf::HybmSdmaScanQueue(ordinal);
         if (ctx->completed[q] == heads[q]) {
             ctx->progressNs[q] = 0;
             continue;
@@ -658,6 +655,17 @@ int32_t checkTransferProgress(const ock::mf::HybmSdmaOrchParam *p, SqContext *ct
             return 1385;
     }
     return 0;
+}
+
+int32_t checkServiceCycle(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, const ScanContext &scan)
+{
+    uint64_t now = 0;
+    if (readMonotonicNs(now) != 0)
+        return 1370;
+    const int32_t ret = checkServiceAtTime(p, ctx, now);
+    if (ret != 0 || ctx->closing)
+        return ret;
+    return checkTransferProgress(p, ctx, scan, now);
 }
 
 bool drainTimeAvailable(SqContext *ctx)
@@ -849,9 +857,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     for (uint64_t loops = 0;; ++loops) {
         int32_t health = 0;
         if (loops % HYBM_SDMA_ORCH_EPOCH_CLOCK_INTERVAL == 0) {
-            health = checkService(p, &ctx);
-            if (health == 0 && !ctx.closing)
-                health = checkTransferProgress(p, &ctx, scan.heads);
+            health = checkServiceCycle(p, &ctx, scan);
         }
         if (health != 0) {
             result->mainRet = health;

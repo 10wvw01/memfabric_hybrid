@@ -704,6 +704,7 @@ class SdmaServiceTest : public SdmaSqCapacityTest {
 protected:
     std::vector<uint64_t> pool = std::vector<uint64_t>(SMEM_SHM_SDMA_RESERVED / 8, 0);
     uint64_t stop = 0;
+    ScanContext scan{};
     void SetUp() override
     {
         SdmaSqCapacityTest::SetUp();
@@ -711,44 +712,45 @@ protected:
         param.stopAddr = reinterpret_cast<uint64_t>(&stop);
         param.hostLeaseMs = 10000;
         param.stopTimeoutMs = 5000;
+        scan.count = SMEM_SHM_SDMA_MAX_BLOCKS;
     }
 };
 
 TEST_F(SdmaServiceTest, MissingHostExpiresUsingDeviceTime)
 {
-    EXPECT_EQ(checkService(&param, &context), 0);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 9999000000ULL;
-    EXPECT_EQ(checkService(&param, &context), 0);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 1000000ULL;
-    EXPECT_EQ(checkService(&param, &context), 1380);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1380);
 }
 
 TEST_F(SdmaServiceTest, ChangedHeartbeatRenewsLease)
 {
-    ASSERT_EQ(checkService(&param, &context), 0);
+    ASSERT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 9000000000ULL;
     storeCell(param.resultAddr + ock::mf::HYBM_SDMA_ORCH_WS_HEARTBEAT_OFF, 2);
-    EXPECT_EQ(checkService(&param, &context), 0);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 9000000000ULL;
-    EXPECT_EQ(checkService(&param, &context), 0);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 1000000000ULL;
-    EXPECT_EQ(checkService(&param, &context), 1380);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1380);
 }
 
 TEST_F(SdmaServiceTest, ExplicitStopClosesAdmissionAndHasDeadline)
 {
     stop = 1;
-    EXPECT_EQ(checkService(&param, &context), 0);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     EXPECT_TRUE(context.closing);
     EXPECT_EQ(loadCell(param.resBase + SMEM_SHM_SDMA_RS_SERVICE), SmemShmSdmaServiceWord(SMEM_SHM_SDMA_DRAINING));
     clockNowNs += 5000000000ULL;
-    EXPECT_EQ(checkService(&param, &context), 1367);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1367);
 }
 
 TEST_F(SdmaServiceTest, ClockFailureFailsServiceCheck)
 {
     clockFailure = true;
-    EXPECT_EQ(checkService(&param, &context), 1370);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1370);
 }
 
 TEST_F(SdmaServiceTest, EmptyServiceCanConfirmNormalStop)
@@ -789,23 +791,48 @@ TEST_F(SdmaServiceTest, UnpublishedSqesKeepCompletionUncertain)
 TEST_F(SdmaServiceTest, MissingSdmaProgressHasElapsedTimeDeadline)
 {
     uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
-    heads[0] = 1;
-    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+    scan.heads[0] = 1;
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 1000000000ULL;
-    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 1385);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1385);
 }
 
 TEST_F(SdmaServiceTest, CompletionProgressRenewsDeadlineAndAllowsStampWrap)
 {
     uint64_t heads[SMEM_SHM_SDMA_QUEUE_COUNT]{};
-    heads[0] = 65;
-    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+    scan.heads[0] = 65;
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 900000000ULL;
     storeCell(param.resBase + SMEM_SHM_SDMA_RS_QUIET, 65);
-    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     EXPECT_EQ(context.completed[0], 65U);
     clockNowNs += 2000000000ULL;
-    EXPECT_EQ(checkTransferProgress(&param, &context, heads), 0);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
+}
+
+TEST_F(SdmaServiceTest, ProgressChecksFollowActivePeerQueues)
+{
+    scan.heads[8] = 1;
+    scan.heads[16] = 1;
+    ASSERT_EQ(checkServiceCycle(&param, &context, scan), 0);
+    clockNowNs += 1000000000ULL;
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
+    EXPECT_EQ(context.progressNs[8], 0U);
+    EXPECT_EQ(context.progressNs[16], 0U);
+    scan.count = 2 * SMEM_SHM_SDMA_MAX_BLOCKS;
+    ASSERT_EQ(checkServiceCycle(&param, &context, scan), 0);
+    clockNowNs += 1000000000ULL;
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1385);
+}
+
+TEST_F(SdmaServiceTest, HealthAndCompletionShareClockSample)
+{
+    scan.heads[0] = 1;
+    ASSERT_EQ(checkServiceCycle(&param, &context, scan), 0);
+    EXPECT_EQ(clockCalls, 1U);
+    clockNowNs += 1000000000ULL;
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1385);
+    EXPECT_EQ(clockCalls, 2U);
 }
 
 #else
