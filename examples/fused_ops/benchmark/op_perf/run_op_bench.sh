@@ -9,7 +9,7 @@
 #                CELL_TIMEOUT
 set -u
 GA=/usr/local/Ascend/cann-9.1.0
-MFOUT=/home/w00804146/310P_2/memfabric_hybrid/output
+MFOUT=/home/USER/310P_2/memfabric_hybrid/output
 DIR=$(cd "$(dirname "$0")" && pwd)
 PRD=$(cd "$DIR/../.." && pwd)
 
@@ -25,7 +25,7 @@ CELL_TIMEOUT=${CELL_TIMEOUT:-1200}   # 单格看门狗秒数：到期 TERM、60s
 
 unset ASCEND_RT_VISIBLE_DEVICES
 source $GA/set_env.sh
-export MF_SDMA_ORCH_DEPLOY_HELPER=/home/w00804146/310P_2/memfabric_hybrid/tools/aicpu_kernel_deploy/orch_deploy_helper
+export MF_SDMA_ORCH_DEPLOY_HELPER=/home/USER/310P_2/memfabric_hybrid/tools/aicpu_kernel_deploy/orch_deploy_helper
 export MF_SDMA_ORCH_JSON=$MFOUT/hybm/aicpu_kernel/libmf_sdma_orch_v28.json
 export MEMFABRIC_HYBRID_HOME_PATH=$MFOUT
 export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=$MFOUT/hybm/lib64

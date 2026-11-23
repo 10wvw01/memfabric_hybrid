@@ -1,4 +1,4 @@
-// smem_mm_iar_310p3_protocol.h —— 协议层：常量、阶段号、标记位域、轮询预算、
+// smem_mm_iar_310p3_protocol.h —— 协议层：常量、标记位域、轮询预算、
 // 错误码、诊断 trace 布局。
 // 分层：smem_mm_iar_310p3_tiling.h 池内区域偏移（唯一事实源，外部建池也依它）；
 // 本头协议语义常量；smem_mm_iar_310p3_transport.h 协议动作原语；
@@ -45,18 +45,9 @@ constexpr uint32_t kFlagSlotQwords = kFlagSlotBytes / sizeof(int64_t);  // 8 个
 constexpr uint32_t kGroupSeatsBytes = kCores * kFlagSlotBytes;          // 每组组完成通知 512B
 constexpr uint32_t kSeatUpOff = 512;       // seatUp 槽段相对 kReadyOff 的偏移（GDONE 槽段后预留）
 
-// ---- 阶段号（device_tag.phase 字段取值；不同标记族取不同值便于诊断区分）----
-enum Phase : uint32_t { REDUCE = 2, GATHER = 3, SEATUP = 5, RDONE = 6, GDONE = 7 };
-
-// device_tag：阶段/调度批次号/子组号/包序号打包成 64 位完成通知附带数据，
-// 下游据此区分"这份完成通知对应哪个子组的哪个包"。
-// 位宽：[63:36] phase 28b | [35:12] epoch 24b | [11:6] group 6b | [5:0] packet 6b。
-// epoch 在会话层从 1000 起递增，与低位字段不重叠。
-__aicore__ inline uint64_t device_tag(uint32_t phase, uint32_t epoch, uint32_t group, uint32_t packet)
-{
-    return (uint64_t{phase} << 36) | (uint64_t{epoch} << 12) |
-           (uint64_t{group} << 6) | packet;
-}
+// 说明：memfabric 1.2.0 删除了随数据包携带完成通知附带数据（旧 imm/device_tag）
+// 的机制，就绪标记改为 signal_set 直接写 8B 值（本批次 epoch），接收方轮询
+// 槽值判等。旧协议中用于诊断区分各标记族的阶段号不再需要。
 
 // ---- 轮询预算与退避（自旋等待共用，避免轮询流量占满访存带宽）----
 constexpr uint32_t kPollBudget = 100000000;  // 死等保护：超过视为协议死锁
@@ -70,7 +61,6 @@ constexpr uint32_t kBackoffMax = 1024;       // 空转间隔上限
 enum class ProtocolError : uint64_t {
     SignalMarkFail = 101,    // 标记包（seatUp/RDONE/GDONE）投递失败
     SignalDataFail = 102,    // 数据包（REDUCE/GATHER）投递失败
-    MailStatusNotOk = 121,   // 完成通知状态非 OK
     GdoneWaitTimeout = 155,  // 尾部拷出分支等 GDONE 死等
     SchedLoopTimeout = 157,  // 调度器事件循环死等
     QuietFail = 105,         // 排空（quiet）超时

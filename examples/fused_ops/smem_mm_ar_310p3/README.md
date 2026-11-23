@@ -28,17 +28,17 @@
 | 设备 | Ascend 310P3 单卡双 die，两个 rank 各用一个 die |
 | CANN | 9.1.0 GA |
 | PyTorch / torch_npu | 均为 2.10 |
-| MemFabric | `v28-orch`；构建算子需要设备侧头文件，运行需要 `libmf_smem.so`、SDMA 编排内核清单和部署助手 |
+| MemFabric | `trunk_for_escc_v1.2.0`；构建算子需要设备侧头文件，运行需要 `libmf_smem.so` 和 SDMA 编排内核清单 |
 
-在对应版本的 MemFabric 仓库中执行 `bash script/build_and_pack_run.sh`，构建后确认上表所列文件齐全。若缺少部署助手，在 MemFabric 的 `tools/aicpu_kernel_deploy/` 下执行 `make ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0`。
+在对应版本的 MemFabric 仓库中执行 `bash script/build_and_pack_run.sh`，构建后确认上表所列文件齐全。
 
 在本算子目录执行，先把 `MF_ROOT` 改为实际的 MemFabric 仓库路径：
 
 ```bash
 source /usr/local/Ascend/cann-9.1.0/set_env.sh
-MF_ROOT=/path/to/memfabric_hybrid
+MF_ROOT=/path/to/memfabric_trunk_v120
 export MIXFABRIC_SDK_OUT="$MF_ROOT/output"
-export MEMFABRIC_SDK_INC="$MIXFABRIC_SDK_OUT/include/smem/device"
+export MEMFABRIC_SDK_INC="$MIXFABRIC_SDK_OUT/smem/include/device"
 bash build.sh
 PKG_ROOT="$PWD/build_out/_CPack_Packages/Linux/External/custom_opp_ubuntu_aarch64.run"
 export ASCEND_CUSTOM_OPP_PATH="$PKG_ROOT/packages/vendors/smem_mm_ar_310p3"
@@ -48,9 +48,7 @@ export ASCEND_CUSTOM_OPP_PATH="$PKG_ROOT/packages/vendors/smem_mm_ar_310p3"
 算子包位于 `build_out/`，上面的命令直接使用构建时展开的 vendor 目录。启动调用进程前保留 `ASCEND_CUSTOM_OPP_PATH` 和 `MIXFABRIC_SDK_OUT`，并设置：
 
 ```bash
-export MF_SDMA_ORCH_DEPLOY_HELPER="$MF_ROOT/tools/aicpu_kernel_deploy/orch_deploy_helper"
-export MF_SDMA_ORCH_JSON="$MIXFABRIC_SDK_OUT/hybm/aicpu_kernel/libmf_sdma_orch_v28.json"
-export MEMFABRIC_HYBRID_HOME_PATH="$MIXFABRIC_SDK_OUT"
+export MF_SDMA_ORCH_DIR="$MIXFABRIC_SDK_OUT/hybm/aicpu_kernel"
 export MEMFABRIC_HYBRID_EXTEND_LIB_PATH="$MIXFABRIC_SDK_OUT/hybm/lib64"
 export LD_LIBRARY_PATH="$MIXFABRIC_SDK_OUT/smem/lib64:$MEMFABRIC_HYBRID_EXTEND_LIB_PATH:$LD_LIBRARY_PATH"
 export LD_LIBRARY_PATH="$MIXFABRIC_SDK_OUT/acc_links/lib64:$ASCEND_CUSTOM_OPP_PATH/op_api/lib:$LD_LIBRARY_PATH"

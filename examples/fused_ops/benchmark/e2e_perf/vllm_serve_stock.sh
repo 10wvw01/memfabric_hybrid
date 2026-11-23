@@ -2,14 +2,14 @@
 # vllm serve — stock baseline (no fusion), TP2 on physical devices 4/5.
 # Prerequisites (already GA-built in this workspace):
 #   - CANN 9.1.0 GA (source'd below)
-#   - memfabric v28-orch SDK: /home/w00804146/310P_2/memfabric_hybrid/output
+#   - memfabric v28-orch SDK: /home/USER/310P_2/memfabric_hybrid/output
 #   - prd_code vllm-ascend checkout installed (editable)
 # DFLASH=0 drops --speculative-config (dflash off): prefill splits into
 # 1x3840+256 (mamba-aligned). TPOT regresses ~2.5x without dflash —
 # TTFT-comparison only.
 set -u
 GA=/usr/local/Ascend/cann-9.1.0
-MFOUT=/home/w00804146/310P_2/memfabric_hybrid/output
+MFOUT=/home/USER/310P_2/memfabric_hybrid/output
 
 source $GA/set_env.sh
 # 宿主环境可能全局导出 ASCEND_RT_VISIBLE_DEVICES（本机 qwen-dflash 预设 0,1），

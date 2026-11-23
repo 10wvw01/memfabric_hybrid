@@ -98,9 +98,10 @@ __aicore__ inline uint64_t sub_bytes_of(uint32_t rows, uint64_t subBytes, uint32
 // issue_reduce_leg：发出 REDUCE 传输段——把子组 subGroup 中本端不拥有的
 // 半区（rank 决定上下哪半）按 packet 粒度分包，以 ADD_FP16 加到对端同偏移
 // 位置（SDMA 在传输途中完成加法，即"硬件归约"），数据包全部发出后再发
-// 8 字节 RDONE 标记。orch 按发送方保序 ⇒ 对端见 RDONE 即整个数据段已落位。
-// subLen 为子组实属字节数（末子组可不足），半区 = subLen/2。
-__aicore__ inline void issue_reduce_leg(__gm__ uint8_t* sdmaRes, __gm__ uint8_t* work, __gm__ uint8_t* peer,
+// 8 字节 RDONE 标记。数据包与标记共处同一发送队列，队列 FIFO 保序 ⇒ 对端
+// 见 RDONE 即整个数据段已落位。subLen 为子组实属字节数（末子组可不足），
+// 半区 = subLen/2。
+__aicore__ inline void issue_reduce_leg(const smem_shm_sdma_ctx_t& ctx, __gm__ uint8_t* work, __gm__ uint8_t* peer,
                                         __gm__ uint8_t* status, uint32_t subGroup, uint64_t subBytes,
                                         uint64_t subLen, uint64_t packet, uint32_t rank, uint32_t epoch)
 {
@@ -108,19 +109,19 @@ __aicore__ inline void issue_reduce_leg(__gm__ uint8_t* sdmaRes, __gm__ uint8_t*
     const uint64_t reduceOff = uint64_t{subGroup} * subBytes + uint64_t{1 - rank} * halfBytes;
     for (uint64_t pos = 0; pos < halfBytes; pos += packet) {
         const uint64_t chunkBytes = halfBytes - pos < packet ? halfBytes - pos : packet;
-        check(smem_shm_sdma_signal_at(sdmaRes, work + reduceOff + pos, peer + reduceOff + pos, chunkBytes,
-              device_tag(REDUCE, epoch, subGroup, static_cast<uint32_t>(pos / packet)),
+        check(smem_shm_sdma_put_nbi_at(ctx, work + reduceOff + pos, peer + reduceOff + pos, chunkBytes,
               SMEM_SHM_SDMA_OP_ADD_FP16), status, ProtocolError::SignalDataFail);
     }
-    check(smem_shm_sdma_signal_at(sdmaRes, work + kCtrlOff, peer + kPeerRdyOff + uint64_t{subGroup} * kFlagSlotBytes,
-          8, device_tag(RDONE, epoch, subGroup, 0), SMEM_SHM_SDMA_OP_COPY), status, ProtocolError::SignalMarkFail);
+    check(smem_shm_sdma_signal_set_nbi_at(ctx,
+          reinterpret_cast<__gm__ uint64_t*>(peer + kPeerRdyOff + uint64_t{subGroup} * kFlagSlotBytes), epoch),
+          status, ProtocolError::SignalMarkFail);
 }
 
 // issue_gather_leg：发出 GATHER 传输段——把子组 subGroup 中本端拥有的半区
 //（其终值已在 REDUCE 阶段收敛完毕）按 packet 粒度复制回对端同偏移位置，随后
 // 发 8 字节 GDONE 标记。发射门是对端 RDONE（由调度器在调用前探测确认）。
 // subLen 为子组实属字节数（末子组可不足），半区 = subLen/2。
-__aicore__ inline void issue_gather_leg(__gm__ uint8_t* sdmaRes, __gm__ uint8_t* work, __gm__ uint8_t* peer,
+__aicore__ inline void issue_gather_leg(const smem_shm_sdma_ctx_t& ctx, __gm__ uint8_t* work, __gm__ uint8_t* peer,
                                         __gm__ uint8_t* status, uint32_t subGroup, uint64_t subBytes,
                                         uint64_t subLen, uint64_t packet, uint32_t rank, uint32_t epoch)
 {
@@ -128,12 +129,12 @@ __aicore__ inline void issue_gather_leg(__gm__ uint8_t* sdmaRes, __gm__ uint8_t*
     const uint64_t gatherOff = uint64_t{subGroup} * subBytes + uint64_t{rank} * halfBytes;
     for (uint64_t pos = 0; pos < halfBytes; pos += packet) {
         const uint64_t chunkBytes = halfBytes - pos < packet ? halfBytes - pos : packet;
-        check(smem_shm_sdma_signal_at(sdmaRes, work + gatherOff + pos, peer + gatherOff + pos, chunkBytes,
-              device_tag(GATHER, epoch, subGroup, static_cast<uint32_t>(pos / packet)),
+        check(smem_shm_sdma_put_nbi_at(ctx, work + gatherOff + pos, peer + gatherOff + pos, chunkBytes,
               SMEM_SHM_SDMA_OP_COPY), status, ProtocolError::SignalDataFail);
     }
-    check(smem_shm_sdma_signal_at(sdmaRes, work + kCtrlOff, peer + kReadyOff + uint64_t{subGroup} * kFlagSlotBytes,
-          8, device_tag(GDONE, epoch, subGroup, 0), SMEM_SHM_SDMA_OP_COPY), status, ProtocolError::SignalMarkFail);
+    check(smem_shm_sdma_signal_set_nbi_at(ctx,
+          reinterpret_cast<__gm__ uint64_t*>(peer + kReadyOff + uint64_t{subGroup} * kFlagSlotBytes), epoch),
+          status, ProtocolError::SignalMarkFail);
 }
 
 }  // namespace iar310p3_kernel

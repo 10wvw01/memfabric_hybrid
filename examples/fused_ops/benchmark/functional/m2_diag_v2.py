@@ -28,7 +28,7 @@ import sys
 
 import numpy as np
 
-SDK = os.environ.get("MIXFABRIC_SDK_OUT", "/home/w00804146/310P_2/memfabric_hybrid/output")
+SDK = os.environ.get("MIXFABRIC_SDK_OUT", "/home/USER/310P_2/memfabric_hybrid/output")
 CANN = os.environ["ASCEND_HOME_PATH"]
 
 import torch  # noqa: E402

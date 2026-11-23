@@ -15,12 +15,12 @@ endif()
 
 # memfabric_hybrid 设备侧 SDK 头文件（smem_shm_aicore_base_sdma.h 等）的
 # include 路径。默认指向本工作区已安装位置；如 SDK 安装在别处，构建前
-# 设置环境变量 MEMFABRIC_SDK_INC 指向 <memfabric output>/include/smem/device
+# 设置环境变量 MEMFABRIC_SDK_INC 指向 <memfabric output>/smem/include/device
 # 的同级目录即可覆盖。
 if(DEFINED ENV{MEMFABRIC_SDK_INC})
     set(SMEM_SDK_INC $ENV{MEMFABRIC_SDK_INC})
 else()
-    set(SMEM_SDK_INC /home/w00804146/310P/a3ut-20261029/memfabric-sdk/include/smem/device)
+    set(SMEM_SDK_INC /home/USER/310P_2/memfabric_trunk_v120/output/smem/include/device)
 endif()
 
 # 把 include 路径传给内核编译。

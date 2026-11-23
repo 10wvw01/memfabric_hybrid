@@ -9,9 +9,7 @@
 //                本端已收敛的半区复制回对端；三个游标各自推进流水级；
 //   block 9..12  尾部拷出分支：逐子组等对端 GDONE 标记后，把已收敛的 work
 //                区数据拷贝到输出 y；
-//   block 13     完成通知消费者核：按确定计数排空本端发出的全部 SDMA 完成
-//                通知（全 kernel 唯一的阻塞等待点），调度器因此全程不阻塞；
-//   block 14     空闲退出（BlockDim=15）。
+//   block 13/14  空闲退出（BlockDim=15）。
 // 文件分层：smem_mm_iar_310p3_tiling.h 池布局（唯一事实源）/
 // smem_mm_iar_310p3_protocol.h 协议常量 / smem_mm_iar_310p3_transport.h 传输
 // 原语 / 本文件三侧编排。全局内存流量一律经 MTE 搬运，不做标量访问。
@@ -106,8 +104,7 @@ __aicore__ inline void fused_matmul(const SmemMmIar310p3TilingData& tilingData, 
     DataCopy(traceGm[kTraceHeader + core * kTraceCoreStride], ub[8], kTraceCoreStride);
 }
 #else
-// Vector 侧（block 8..13）AllReduce 段：三游标调度器 + 4 条尾部拷出分支 +
-// 1 个完成通知消费者核。
+// Vector 侧（block 8..12）AllReduce 段：三游标调度器 + 4 条尾部拷出分支。
 __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_ADDR y, GM_ADDR workspace)
 {
     (void)workspace;
@@ -126,8 +123,8 @@ __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_
 
     const uint32_t globalIdx = static_cast<uint32_t>(GetBlockIdx());
     const uint32_t localIdx = globalIdx >= kCores ? globalIdx - kCores : 0;
-    if (localIdx > 5u) return;
-    // 公共准备：轮询暂存 poll、时间戳暂存 stamps、SDMA 资源句柄。
+    if (localIdx > 4u) return;
+    // 公共准备：轮询暂存 poll、时间戳暂存 stamps、SDMA 上下文。
     TPipe pipe;
     TBuf<TPosition::VECCALC> ioBuf;
     pipe.InitBuffer(ioBuf, 1024);
@@ -136,7 +133,11 @@ __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_
     LocalTensor<int64_t> stamps = ub[64];
     GlobalTensor<int64_t> traceGm;
     traceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(trace), kTraceU64);
-    __gm__ uint8_t* sdmaRes = smem_shm_sdma_reserved(poolGva);
+    // SDMA 上下文：新版 memfabric 只允许 block<8 提交 SDMA，而调度器在 Vector
+    // block 8。Cube 侧 block 0..7 不做 SDMA，其队列空闲，故把上下文 block 映射
+    // 到 0（队列下标仅按 block 划分，通知靠显式 8B 槽地址传递，不依赖 block 路由）。
+    smem_shm_sdma_ctx_t sdmaCtx = smem_shm_sdma_ctx(poolGva);
+    sdmaCtx.block = 0;
     // 通信粒度：矩阵乘组内按子组行数切通信子组（子组与矩阵乘组同粒度，
     // subsPerGroup = 1、slotsPerSub = 8）。
     const uint32_t subRows = kSubRows;
@@ -144,25 +145,6 @@ __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_
     const uint32_t subCount = (rows + subRows - 1) / subRows;   // 末子组可不足整子组
     const uint32_t subsPerGroup = kCommRows / subRows;
     const uint32_t slotsPerSub = kCores / subsPerGroup;
-    if (localIdx == 5) {
-        // ---------- 完成通知消费者核（block 13）----------
-        // 把"排空完成通知"从调度器剥离：调度器要持续处理传输请求（请求环仅
-        // 64 槽，写满会背压阻塞），若还自己等通知，到达环会不断堆积。本核
-        // 按确定计数逐个取走本端发出的全部完成通知后退出：每子组数量 =
-        // 组完成通知 1 + REDUCE 包 k + RDONE 1 + GATHER 包 k + GDONE 1
-        //（k = 半区字节数按包长向上取整）。只数数量不看内容（协议推进只认
-        // 全局内存标记，通知本身仅丢弃）；计数按子组实属字节数累计。
-        uint32_t notifyTotal = 0;
-        for (uint32_t subGroup = 0; subGroup < subCount; ++subGroup) {
-            const uint64_t subLen = sub_bytes_of(rows, subBytes, subGroup);
-            notifyTotal += 2 * static_cast<uint32_t>((subLen / 2 + kPacket - 1) / kPacket) + 3;
-        }
-        for (uint32_t i = 0; i < notifyTotal; ++i) {
-            const auto notice = smem_shm_sdma_wait_at(sdmaRes);
-            check(notice.status == SMEM_SHM_SDMA_MAIL_OK, status, ProtocolError::MailStatusNotOk);
-        }
-        return;
-    }
     if (localIdx >= 1) {
         // ---------- 尾部拷出分支（block 9..12）----------
         // 半交换收敛后 work 区即两端之和：本端拥有的半区由对端 REDUCE 加法
@@ -248,10 +230,10 @@ __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_
             const uint32_t group = aCur / subsPerGroup;
             const uint32_t firstSlot = (aCur % subsPerGroup) * slotsPerSub;
             if (probe_seats(poll, seats, group, firstSlot, slotsPerSub, epoch) == slotsPerSub) {
-                check(smem_shm_sdma_signal_at(sdmaRes, work + kCtrlOff,
-                      peer + kReadyOff + kSeatUpOff + uint64_t{aCur} * kFlagSlotBytes, 8,
-                      device_tag(SEATUP, epoch, aCur, 0), SMEM_SHM_SDMA_OP_COPY), status,
-                      ProtocolError::SignalMarkFail);
+                check(smem_shm_sdma_signal_set_nbi_at(sdmaCtx,
+                      reinterpret_cast<__gm__ uint64_t*>(
+                          peer + kReadyOff + kSeatUpOff + uint64_t{aCur} * kFlagSlotBytes), epoch),
+                      status, ProtocolError::SignalMarkFail);
                 stamps.SetValue(8 + aCur * 4 + 0, static_cast<int64_t>(spins));
                 ++aCur;
                 ++did;
@@ -261,7 +243,7 @@ __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_
                                      epoch)) {
             // B 门：对端 seatUp[b] 可见——对端该子组矩阵乘已完成，
             // 我的 ADD 数据可以落到对端区域。
-            issue_reduce_leg(sdmaRes, work, peer, status, bCur, subBytes,
+            issue_reduce_leg(sdmaCtx, work, peer, status, bCur, subBytes,
                              sub_bytes_of(rows, subBytes, bCur), kPacket, rank, epoch);
             stamps.SetValue(8 + bCur * 4 + 1, static_cast<int64_t>(spins));
             ++bCur;
@@ -271,7 +253,7 @@ __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_
                                      epoch)) {
             // C 门：对端 RDONE[c] 可见——本端拥有的半区已是终值，
             // 可以作为 GATHER 的源回传。
-            issue_gather_leg(sdmaRes, work, peer, status, cCur, subBytes,
+            issue_gather_leg(sdmaCtx, work, peer, status, cCur, subBytes,
                              sub_bytes_of(rows, subBytes, cCur), kPacket, rank, epoch);
             stamps.SetValue(8 + cCur * 4 + 2, static_cast<int64_t>(spins));
             ++cCur;
@@ -289,7 +271,7 @@ __aicore__ inline void allreduce(const SmemMmIar310p3TilingData& tilingData, GM_
         if ((spins & (kBackoffStep - 1u)) == 0 && delay < kBackoffMax) delay <<= 1;
     }
     // 全部子组交换完成后排空队列，把批次头与游标时间戳写进 trace 区。
-    check(smem_shm_sdma_quiet_at(sdmaRes), status, ProtocolError::QuietFail);
+    check(smem_shm_sdma_quiet_at(sdmaCtx), status, ProtocolError::QuietFail);
     DataCopy(traceGm[0], stamps, kFlagSlotQwords);
     DataCopy(traceGm[kTraceSchedBase], stamps[8], 8 + subCount * 4);
 }

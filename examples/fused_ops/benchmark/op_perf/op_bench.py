@@ -202,7 +202,17 @@ def log(msg: str) -> None:
 log(f"path={a.path} M={M} iters={a.iters} reps={a.reps}"
     + (f" pool gva=0x{gva:x}" if a.path != "stock" else " no pool"))
 
-# ---- cold first wave (fused only; watchdog-contaminated, reference) -------
+# ---- warm-up wave (fused only; 会话层时序契约) --------------------------
+# session.py 契约：首次 kernel 发射存在冷首发竞态窗口。v28 下首发只是数据
+# 腐化（能跑完），trunk 新接口下发首会 Vector core 死等（507034 超时）。
+# 必须先发射一波不校验、不计时的暖机调度批次，正式波才可测；M2 因此有
+# 暖机波，op_bench 原 cold first wave 直接首发违反契约。
+if a.path != "stock":
+    call()
+    torch.npu.synchronize()
+    sess.barrier()
+
+# ---- first timed wave (fused only; watchdog-contaminated, reference) -------
 if a.path != "stock":
     torch.npu.synchronize()
     sess.barrier()

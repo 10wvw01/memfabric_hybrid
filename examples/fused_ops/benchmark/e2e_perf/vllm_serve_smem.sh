@@ -5,7 +5,7 @@
 #   SMEM_OP=iar -> smem_mm_iar_310p3 (hardware reduction)
 # Prerequisites (already GA-built in this workspace):
 #   - CANN 9.1.0 GA (source'd below)
-#   - memfabric v28-orch SDK: /home/w00804146/310P_2/memfabric_hybrid/output
+#   - memfabric v28-orch SDK: /home/USER/310P_2/memfabric_hybrid/output
 #   - orch_deploy_helper:     tools/aicpu_kernel_deploy/ (GA-built)
 #   - custom_opp packages:     prd_code/smem_mm_{ar,iar}_310p3/build_out
 #   - xops wheels:            xops_smem_mm_ar_310p3 / xops_smem_mm_iar_310p3 installed
@@ -15,7 +15,7 @@
 # TPOT regresses ~2.5x without dflash — TTFT-comparison only.
 set -u
 GA=/usr/local/Ascend/cann-9.1.0
-MFOUT=/home/w00804146/310P_2/memfabric_hybrid/output
+MFOUT=/home/USER/310P_2/memfabric_hybrid/output
 DIR=$(cd "$(dirname "$0")" && pwd)
 PRD=$(cd "$DIR/../.." && pwd)
 SMEM_OP=${SMEM_OP:-ar}

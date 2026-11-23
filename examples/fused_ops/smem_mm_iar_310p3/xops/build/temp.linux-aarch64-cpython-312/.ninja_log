@@ -1,7 +1,0 @@
-# ninja log v7
-0	22893	1795086458367820370	/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/build/temp.linux-aarch64-cpython-312/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/xops_iar_310p3/csrc/ops_common.o	5e8fc26590c0af9e
-0	23999	1795086458367820370	/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/build/temp.linux-aarch64-cpython-312/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/xops_iar_310p3/csrc/ops_def_registration.o	3e33ab72c717659a
-0	25325	1795086458367820370	/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/build/temp.linux-aarch64-cpython-312/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/xops_iar_310p3/csrc/npu_smem_mm_iar_310p3.o	12ddb6452adc7ac0
-17	25177	1795086484287820370	/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/build/temp.linux-aarch64-cpython-312/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/xops_iar_310p3/csrc/ops_def_registration.o	bf0625f680239670
-16	26140	1795086484287820370	/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/build/temp.linux-aarch64-cpython-312/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/xops_iar_310p3/csrc/ops_common.o	b05889c6f4c83441
-16	26860	1795086484287820370	/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/build/temp.linux-aarch64-cpython-312/home/w00804146/310P_2/prd_code/smem_mm_iar_310p3/xops/xops_iar_310p3/csrc/npu_smem_mm_iar_310p3.o	b145f5a5fa261538

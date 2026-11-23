@@ -31,12 +31,12 @@
 
 ## 软硬件环境
 
-算子级和 E2E 示例都在 Linux aarch64 上运行，需要一张 Ascend 310P3 卡的两个 die，两个 rank 各用一个 die。下文的 `6,7` 是设备编号示例，请按目标机的实际编号替换。
+算子级和 E2E 示例都在 Linux aarch64 上运行，需要一张 Ascend 310P3 卡的两个 die，两个 rank 各用一个 die。下文的 `4,5` 是设备编号示例，请按目标机的实际编号替换。
 
 | 用途 | 环境与依赖 |
 | --- | --- |
-| 两类示例共用 | CANN 9.1.0 GA、PyTorch 2.10、torch_npu 2.10，以及 `v28-orch` 版本的 MemFabric。以上是示例使用的版本。 |
-| 构建和运行融合算子 | 构建需要 MemFabric 设备侧头文件；运行需要 `libmf_smem.so`、SDMA 编排内核清单和部署助手。具体路径和构建命令见上表中的两篇算子文档。 |
+| 两类示例共用 | CANN 9.1.0 GA、PyTorch 2.10、torch_npu 2.10，以及 `trunk_for_escc_v1.2.0` 版本的 MemFabric。以上是示例使用的版本。 |
+| 构建和运行融合算子 | 构建需要 MemFabric 设备侧头文件；运行需要 `libmf_smem.so` 和 SDMA 编排内核清单。具体路径和构建命令见上表中的两篇算子文档。 |
 | E2E 示例额外需要 | vLLM 0.24.0、本目录的 `vllm-ascend/` 接入代码，以及脚本使用的 Qwen3.6-35B-A3B-W8A8 模型。脚本默认开启 DFlash，还需要对应的 DFlash 模型。服务配置要求 `TP=2`、`PP=1`、`DP=1`、FP16。 |
 
 独立运行算子不需要安装 vLLM，也不需要下载模型。
@@ -47,18 +47,18 @@
 
 1. 按对应算子文档准备 CANN、MemFabric 和 PyTorch 环境，构建自定义算子包并安装 `xops` wheel。运行两种算子的对比脚本前，先构建并安装两种算子。
 2. 在目标机上检查测试脚本中的 CANN、MemFabric 和模型路径。部分脚本写入了原测试环境的绝对路径，需要按实际安装位置修改。
-3. 在本目录运行以下命令。`6,7` 是一组设备编号示例，换成目标机上同卡的两个 die。
+3. 在本目录运行以下命令。`4,5` 是一组设备编号示例，换成目标机上同卡的两个 die。
 
 先检查两端输出：
 
 ```bash
-DEVICES=6,7 bash benchmark/functional/run_m2.sh
+DEVICES=4,5 bash benchmark/functional/run_m2_v120.sh
 ```
 
 确认脚本输出的 `summary.txt` 中本次各组均为 `PASS`；脚本在某组失败后仍会继续执行，不能只看退出码。再比较原生矩阵乘加 HCCL AllReduce 与两个融合算子：
 
 ```bash
-DEVICES=6,7 bash benchmark/op_perf/run_op_bench.sh
+DEVICES=4,5 bash benchmark/op_perf/run_op_bench_v120.sh
 ```
 
 测试参数和判定方法见 [benchmark/README.md](benchmark/README.md)。
@@ -72,7 +72,7 @@ DEVICES=6,7 bash benchmark/op_perf/run_op_bench.sh
 ```bash
 source /usr/local/Ascend/cann-9.1.0/set_env.sh
 (cd vllm-ascend && python -m pip install -e . --no-build-isolation)
-SMEM_OP=ar VLLM_ASCEND_DEVICE_OFFSET=6 bash benchmark/e2e_perf/vllm_serve_smem.sh
+SMEM_OP=ar VLLM_ASCEND_DEVICE_OFFSET=4 bash benchmark/e2e_perf/vllm_serve_smem_v120.sh
 ```
 
 脚本默认用 `ar`，改为 `SMEM_OP=iar` 可切换。用 `VLLM_ASCEND_DEVICE_OFFSET` 指定设备，不用 `ASCEND_RT_VISIBLE_DEVICES` 重映射编号。
@@ -103,7 +103,7 @@ python3 benchmark/functional/e2e_functional_test.py
 > **执行前**：停止手动启动的服务。脚本会停止匹配的 vLLM 进程，只在没有其他 vLLM 服务运行的专用测试机上执行。
 
 ```bash
-bash benchmark/e2e_perf/run_e2e_matrix.sh
+bash benchmark/e2e_perf/run_e2e_matrix_v120.sh
 ```
 
 ## 怎样看性能结果

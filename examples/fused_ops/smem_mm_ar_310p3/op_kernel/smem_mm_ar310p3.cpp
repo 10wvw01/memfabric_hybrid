@@ -4,7 +4,7 @@
 //   block 0..7   Cube 矩阵乘段（fused_matmul）：结果写池内 work 区，本核
 //                切片完成后无条件发布组完成通知；
 //   block 8      通信调度器：逐组等本端通知齐 → 组数据复制进对端 scratch →
-//                发 8B 就绪标记 → 排空完成通知并确认对端标记；
+//                发 8B 就绪标记 → 确认对端标记已到；
 //   block 9..12  归约加法分支：逐组轮询对端就绪标记 → work 与 scratch 相加
 //                → 直接写 y；
 //   block 13/14  空闲退出（BlockDim=15）。
@@ -132,7 +132,12 @@ __aicore__ inline void allreduce(const SmemMmAr310p3TilingData& tilingData, GM_A
     LocalTensor<int64_t> stamps = ub[64];
     GlobalTensor<int64_t> traceGm;
     traceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(trace), kTraceU64);
-    Transport transport{smem_shm_sdma_reserved(poolGva), work, peer, status, epoch, kPacket};
+    // SDMA 上下文：新版 memfabric 只允许 block<8 提交 SDMA，而调度器在 Vector
+    // block 8。Cube 侧 block 0..7 不做 SDMA，其队列空闲，故把上下文 block 映射
+    // 到 0（队列下标仅按 block 划分，通知靠显式 8B 槽地址传递，不依赖 block 路由）。
+    smem_shm_sdma_ctx_t sdmaCtx = smem_shm_sdma_ctx(poolGva);
+    sdmaCtx.block = 0;
+    Transport transport{sdmaCtx, work, peer, status, epoch, kPacket};
     if (localIdx >= 1) {
         // ---------- 归约加法分支（block 9..12）----------
         // 分支 lane 各负责每组数据的四分之一：轮询对端 peerRdy 标记 → work 与
@@ -189,10 +194,8 @@ __aicore__ inline void allreduce(const SmemMmAr310p3TilingData& tilingData, GM_A
     // ---------- 通信调度器（block 8）：全交换协议 ----------
     // 两端互把组数据复制进对端 scratch（写向对端的不同区域，字节不相交，
     // 不与对端矩阵乘互扰），无数据回传、无远端加法。"对端组数据已到我方
-    // scratch"的信号 = 数据包之后紧跟的 8B 就绪标记（orch 按发送方保序，
+    // scratch"的信号 = 数据包之后紧跟的 8B 就绪标记（共队列 FIFO 保序，
     // 标记必晚于数据到达），归约分支轮询该标记即可。
-    // sendPhase 两端取不同阶段号（REDUCE/GATHER），仅为完成通知可诊断区分。
-    const Phase sendPhase = rank == 0 ? Phase::REDUCE : Phase::GATHER;
     GlobalTensor<int64_t> ctrlSrcGm;
     ctrlSrcGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(work + kCtrlOff), kFlagSlotQwords);
     for (uint32_t group = 0; group < groups; ++group) {
@@ -204,15 +207,8 @@ __aicore__ inline void allreduce(const SmemMmAr310p3TilingData& tilingData, GM_A
         ub.SetValue(0, static_cast<int64_t>(epoch));
         DataCopy(ctrlSrcGm, ub, kFlagSlotQwords);
         // 组数据复制进对端 scratch；随后单独发 8B 就绪标记。
-        transport.send_group_copy(sendPhase, group, rows);
+        transport.send_group_copy(group, rows);
         transport.signal_peer_ready(group);
-        // 排空完成通知直到本组标记包回执：数据通知按发送顺序先到，途中无关
-        // 通知消费即弃；READY 阶段号与数据包（REDUCE/GATHER）位域不同，可精确识别。
-        while (true) {
-            const auto notice = smem_shm_sdma_wait_at(transport.sdmaRes);
-            check(notice.status == SMEM_SHM_SDMA_MAIL_OK, status, ProtocolError::MailStatusNotOk);
-            if (notice.imm == device_tag(Phase::READY, epoch, group, 0)) break;
-        }
         // 对端标记已到我方 peerRdy 槽，本端归约分支随时可相加。
         wait_peer_rdy(poll, work, group, epoch, status);
         // 本端就绪标记写 ready 槽（诊断用，对端不读）。
@@ -221,8 +217,9 @@ __aicore__ inline void allreduce(const SmemMmAr310p3TilingData& tilingData, GM_A
             work + kReadyOff + uint64_t{group} * kFlagSlotBytes), kFlagSlotQwords);
         DataCopy(readySlotGm, ub, kFlagSlotQwords);
     }
-    // 排空队列确保无遗留未决通知；trace 头写 magic，调度器轮数段入 trace。
-    check(smem_shm_sdma_quiet_at(transport.sdmaRes), status, ProtocolError::QuietFail);
+    // 排空队列确保全部已投递传输落地（源缓冲复用前）；trace 头写 magic，
+    // 调度器轮数段入 trace。
+    check(smem_shm_sdma_quiet_at(transport.ctx), status, ProtocolError::QuietFail);
     ub.SetValue(0, static_cast<int64_t>(kTraceMagic));
     DataCopy(traceGm[0], ub, kFlagSlotQwords);
     DataCopy(traceGm[kTraceSchedBase], stamps[8], 8 + groups * 4);

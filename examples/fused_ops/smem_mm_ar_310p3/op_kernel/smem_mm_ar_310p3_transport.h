@@ -94,42 +94,43 @@ __aicore__ inline uint32_t wait_peer_rdy(LocalTensor<int64_t>& poll, __gm__ uint
     return spins;
 }
 
-// Transport：SDMA 传输封装。sdmaRes 为保留区基址句柄（kernel 入口预计算），
-// work/peer 为本端与对端池地址，status 写失败错误码，epoch 参与完成通知标记，
-// packet 为分包粒度。
+// Transport：SDMA 传输封装。ctx 为 SDMA 上下文（kernel 入口预计算，block 已
+// 映射到可用队列），work/peer 为本端与对端池地址，status 写失败错误码，epoch
+// 参与就绪标记值，packet 为分包粒度。
 struct Transport {
-    __gm__ uint8_t *sdmaRes, *work, *peer, *status;
+    smem_shm_sdma_ctx_t ctx;
+    __gm__ uint8_t *work, *peer, *status;
     uint32_t epoch, packet;
 
     // send_packetized：把 work 区 [srcOff, srcOff+bytes) 按 packet 粒度分包
-    // 复制到对端 dstOff；每包完成通知携带 device_tag（phase/group/包序号）。
+    // copy 到对端 dstOff。数据包走 put_nbi_at（非阻塞入队），与随后的就绪
+    // 标记共处同一发送队列，orch 按队列 FIFO 序消费 ⇒ 标记晚于数据落地。
     // 任一包失败即写错误码并终止。
-    __aicore__ inline void send_packetized(Phase phase, uint32_t group, uint64_t srcOff, uint64_t dstOff,
-                                           uint64_t bytes, smem_shm_sdma_op_t op)
+    __aicore__ inline void send_packetized(uint64_t srcOff, uint64_t dstOff, uint64_t bytes,
+                                           smem_shm_sdma_op_t op)
     {
         for (uint64_t pos = 0; pos < bytes; pos += packet) {
             const uint64_t chunkBytes = bytes - pos < packet ? bytes - pos : packet;
-            check(smem_shm_sdma_signal_at(sdmaRes, work + srcOff + pos, peer + dstOff + pos, chunkBytes,
-                  device_tag(phase, epoch, group, static_cast<uint32_t>(pos / packet)), op), status,
-                  ProtocolError::SignalPostFail);
+            check(smem_shm_sdma_put_nbi_at(ctx, work + srcOff + pos, peer + dstOff + pos, chunkBytes, op),
+                  status, ProtocolError::SignalPostFail);
         }
     }
 
     // send_group_copy：组 group 本端数据全量复制进对端 scratch 区同偏移，
     // 末尾组按实属行数缩短。
-    __aicore__ inline void send_group_copy(Phase phase, uint32_t group, uint32_t rows)
+    __aicore__ inline void send_group_copy(uint32_t group, uint32_t rows)
     {
-        send_packetized(phase, group, uint64_t{group} * kGroupBytes, kScratchOff + uint64_t{group} * kGroupBytes,
+        send_packetized(uint64_t{group} * kGroupBytes, kScratchOff + uint64_t{group} * kGroupBytes,
               group_bytes_of(rows, group), SMEM_SHM_SDMA_OP_COPY);
     }
 
-    // signal_peer_ready：发 8B 包把就绪标记写进对端 peerRdy 槽（载荷为本
-    // 批次 epoch），对端归约分支轮询到该值即知数据已到。
+    // signal_peer_ready：发 8B 就绪标记把本批次 epoch 写进对端 peerRdy 槽，
+    // 对端归约分支轮询到该值即知数据已到（信号与数据共队列，FIFO 保序）。
     __aicore__ inline void signal_peer_ready(uint32_t group)
     {
-        check(smem_shm_sdma_signal_at(sdmaRes, work + kCtrlOff, peer + kPeerRdyOff + uint64_t{group} * kFlagSlotBytes,
-              8, device_tag(Phase::READY, epoch, group, 0), SMEM_SHM_SDMA_OP_COPY), status,
-              ProtocolError::SignalPostFail);
+        check(smem_shm_sdma_signal_set_nbi_at(ctx,
+              reinterpret_cast<__gm__ uint64_t*>(peer + kPeerRdyOff + uint64_t{group} * kFlagSlotBytes),
+              epoch), status, ProtocolError::SignalPostFail);
     }
 };
 
