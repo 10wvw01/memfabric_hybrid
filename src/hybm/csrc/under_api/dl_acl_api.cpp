@@ -19,6 +19,7 @@ std::mutex DlAclApi::gMutex;
 void *DlAclApi::rtHandle;
 const char *DlAclApi::gAscendAclLibName = "libascendcl.so";
 
+aclrtGetDeviceInfoFunc DlAclApi::pAclrtGetDeviceInfo = nullptr;
 aclrtGetDeviceFunc DlAclApi::pAclrtGetDevice = nullptr;
 aclrtSetDeviceFunc DlAclApi::pAclrtSetDevice = nullptr;
 aclrtDeviceEnablePeerAccessFunc DlAclApi::pAclrtDeviceEnablePeerAccess = nullptr;
@@ -107,6 +108,7 @@ Result DlAclApi::LoadLibrary(const std::string &libDirPath)
     }
 
     /* load sym */
+    DL_LOAD_SYM_OPTIONAL(pAclrtGetDeviceInfo, aclrtGetDeviceInfoFunc, rtHandle, "aclrtGetDeviceInfo");
     DL_LOAD_SYM(pAclrtGetDevice, aclrtGetDeviceFunc, rtHandle, "aclrtGetDevice");
     DL_LOAD_SYM(pAclrtSetDevice, aclrtSetDeviceFunc, rtHandle, "aclrtSetDevice");
     DL_LOAD_SYM(pAclrtDeviceEnablePeerAccess, aclrtDeviceEnablePeerAccessFunc, rtHandle, "aclrtDeviceEnablePeerAccess");
@@ -222,6 +224,7 @@ void DlAclApi::CleanupLibrary()
         return;
     }
 
+    pAclrtGetDeviceInfo = nullptr;
     pAclrtGetDevice = nullptr;
     pAclrtSetDevice = nullptr;
     pAclrtDeviceEnablePeerAccess = nullptr;

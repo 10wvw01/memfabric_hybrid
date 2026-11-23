@@ -121,6 +121,7 @@ Result SmemShmEntry::Initialize(hybm_options &options)
     SM_LOG_ERROR_RETURN_IT_IF_NOT_OK(CreateGlobalTeam(options.rankCount, options.rankId), "create global team failed");
 
     options_ = options;
+    options_.sdmaProducerMask = extraConfig_.sdmaProducerMask;
     for (auto it = initSteps_.begin(); it != initSteps_.end(); ++it) {
         SM_LOG_DEBUG("process init step : " << it->name);
         auto stepRet = it->processor();

@@ -372,7 +372,7 @@ TEST_F(SdmaDirectionTest, UnfinishedPreviousTransferPreventsStageOverwrite)
 
 class SdmaBatchTest : public SdmaDirectionTest {
 protected:
-    alignas(64) std::array<uint8_t, 64 * kSqeSize> batchRing{};
+    alignas(64) std::array<uint8_t, 128 * kSqeSize> batchRing{};
     ScanContext scan{};
     uint32_t batch = 0;
     uint32_t reads = 0;
@@ -382,9 +382,9 @@ protected:
     {
         SdmaDirectionTest::SetUp();
         context.sqBase = reinterpret_cast<uint64_t>(batchRing.data());
-        context.sqDepth = 64;
+        context.sqDepth = 128;
         context.result = reinterpret_cast<ock::mf::HybmSdmaOrchResult *>(workspace.data());
-        scan.count = 8;
+        scan.count = ock::mf::HybmSdmaBuildScanQueues(2, 0xFF, scan.queues);
         param.rankCount = 2;
     }
 
@@ -446,7 +446,7 @@ TEST_F(SdmaBatchTest, SingleHighQueueNeedsOnePass)
 
 TEST_F(SdmaBatchTest, SingleLastPeerQueueNeedsOnePass)
 {
-    scan.count = 24;
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(4, 0xFF, scan.queues);
     param.rankCount = 4;
     Publish(39, 1);
     ASSERT_EQ(Run(), 0);
@@ -497,7 +497,7 @@ TEST_F(SdmaBatchTest, RequestsPublishedAfterSnapshotRemainForNextBatch)
 
 TEST_F(SdmaBatchTest, BackloggedLowQueuesDoNotBlockLastPeer)
 {
-    scan.count = 24;
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(4, 0xFF, scan.queues);
     param.rankCount = 4;
     for (uint32_t queue = 0; queue < 8; ++queue) {
         Publish(queue, 2);
@@ -514,10 +514,10 @@ TEST_F(SdmaBatchTest, BackloggedLowQueuesDoNotBlockLastPeer)
 
 TEST_F(SdmaBatchTest, FullBatchesContinueAcrossAllPeers)
 {
-    scan.count = 24;
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(4, 0xFF, scan.queues);
     param.rankCount = 4;
     for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
-        Publish(ock::mf::HybmSdmaScanQueue(ordinal), 1);
+        Publish(scan.queues[ordinal], 1);
     }
     for (uint32_t iteration = 0; iteration < 3; ++iteration) {
         ASSERT_EQ(Run(), 0);
@@ -526,7 +526,7 @@ TEST_F(SdmaBatchTest, FullBatchesContinueAcrossAllPeers)
     EXPECT_EQ(reads, 24U);
     EXPECT_EQ(scan.next, 0U);
     for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
-        EXPECT_EQ(scan.heads[ock::mf::HybmSdmaScanQueue(ordinal)], 1U);
+        EXPECT_EQ(scan.heads[scan.queues[ordinal]], 1U);
     }
 }
 
@@ -544,6 +544,51 @@ TEST_F(SdmaBatchTest, FailedRequestRetainsHeadAndAlreadyPreparedRequests)
     EXPECT_EQ(context.sqTail, 2U);
     EXPECT_EQ(flushBatchDoorbell(&param, &context), 0);
     EXPECT_EQ(publishedTail, 2U);
+}
+
+TEST_F(SdmaBatchTest, VectorOnlyQueuesAreConsumedAndDisabledQueuesRetainHead)
+{
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(2, 0x7F00, scan.queues);
+    Publish(0, 1);
+    Publish(14, 1);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 1U);
+    EXPECT_EQ(reads, 7U);
+    EXPECT_EQ(scan.heads[0], 0U);
+    EXPECT_EQ(scan.heads[14], 1U);
+}
+
+TEST_F(SdmaBatchTest, MixedFullBatchesServeAllFortyFiveQueues)
+{
+    param.rankCount = 4;
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(4, 0x7FFF, scan.queues);
+    ASSERT_EQ(scan.count, 45U);
+    for (uint32_t i = 0; i < scan.count; ++i) {
+        Publish(scan.queues[i], 1);
+    }
+    for (uint32_t i = 0; i < 6; ++i) {
+        ASSERT_EQ(Run(), 0);
+        EXPECT_EQ(batch, i < 5 ? 8U : 5U);
+    }
+    for (uint32_t i = 0; i < scan.count; ++i) {
+        EXPECT_EQ(scan.heads[scan.queues[i]], 1U);
+    }
+    EXPECT_EQ(scan.heads[15], 0U);
+    EXPECT_EQ(scan.heads[31], 0U);
+    EXPECT_EQ(scan.heads[47], 0U);
+}
+
+TEST_F(SdmaBatchTest, SparseHighVectorQueueContinuesAfterSaturatedAiQueues)
+{
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(2, 0x7FFF, scan.queues);
+    for (uint32_t q = 0; q < 8; ++q) {
+        Publish(q, 2);
+    }
+    ASSERT_EQ(Run(), 0);
+    Publish(14, 1);
+    ASSERT_EQ(Run(), 0);
+    EXPECT_EQ(batch, 8U);
+    EXPECT_EQ(scan.heads[14], 1U);
 }
 
 class SdmaDeployVerifyTest : public testing::Test {
@@ -712,7 +757,7 @@ protected:
         param.stopAddr = reinterpret_cast<uint64_t>(&stop);
         param.hostLeaseMs = 10000;
         param.stopTimeoutMs = 5000;
-        scan.count = SMEM_SHM_SDMA_MAX_BLOCKS;
+        scan.count = ock::mf::HybmSdmaBuildScanQueues(2, 0xFF, scan.queues);
     }
 };
 
@@ -819,7 +864,7 @@ TEST_F(SdmaServiceTest, ProgressChecksFollowActivePeerQueues)
     EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
     EXPECT_EQ(context.progressNs[8], 0U);
     EXPECT_EQ(context.progressNs[16], 0U);
-    scan.count = 2 * SMEM_SHM_SDMA_MAX_BLOCKS;
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(3, 0xFF, scan.queues);
     ASSERT_EQ(checkServiceCycle(&param, &context, scan), 0);
     clockNowNs += 1000000000ULL;
     EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1385);
@@ -833,6 +878,20 @@ TEST_F(SdmaServiceTest, HealthAndCompletionShareClockSample)
     clockNowNs += 1000000000ULL;
     EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1385);
     EXPECT_EQ(clockCalls, 2U);
+}
+
+TEST_F(SdmaServiceTest, VectorProgressUsesConfiguredProducerQueues)
+{
+    scan.count = ock::mf::HybmSdmaBuildScanQueues(2, 0x100, scan.queues);
+    scan.heads[0] = 1;
+    scan.heads[8] = 1;
+    ASSERT_EQ(checkServiceCycle(&param, &context, scan), 0);
+    clockNowNs += 1000000000ULL;
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 1385);
+    EXPECT_EQ(context.progressNs[0], 0U);
+    storeCell(param.resBase + SMEM_SHM_SDMA_RS_QUIET + 8 * SMEM_SHM_SDMA_RS_QUIET_STRIDE, 1);
+    EXPECT_EQ(checkServiceCycle(&param, &context, scan), 0);
+    EXPECT_EQ(context.completed[8], 1U);
 }
 
 #else

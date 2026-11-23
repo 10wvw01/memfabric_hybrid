@@ -299,6 +299,7 @@ SMEM_API int32_t smem_shm_config_init(smem_shm_config_t *config)
     config->controlOperationTimeout = SMEM_DEFAUT_WAIT_TIME;
     config->startConfigStoreServer = true;
     config->flags = 0;
+    config->sdmaProducerMask = 0x00FF;
     return SM_OK;
 }
 
@@ -313,6 +314,8 @@ static int32_t SmemShmConfigCheck(const smem_shm_config_t *config)
     SM_VALIDATE_RETURN(config->controlOperationTimeout != 0, "controlOperationTimeout is zero", SM_INVALID_PARAM);
     SM_VALIDATE_RETURN(config->controlOperationTimeout <= SMEM_SHM_TIMEOUT_MAX, "controlOperationTimeout is too large",
                        SM_INVALID_PARAM);
+    SM_VALIDATE_RETURN(config->sdmaProducerMask != 0 && (config->sdmaProducerMask & ~0x7FFFU) == 0,
+                       "invalid sdmaProducerMask: " << config->sdmaProducerMask, SM_INVALID_PARAM);
     return 0;
 }
 

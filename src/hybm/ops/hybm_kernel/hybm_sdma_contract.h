@@ -56,15 +56,17 @@ struct HybmSdmaOrchParam {
     uint64_t symSize;      /* 对称段大小(对端段基址掩码算术用, 须 2 的幂) */
     uint64_t physSize;     /* 段物理大小(对端保留区定位用) */
     /* v29 4-rank 化: reqBase/quietBase 合并为 resBase(请求环/完成戳均由保留区基址+布局常量定位),
-     * 尾部使用 rank/rankCount/poolBaseGva; 追加租约与实例后布局为96B，通过协议标识检查配套产物 */
-    uint32_t rank;        /* 本端 rank 号(请求环下标 = PeerRingIdx(rank, 目的 rank)) */
-    uint32_t rankCount;   /* 世界大小，决定有效对端队列范围 */
-    uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
+     * 尾部使用 rank/rankCount/poolBaseGva; 追加租约与实例后布局为104B，通过协议标识检查配套产物 */
+    uint32_t rank;         /* 本端 rank 号(请求环下标 = PeerRingIdx(rank, 目的 rank)) */
+    uint32_t rankCount;    /* 世界大小，决定有效对端队列范围 */
+    uint64_t poolBaseGva;  /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
+    uint32_t producerMask; /* 允许提交的逻辑block，与设备元数据一致 */
+    uint32_t reserved;
     uint32_t hostLeaseMs;
     uint32_t stopTimeoutMs;
     uint64_t instance;
 };
-static_assert(sizeof(HybmSdmaOrchParam) == 96, "Param 尺寸漂移"); /* Host/AICPU共同使用的参数布局 */
+static_assert(sizeof(HybmSdmaOrchParam) == 104, "Param 尺寸漂移"); /* Host/AICPU共同使用的参数布局 */
 
 // 部署与清理确认使用独立参数，结果必须携带本次nonce。
 struct HybmSdmaDeployCheck {
@@ -130,10 +132,21 @@ constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 常驻服务仍检查host租约、停止及错误 */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_CLOCK_INTERVAL = 64; /* 稀疏读取单调时钟，限制每轮实际时长 */
 
-// 紧凑扫描编号映射到稀疏队列，保留每对端block 8..15的预留位置。
-inline uint32_t HybmSdmaScanQueue(uint32_t ordinal)
+// epoch入口生成允许提交的队列列表，批次消费时直接按列表轮转。
+inline uint32_t HybmSdmaBuildScanQueues(uint32_t ranks, uint32_t mask, uint32_t *queues)
 {
-    return SmemShmSdmaQueueIdx(ordinal / SMEM_SHM_SDMA_MAX_BLOCKS, ordinal % SMEM_SHM_SDMA_MAX_BLOCKS);
+    if (ranks == 0 || ranks > SMEM_SHM_SDMA_MAX_RANKS || !SmemShmSdmaProducerMaskValid(mask)) {
+        return 0;
+    }
+    uint32_t count = 0;
+    for (uint32_t peer = 0; peer < ranks - 1; ++peer) {
+        for (uint32_t block = 0; block < SMEM_SHM_SDMA_QUEUES_PER_PEER; ++block) {
+            if (SmemShmSdmaProducerAllowed(mask, block)) {
+                queues[count++] = SmemShmSdmaQueueIdx(peer, block);
+            }
+        }
+    }
+    return count;
 }
 
 inline uint32_t HybmSdmaNextScan(uint32_t ordinal, uint32_t count)
