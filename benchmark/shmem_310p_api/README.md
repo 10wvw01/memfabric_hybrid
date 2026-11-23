@@ -211,6 +211,13 @@ gva、at、local 对应上文接口形式。所有时间单位为 µs。
 | signal_test_ready | local | — | 92.357 | 92.683 | 99.583 | 105.234 | 106.485 | 94.435 | 222.745 |
 | signal_wait_ready | local | — | 90.449 | 91.849 | 101.224 | 102.188 | 102.448 | 93.376 | 218.945 |
 
+**比较条件：同步接口的“接口 Event”包含完成等待，NBI 的“接口 Event”记录提交；
+比较传输完成耗时使用“完成 Event”，该范围还包含后续 quiet kernel 和提交间隔。
+quiet_after_nbi 的请求在计时前提交，数值表示剩余等待；ready 场景在计时前已满足条件。
+gva/at 均在 kernel 入口获取上下文，gva 封装内部还会获取上下文。
+本表由 rank 0 的一个 AICore 测量单向 COPY 或通知/等待；
+AllReduce 表由两个 rank 同时执行 ADD 与 COPY，并取较慢 rank，计时工作范围分别对应各自场景。**
+
 <details>
 <summary>完成 Event 和 Host 的完整统计（µs）</summary>
 
@@ -372,5 +379,12 @@ gva、at、local 对应上文接口形式。所有时间单位为 µs。
 | signal_test_ready | local | — | Host | 222.745 | 221.440 | 233.030 | 236.180 | 391.350 |
 | signal_wait_ready | local | — | 完成 Event | 93.376 | 94.010 | 103.229 | 104.375 | 104.792 |
 | signal_wait_ready | local | — | Host | 218.945 | 217.920 | 231.450 | 241.410 | 255.090 |
+
+**比较条件：同步接口的“接口 Event”包含完成等待，NBI 的“接口 Event”记录提交；
+比较传输完成耗时使用“完成 Event”，该范围还包含后续 quiet kernel 和提交间隔。
+quiet_after_nbi 的请求在计时前提交，数值表示剩余等待；ready 场景在计时前已满足条件。
+gva/at 均在 kernel 入口获取上下文，gva 封装内部还会获取上下文。
+本表由 rank 0 的一个 AICore 测量单向 COPY 或通知/等待；
+AllReduce 表由两个 rank 同时执行 ADD 与 COPY，并取较慢 rank，计时工作范围分别对应各自场景。**
 
 </details>
