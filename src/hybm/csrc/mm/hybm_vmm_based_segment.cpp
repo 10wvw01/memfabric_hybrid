@@ -139,7 +139,10 @@ Result HybmVmmBasedSegment::UnReserveMemorySpace() noexcept
         auto freeRet = DlHalApi::HalMemAddressFree(lva);
         BM_LOG_INFO("free reserved address va:" << lva << " return:" << freeRet);
         if (freeRet != BM_OK) {
-            BM_LOG_WARN("Unable to free reserved VA, ret:" << freeRet << " gva:" << globalVirtualAddress_
+            /* 必须转 void*: globalVirtualAddress_ 是 uint8_t*, 流会将其按 C 字符串处理(先 strlen 解引用),
+             * 310P 上 GVA 为设备侧地址, host 解引用必段错误(实测崩点 strlen+0x10 @ 0x280040000000) */
+            BM_LOG_WARN("Unable to free reserved VA, ret:" << freeRet
+                                                           << " gva:" << reinterpret_cast<void *>(globalVirtualAddress_)
                                                            << " va:" << lva);
         }
     }
