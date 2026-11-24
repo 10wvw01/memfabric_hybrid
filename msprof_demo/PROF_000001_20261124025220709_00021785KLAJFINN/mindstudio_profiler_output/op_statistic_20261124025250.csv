@@ -1,2 +1,0 @@
-Device_id,OP Type,Core Type,Count,Total Time(us),Min Time(us),Avg Time(us),Max Time(us),Ratio(%)
-0,Mul,AI_CORE,1,6.327,6.327,6.327,6.327,100.0
