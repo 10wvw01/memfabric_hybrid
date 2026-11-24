@@ -14,8 +14,8 @@
 
 Mirrors vllm_integration_test.py's three 4-rank scenarios but runs MemCache
 in host_shm mode — KV Cache goes directly to /dev/shm DRAM, bypassing HBM
-entirely. This verifies the pure-DRAM data path without HBM fast-path or
-HBM→DRAM eviction.
+entirely. This verifies the pure-DRAM data path under full miss, 50% hit,
+and 100% hit patterns without HBM fast-path or HBM→DRAM eviction.
 
 Test scenarios (4-rank only):
 
@@ -37,18 +37,14 @@ Run with:
 
 import multiprocessing
 import os
+import sys
 import time
 
 import pytest
 
 from integration import vllm_integration_test as integration_cases
-
-# Reuse VLLMBenchmark and helpers from the baseline integration test module.
-# Both files live in the same package (integration/), so a package-relative
-# import works under pytest's default sys.path insertion.
 from integration.vllm_integration_test import (
     DEFAULT_DEVICE_IDS,
-    DEFAULT_MODEL_PATH,
     DEFAULT_SERVED_MODEL_NAME,
     DEFAULT_TENSOR_PARALLEL_SIZE,
     DEFAULT_VLLM_PORT,
@@ -61,10 +57,9 @@ from integration.vllm_integration_test import (
     _vllm_available,
 )
 
-# ---------------------------------------------------------------------------
-# Pure-DRAM config selection
-# ---------------------------------------------------------------------------
-_PURE_DRAM_CONFIG = os.path.join(os.path.dirname(__file__), "..", "..", "..", "config", "mmc-local-puredram-4rank.conf")
+_PURE_DRAM_CONFIG = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "config", "mmc-local-puredram-4rank.conf"
+)
 
 
 def _set_puredram_config_env():
@@ -78,16 +73,12 @@ def _set_puredram_config_env():
     print(f"[INFO] Pure-DRAM config: {os.environ['MMC_LOCAL_CONFIG_PATH']}")
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
 def meta_service():
     if not _npu_available():
         pytest.skip("NPU environment not available")
     _set_puredram_config_env()
-    # If a MetaService is already running under a different protocol config
-    # (e.g. device_sdma), restart it so it picks up host_shm for pure-DRAM.
+    # 协议与 device_sdma 不同，重启 MetaService 以切换到 host_shm。
     if _is_meta_service_running():
         _kill_meta_service()
         time.sleep(2)
@@ -116,7 +107,14 @@ def meta_service():
 def benchmark(meta_service):
     if not _vllm_available():
         pytest.skip("vLLM environment not available")
-    model_path = os.environ.get("MMC_TEST_VLLM_MODEL_PATH", DEFAULT_MODEL_PATH)
+    # model path 为必填项，不设默认路径，避免误用不存在的路径。
+    model_path = os.environ.get("MMC_TEST_VLLM_MODEL_PATH", "")
+    if not model_path:
+        print(f"[ERROR] MMC_TEST_VLLM_MODEL_PATH is not set, deviceIds="
+              f"{os.environ.get('MMC_TEST_DEVICE_IDS', DEFAULT_DEVICE_IDS)}, "
+              f"tpSize={os.environ.get('MMC_TEST_TENSOR_PARALLEL_SIZE', str(DEFAULT_TENSOR_PARALLEL_SIZE))}; "
+              "set it to the W8A8 model path before running pure-DRAM tests", file=sys.stderr)
+        pytest.skip("MMC_TEST_VLLM_MODEL_PATH not set; set it to the W8A8 model path")
     served_name = os.environ.get("MMC_TEST_VLLM_MODEL", DEFAULT_SERVED_MODEL_NAME)
     port = int(os.environ.get("MMC_TEST_VLLM_PORT", str(DEFAULT_VLLM_PORT)))
     device_ids = os.environ.get("MMC_TEST_DEVICE_IDS", DEFAULT_DEVICE_IDS)

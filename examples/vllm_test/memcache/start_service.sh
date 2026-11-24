@@ -11,7 +11,7 @@
 #   --tp <N>                    tensor parallel size (default: 2)
 #   --port <PORT>               vLLM server port (default: 4077)
 #   --gpu-mem-util <float>      GPU memory utilization (default: 0.80)
-#   --model <PATH>              model path (default: /workspace/models/Qwen3.6-35B-A3B-w8a8)
+#   --model <PATH>              model path (required, or set MMC_TEST_VLLM_MODEL_PATH)
 #   --served-model-name <NAME>  served model name (default: Qwen3.6-35B-A3B)
 #   --memcache-dir <DIR>        memcache repo dir (default: /workspace/memcache-v121-test)
 #   --config <PATH>             MMC_LOCAL_CONFIG_PATH (default: selected by --tp)
@@ -40,7 +40,8 @@ DEVICE_IDS="6,7"
 TP_SIZE="2"
 VLLM_PORT="4077"
 GPU_MEM_UTIL="0.80"
-MODEL_PATH="/workspace/models/Qwen3.6-35B-A3B-w8a8"
+# model path 为必填项，不设默认路径，避免误用不存在的路径。
+MODEL_PATH="${MMC_TEST_VLLM_MODEL_PATH:-}"
 SERVED_MODEL_NAME="Qwen3.6-35B-A3B"
 MEMCACHE_DIR="/workspace/memcache-v121-test"
 LOCAL_CONFIG="${MMC_LOCAL_CONFIG_PATH:-}"
@@ -63,6 +64,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "[ERROR] 未知参数: $1"; exit 1 ;;
     esac
 done
+
+# model path 必填，未通过 --model 或 MMC_TEST_VLLM_MODEL_PATH 设置时报错退出。
+if [[ -z "$MODEL_PATH" ]]; then
+    echo "[ERROR] model path 未设置，deviceIds=$DEVICE_IDS, tpSize=$TP_SIZE; " \
+         "请通过 --model 或环境变量 MMC_TEST_VLLM_MODEL_PATH 指定 W8A8 模型路径" >&2
+    exit 1
+fi
 
 if [[ -z "$LOCAL_CONFIG" ]]; then
     case "$TP_SIZE" in

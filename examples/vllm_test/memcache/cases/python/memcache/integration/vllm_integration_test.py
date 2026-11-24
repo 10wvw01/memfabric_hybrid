@@ -72,8 +72,8 @@ SUFFIX_TOKENS = PROMPT_TOKENS - PREFIX_HIT_TOKENS
 DECODE_MAX_TOKENS = int(os.environ.get("MMC_TEST_DECODE_MAX_TOKENS", "1536"))
 MAX_TOKENS_TTFT = 1
 
-WARMUP_REQUESTS = 1
-MEASURED_REQUESTS = 10
+WARMUP_REQUESTS = int(os.environ.get("MMC_TEST_WARMUP_REQUESTS", "1"))
+MEASURED_REQUESTS = int(os.environ.get("MMC_TEST_MEASURED_REQUESTS", "10"))
 
 VLLM_READY_TIMEOUT_S = 600
 VLLM_STOP_TIMEOUT_S = 60
@@ -85,7 +85,8 @@ VOCAB_SIZE = 151936
 # ---------------------------------------------------------------------------
 # Environment defaults
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL_PATH = "/workspace/models/Qwen3.5-4B-W8A8-310P"
+# MMC_TEST_VLLM_MODEL_PATH 为必填环境变量，不设置默认路径，避免误用不存在的
+# 路径导致 transformers 把路径当作 HuggingFace repo id 解析而失败。
 DEFAULT_SERVED_MODEL_NAME = "Qwen3.5-4B"
 DEFAULT_VLLM_PORT = 4077
 DEFAULT_DEVICE_IDS = "0,1"
@@ -366,22 +367,23 @@ class VLLMBenchmark:
     def _wait_for_device_memory(self, timeout: int = 120):
         device_ids = {int(device) for device in self._device_ids.split(",")}
         deadline = time.monotonic() + timeout
-        pattern = re.compile(r"^\|\s*\d+\s+(\d+)\s*\|.*\|\s*\d+\s+(\d+)\s*/\s*(\d+)\s*\|")
         max_used_ratio = float(os.environ.get("MMC_TEST_MAX_USED_MEMORY_RATIO", "0.25"))
         if not 0 < max_used_ratio < 1:
             raise ValueError("MMC_TEST_MAX_USED_MEMORY_RATIO must be between 0 and 1")
+        # 用 ACL runtime 直接获取设备显存，避免 npu-smi 命令在设备异常时卡死。
+        import acl
+
+        acl.init()
         idle_samples = 0
+        memory = {}
         while time.monotonic() < deadline:
-            result = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, timeout=15, check=True)
             memory = {}
-            for line in result.stdout.splitlines():
-                match = pattern.match(line)
-                if match:
-                    device, used, total = map(int, match.groups())
-                    if device in device_ids:
-                        memory[device] = (used, total)
+            for dev in sorted(device_ids):
+                acl.rt.set_device(dev)
+                free_bytes, total_bytes, _ = acl.rt.get_mem_info(0)
+                memory[dev] = (total_bytes - free_bytes, total_bytes)
             if set(memory) != device_ids:
-                raise RuntimeError(f"npu-smi did not report memory for devices {sorted(device_ids)}: {memory}")
+                raise RuntimeError(f"ACL did not report memory for devices {sorted(device_ids)}: {memory}")
             idle_samples = (
                 idle_samples + 1 if all(used <= total * max_used_ratio for used, total in memory.values()) else 0
             )
@@ -767,7 +769,14 @@ def _create_benchmark():
     if not _vllm_available():
         pytest.skip("vLLM environment not available")
 
-    model_path = os.environ.get("MMC_TEST_VLLM_MODEL_PATH", DEFAULT_MODEL_PATH)
+    # model path 为必填项，不设默认路径，避免误用不存在的路径。
+    model_path = os.environ.get("MMC_TEST_VLLM_MODEL_PATH", "")
+    if not model_path:
+        print(f"[ERROR] MMC_TEST_VLLM_MODEL_PATH is not set, deviceIds="
+              f"{os.environ.get('MMC_TEST_DEVICE_IDS', DEFAULT_DEVICE_IDS)}, "
+              f"tpSize={os.environ.get('MMC_TEST_TENSOR_PARALLEL_SIZE', str(DEFAULT_TENSOR_PARALLEL_SIZE))}; "
+              "set it to the W8A8 model path before running integration tests", file=sys.stderr)
+        pytest.skip("MMC_TEST_VLLM_MODEL_PATH not set; set it to the W8A8 model path")
     served_name = os.environ.get("MMC_TEST_VLLM_MODEL", DEFAULT_SERVED_MODEL_NAME)
     port = int(os.environ.get("MMC_TEST_VLLM_PORT", str(DEFAULT_VLLM_PORT)))
     device_ids = os.environ.get("MMC_TEST_DEVICE_IDS", DEFAULT_DEVICE_IDS)
