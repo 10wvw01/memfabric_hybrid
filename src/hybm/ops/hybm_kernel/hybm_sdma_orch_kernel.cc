@@ -310,6 +310,13 @@ inline uint64_t LoadHeartbeat(const volatile ock::mf::HybmSdmaOrchResult *result
     return *reinterpret_cast<volatile uint64_t *>(hbAddr);
 }
 
+/* 诊断阶段码: 写入 result->headAfter(退出前会被真实 SQ head 覆盖), 供 host D2H 定位 kernel 卡点。 */
+inline void markStage(volatile ock::mf::HybmSdmaOrchResult *result, uint32_t code)
+{
+    result->headAfter = static_cast<uint64_t>(code);
+    cacheFlushLine(reinterpret_cast<uintptr_t>(result) & ~static_cast<uintptr_t>(63));
+}
+
 // 结果写回并刷出(host 经 D2H 可读)
 void finishResult(volatile ock::mf::HybmSdmaOrchResult *result)
 {
@@ -634,6 +641,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     result->consumed = 0;
     result->exitReason = HYBM_SDMA_ORCH_EXIT_RUNNING; // 运行中(host 轮询判据: 变为终值即退出)
     finishResult(result);                             // 入口状态刷出(host 立即可见 RUNNING)
+    markStage(result, 0x1000);                        // 诊断: 已进入 kernel
     SqContext ctx = {};
     ctx.result = result;
     ctx.streamId = static_cast<uint32_t>(p->streamId);
@@ -646,7 +654,9 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         finishResult(result);
         return 1;
     }
+    markStage(result, 0x1001);                 // 诊断: cp1LiveQuery 返回
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
+    markStage(result, 0x1002);                 // 诊断: querySsid 返回
     /* 寄存器同步唤醒装载: regBase 数组(10×u64, host H2D 后的设备地址; commByReg=0 时为 null 走 GM)。
      * 唤醒正确性不依赖寄存器: 每 kCondForceScan 次空转强制全扫 GM 兜底(set_cond 丢失时不挂死)。 */
     const volatile uint64_t *regBaseArr = (p->commByReg != 0 && p->regBaseAddr != 0)
@@ -660,6 +670,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     for (uint32_t q = 0; q < SMEM_SHM_SDMA_QUEUE_COUNT; q++) {
         heads[q] = loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_HEAD + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
     }
+    markStage(result, 0x1003); // 诊断: 队列游标装载完成, 即将进主循环
     EpochBudget budget{};
     if (initEpochBudget(p, budget) != 0) {
         result->mainRet = 1370;
@@ -673,10 +684,12 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
         if (state != 0) {
             result->mainRet = state < 0 ? 1370 : 0;
             result->exitReason = state < 0 ? HYBM_SDMA_ORCH_EXIT_ERROR : HYBM_SDMA_ORCH_EXIT_DEADLINE;
+            markStage(result, 0x6000); // 诊断: 时限退出
             break;
         }
         if (loadCell(p->stopAddr) != 0) { // 停止标志(host 析构)
             result->exitReason = HYBM_SDMA_ORCH_EXIT_STOP;
+            markStage(result, 0x6001); // 诊断: 停止退出
             break;
         }
         /* commByReg 空闲唤醒: 空转中(idleSpins>0)只读 10 核 COND(MMIO, 免 GM 全队列 dcci),
@@ -684,16 +697,20 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
          * (唤醒信号丢失/未启用 set_cond 时退化为纯 GM 轮询, 不挂死)。 */
         if (regBaseArr != nullptr && idleSpins > 0) {
             bool woken = false;
+            markStage(result, 0x3000); // 诊断: 进入 COND 扫描
             for (uint32_t c = 0; c < REG_ORCH_CORES; c++) {
+                markStage(result, 0x3100 + c); // 诊断: 即将读第 c 个核的 COND
                 const uint64_t v = AicpuReadReg64(regBaseArr[c] + REG_SPR_COND);
                 if (v != lastCond[c]) {
                     lastCond[c] = v;
                     woken = true;
                 }
             }
+            markStage(result, woken ? 0x3201 : 0x3200); // 诊断: COND 扫描完成(有无变化)
             if (!woken) {
                 if (idleSpins < kCondForceScan) {
                     idleSpins++;
+                    markStage(result, 0x5000); // 诊断: 空闲空转(未到强扫周期)
                     usleep(HYBM_SDMA_ORCH_EPOCH_IDLE_US);
                     continue;
                 }

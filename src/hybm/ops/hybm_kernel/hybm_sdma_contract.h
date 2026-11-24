@@ -134,6 +134,7 @@ static_assert(sizeof(HybmSdmaOrchDbgMail) == 64, "DbgMail 尺寸漂移"); /* 布
 
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 永不退出的专用值(不判报时, 诊断用) */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;       /* 空闲退避 100µs(实测 ≈130µs) */
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_CLOCK_INTERVAL = 64; /* 稀疏读取单调时钟，限制每轮实际时长 */
 
 } // namespace mf
