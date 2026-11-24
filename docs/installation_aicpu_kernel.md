@@ -1,6 +1,11 @@
 # 安装 HYBM AICPU Kernel Run 包
 
-本文档介绍安装 `memfabric_hybrid_aicpu_kernel.run` 的方法。该安装包将 `cann-hybm-compat.tar.gz`、`libcann_hybm_kernel.json` 和 `cann_hybm_kernel_version` 安装到 CANN device-side OPP tree。
+本文档介绍安装 `memfabric_hybrid_aicpu_kernel.run` 的方法。该安装包同时包含 A3/A5 和 310P 两个平台的 AICPU kernel，安装时两份都装（各架构运行时只加载自己需要的，互不干扰）：
+
+| 产物 | 类型 | 安装位置 | 适用平台 |
+| -- | -- | -- | -- |
+| `cann-hybm-compat.tar.gz` + `libcann_hybm_kernel.json` | `AICPUKernel`（URMA transport 用） | `${ASCEND_HOME_PATH}/opp/vendors/cust/op_impl/aicpu/{kernel,config}/` | A3/A5 |
+| `libmf_sdma_orch.so` + `libmf_sdma_orch.json` + `libmf_sdma_orch_launch.json` | `CUSTAICPUKernel`（SDMA 协同用） | `${MEMFABRIC_HYBRID_HOME_PATH}/cust_aicpu_kernel/` | 310P |
 
 ---
 
@@ -11,7 +16,8 @@
 | 条件 | 说明 |
 | -- | -- |
 | **CANN 环境** | 已安装对应版本的 CANN 工具包，且 `ASCEND_HOME_PATH` 环境变量已配置 |
-| **安装权限** | 具备目标 CANN 路径的写入权限（通常需要 `root` 或 `sudo`） |
+| **主包已安装（310P 必需）** | 310P 的 `libmf_sdma_orch.so` 装到主包安装目录的 `cust_aicpu_kernel/` 子目录，需主包已安装并 source `set_env.sh`（`MEMFABRIC_HYBRID_HOME_PATH` 已配置）。A3/A5 产物装到 CANN OPP 树，不依赖主包 |
+| **安装权限** | 具备目标 CANN 路径和主包安装目录的写入权限（通常需要 `root` 或 `sudo`） |
 | **Run 包** | 已获取 `memfabric_hybrid_aicpu_kernel.run`（参见下文"获取 run 包"） |
 
 ---
@@ -309,3 +315,40 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 **现象**：安装过程中提示签名验证失败错误。
 
 **解决方法**：如果在 A5 环境上安装，请先按照 [六、在 A5 环境关闭验签](#六-在-a5-环境关闭验签不建议在生产环境关闭) 章节的指引关闭验签后重试。
+
+---
+
+## 九、 310P sdma orchestrator kernel
+
+### 1. 安装位置
+
+310P 的 `libmf_sdma_orch.so` + 双 json 装到主包安装目录的 `cust_aicpu_kernel/` 子目录（与 A3/A5 的 `libcann_hybm_kernel.so` 装到 CANN OPP 树不同）。`cust_aicpu_kernel/` 收纳所有 host 侧主动 CUST 迁移加载的 AICPU kernel，当前装 sdma orchestrator 一组，后续同类 kernel 往同目录平铺：
+
+```bash
+${MEMFABRIC_HYBRID_HOME_PATH}/cust_aicpu_kernel/
+├── libmf_sdma_orch.so
+├── libmf_sdma_orch.json
+├── libmf_sdma_orch_launch.json
+└── sdma_orch_kernel_version
+```
+
+### 2. 安装前提
+
+310P 的 `libmf_sdma_orch.so` 装到主包安装目录，**需主包已安装并 source `set_env.sh`**（`MEMFABRIC_HYBRID_HOME_PATH` 已配置）。若主包未安装，310P 产物会装到默认路径 `/usr/local/memfabric_hybrid/latest/cust_aicpu_kernel/`，但运行时 `FindInstalledJson()` 依赖 `libmf_hybm_core.so` 定位主包目录，主包未装时无法发现。
+
+A3/A5 产物装到 CANN OPP 树，不依赖主包。
+
+### 3. 加载机制
+
+310P 的 `libmf_sdma_orch.so` 是 `CUSTAICPUKernel` 类型，由 host 侧 `SdmaOrchestrator`（`hybm_sdma_orchestrator.cpp`）主动 CUST 迁移加载，不走 CANN OPP 自动加载。
+
+`FindInstalledJson()` 从 `libmf_hybm_core.so` 所在目录上溯到主包安装目录，其下 `cust_aicpu_kernel/` 子目录找 `libmf_sdma_orch_launch.json`，命中后从同目录取 `libmf_sdma_orch.so` + `libmf_sdma_orch.json` 走 CUST 迁移通道。
+
+### 4. 两份都装的影响
+
+`memfabric_hybrid_aicpu_kernel.run` 安装时 A3/A5 和 310P 两份产物都装，运行时各架构只加载自己需要的：
+
+- A3/A5 环境：加载 `libcann_hybm_kernel.so`（从 CANN OPP 树），不加载 `libmf_sdma_orch.so`
+- 310P 环境：加载 `libmf_sdma_orch.so`（从主包目录），不加载 `libcann_hybm_kernel.so`
+
+互不干扰，无需按架构选择安装。
