@@ -1,0 +1,118 @@
+2026-11-24 06:30:52 [INFO] [collection_engine.py:99] - Database process finished.
+2026-11-24 06:30:52 [INFO] [collection_engine.py:100] - Analysis finished.
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - L2CacheParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingRuntimeData process data finished, execute time is 0.004 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingDDRData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingTSData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingAICPUData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingCtrlCPUData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingMemoryData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingCpuUsageData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingPcieData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingHBMData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - NonMiniLLCParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingHCCSData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingAICoreSampleData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParsingAIVectorCoreSampleData process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_time_parser.py:116] - Start parsing sync data ...
+2026-11-24 06:30:52 [INFO] [ms_time_parser.py:119] - Parsing sync data finished...
+2026-11-24 06:30:52 [WARNING] [data_preparation_parser.py:104] - No data preparation data, data list is empty!
+2026-11-24 06:30:52 [INFO] [data_preparation_parser.py:117] - Parsing data preparation has finished.
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - DataPreparationParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - ParallelStrategyParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - NpuMemParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - NpuModuleMemParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:52 [INFO] [aicpu_add_info_parser.py:305] - start parsing aicpu data, files: ['aicpu.data.4.slice_0']
+2026-11-24 06:30:52 [INFO] [data_parser.py:122] - start to process the file: aicpu.data.4.slice_0
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - NetDevStatsParser process data finished, execute time is 0.002 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - MsTimeParser process data finished, execute time is 0.015 s
+2026-11-24 06:30:52 [INFO] [ms_multi_process.py:77] - AicpuAddInfoParser process data finished, execute time is 0.022 s
+2026-11-24 06:30:53 [INFO] [ts_track_parser.py:100] - start parsing rts data file: ts_track.data.4.slice_0
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - TstrackParser process data finished, execute time is 0.022 s
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - AicpuBinDataParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - HCCLOperatorParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - ParallelParser process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [profiling_scene.py:69] - Current scene of data is based on single_op
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - IterRecParser process data finished, execute time is 0.004 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - NoGeIterRecParser process data finished, execute time is 0.004 s
+2026-11-24 06:30:53 [INFO] [msprof_c_interface.py:100] - Do not support parsing by msprof_analysis.so!
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [profiling_scene.py:69] - Current scene of data is based on single_op
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:293] - Different flip numbers, 9 host flips and 8 device flips.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table TsBlockNum not found.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - BlockNumCalculator process data finished, execute time is 0.006 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - L2CacheCalculator process data finished, execute time is 0.004 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - MemcpyCalculator process data finished, execute time is 0.021 s
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [aic_calculator.py:154] - start parsing ai core data file: aicore.data.4.slice_0
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - AivCalculator process data finished, execute time is 0.010 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - AicCalculator process data finished, execute time is 0.017 s
+2026-11-24 06:30:53 [INFO] [hwts_aiv_calculator.py:59] - The Table HwtsTask or HwtsTaskTime already exists in the hwts.db, and won't be calculate again.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - HwtsAivCalculator process data finished, execute time is 0.024 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - HwtsCalculator process data finished, execute time is 0.027 s
+2026-11-24 06:30:53 [INFO] [ascend_task_calculator.py:88] - No table AscendTask found, to generate it
+2026-11-24 06:30:53 [WARNING] [device_task_collector.py:121] - no db hwts_aiv.db found
+2026-11-24 06:30:53 [INFO] [ascend_task_generator.py:325] - Found 17 host device matched task, 46 top down task
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - AscendTaskCalculator process data finished, execute time is 0.017 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - HcclCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - KfcCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - ParseAiCoreOpSummaryCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - MergeOpCounterCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - OpSummaryOpSceneCalculator process data finished, execute time is 0.029 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - OpCounterOpSceneCalculator process data finished, execute time is 0.029 s
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:572] - Unable to get freq data. Maybe the data is not collected, or the data may fail to be analyzed.
+2026-11-24 06:30:53 [WARNING] [pipeline_overlap_viewer.py:85] - Both task data and hccl data are missing, no need to calculate the overlap.
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:572] - Unable to get msprof data. Maybe the data is not collected, or the data may fail to be analyzed.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [profiling_scene.py:69] - Current scene of data is based on single_op
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:293] - Different flip numbers, 9 host flips and 8 device flips.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table EventData not found.
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:572] - Unable to get voltage data. Maybe the data is not collected, or the data may fail to be analyzed.
+2026-11-24 06:30:53 [WARNING] [file_manager.py:99] - Data has been analyzed, path is /tmp/opencode/msprof_allreduce/PROF_000001_20261124063032192_00047027PLFCNLEQ/device_4, there are ['step_trace.db', 'memory_copy.db', 'ai_cpu.db', 'op_counter.db', 'kfc_info.db', 'time.db', 'ai_core_op_summary.db', 'freq.db', 'ascend_task.db', 'hwts.db', 'metric_summary.db'] in sqlite.
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:476] - File all_file.complete already exists. All data will be exported from db in sqlite. Path is /tmp/opencode/msprof_allreduce/PROF_000001_20261124063032192_00047027PLFCNLEQ/device_4 
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [profiling_scene.py:69] - Current scene of data is based on single_op
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:293] - Different flip numbers, 9 host flips and 8 device flips.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - L2CacheCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table TsBlockNum not found.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - BlockNumCalculator process data finished, execute time is 0.005 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - MemcpyCalculator process data finished, execute time is 0.025 s
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [hwts_calculator.py:84] - The Table HwtsTask or HwtsTaskTime already exists in the hwts.db, and won't be calculate again.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - HwtsCalculator process data finished, execute time is 0.004 s
+2026-11-24 06:30:53 [INFO] [hwts_aiv_calculator.py:59] - The Table HwtsTask or HwtsTaskTime already exists in the hwts.db, and won't be calculate again.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - HwtsAivCalculator process data finished, execute time is 0.004 s
+2026-11-24 06:30:53 [INFO] [aiv_calculator.py:73] - The Table MetricSummary already exists in the metric_summary.db, and won't be calculate again.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - AivCalculator process data finished, execute time is 0.004 s
+2026-11-24 06:30:53 [INFO] [aic_calculator.py:76] - The Table MetricSummary already exists in the metric_summary.db, and won't be calculate again.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - AicCalculator process data finished, execute time is 0.006 s
+2026-11-24 06:30:53 [INFO] [ascend_task_calculator.py:85] - Found table AscendTask in operator scene, no need to generate again
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - AscendTaskCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - HcclCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - KfcCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - ParseAiCoreOpSummaryCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [op_summary_op_scene_calculator.py:79] - The db ai_core_op_summary.db already exists, and won't create again.
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - OpSummaryOpSceneCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - MergeOpCounterCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [INFO] [ms_multi_process.py:77] - OpCounterOpSceneCalculator process data finished, execute time is 0.003 s
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [WARNING] [base_model.py:75] - Table step_trace_data not found.
+2026-11-24 06:30:53 [INFO] [profiling_scene.py:69] - Current scene of data is based on single_op
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:293] - Different flip numbers, 9 host flips and 8 device flips.
+2026-11-24 06:30:53 [INFO] [ai_core_op_report.py:217] - There are 7 records before op_summary data filtering, timestamp is 1795501832972401.
+2026-11-24 06:30:53 [INFO] [ai_core_op_report.py:223] - There are 7 records after op_summary data filtering.
+2026-11-24 06:30:53 [INFO] [task_op_viewer.py:59] - There are 23 records before task_time data filtering, timestamp is 1795501832972401
+2026-11-24 06:30:53 [INFO] [task_op_viewer.py:62] - There are 23 records after task_time data filtering.
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:572] - Unable to get dp data. Maybe the data is not collected, or the data may fail to be analyzed.
+2026-11-24 06:30:53 [WARNING] [aicpu_viewer.py:190] - Can't connect data_preprocess.db
+2026-11-24 06:30:53 [WARNING] [msprof_export.py:572] - Unable to get aicpu_mi data. Maybe the data is not collected, or the data may fail to be analyzed.
