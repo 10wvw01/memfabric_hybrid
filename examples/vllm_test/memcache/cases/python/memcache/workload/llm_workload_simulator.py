@@ -10,7 +10,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-"""LLM workload simulator for TTFT benchmark testing.
+"""LLM workload simulator, percentile utility and TTFT report.
 
 Simulates four KV Cache access patterns found in real LLM inference:
   - prefill:           write full-sequence KV cache to MemCache (L2G)
@@ -24,6 +24,7 @@ W8A8 parameters from ``example/benchmark/mutil_process.py``.
 
 import math
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -69,6 +70,12 @@ PREFILL_KEY_PREFIX = "kv_"
 DECODE_KEY_PREFIX = "kv_decode_"
 DUMMY_KEY_PREFIX = "dummy_"
 
+# --- Percentile points ---
+PERCENTILE_P50 = 0.50
+PERCENTILE_P90 = 0.90
+PERCENTILE_P99 = 0.99
+EMPTY_LIST_DEFAULT = 0
+
 
 def _allocate_aligned_tensor(shape, dtype=torch.uint8, alignment=TENSOR_ALIGNMENT_BYTES):
     """Allocate a 2 MB-aligned NPU tensor (reuses mutil_process.py:52-69 pattern)."""
@@ -83,8 +90,116 @@ def _allocate_aligned_tensor(shape, dtype=torch.uint8, alignment=TENSOR_ALIGNMEN
     address = buffer.data_ptr()
     aligned_address = (address + alignment - 1) & ~(alignment - 1)
     offset = (aligned_address - address) // element_size
-    aligned_tensor = buffer[offset : offset + num_elements].view(*shape)
-    return aligned_tensor
+    return buffer[offset : offset + num_elements].view(*shape)
+
+
+def percentile(values: List[float], pct: float) -> float:
+    """Return the pct-th percentile of *values* using linear interpolation.
+
+    pct is a fraction in [0, 1]. An empty list returns 0.
+    """
+    if not values:
+        return float(EMPTY_LIST_DEFAULT)
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+    rank = pct * (n - 1)
+    lower = int(rank)
+    upper = min(lower + 1, n - 1)
+    fraction = rank - lower
+    return sorted_values[lower] * (1 - fraction) + sorted_values[upper] * fraction
+
+
+def percentile_report(values: List[float]) -> Dict[str, float]:
+    """Return a dict with p50/p90/p99/avg from *values*.
+
+    An empty list returns all zeros.
+    """
+    if not values:
+        return {k: float(EMPTY_LIST_DEFAULT) for k in ("p50", "p90", "p99", "avg")}
+    return {
+        "p50": percentile(values, PERCENTILE_P50),
+        "p90": percentile(values, PERCENTILE_P90),
+        "p99": percentile(values, PERCENTILE_P99),
+        "avg": sum(values) / len(values),
+    }
+
+
+@dataclass
+class TtftReport:
+    """Structured TTFT latency report containing percentile distribution and pass/fail."""
+
+    test_name: str
+    iterations: int
+    p50_us: float
+    p90_us: float
+    p99_us: float
+    avg_us: float
+    throughput_ops_per_sec: float
+    passed: bool
+    extra: Dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def from_latencies(
+        cls,
+        test_name: str,
+        latencies_us: List[float],
+        pass_condition: Optional[bool] = None,
+    ) -> "TtftReport":
+        """Build a TtftReport from a list of per-iteration latencies (microseconds).
+
+        When *pass_condition* is None, the report is considered passed if there
+        are valid latencies.
+        """
+        report = percentile_report(latencies_us)
+        iterations = len(latencies_us)
+        total_us = sum(latencies_us)
+        throughput_ops_per_sec = MICROSECONDS_PER_SECOND * iterations / total_us if total_us > 0 else 0.0
+        passed = pass_condition if pass_condition is not None else iterations > 0
+        return cls(
+            test_name=test_name,
+            iterations=iterations,
+            p50_us=report["p50"],
+            p90_us=report["p90"],
+            p99_us=report["p99"],
+            avg_us=report["avg"],
+            throughput_ops_per_sec=throughput_ops_per_sec,
+            passed=passed,
+        )
+
+    def to_dict(self) -> Dict:
+        """Return a dictionary representation suitable for JSON serialisation."""
+        result = {
+            "test_name": self.test_name,
+            "iterations": self.iterations,
+            "p50_us": round(self.p50_us, 2),
+            "p90_us": round(self.p90_us, 2),
+            "p99_us": round(self.p99_us, 2),
+            "avg_us": round(self.avg_us, 2),
+            "throughput_ops_per_sec": round(self.throughput_ops_per_sec, 2),
+            "pass": self.passed,
+        }
+        for key, value in self.extra.items():
+            result[key] = round(value, 2) if isinstance(value, float) else value
+        return result
+
+    def print(self) -> str:
+        """Print the report to stdout and return the formatted string."""
+        status = "PASS" if self.passed else "FAIL"
+        lines = [
+            f"===== TTFT Report: {self.test_name} =====",
+            f"  iterations:             {self.iterations}",
+            f"  p50_us:                 {self.p50_us:.2f}",
+            f"  p90_us:                 {self.p90_us:.2f}",
+            f"  p99_us:                 {self.p99_us:.2f}",
+            f"  avg_us:                 {self.avg_us:.2f}",
+            f"  throughput_ops_per_sec: {self.throughput_ops_per_sec:.2f}",
+            f"  status:                 {status}",
+        ]
+        for key, value in self.extra.items():
+            lines.append(f"  {key}: {value:.2f}" if isinstance(value, float) else f"  {key}: {value}")
+        text = "\n".join(lines)
+        print(text)
+        return text
 
 
 class LLMWorkloadSimulator:
@@ -104,9 +219,6 @@ class LLMWorkloadSimulator:
         self._registered_buffers: List[Tuple[int, int]] = []
         self._alloc_kv_tensors(self._max_blocks)
 
-    # ------------------------------------------------------------------
-    # 2.2  K/V interleaved layer sizes
-    # ------------------------------------------------------------------
     def _kv_layer_sizes(self, num_blocks: int) -> List[int]:
         """Return K/V interleaved sizes for *num_blocks* blocks.
 
@@ -120,9 +232,6 @@ class LLMWorkloadSimulator:
             sizes.append(v_total)
         return sizes
 
-    # ------------------------------------------------------------------
-    # 2.3  Allocate NPU tensors and register buffers
-    # ------------------------------------------------------------------
     def _alloc_kv_tensors(self, num_blocks: int) -> List[torch.Tensor]:
         """Pre-allocate K/V NPU tensor pools and register them with the store.
 
@@ -152,9 +261,6 @@ class LLMWorkloadSimulator:
             tensors.append(v_pool[i])
         return tensors
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     def _sync_stream(self):
         if _HAS_TORCH_NPU:
             torch_npu.npu.current_stream().synchronize()
@@ -183,55 +289,33 @@ class LLMWorkloadSimulator:
         sizes = self._kv_layer_sizes(num_blocks)
         return self._store.get_into_layers(key, ptrs, sizes, G2L)
 
-    # ------------------------------------------------------------------
-    # 2.4  Prefill
-    # ------------------------------------------------------------------
+    def _timed_kv_op(self, op, key: str, num_blocks: int) -> Tuple[int, float]:
+        """Run a put/get KV operation between NPU stream syncs and return (ret, latency_us)."""
+        self._sync_stream()
+        start = time.perf_counter()
+        ret = op(key, num_blocks)
+        self._sync_stream()
+        end = time.perf_counter()
+        return ret, (end - start) * MICROSECONDS_PER_SECOND
+
     def prefill(self, request_id: str, seq_len: int) -> Tuple[int, float]:
         """Simulate prefill: write seq_len tokens of KV cache via put_from_layers (L2G)."""
         num_blocks = math.ceil(seq_len / self._block_size)
         self._ensure_capacity(num_blocks)
         key = f"{PREFILL_KEY_PREFIX}{request_id}"
-        self._sync_stream()
-        start = time.perf_counter()
-        ret = self._put_kv(key, num_blocks)
-        self._sync_stream()
-        end = time.perf_counter()
-        latency_us = (end - start) * MICROSECONDS_PER_SECOND
-        return ret, latency_us
+        return self._timed_kv_op(self._put_kv, key, num_blocks)
 
-    # ------------------------------------------------------------------
-    # 2.5  Decode step
-    # ------------------------------------------------------------------
     def decode_step(self, request_id: str, step: int) -> Tuple[int, float]:
         """Simulate single-token decode: append 1 block of KV cache via put_from_layers (L2G)."""
-        num_blocks = 1
         key = f"{DECODE_KEY_PREFIX}{request_id}_{step}"
-        self._sync_stream()
-        start = time.perf_counter()
-        ret = self._put_kv(key, num_blocks)
-        self._sync_stream()
-        end = time.perf_counter()
-        latency_us = (end - start) * MICROSECONDS_PER_SECOND
-        return ret, latency_us
+        return self._timed_kv_op(self._put_kv, key, 1)
 
-    # ------------------------------------------------------------------
-    # 2.6  Prefix cache hit
-    # ------------------------------------------------------------------
     def prefix_cache_hit(self, request_id: str, prefix_len: int) -> Tuple[int, float]:
         """Simulate prefix cache hit: read existing KV cache via get_into_layers (G2L)."""
         num_blocks = math.ceil(prefix_len / self._block_size)
         key = f"{PREFILL_KEY_PREFIX}{request_id}"
-        self._sync_stream()
-        start = time.perf_counter()
-        ret = self._get_kv(key, num_blocks)
-        self._sync_stream()
-        end = time.perf_counter()
-        latency_us = (end - start) * MICROSECONDS_PER_SECOND
-        return ret, latency_us
+        return self._timed_kv_op(self._get_kv, key, num_blocks)
 
-    # ------------------------------------------------------------------
-    # 2.7  DRAM → HBM rewarm
-    # ------------------------------------------------------------------
     def rewarm_from_dram(
         self, request_id: str, seq_len: int, hbm_total_mb: int = DEFAULT_HBM_TOTAL_MB
     ) -> Tuple[int, float]:
@@ -246,8 +330,7 @@ class LLMWorkloadSimulator:
             return ret, 0.0
 
         # Step 2 — fill HBM with dummy keys to trigger LRU eviction
-        kv_buf_size_bytes = num_blocks * (self._k_size + self._v_size) * self._num_layers
-        kv_buf_size_mb = kv_buf_size_bytes / (1024 * 1024)
+        kv_buf_size_mb = num_blocks * (self._k_size + self._v_size) * self._num_layers / (1024 * 1024)
         key_num = math.ceil(hbm_total_mb / kv_buf_size_mb) + EVICTION_SAFETY_MARGIN
         for i in range(key_num):
             dummy_key = f"{DUMMY_KEY_PREFIX}{request_id}_{i}"
@@ -256,31 +339,25 @@ class LLMWorkloadSimulator:
                 break
 
         # Step 3 — verify target key survived (evicted HBM→DRAM)
-        exist = self._store.is_exist(target_key)
-        if exist != 1:
+        if self._store.is_exist(target_key) != 1:
             return -1, 0.0
 
         # Step 4 — rewarm: read target from DRAM back to HBM (G2L)
-        self._sync_stream()
-        start = time.perf_counter()
-        ret = self._get_kv(target_key, num_blocks)
-        self._sync_stream()
-        end = time.perf_counter()
-        latency_us = (end - start) * MICROSECONDS_PER_SECOND
+        latency_us = 0.0
+        ret, latency_us = self._timed_kv_op(self._get_kv, target_key, num_blocks)
 
         # Step 5 — cleanup dummy keys to avoid store exhaustion across iterations
+        self._remove_dummy_keys(request_id, key_num)
+        return ret, latency_us
+
+    def _remove_dummy_keys(self, request_id: str, key_num: int):
+        """Remove dummy keys used during rewarm eviction pressure-fill."""
         for i in range(key_num):
-            dummy_key = f"{DUMMY_KEY_PREFIX}{request_id}_{i}"
             try:
-                self._store.remove(dummy_key)
+                self._store.remove(f"{DUMMY_KEY_PREFIX}{request_id}_{i}")
             except Exception:
                 pass
 
-        return ret, latency_us
-
-    # ------------------------------------------------------------------
-    # 2.8  Cleanup
-    # ------------------------------------------------------------------
     def _free_pools(self):
         for ptr, size in self._registered_buffers:
             try:
