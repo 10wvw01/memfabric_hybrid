@@ -17,7 +17,12 @@ export LOG_DIR="${LOG_DIR:-$PWD/build/logs/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 export LOG_DIR
+export DEVICE_BASE="${DEVICE_BASE:-6}"
 bash build.sh
+profile=()
+if [[ "${PROFILE:-0}" == 1 ]]; then
+ profile=(msprof --output="$LOG_DIR/profile" --ascendcl=on --runtime-api=on --task-time=l2 --aicpu=on --hccl=on --ai-core=on)
+fi
 timeout --kill-after=10s "${TIMEOUT:-1200}s" "$MPI_RUN" --allow-run-as-root --stdin none -np 2 \
-    build/api_perf > "$LOG_DIR/launcher.log" 2>&1
+    "${profile[@]}" build/api_perf > "$LOG_DIR/launcher.log" 2>&1
 python3 summarize.py "$LOG_DIR"

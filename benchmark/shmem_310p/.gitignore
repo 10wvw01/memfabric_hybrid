@@ -1,2 +1,2 @@
-/build/
-!test_summarize.py
+build/
+__pycache__/

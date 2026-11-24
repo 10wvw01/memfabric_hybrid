@@ -1,5 +1,8 @@
 # 单 AICore SHMEM 独立接口性能测试
 
+固定使用逻辑设备6、7重新测试原实现与优化实现的全部78组接口，普通采样、msprof采样及数据耗时计算见[性能细节](PERFORMANCE_DETAILS.md)。
+本页原有表格保留各自标注的采样日期和设备条件。
+
 ## 测试范围与运行条件
 
 [main.asc](main.asc) 分别测试 SDMA 数据搬运、通知、完成等待及本地通知检查接口。
@@ -9,14 +12,14 @@ rank 0 的准备、接口调用、等待完成 kernel 按 stream 顺序执行，
 AICPU 处理设备请求队列，测试全程只有 rank 0 的一个 AICore 发起接口调用。
 
 下方展示 2026-11-24 队列优化后的采样，并保留 2026-11-23 的历史采样。
-优化后的批次接口及 AllReduce 对照见 [批次提交与队列优化](../shmem_310p/README.md#显式批次提交与队列优化)。
+优化后的批次接口及 AllReduce 对照见 [批次提交与队列优化](../shmem_310p_allreduce/README.md#显式批次提交与队列优化)。
 
 历史采样环境：Atlas 300I Duo（Ascend310P3），同卡双 die，CANN 9.1.0、
 驱动 26.1.1，Release Host 库及配套 AICPU kernel。共享服务器上存在其他常驻进程。
 每组预热 10 轮、采样 100 轮，逐轮检查完整目标数据或通知值。
 统计使用 rank 0 的计时样本，计算均值、P50、P95、P99、最大值。
 汇总前同时检查两端全部场景的校验记录和轮数。
-对应的 AllReduce 实现、时序图及 HCCL 基线见 [统一 AllReduce 基准](../shmem_310p/README.md)。
+对应的 AllReduce 实现、时序图及 HCCL 基线见 [统一 AllReduce 基准](../shmem_310p_allreduce/README.md)。
 
 ## 接口、场景和数据组织
 
@@ -115,7 +118,7 @@ sequenceDiagram
 ```bash
 bash script/build_and_pack_run.sh
 cd benchmark/shmem_310p_api
-DEVICE_BASE=0 WARMUP=10 ROUNDS=100 LOG_DIR=/path/to/logs bash run.sh
+DEVICE_BASE=6 WARMUP=10 ROUNDS=100 LOG_DIR=/path/to/logs bash run.sh
 ```
 
 需要 CANN bisheng、OpenMPI；自定义 MPI 安装可设置 MPI_HOME。

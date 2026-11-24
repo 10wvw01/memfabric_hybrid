@@ -36,4 +36,4 @@ smem_shm_signal_wait_until(localReady, SMEM_SHM_CMP_EQ, seq);
 
 Host库、AICPU产物和使用新增设备API的应用需配套构建；运行时协议标识用于检查Host与AICPU内核是否匹配。
 
-功能测试：`test/integration/310p_shmem_signal`。统一MF/HCCL基准：`benchmark/shmem_310p`。
+功能测试：`test/integration/310p_shmem_signal`。统一MF/HCCL基准：`benchmark/shmem_310p_allreduce`。
