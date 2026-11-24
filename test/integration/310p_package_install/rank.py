@@ -24,8 +24,15 @@ def validate_install(args):
     extension = Path(_pymf_hybrid.__file__).resolve()
     if not extension.is_relative_to(Path(args.prefix).resolve()):
         raise RuntimeError(f"unexpected imported extension: {extension}")
+    # 310P aicpu 产物装到 venv 内 memfabric_hybrid 包目录下 cust_aicpu_kernel/ 子目录,
+    # FindInstalledJson() 从两级布局 <pkg>/lib/libmf_hybm_core.so 上溯两级到 <pkg>
+    # 发现 launch json, 这里校验同一位置。
+    home = os.environ.get("MEMFABRIC_HYBRID_HOME_PATH")
+    if not home:
+        raise RuntimeError("MEMFABRIC_HYBRID_HOME_PATH must be set for 310P aicpu kernel discovery")
+    pkg_dir = os.path.dirname(os.path.abspath(mf.__file__))
     for asset in ("libmf_sdma_orch.so", "libmf_sdma_orch.json", "libmf_sdma_orch_launch.json"):
-        if not (package.parent / "hybm" / "aicpu_kernel" / asset).is_file():
+        if not (Path(pkg_dir) / "cust_aicpu_kernel" / asset).is_file():
             raise RuntimeError(f"missing installed AICPU asset: {asset}")
     rounds = int(os.environ.get("ROUNDS", "100"))
     if rounds <= 0:
