@@ -1,17 +1,21 @@
 #!/bin/bash
 # run_test.sh — Unified vLLM TTFT test runner
 #
-# Run MemCache workloads, vLLM integration tests, and benchmarks.
+# Run MemCache workloads and vLLM integration tests.
 #
 # Usage:
 #   bash run_test.sh --memcache-dir <DIR> [options]
 #
+# Environment variables:
+#   MMC_TEST_VLLM_MODEL_PATH <PATH>          W8A8 model path (required for integration/
+#                                           largecap/puredram; not needed for workload)
+#
 # Options:
 #   --memcache-dir <DIR>                    memcache repo dir (required)
-#   --type workload|integration|largecap|bench|puredram  test type (default: workload)
+#   --type workload|integration|largecap|puredram  test type (default: workload)
 #                                           puredram: pure-DRAM (host_shm, 0 HBM) 4-rank
-#   --rank 1|2|4                            rank count: 1-rank (TP=1), 2-rank (TP=2) or 4-rank (TP=4) (integration/bench, required for integration)
-#   --suite workload|integration|all       large-capacity test selection (default: all)
+#   --rank 1|2|4                            rank count: 1-rank (TP=1), 2-rank (TP=2) or 4-rank (TP=4) (integration, required for integration)
+#   --suite integration|all              large-capacity test selection (default: all)
 #   --protocol host_shm|device_sdma         protocol (integration only, default: config default)
 #   --device-ids <a,b,...>                  NPU device IDs (default: 0 for 1-rank, 6,7 for 2-rank, 0,1,2,3 for 4-rank, 4,5,6,7 for largecap/puredram)
 #   --filter <name>                         pytest -m marker filter (e.g. rank2, rank4, throughput, hitdecode)
@@ -20,10 +24,6 @@
 #   --skip-clean                            skip env cleanup before tests
 #   --split                                 4-rank integration/puredram: run each test separately
 #                                           with NPU cleanup between (recommended for 310P3)
-#   --bench-num-prompts <N>                 bench: prompts per round (default: 20)
-#   --bench-request-rate <N>                bench: requests per second (default: 5)
-#   --bench-input-len <N>                   bench: input token length (default: 1024)
-#   --bench-output-len <N>                  bench: output token length (default: 32)
 #   --help                                  show help
 #
 # Examples:
@@ -38,9 +38,6 @@
 #
 #   # vLLM 集成测试 4-rank (TP=4)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type integration --rank 4 --protocol device_sdma --device-ids 0,1,2,3 --log
-#
-#   # Throughput benchmark (2-rank)
-#   bash run_test.sh --memcache-dir /path/to/memcache --type bench --rank 2 --device-ids 6,7
 #
 #   # Large-capacity test (TP=4, large HBM + DRAM)
 #   bash run_test.sh --memcache-dir /path/to/memcache --type largecap --suite integration --device-ids 4,5,6,7 --log
@@ -66,10 +63,6 @@ ENABLE_LOG=0
 GPU_MEM_UTIL=""
 SKIP_CLEAN=0
 SPLIT_TESTS=0
-BENCH_NUM_PROMPTS="20"
-BENCH_REQUEST_RATE="5"
-BENCH_INPUT_LEN="1024"
-BENCH_OUTPUT_LEN="32"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -84,10 +77,6 @@ while [[ $# -gt 0 ]]; do
         --gpu-mem-util)       GPU_MEM_UTIL="$2"; shift 2 ;;
         --skip-clean)         SKIP_CLEAN=1; shift ;;
         --split)              SPLIT_TESTS=1; shift ;;
-        --bench-num-prompts)  BENCH_NUM_PROMPTS="$2"; shift 2 ;;
-        --bench-request-rate) BENCH_REQUEST_RATE="$2"; shift 2 ;;
-        --bench-input-len)    BENCH_INPUT_LEN="$2"; shift 2 ;;
-        --bench-output-len)   BENCH_OUTPUT_LEN="$2"; shift 2 ;;
         --help|-h)            sed -n '2,40p' "$0"; exit 0 ;;
         *) echo "[ERROR] 未知参数: $1"; exit 1 ;;
     esac
@@ -97,12 +86,12 @@ done
 [[ ! -d "$MEMCACHE_DIR" ]] && { echo "[ERROR] 目录不存在: $MEMCACHE_DIR"; exit 1; }
 
 case "$TEST_TYPE" in
-    workload|integration|largecap|bench|puredram) ;;
-    *) echo "[ERROR] --type 只能是 workload, integration, largecap, bench 或 puredram"; exit 1 ;;
+    workload|integration|largecap|puredram) ;;
+    *) echo "[ERROR] --type 只能是 workload, integration, largecap 或 puredram"; exit 1 ;;
 esac
 
-# --rank validation (required for integration and bench)
-if [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" ]]; then
+# --rank validation (required for integration)
+if [[ "$TEST_TYPE" == "integration" ]]; then
     if [[ -z "$RANK" ]]; then
         echo "[ERROR] --type $TEST_TYPE 需要指定 --rank 1、2 或 --rank 4"
         exit 1
@@ -113,8 +102,8 @@ if [[ -n "$RANK" && "$RANK" != "1" && "$RANK" != "2" && "$RANK" != "4" ]]; then
     exit 1
 fi
 
-# Device ID count must match rank count (for integration and bench)
-if [[ "$TEST_TYPE" == "integration" || "$TEST_TYPE" == "bench" ]]; then
+# Device ID count must match rank count (for integration)
+if [[ "$TEST_TYPE" == "integration" ]]; then
     DEV_COUNT=$(echo "$DEVICE_IDS" | tr ',' '\n' | wc -l)
     if [[ -n "$DEVICE_IDS" && "$DEV_COUNT" -ne "$RANK" ]]; then
         echo "[ERROR] --device-ids 设备数 ($DEV_COUNT) 与 --rank ($RANK) 不匹配"
@@ -289,7 +278,8 @@ check_npu() {
     local total
     total=$(ls -d /dev/davinci[0-9]* 2>/dev/null | wc -l || true)
     [[ "$total" -eq 0 ]] && return 1
-    command -v npu-smi &>/dev/null && npu-smi info &>/dev/null || return 1
+    # 不用 npu-smi info：驱动异常时该命令会卡死。设备文件存在即认为 NPU 存在，
+    # 设备健康度由后续 check_env.sh 预检判断。
     return 0
 }
 if ! check_npu; then
@@ -298,9 +288,20 @@ if ! check_npu; then
 fi
 log "[INFO] NPU detected"
 
+# ============================================================================
+# Pre-flight: 驱动健康预检
+# 驱动异常时 put_from_layers 的 ioctl 退化数千倍，导致 workload 单次 prefill
+# 从 ~4ms 退化到 ~27s。提前做一次 256MB D2D 拷贝，超 50ms 即中止，避免浪费时间。
+# ============================================================================
+log "[INFO] 预检目标设备驱动健康: $DEVICE_IDS"
+if ! bash "$PKG_DIR/check_env.sh" --device-ids "$DEVICE_IDS" 2>&1 | while IFS= read -r line; do log "$line"; done; then
+    log "[ERROR] 预检失败，中止测试。排查: dmesg | grep 'devmm.*Map address failed'"
+    exit 1
+fi
+
 # Verify the repository revisions and runtime packages before starting tests.
 VERIFY_ARGS=(verify --memcache-dir "$MEMCACHE_DIR")
-if [[ "$TEST_TYPE" == integration || "$TEST_TYPE" == bench || "$TEST_TYPE" == puredram ]]; then
+if [[ "$TEST_TYPE" == integration || "$TEST_TYPE" == puredram ]]; then
     VERIFY_ARGS+=(--require-vllm)
 fi
 python3 "$PKG_DIR/source_manifest.py" "${VERIFY_ARGS[@]}"
@@ -512,18 +513,6 @@ run_puredram() {
     fi
 }
 
-run_largecap_workload() {
-    ensure_meta_service
-    local test_file="$PKG_DIR/cases/python/memcache/largecap/large_capacity_test.py"
-    if [[ -n "$TEST_FILTER" ]]; then
-        log "[INFO] Starting large-capacity MemCache workload tests (filter: $TEST_FILTER)..."
-        run_pytest "$test_file" -v -s -m "$TEST_FILTER"
-    else
-        log "[INFO] Starting large-capacity MemCache workload tests..."
-        run_pytest "$test_file" -v -s -m largecap
-    fi
-}
-
 run_largecap_integration() {
     if ! python3 -c "import vllm" 2>/dev/null; then
         log "[SKIP] vLLM not available, skipping vLLM integration tests"
@@ -544,85 +533,6 @@ run_largecap_integration() {
 }
 
 # ============================================================================
-# Bench: throughput benchmark (cache-miss vs cache-hit)
-# ============================================================================
-run_bench() {
-    if ! python3 -c "import vllm" 2>/dev/null; then
-        log "[SKIP] vLLM not available, skipping benchmark"
-        exit 0
-    fi
-
-    local vllm_port=4077
-    local model_path="/home/models/Qwen3.6-35B-A3B-w8a8"
-    local served_model_name="Qwen3.6-35B-A3B"
-
-    export VLLM_LOGGING_LEVEL=INFO
-    export VLLM_SERVER_DEV_MODE=1
-
-    # Start MetaService + vLLM via start_service.sh
-    log "[INFO] === Starting services (MetaService + vLLM) ==="
-    bash "$PKG_DIR/start_service.sh" \
-        --device-ids "$DEVICE_IDS" \
-        --tp "$MMC_TEST_TENSOR_PARALLEL_SIZE" \
-        --config "$MMC_LOCAL_CONFIG_PATH" \
-        --port "$vllm_port" \
-        --gpu-mem-util "$GPU_MEM_UTIL" \
-        --model "$model_path" \
-        --served-model-name "$served_model_name" \
-        --memcache-dir "$MEMCACHE_DIR" || return $?
-    log "[INFO] Services ready."
-
-    local bench_py="$PKG_DIR/cases/python/memcache/integration/simple_throughput_bench.py"
-    local common_args="--host 127.0.0.1 --port $vllm_port --model $served_model_name \
-  --input-len $BENCH_INPUT_LEN --output-len $BENCH_OUTPUT_LEN \
-  --num-prompts $BENCH_NUM_PROMPTS --request-rate $BENCH_REQUEST_RATE --num-warmups 2"
-
-    local miss_file=/tmp/bench_memcache_miss.json
-    local hit_file=/tmp/bench_memcache_hit.json
-
-    log "[INFO] === Round 1/2: cache-miss baseline (unique prompts) ==="
-    cd "$PKG_DIR"
-    set +e
-    python3 "$bench_py" $common_args \
-      --label memcache-miss --output-file "$miss_file" 2>&1 | { [[ -n "$LOG_FILE" ]] && tee -a "$LOG_FILE" || cat; }
-    local miss_exit=${PIPESTATUS[0]}
-    set -e
-    [[ "$miss_exit" -eq 0 ]] || return "$miss_exit"
-
-    log "[INFO] === Round 2/2: cache-hit (repeated prompts) ==="
-    set +e
-    python3 "$bench_py" $common_args --cache-test \
-      --label memcache-hit --output-file "$hit_file" 2>&1 | { [[ -n "$LOG_FILE" ]] && tee -a "$LOG_FILE" || cat; }
-    local hit_exit=${PIPESTATUS[0]}
-    set -e
-    [[ "$hit_exit" -eq 0 ]] || return "$hit_exit"
-
-    log "[INFO] === MemCache hit benefit ==="
-    python3 - "$miss_file" "$hit_file" <<'PY'
-import json, sys
-miss = json.load(open(sys.argv[1]))
-hit = json.load(open(sys.argv[2]))
-def pct(b, a):
-    return f"{(a - b) / b * 100:+.1f}%" if b else "n/a"
-print(f"{'metric':<24}{'miss':>14}{'hit':>14}{'delta':>12}")
-print("-" * 64)
-rows = [
-    ("total_token_throughput", "tok/s"),
-    ("input_throughput", "tok/s"),
-    ("output_throughput", "tok/s"),
-    ("mean_latency_ms", "ms"),
-    ("p50_latency_ms", "ms"),
-    ("p90_latency_ms", "ms"),
-    ("p99_latency_ms", "ms"),
-    ("cache_hit_rate", "%"),
-]
-for key, unit in rows:
-    m, h = miss.get(key, 0), hit.get(key, 0)
-    print(f"{key:<24}{m:>14.2f}{h:>14.2f}{pct(m, h):>12}")
-PY
-}
-
-# ============================================================================
 # Main dispatch
 # ============================================================================
 OVERALL_EXIT=0
@@ -634,37 +544,13 @@ case "$TEST_TYPE" in
     integration)
         run_integration || OVERALL_EXIT=$?
         ;;
-    bench)
-        run_bench || OVERALL_EXIT=$?
-        # Cleanup vLLM processes after bench
-        pkill -9 -f "vllm serve" 2>/dev/null || true
-        sleep 3
-        pkill -9 -f "VLLM::" 2>/dev/null || true
-        ;;
     largecap)
         case "$LARGECAP_SUITE" in
-            workload|layer2|l2)
-                run_largecap_workload || OVERALL_EXIT=$?
-                ;;
-            integration|layer3|l3)
-                run_largecap_integration || OVERALL_EXIT=$?
-                ;;
-            all)
-                run_largecap_workload || OVERALL_EXIT=$?
-                log ""
-                log "[INFO] === MemCache workloads complete, starting vLLM integration tests ==="
-                if [[ -f "$CLEAN_SCRIPT" ]]; then
-                    if [[ -n "$LOG_FILE" ]]; then
-                        bash "$CLEAN_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
-                    else
-                        bash "$CLEAN_SCRIPT"
-                    fi
-                fi
-                stop_meta_service
+            integration|layer3|l3|all)
                 run_largecap_integration || OVERALL_EXIT=$?
                 ;;
             *)
-                log "[ERROR] Unknown suite: $LARGECAP_SUITE (use: workload, integration, all)"
+                log "[ERROR] Unknown suite: $LARGECAP_SUITE (use: integration, all)"
                 exit 1
                 ;;
         esac

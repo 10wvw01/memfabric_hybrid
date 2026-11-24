@@ -4,8 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# run_test.sh --protocol 生成的协议切换临时配置
-.mmc-local-integration-*.conf
+# run_test.sh --protocol 生成的协议切换临时配置（含 .single/.bench 等变体）
+.mmc-local-integration-*
 .l3_*.conf
 
 # vLLM NPU 编译图融合结果（运行时产物）
