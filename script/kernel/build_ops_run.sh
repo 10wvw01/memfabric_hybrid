@@ -159,13 +159,35 @@ echo "Generated ${KERNEL_VER_FILE}"
 echo "  mf version: ${MF_VERSION}"
 echo "  git: ${GIT_COMMIT}"
 
+# ---- Stage 310P sdma orchestrator version (三产物由 cmake install 装到 KERNEL_VER_DIR, 与 A3/A5 同目录) ----
+# 310P 的 libmf_sdma_orch.so 与 A3/A5 的 libcann_hybm_kernel.so 由同一 hybm_kernel/CMakeLists.txt 编译,
+# cmake install 已将 310P 三产物装到 output/hybm/aicpu_kernel/(与 A3/A5 产物同目录),
+# 此处只生成 version 文件; 产物存在性由下方 Checking artifacts 段统一校验。
+SDMA_ORCH_VER_FILE="${KERNEL_VER_DIR}/sdma_orch_kernel_version"
+{
+  echo "mf version info:"
+  echo "mf version: ${MF_VERSION}"
+  echo "git: ${GIT_COMMIT}"
+} > "${SDMA_ORCH_VER_FILE}"
+echo "Generated ${SDMA_ORCH_VER_FILE}"
+
 # ---- Verify required artifacts exist before packing ----
 echo ""
 echo "--- Checking artifacts ---"
 ARTIFACTS_PRESENT=1
+# A3/A5 产物
 for f in cann-hybm-compat.tar.gz libcann_hybm_kernel.json install.sh cann_hybm_kernel_version; do
     if [[ ! -f "${KERNEL_VER_DIR}/${f}" ]]; then
         echo "ERROR: Missing artifact: ${KERNEL_VER_DIR}/${f}" >&2
+        ARTIFACTS_PRESENT=0
+    else
+        echo "  OK: ${KERNEL_VER_DIR}/${f}"
+    fi
+done
+# 310P 产物
+for f in libmf_sdma_orch.so libmf_sdma_orch.json libmf_sdma_orch_launch.json sdma_orch_kernel_version; do
+    if [[ ! -f "${KERNEL_VER_DIR}/${f}" ]]; then
+        echo "ERROR: Missing 310P artifact: ${KERNEL_VER_DIR}/${f}" >&2
         ARTIFACTS_PRESENT=0
     else
         echo "  OK: ${KERNEL_VER_DIR}/${f}"

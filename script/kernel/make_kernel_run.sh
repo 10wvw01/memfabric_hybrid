@@ -23,20 +23,41 @@ INSTALL_SCRIPT="install.sh"
 VERSION_FILE="cann_hybm_kernel_version"
 RUN_NAME="memfabric_hybrid_aicpu_kernel.run"
 
+# 310P sdma orchestrator artifacts(与 A3/A5 同 .run 包发布, install.sh 按架构探测装不同位置)
+SDMA_ORCH_SO="libmf_sdma_orch.so"
+SDMA_ORCH_CUST_JSON="libmf_sdma_orch.json"
+SDMA_ORCH_LAUNCH_JSON="libmf_sdma_orch_launch.json"
+SDMA_ORCH_VERSION_FILE="sdma_orch_kernel_version"
+
+# A3/A5 产物校验
 if [[ ! -f "${OUTPUT_DIR}/${PACKAGE_NAME}" || ! -f "${OUTPUT_DIR}/${JSON_NAME}" || ! -f "${OUTPUT_DIR}/${INSTALL_SCRIPT}" || ! -f "${OUTPUT_DIR}/${VERSION_FILE}" ]]; then
-    echo "Error: AICPU kernel artifacts not found in ${OUTPUT_DIR}" >&2
+    echo "Error: A3/A5 AICPU kernel artifacts not found in ${OUTPUT_DIR}" >&2
     echo "Required files: ${PACKAGE_NAME}, ${JSON_NAME}, ${INSTALL_SCRIPT}, ${VERSION_FILE}" >&2
     exit 1
 fi
 
+# 310P 产物校验
+for f in "${SDMA_ORCH_SO}" "${SDMA_ORCH_CUST_JSON}" "${SDMA_ORCH_LAUNCH_JSON}" "${SDMA_ORCH_VERSION_FILE}"; do
+    if [[ ! -f "${OUTPUT_DIR}/${f}" ]]; then
+        echo "Error: 310P sdma orchestrator artifact '${f}' not found in ${OUTPUT_DIR}" >&2
+        exit 1
+    fi
+done
+
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
-# Copy artifacts into work directory
+# Copy A3/A5 artifacts into work directory
 cp "${OUTPUT_DIR}/${PACKAGE_NAME}" "${WORK_DIR}/"
 cp "${OUTPUT_DIR}/${JSON_NAME}" "${WORK_DIR}/"
 cp "${OUTPUT_DIR}/${INSTALL_SCRIPT}" "${WORK_DIR}/"
 cp "${OUTPUT_DIR}/${VERSION_FILE}" "${WORK_DIR}/"
+
+# Copy 310P sdma orchestrator artifacts into work directory
+cp "${OUTPUT_DIR}/${SDMA_ORCH_SO}" "${WORK_DIR}/"
+cp "${OUTPUT_DIR}/${SDMA_ORCH_CUST_JSON}" "${WORK_DIR}/"
+cp "${OUTPUT_DIR}/${SDMA_ORCH_LAUNCH_JSON}" "${WORK_DIR}/"
+cp "${OUTPUT_DIR}/${SDMA_ORCH_VERSION_FILE}" "${WORK_DIR}/"
 
 # Build the self-extracting header script.
 # The placeholder "lines=XX" is replaced below with the actual header line count.
@@ -145,10 +166,11 @@ HEADER_EOF
 HEADER_LINES=$(wc -l < "${HEADER}")
 sed -i "s/^lines=XX$/lines=$(( HEADER_LINES + 1 ))/" "${HEADER}"
 
-# Create the payload archive (includes VERSION metadata)
+# Create the payload archive (A3/A5 + 310P artifacts, install.sh 按架构探测装不同位置)
 PAYLOAD_ARCHIVE="${WORK_DIR}/payload.tar.gz"
 tar -czf "${PAYLOAD_ARCHIVE}" -C "${WORK_DIR}" \
-    "${PACKAGE_NAME}" "${JSON_NAME}" "${INSTALL_SCRIPT}" "${VERSION_FILE}"
+    "${PACKAGE_NAME}" "${JSON_NAME}" "${INSTALL_SCRIPT}" "${VERSION_FILE}" \
+    "${SDMA_ORCH_SO}" "${SDMA_ORCH_CUST_JSON}" "${SDMA_ORCH_LAUNCH_JSON}" "${SDMA_ORCH_VERSION_FILE}"
 
 # Ensure output directory exists
 mkdir -p "${RUN_OUTPUT_DIR}"

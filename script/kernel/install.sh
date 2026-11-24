@@ -8,6 +8,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." 2>/dev/null && pwd || true)"
 BACKUP_BASENAME=".hybm_aicpu_kernel_backup"
 
+# 310P sdma orchestrator 产物(与 A3/A5 同 .run 包发布, 装主包 cust_aicpu_kernel/ 子目录)
+SDMA_ORCH_SO="libmf_sdma_orch.so"
+SDMA_ORCH_CUST_JSON="libmf_sdma_orch.json"
+SDMA_ORCH_LAUNCH_JSON="libmf_sdma_orch_launch.json"
+SDMA_ORCH_VERSION_FILE="sdma_orch_kernel_version"
+SDMA_ORCH_BACKUP_BASENAME=".sdma_orch_kernel_backup"
+
 ACTION=""
 FORCE=0
 INSTALL_FOR_ALL=0
@@ -51,6 +58,36 @@ find_source_dir() {
         echo "${PROJECT_ROOT}/output/hybm/aicpu_kernel"
     else
         echo ""
+    fi
+}
+
+# ---------------------------------------------------------------
+# Detect target chip platform.
+# 按文档 docs/installation_aicpu_kernel.md: 310P 只需 libmf_sdma_orch.so,
+# A3/A5 只需 cann-hybm-compat.tar.gz。两份都装会在 310P 上触发设备签名校验
+# 失败(verifyFlag=Only Huawei, 包无签名), 导致 aclrtSetDevice 507033。
+# 故安装前探测平台, 只装对应那一份。
+# 返回值(写到全局 PLATFORM_DETECTED): "310P" | "A3A5" | "unknown"
+# ---------------------------------------------------------------
+detect_platform() {
+    PLATFORM_DETECTED="unknown"
+    local soc_name=""
+    # 优先 npu-smi: 310P 的 Chip 列为 "310P3"(不带 Ascend 前缀), A3/A5 为 Ascend9xx
+    if command -v npu-smi &>/dev/null; then
+        soc_name=$(npu-smi info 2>/dev/null | grep -oE "Ascend9[0-9]+[A-Za-z]*|310P[0-9]*" | head -n1)
+    fi
+    if [[ -n "${soc_name}" ]]; then
+        case "${soc_name}" in
+            *310P*)
+                PLATFORM_DETECTED="310P" ;;
+            *)
+                PLATFORM_DETECTED="A3A5" ;;
+        esac
+        return
+    fi
+    # lspci 兜底(PCI 设备 ID: d802=A2, d803=A3, d806=A5; 310P 无对应 ID, 不在此识别)
+    if [[ $(lspci 2>/dev/null | grep -ci "Processing.*Huawei.*d80[236]") -gt 0 ]]; then
+        PLATFORM_DETECTED="A3A5"
     fi
 }
 
@@ -391,6 +428,163 @@ do_uninstall() {
     fi
 }
 
+# ---------------------------------------------------------------
+# 310P sdma orchestrator: resolve install dir
+# 优先装到 venv 内 memfabric_hybrid 包目录下 cust_aicpu_kernel/ 子目录;
+# rank 运行时加载 venv 内两级布局 <pkg>/lib/libmf_hybm_core.so, FindInstalledJson()
+# 上溯两级到 <pkg> 找 <pkg>/cust_aicpu_kernel/, 故产物装此处与之匹配。
+# venv 包不可用(如纯 run-install 三级布局场景)时回退 MEMFABRIC_HYBRID_HOME_PATH/cust_aicpu_kernel/。
+# 该目录收纳所有 host 侧主动 CUST 迁移加载的 AICPU kernel(与 A3/A5 走 CANN OPP 自动加载区分),
+# 当前装 sdma orchestrator 一组, 后续同类 kernel 往同目录平铺。
+# ---------------------------------------------------------------
+resolve_sdma_orch_install_dir() {
+    # 优先: venv 内 memfabric_hybrid 包目录(两级布局, FindInstalledJson 两级回溯命中)
+    if command -v python &>/dev/null; then
+        local pkg_dir
+        pkg_dir=$(python - <<'PYEOF' 2>/dev/null
+import os
+try:
+    import memfabric_hybrid as m
+    p = os.path.dirname(os.path.abspath(m.__file__))
+    print(p)
+except Exception:
+    pass
+PYEOF
+        )
+        if [[ -n "${pkg_dir}" && -d "${pkg_dir}" ]]; then
+            echo "${pkg_dir}/cust_aicpu_kernel"
+            return
+        fi
+    fi
+    # 回退: MEMFABRIC_HYBRID_HOME_PATH(三级布局, run-install 场景)
+    local home="${MEMFABRIC_HYBRID_HOME_PATH:-}"
+    if [[ -n "${home}" && -d "${home}" ]]; then
+        echo "${home}/cust_aicpu_kernel"
+        return
+    fi
+    echo "/usr/local/memfabric_hybrid/latest/cust_aicpu_kernel"
+}
+
+# ---------------------------------------------------------------
+# 310P sdma orchestrator: --install
+# 三个产物(.so + 双 json)装到同一目录(与 FindInstalledJson 期望路径一致)
+# ---------------------------------------------------------------
+# 首次备份 install_dir 下已存在的 310P 产物并登记 manifest;
+# 后续 --force 覆盖不重复备份, --uninstall 时据此还原。
+backup_existing_sdma_orch() {
+    local install_dir="$1"
+    shift
+    local backup_dir="${install_dir}/${SDMA_ORCH_BACKUP_BASENAME}"
+    local manifest="${backup_dir}/manifest.txt"
+    [[ -f "$manifest" ]] && return
+    mkdir -p "${backup_dir}"
+    for f in "$@"; do
+        local target="${install_dir}/${f}"
+        [[ -f "$target" ]] && cp -a "$target" "${backup_dir}/" && echo "$f" >> "$manifest"
+    done
+}
+
+do_install_sdma_orch() {
+    local src_dir="$1"
+    local install_dir="$2"
+
+    local artifacts=("${SDMA_ORCH_SO}" "${SDMA_ORCH_CUST_JSON}" "${SDMA_ORCH_LAUNCH_JSON}" "${SDMA_ORCH_VERSION_FILE}")
+    # 源文件存在检查: .run 包构建时已强制要求 310P 产物齐全, 缺失说明 .run 包损坏, 硬失败
+    for f in "${artifacts[@]}"; do
+        if [[ ! -f "${src_dir}/${f}" ]]; then
+            echo "Error: 310P sdma orchestrator artifact '${f}' not found in ${src_dir}" >&2
+            exit 1
+        fi
+    done
+
+    mkdir -p "${install_dir}"
+
+    local existing=0
+    for f in "${artifacts[@]}"; do
+        [[ -f "${install_dir}/${f}" ]] && existing=1
+    done
+
+    if [[ $existing -eq 1 && $FORCE -eq 0 ]]; then
+        echo "Error: 310P sdma orchestrator target files already exist at ${install_dir}." >&2
+        echo "       Use --force to overwrite, or --uninstall first." >&2
+        exit 1
+    fi
+
+    backup_existing_sdma_orch "${install_dir}" "${artifacts[@]}"
+
+    local targets=()
+    for f in "${artifacts[@]}"; do
+        cp -f "${src_dir}/${f}" "${install_dir}/${f}"
+        echo "Installed: ${install_dir}/${f}"
+        targets+=("${install_dir}/${f}")
+    done
+
+    local file_perm=440
+    local dir_perm=750
+    if [[ $INSTALL_FOR_ALL -eq 1 ]]; then
+        file_perm=444
+        dir_perm=755
+    fi
+    chmod "$file_perm" "${targets[@]}"
+    chmod "$dir_perm" "${install_dir}"
+}
+
+# ---------------------------------------------------------------
+# 310P sdma orchestrator: --uninstall
+# ---------------------------------------------------------------
+do_uninstall_sdma_orch() {
+    local install_dir="$1"
+
+    local so_target="${install_dir}/${SDMA_ORCH_SO}"
+    local cust_json_target="${install_dir}/${SDMA_ORCH_CUST_JSON}"
+    local launch_json_target="${install_dir}/${SDMA_ORCH_LAUNCH_JSON}"
+    local ver_target="${install_dir}/${SDMA_ORCH_VERSION_FILE}"
+
+    local removed=0
+
+    for f in "$so_target" "$cust_json_target" "$launch_json_target" "$ver_target"; do
+        if [[ -f "$f" ]]; then
+            rm -f "$f"
+            echo "Removed: ${f}"
+            removed=1
+        fi
+    done
+
+    # Restore from backup if manifest exists
+    local backup_dir="${install_dir}/${SDMA_ORCH_BACKUP_BASENAME}"
+    local manifest="${backup_dir}/manifest.txt"
+    if [[ -f "$manifest" ]]; then
+        echo "Restoring 310P sdma orchestrator from backup..."
+        while IFS= read -r fname; do
+            local bkp="${backup_dir}/${fname}"
+            if [[ -f "$bkp" ]]; then
+                case "$fname" in
+                    "${SDMA_ORCH_SO}")
+                        cp -a "$bkp" "$so_target" && echo "Restored: ${so_target}" ;;
+                    "${SDMA_ORCH_CUST_JSON}")
+                        cp -a "$bkp" "$cust_json_target" && echo "Restored: ${cust_json_target}" ;;
+                    "${SDMA_ORCH_LAUNCH_JSON}")
+                        cp -a "$bkp" "$launch_json_target" && echo "Restored: ${launch_json_target}" ;;
+                    "${SDMA_ORCH_VERSION_FILE}")
+                        cp -a "$bkp" "$ver_target" && echo "Restored: ${ver_target}" ;;
+                    *)
+                        echo "WARNING: unknown backup entry: ${fname}" ;;
+                esac
+            fi
+        done < "$manifest"
+        rm -f "$manifest"
+    fi
+
+    # Clean up empty backup dirs / stale backup files
+    rm -f "${backup_dir}/${SDMA_ORCH_SO}" "${backup_dir}/${SDMA_ORCH_CUST_JSON}" \
+            "${backup_dir}/${SDMA_ORCH_LAUNCH_JSON}" "${backup_dir}/${SDMA_ORCH_VERSION_FILE}" 2>/dev/null || true
+    rmdir "${backup_dir}" 2>/dev/null || true
+
+    if [[ $removed -eq 0 ]]; then
+        echo "Nothing to uninstall for 310P sdma orchestrator."
+    fi
+}
+
 # ===============================================================
 # Main
 # ===============================================================
@@ -489,10 +683,48 @@ case "$ACTION" in
         KERNEL_DIR="${CANN_ROOT}/opp/vendors/cust/op_impl/aicpu/kernel"
         CONFIG_DIR="${CANN_ROOT}/opp/vendors/cust/op_impl/aicpu/config"
         BACKUP_DIR="${CANN_ROOT}/opp/vendors/cust/${BACKUP_BASENAME}"
-        if [[ "$ACTION" == "install" ]]; then
-            do_install "$SOURCE_DIR" "$KERNEL_DIR" "$CONFIG_DIR" "$BACKUP_DIR"
+        detect_platform
+        if [[ "$PLATFORM_DETECTED" == "unknown" ]]; then
+            echo "WARNING: cannot detect chip platform (npu-smi/lspci unavailable or not NPU host)." >&2
+            echo "WARNING: installing both A3/A5 and 310P artifacts." >&2
+            echo "WARNING: on 310P with verifyFlag=Only Huawei this may trigger aclrtSetDevice 507033;" >&2
+            echo "         re-run on a host with npu-smi or pre-install only the matching platform." >&2
         else
-            do_uninstall "$KERNEL_DIR" "$CONFIG_DIR" "$BACKUP_DIR"
+            echo "INFO: detected platform = ${PLATFORM_DETECTED}"
+        fi
+        if [[ "$ACTION" == "install" ]]; then
+            # A3/A5 产物(走 CANN OPP 自动加载, 注册进 ascend_package_load.ini)
+            if [[ "$PLATFORM_DETECTED" == "A3A5" || "$PLATFORM_DETECTED" == "unknown" ]]; then
+                echo "=== Installing A3/A5 AICPU kernel (libcann_hybm_kernel.so) to CANN OPP tree ==="
+                do_install "$SOURCE_DIR" "$KERNEL_DIR" "$CONFIG_DIR" "$BACKUP_DIR"
+            else
+                echo "=== Skipping A3/A5 AICPU kernel on 310P (not required, avoids signature verify failure) ==="
+            fi
+            echo ""
+            # 310P 产物(host 侧 CUST 迁移加载, 不走 CANN OPP 自动加载)
+            if [[ "$PLATFORM_DETECTED" == "310P" || "$PLATFORM_DETECTED" == "unknown" ]]; then
+                echo "=== Installing 310P sdma orchestrator AICPU kernel (libmf_sdma_orch.so) ==="
+                SDMA_ORCH_INSTALL_DIR=$(resolve_sdma_orch_install_dir)
+                do_install_sdma_orch "$SOURCE_DIR" "$SDMA_ORCH_INSTALL_DIR"
+            else
+                echo "=== Skipping 310P sdma orchestrator kernel on A3/A5 (not required) ==="
+            fi
+        else
+            # uninstall 与 install 对称: 按平台只清对应那一份
+            if [[ "$PLATFORM_DETECTED" == "A3A5" || "$PLATFORM_DETECTED" == "unknown" ]]; then
+                echo "=== Uninstalling A3/A5 AICPU kernel (libcann_hybm_kernel.so) from CANN OPP tree ==="
+                do_uninstall "$KERNEL_DIR" "$CONFIG_DIR" "$BACKUP_DIR"
+            else
+                echo "=== Skipping A3/A5 AICPU kernel uninstall on 310P (was not installed) ==="
+            fi
+            echo ""
+            if [[ "$PLATFORM_DETECTED" == "310P" || "$PLATFORM_DETECTED" == "unknown" ]]; then
+                echo "=== Uninstalling 310P sdma orchestrator AICPU kernel (libmf_sdma_orch.so) ==="
+                SDMA_ORCH_INSTALL_DIR=$(resolve_sdma_orch_install_dir)
+                do_uninstall_sdma_orch "$SDMA_ORCH_INSTALL_DIR"
+            else
+                echo "=== Skipping 310P sdma orchestrator kernel uninstall on A3/A5 (was not installed) ==="
+            fi
         fi
         ;;
     check)

@@ -271,15 +271,7 @@ mkdir -p ${PROJ_DIR}/src/smem/python/memfabric_hybrid/memfabric_hybrid/lib
 \cp -v "${PROJ_DIR}/output/smem/lib64/libmf_smem.so" "${PROJ_DIR}/src/smem/python/memfabric_hybrid/memfabric_hybrid/lib/"
 \cp -v "${PROJ_DIR}/output/hybm/lib64/libmf_hybm_core.so" "${PROJ_DIR}/src/smem/python/memfabric_hybrid/memfabric_hybrid/lib/"
 \cp -v "${PROJ_DIR}/output/acc_offload/lib64/libmf_acc_offload.so" "${PROJ_DIR}/src/smem/python/memfabric_hybrid/memfabric_hybrid/lib/"
-# AICPU 文件与主库一起分发，运行时从 lib/ 同级目录发现。
-AICPU_WHEEL_DIR="${PROJ_DIR}/src/smem/python/memfabric_hybrid/memfabric_hybrid/hybm/aicpu_kernel"
-rm -rf "${AICPU_WHEEL_DIR}"
-if [ "${XPU_TYPE}" = "NPU" ] && [ -f "${PROJ_DIR}/output/hybm/aicpu_kernel/libmf_sdma_orch.so" ]; then
-    mkdir -p "${AICPU_WHEEL_DIR}"
-    for asset in libmf_sdma_orch.so libmf_sdma_orch.json libmf_sdma_orch_launch.json; do
-        cp "${PROJ_DIR}/output/hybm/aicpu_kernel/${asset}" "${AICPU_WHEEL_DIR}/"
-    done
-fi
+# AICPU kernel(libmf_sdma_orch.so)随独立 .run 包发布, 不进主 wheel(与 libcann_hybm_kernel.so 对等)
 # --- 头文件：smem/include/host/ ---
 mkdir -p ${PROJ_DIR}/src/smem/python/memfabric_hybrid/memfabric_hybrid/include/smem/host
 cp -v "${PROJ_DIR}/output/smem/include/host/"*.h "${PROJ_DIR}/src/smem/python/memfabric_hybrid/memfabric_hybrid/include/smem/host/"

@@ -196,25 +196,43 @@ Result SdmaOrchestrator::AllocWorkspace()
     return BM_OK;
 }
 
-/* 安装前缀自动发现: 本 so 所在目录(如 <prefix>/lib64)的同级 hybm/aicpu_kernel 下
- * 找 launch json(so→<prefix>/lib64, json→<prefix>/hybm/aicpu_kernel)。
- * 命中返回绝对路径, 未命中返回空串(调用方继续回退 CWD)。 */
+/* 安装前缀自动发现: 主包安装目录(libmf_hybm_core.so 所在 <prefix>/<arch-os>/lib64)
+ * 上溯到 <prefix>, 其下 cust_aicpu_kernel/ 子目录找 launch json。
+ * 独立 .run 包把 .so + 双 json 装到此处(与主包解耦, 无主包内 hybm/aicpu_kernel 路径依赖)。
+ * 命中返回绝对路径, 未命中返回空串(调用方继续回退 CWD 或环境变量)。
+ * 兼容两种布局: run-install 三级 <prefix>/<arch-os>/lib64/(上溯三级到 <prefix>);
+ *               wheel/venv 两级 <memfabric_hybrid>/lib/(上溯两级到包目录)。 */
 static std::string FindInstalledJson()
 {
     Dl_info info = {};
     if (dladdr(reinterpret_cast<void *>(&SdmaOrchestrator::GetInstance), &info) == 0 || info.dli_fname == nullptr) {
         return "";
     }
-    std::string soDir(info.dli_fname);
-    auto pos = soDir.find_last_of('/');
+    std::string soPath(info.dli_fname); // <prefix>/<arch-os>/lib64/libmf_hybm_core.so
+    auto pos = soPath.find_last_of('/');
     if (pos == std::string::npos) {
         return "";
     }
-    soDir.resize(pos);
+    std::string libDir = soPath.substr(0, pos);             // <prefix>/<arch-os>/lib64 或 <pkg>/lib
+    auto archPos = libDir.find_last_of('/');
+    if (archPos == std::string::npos) {
+        return "";
+    }
+    std::string archDir = libDir.substr(0, archPos);        // <prefix>/<arch-os> 或 <pkg>
+    std::vector<std::string> candPrefixes;
+    // 三级布局: <prefix>/<arch-os>/lib64 -> 上溯三级到 <prefix>(run-install 场景)
+    auto prefixPos = archDir.find_last_of('/');
+    if (prefixPos != std::string::npos) {
+        candPrefixes.emplace_back(archDir.substr(0, prefixPos)); // <prefix>
+    }
+    // 两级布局: <pkg>/lib -> 上溯两级到 <pkg>(wheel/venv 场景), pkg 名 = memfabric_hybrid
+    candPrefixes.emplace_back(archDir);                     // <pkg> = memfabric_hybrid
     char resolved[PATH_MAX] = {0};
-    std::string cand = soDir + "/../hybm/aicpu_kernel/" + HYBM_SDMA_ORCH_DEFAULT_JSON;
-    if (realpath(cand.c_str(), resolved) != nullptr && access(resolved, R_OK) == 0) {
-        return std::string(resolved);
+    for (const auto &prefix : candPrefixes) {
+        std::string cand = prefix + "/cust_aicpu_kernel/" + HYBM_SDMA_ORCH_DEFAULT_JSON;
+        if (realpath(cand.c_str(), resolved) != nullptr && access(resolved, R_OK) == 0) {
+            return std::string(resolved);
+        }
     }
     return "";
 }
