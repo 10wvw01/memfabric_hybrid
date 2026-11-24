@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-ROOT="$(cd ../.. && pwd)"
+ROOT="$(cd ../../.. && pwd)"
 : "${ASCEND_HOME_PATH:?Load CANN environment}"
 export LD_LIBRARY_PATH="$ROOT/build/src/smem/csrc:$ROOT/build/src/hybm/csrc:"\
 "$ASCEND_HOME_PATH/lib64:${LD_LIBRARY_PATH:-}"
@@ -11,17 +11,22 @@ export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 LOG_DIR="${LOG_DIR:-$PWD/build/logs/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$LOG_DIR"
+export BLOCKS=1 CHUNKS=1
 bash build.sh
-backends="${BACKEND:-both}"
+backends="${BACKEND:-mf-doubling hccl}"
 if [[ "$backends" == both ]]; then
- backends="mf-signal hccl"
+ backends="mf-doubling hccl"
 elif [[ "$backends" == all ]]; then
- backends="mf-sync mf-nbi mf-signal mf-signal-nbi hccl"
+ backends="mf-doubling hccl"
+fi
+profile=()
+if [[ "${PROFILE:-0}" == 1 ]]; then
+ profile=(msprof --output="$LOG_DIR/profile" --ascendcl=on --runtime-api=on --task-time=l2 --aicpu=on --hccl=on --ai-core=on)
 fi
 for backend in $backends; do
  mkdir -p "$LOG_DIR/$backend"
- timeout --kill-after=10s "${TIMEOUT:-600}s" build/tp2_compare "$backend" "${DEVICE_BASE:-0}" \
+ timeout --kill-after=10s "${TIMEOUT:-600}s" "${profile[@]}" build/full_input_exchange "$backend" "${DEVICE_BASE:-6}" \
   "$LOG_DIR/$backend" "${WARMUP:-10}" "${ROUNDS:-100}" "${STORE_URL:-tcp://127.0.0.1:18881}" \
   > "$LOG_DIR/$backend/launcher.log" 2>&1
 done
-python3 summarize.py "$LOG_DIR"
+python3 ../summarize.py "$LOG_DIR"

@@ -1,6 +1,6 @@
 # 单 AICore SHMEM 独立接口性能测试
 
-固定使用逻辑设备6、7重新测试原实现与优化实现的全部78组接口，普通采样、msprof采样及数据耗时计算见[性能细节](../shmem_310p/PERFORMANCE_DETAILS.md)。
+固定使用逻辑设备6、7重新测试原实现与优化实现的全部78组接口，普通采样、msprof采样及数据耗时计算见[性能细节](PERFORMANCE_DETAILS.md)。
 本页原有表格保留各自标注的采样日期和设备条件。
 
 ## 测试范围与运行条件
@@ -16,7 +16,7 @@ AICPU 处理设备请求队列，测试全程只有 rank 0 的一个 AICore 发�
 每组预热 10 轮、采样 100 轮，逐轮检查完整目标数据或通知值。
 统计使用 rank 0 的计时样本，计算均值、P50、P95、P99、最大值。
 汇总前同时检查两端全部场景的校验记录和轮数。
-对应的 AllReduce 实现、时序图及 HCCL 基线见 [统一 AllReduce 基准](../shmem_310p/README.md)。
+对应的 AllReduce 实现、时序图及 HCCL 基线见 [统一 AllReduce 基准](../shmem_310p_allreduce/README.md)。
 
 ## 接口、场景和数据组织
 
