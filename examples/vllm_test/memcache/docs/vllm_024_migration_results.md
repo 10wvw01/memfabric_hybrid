@@ -273,7 +273,7 @@ P50为本轮样本中位数。下表记录共享服务器上的首token延迟实
 1. 固定基址`0x12da80000000`验证范围是本机设备6/7、上述两模型与TP=1/2；其他环境、跨卡及多池未验证。保留PR#23共同固定窗口和精确地址检查；所有rank必须使用相同基址与代码。未实现分布式地址协商。
 2. 原始裸completion、ignore_eos=true的长输入出现token差异；无connector的同一输入重复计算也不一致，根因尚未解决。日志 `vllm024-final-qwen36-tp2-raw-baseline-unstable.log`。最终聊天用例保持逐token对比，验证范围是明确列出的输入，不属于通用模型精度验收。
 3. 设备曾多次被其他容器的新任务占用，产生显存不足及一次HCCL分配失败；对应失败日志保留。按用户授权清理6/7，并临时监控本次窗口。初版监控误判环境变量缺失的自身子进程，已修正为完整进程树排除；该次失败单独归档。监控不属于产品补丁，测试结束已撤销。
-4. TP=4按用户要求未执行；未完成多并发吞吐、长时间稳定性、HBM→DRAM eviction/rewarm大容量测试。历史largecap和可选多token辅助方法仍需单独迁移，具体见下文。
+4. TP=4按用户要求未执行；未完成多并发吞吐、长时间稳定性测试。可选多 token 辅助方法仍需单独迁移，具体见下文。
 
 ## 测试用例与目的
 
@@ -299,7 +299,6 @@ examples/vllm_test/memcache/README.md
 examples/vllm_test/memcache/cases/config/mmc-local-integration-1rank.conf
 examples/vllm_test/memcache/cases/config/mmc-local-integration-4rank.conf
 examples/vllm_test/memcache/cases/config/mmc-local-integration.conf
-examples/vllm_test/memcache/cases/python/memcache/integration/vllm_http_test.py
 examples/vllm_test/memcache/cases/python/memcache/integration/vllm_integration_test.py
 examples/vllm_test/memcache/docs/error_analysis_report.md
 examples/vllm_test/memcache/docs/vllm_024_migration_results.md
