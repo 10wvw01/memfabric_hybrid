@@ -1,5 +1,8 @@
 # TP=2 SHMEM 与 HCCL AllReduce：实现、测试方案与性能
 
+固定使用逻辑设备6、7重新采样的普通性能、msprof分项及完整调用与数据执行成本，见[性能细节](PERFORMANCE_DETAILS.md)。
+本页原有表格保留各自标注的采样日期和设备条件。
+
 ## 测试对象与条件
 
 入口为 [main.asc](main.asc) 的 `mfAllReduce`、`reducePhase` 和 `runSize`。
