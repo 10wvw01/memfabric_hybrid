@@ -43,6 +43,27 @@ bool g_metaCleanupPending = false;
 bool g_sdmaInitHeld = false;
 
 std::mutex initMutex;
+
+/* 公开 C API 的同卡判定:
+ * 310P3 Duo 两 die 共卡, deviceId/2 即物理卡号;
+ * 其他 SoC 查询 INFO_TYPE_PHY_CHIP_ID 比较, 与 MemSegment::IsSameCard 语义一致;
+ * 查询失败或为 0 时视为不同卡(保守不跳过, 让驱动处理)。 */
+bool IsSameCardForPeerAccess(uint32_t localDevId, uint32_t peerDevId)
+{
+    if (DlAclApi::GetAscendSocType() == AscendSocType::ASCEND_310P) {
+        return IsSamePhysicalCard(localDevId, peerDevId);
+    }
+    auto localChipId = hybm_get_phy_chip_id(localDevId);
+    auto peerChipId = hybm_get_phy_chip_id(peerDevId);
+    if (localChipId <= 0 || peerChipId <= 0) {
+        BM_LOG_WARN("phy chip id unavailable, treat as different card, localDevId:" << localDevId
+                                                                                     << " localChipId:" << localChipId
+                                                                                     << " peerDevId:" << peerDevId
+                                                                                     << " peerChipId:" << peerChipId);
+        return false;
+    }
+    return localChipId == peerChipId;
+}
 } // namespace
 
 int32_t HybmGetInitDeviceId()
@@ -289,12 +310,9 @@ HYBM_API int32_t hybm_enable_peer_access(uint32_t localDeviceId, uint32_t peerDe
     if (localDeviceId == peerDeviceId) {
         return 0;
     }
-    /* 310P3 Duo: deviceId/2 identifies the physical card.
-     * dev0/dev1 → card0, dev2/dev3 → card1, etc.
-     * Same card = no P2P needed. */
-    if (IsSamePhysicalCard(localDeviceId, peerDeviceId)) {
-        BM_LOG_INFO("hybm_enable_peer_access: same card by deviceId/2, local:" << localDeviceId
-                                                                               << " peer:" << peerDeviceId);
+    /* 同卡免 P2P: 310P3 Duo 看 deviceId/2, 其他 SoC 看 physicalChipId。 */
+    if (IsSameCardForPeerAccess(localDeviceId, peerDeviceId)) {
+        BM_LOG_INFO("hybm_enable_peer_access: same card, local:" << localDeviceId << " peer:" << peerDeviceId);
         return 0;
     }
     auto ret = DlAclApi::AclrtDeviceEnablePeerAccess(static_cast<int32_t>(peerDeviceId), 0);
@@ -414,7 +432,7 @@ HYBM_API void *hybm_alloc_vmm_buffer(uint32_t deviceId, uint32_t worldSize, size
         if (d == deviceId) {
             continue;
         }
-        if (IsSamePhysicalCard(d, deviceId)) {
+        if (IsSameCardForPeerAccess(d, deviceId)) {
             continue;
         }
         aclrtMemAccessDesc desc{
