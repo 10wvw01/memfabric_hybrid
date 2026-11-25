@@ -60,8 +60,13 @@ struct HybmSdmaOrchParam {
     uint64_t poolBaseGva; /* 池窗口基址(对端段基 → 对端 rank = (dstSeg - poolBaseGva)/symSize) */
     uint32_t producerMask; /* 允许提交的逻辑block，与设备元数据一致 */
     uint32_t reserved;
+    /* 寄存器通知(commByReg): 默认 0 走原 GM 路径; 1 时 AICore 入口自注册核号并在提交后
+     * set_cond, AICPU 空闲时只读该注册核的 COND(不扫其它核), 数据面(邮件/游标)仍走 GM。 */
+    uint8_t commByReg;    /* 1=启用寄存器通知; 0=GM(默认) */
+    uint8_t rsv2[7];      /* 填充对齐(显式置 0) */
+    uint64_t regBaseAddr; /* regBase 数组设备地址(10×u64, host 经 halMemCtl 查出后 H2D) */
 };
-static_assert(sizeof(HybmSdmaOrchParam) == 88, "Param 尺寸漂移");
+static_assert(sizeof(HybmSdmaOrchParam) == 104, "Param 尺寸漂移"); /* 布局锁 104B(88B + 8B + 8B) */
 
 // 部署与清理确认使用独立参数，结果必须携带本次nonce。
 struct HybmSdmaDeployCheck {
@@ -124,6 +129,21 @@ struct HybmSdmaOrchDbgMail {                                  /* 单条逐单日
     uint64_t sqTailAfter; /* SQE 入环后 shadow 尾 */
 };
 static_assert(sizeof(HybmSdmaOrchDbgMail) == 64, "DbgMail 尺寸漂移"); /* 布局锁 64B */
+
+/* ---- 寄存器通知(commByReg)常量 ---- */
+constexpr uint32_t HYBM_SDMA_ORCH_REG_CORES = 10;        /* 310P3 DAV_2002 物理 AICore 数 */
+constexpr uint64_t HYBM_SDMA_ORCH_REG_CORE_STRIDE = 0x200000ULL; /* 每核寄存器窗口 2MB */
+constexpr uint32_t HYBM_SDMA_ORCH_REG_SPR_COND = 0x4C8;  /* AICore set_cond 写, AICPU 读 */
+constexpr uint32_t HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_DEFAULT = 100;  /* AICore 出口等待回执默认 100ms */
+constexpr uint32_t HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_MAX = 60000;    /* 硬上限 1 分钟 */
+constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_IDLE_US = 100;   /* 寄存器通知空闲休眠(仅启用时) */
+constexpr uint32_t HYBM_SDMA_ORCH_REG_FORCE_SCAN = 4096; /* 连续空转后强制 GM 全扫(通知丢失兜底) */
+/* 寄存器通知阶段码(写 result->headAfter, 退出前被真实 head 覆盖; 挂死时 host D2H 可读):
+ * 0x3001 读通知槽 / 0x3100+coreId 即将读该核 COND / 0x3200 读完成 / 0x3300 写回执 */
+constexpr uint64_t HYBM_SDMA_ORCH_STAGE_REG_CELLS = 0x3001;
+constexpr uint64_t HYBM_SDMA_ORCH_STAGE_REG_COND_BASE = 0x3100;
+constexpr uint64_t HYBM_SDMA_ORCH_STAGE_REG_DONE = 0x3200;
+constexpr uint64_t HYBM_SDMA_ORCH_STAGE_REG_ACK = 0x3300;
 
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S = 15;
 constexpr uint32_t HYBM_SDMA_ORCH_EPOCH_BUDGET_RESIDENT = 0xFFFFFFFFu; /* 永不退出的专用值(不判报时, 诊断用) */

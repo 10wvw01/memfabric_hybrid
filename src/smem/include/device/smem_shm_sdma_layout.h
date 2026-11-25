@@ -24,7 +24,11 @@
  * __host__ __aicore__ 双属性(设备 kernel 与 host 代码均可调); 纯 g++ 环境
  * (AICPU kernel 交叉编译/host UT/orchestrator)无执行模型, 退化为普通 inline */
 #if defined(__CCE__)
+#if defined(__host_aicore__) /* bisheng 9.0.0 及更早: 双属性拼写为 __host_aicore__([host, aicore]) */
+#define SMEM_SHM_SDMA_LAYOUT_FN __host_aicore__ inline
+#else /* 新版本 bisheng: 拆分为 __host__ __aicore__ */
 #define SMEM_SHM_SDMA_LAYOUT_FN __host__ __aicore__ inline
+#endif
 #else
 #define SMEM_SHM_SDMA_LAYOUT_FN static inline
 #endif
@@ -59,6 +63,27 @@ constexpr uint64_t SMEM_SHM_SDMA_RS_PRODUCER_MASK = 0xEF800;
 static_assert(SMEM_SHM_SDMA_RS_SIGNAL + 48 * SMEM_SHM_SDMA_RS_SIGNAL_STRIDE <=
               SMEM_SHM_SDMA_RS_PRODUCER_MASK, "producer mask overlaps signal parameters");
 static_assert(SMEM_SHM_SDMA_RS_PRODUCER_MASK + 64 <= SMEM_SHM_SDMA_RESERVED, "producer mask exceeds reserved area");
+
+/* ---- 寄存器通知(commByReg)保留槽 ----
+ * 开关槽由 host 在启用时写 1, AICore 提交路径读它决定是否 set_cond。
+ * 通知槽每 block 一个(64B 独占行): AICore kernel 入口写 magic/coreId/gen/active,
+ * 出口清 active; AICPU 只对 active 槽上报的核读 COND, 并对已退出槽写 ack 释放
+ * AICore 的有界等待。未启用时两处均为 0, AICore/AICPU 完全走 GM 路径。 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_COMM_BY_REG = 0xF0800;   /* 开关 u8(host 写, AICore 读) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_ACK_TIMEOUT = 0xF0840;   /* u64: AICore 出口等待回执上限(微秒, 0=默认) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_NOTIFY = 0xF0000;        /* 通知槽数组基址(每 block 64B) */
+constexpr uint64_t SMEM_SHM_SDMA_RS_NOTIFY_STRIDE = 0x40;    /* 槽间距(独占 64B 行) */
+constexpr uint32_t SMEM_SHM_SDMA_RS_NOTIFY_SLOTS = 8;        /* = 每 die block 上限 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_NOTIFY_MAGIC_OFF = 0x00; /* u64: 槽有效标识 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_NOTIFY_ACTIVE_OFF = 0x08;/* u64: 1=kernel 在跑 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_NOTIFY_COREID_OFF = 0x10;/* u64: get_coreid() 物理核号 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_NOTIFY_GEN_OFF = 0x18;   /* u64: 本次 launch 代号 */
+constexpr uint64_t SMEM_SHM_SDMA_RS_NOTIFY_ACK_OFF = 0x20;   /* u64: AICPU 回执代号 */
+constexpr uint64_t SMEM_SHM_SDMA_NOTIFY_MAGIC = 0x4E4F5449ULL; /* 'NOTI' */
+constexpr uint32_t SMEM_SHM_SDMA_ACK_TIMEOUT_US_DEFAULT = 100000; /* AICore 出口等待回执默认 100ms */
+static_assert(SMEM_SHM_SDMA_RS_NOTIFY + SMEM_SHM_SDMA_RS_NOTIFY_SLOTS * SMEM_SHM_SDMA_RS_NOTIFY_STRIDE <=
+              SMEM_SHM_SDMA_RS_COMM_BY_REG, "notify cells overlap commByReg flag");
+static_assert(SMEM_SHM_SDMA_RS_ACK_TIMEOUT + 64 <= SMEM_SHM_SDMA_RESERVED, "ack timeout exceeds reserved area");
 
 /* ---- 协同模式规模上限 ---- */
 constexpr uint32_t SMEM_SHM_SDMA_MAX_RANKS = 4;  /* rank 上限(8-rank 全互联被每卡 8 个 P2P 槽位硬约束否定) */

@@ -73,6 +73,11 @@ inline const std::string MF_SDMA_ORCH_DIR = GetEnvStr("MF_SDMA_ORCH_DIR");
 // 搬运 kernel 每轮时长秒数(缺省 15): 到点自退后由监督线程重新拉起(环+游标零丢失)。
 // 4294967295=永不退出(诊断用; 会阻塞任何全设备同步, 见平台事实 2026-10-12 定案条目)
 inline const std::string MF_SDMA_ORCH_EPOCH_BUDGET_S = GetEnvStr("MF_SDMA_ORCH_EPOCH_BUDGET_S"); // ConfigureOrch 读取
+// 寄存器通知(commByReg)开关(默认关: 走原 GM 路径)。=1 时 AICore 入口自注册核号、提交后
+// set_cond, AICPU 只读该注册核的 COND; host 查寄存器基址失败自动退回 GM(零功能损失)。
+inline const std::string MF_SDMA_ORCH_COMM_BY_REG = GetEnvStr("MF_SDMA_ORCH_COMM_BY_REG"); // QueryAicoreRegs 读取
+// AICore 出口等待 AICPU 回执上限(毫秒, 缺省 100, 硬上限 60000)
+inline const std::string MF_SDMA_ORCH_ACK_TIMEOUT_MS = GetEnvStr("MF_SDMA_ORCH_ACK_TIMEOUT_MS"); // ConfigureOrch 读取
 inline const std::string MF_GROUP_JOIN_MAX_TIMEOUT = GetEnvStr("MF_GROUP_JOIN_MAX_TIMEOUT");
 inline const std::string MF_GROUP_RETRY_TIME = GetEnvStr("MF_GROUP_RETRY_TIME", "MF_SMEM_GROUP_RETRY_TIME");
 inline const std::string MF_ACC_CHECK_PERIOD_HOURS =

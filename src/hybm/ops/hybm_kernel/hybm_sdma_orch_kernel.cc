@@ -70,7 +70,18 @@ extern "C" {
 __attribute__((weak)) int32_t halSqCqConfig(uint32_t devId, void *info);
 __attribute__((weak)) int32_t halSqCqQuery(uint32_t devId, void *info);
 __attribute__((weak)) int32_t drvMemSmmuQuery(uint32_t devId, uint32_t *ssid);
+// AICPU 侧日志: dlog 弱符号, 由 AICPU 执行环境按名解析(与 CANN aicpu_common log_weak.h 同签名)
+__attribute__((weak)) void DlogRecord(int32_t moduleId, int32_t level, const char *fmt, ...);
 } // extern "C"
+
+/* AICPU 日志宏: 符号不可用时静默跳过。输出落 host 侧
+ * /root/ascend/log/run/device-N/device-*.log(INFO) 或 debug/device-N/device-*.log(ERROR)。 */
+#define ORCH_LOG(level, fmt, ...)                                  \
+    do {                                                           \
+        if (DlogRecord != nullptr) {                               \
+            DlogRecord(36 /* AICPU */, (level), fmt, ##__VA_ARGS__); \
+        }                                                          \
+    } while (0)
 
 namespace {
 // 常量(HAL 镜像词保持驱动侧命名)
@@ -330,6 +341,70 @@ inline void storeCell(uint64_t addr, uint64_t v)
 {
     *reinterpret_cast<volatile uint64_t *>(addr) = v;
     cacheFlushLine(addr & ~static_cast<uintptr_t>(63));
+}
+
+/* ---- 寄存器通知(commByReg)原语 ----
+ * AICPU 只读 AICore 自己上报核号的 COND(不遍历其它核); 写回执走 GM 通知槽。 */
+inline uint64_t AicpuReadReg64(uint64_t regAddr)
+{
+    return *reinterpret_cast<volatile uint64_t *>(regAddr);
+}
+
+/* 阶段码写 result->headAfter(退出前被真实 SQ head 覆盖; 挂死时 host D2H 可读定位) */
+inline void markStage(volatile ock::mf::HybmSdmaOrchResult *result, uint64_t code)
+{
+    result->headAfter = code;
+    cacheFlushLine(reinterpret_cast<uintptr_t>(result) & ~static_cast<uintptr_t>(63));
+    memBarrier();
+}
+
+/* 寄存器通知路径计数(仅 AICPU 栈上, 不写 GM; 退出时随日志打印, 作为"走了寄存器"的判据) */
+struct RegStats {
+    uint64_t condReads;   // 读 COND 寄存器次数
+    uint64_t condChanges; // COND 值变化次数(变化即需要扫 GM)
+    uint64_t ackWrites;   // 写回执次数
+    uint64_t forceScans;  // 空转超限强制 GM 全扫次数(通知丢失兜底)
+    uint64_t gmScans;     // 主循环 GM 扫描轮数
+};
+
+/* 寄存器通知空闲判定: 只读 active 槽上报核的 COND(不遍历其它核), 对已退出槽写回执。
+ * 返回 true 表示需要扫 GM 队列; 核号异常或未注册一律返回 true 退回 GM 扫描。 */
+inline bool pollNotifyCells(const ock::mf::HybmSdmaOrchParam *p, const volatile uint64_t *regBaseArr,
+                            uint64_t *lastCond, volatile ock::mf::HybmSdmaOrchResult *result, RegStats *stats)
+{
+    using namespace ock::mf;
+    bool needScan = false;
+    markStage(result, HYBM_SDMA_ORCH_STAGE_REG_CELLS);
+    for (uint32_t block = 0; block < SMEM_SHM_SDMA_RS_NOTIFY_SLOTS; ++block) {
+        if (!SmemShmSdmaProducerAllowed(p->producerMask, block)) {
+            continue;
+        }
+        const uint64_t off = p->resBase + SMEM_SHM_SDMA_RS_NOTIFY +
+                             static_cast<uint64_t>(block) * SMEM_SHM_SDMA_RS_NOTIFY_STRIDE;
+        const uint64_t active = loadCell(off + SMEM_SHM_SDMA_RS_NOTIFY_ACTIVE_OFF);
+        const uint64_t gen = loadCell(off + SMEM_SHM_SDMA_RS_NOTIFY_GEN_OFF);
+        if (active != 0) {
+            const uint64_t coreId = loadCell(off + SMEM_SHM_SDMA_RS_NOTIFY_COREID_OFF);
+            if (coreId >= HYBM_SDMA_ORCH_REG_CORES) {
+                needScan = true; // 核号异常: 不读寄存器, 退回 GM 扫描
+                continue;
+            }
+            markStage(result, HYBM_SDMA_ORCH_STAGE_REG_COND_BASE + coreId);
+            const uint64_t v = AicpuReadReg64(regBaseArr[coreId] + HYBM_SDMA_ORCH_REG_SPR_COND);
+            stats->condReads++;
+            markStage(result, HYBM_SDMA_ORCH_STAGE_REG_DONE);
+            if (v != lastCond[coreId]) {
+                lastCond[coreId] = v;
+                stats->condChanges++;
+                needScan = true;
+            }
+        } else if (gen != 0 && loadCell(off + SMEM_SHM_SDMA_RS_NOTIFY_ACK_OFF) != gen) {
+            markStage(result, HYBM_SDMA_ORCH_STAGE_REG_ACK);
+            storeCell(off + SMEM_SHM_SDMA_RS_NOTIFY_ACK_OFF, gen); // 释放 AICore 出口等待
+            stats->ackWrites++;
+        }
+    }
+    return needScan;
 }
 
 // v15 诊断逐单日志: 逐单落工作区环形缓冲(读回原文/计算地址/SQ 游标), host D2H 可读。
@@ -682,6 +757,13 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     ScanContext scan{};
     scan.count = HybmSdmaBuildScanQueues(p->rankCount, p->producerMask, scan.queues);
     const uint16_t ssid = querySsid(p->devId); // ssid 实时查询(严禁硬编码)
+    /* 寄存器通知装载: commByReg=0 或 regBase 缺失时 regBaseArr=nullptr, 主循环保持原 GM 路径 */
+    const volatile uint64_t *regBaseArr = (p->commByReg != 0 && p->regBaseAddr != 0)
+        ? reinterpret_cast<const volatile uint64_t *>(p->regBaseAddr)
+        : nullptr;
+    uint64_t lastCond[HYBM_SDMA_ORCH_REG_CORES] = {0}; // 各核 COND 上次采样(变化即活动)
+    uint32_t idleSpins = 0;                            // 连续空转计数(有消费即清零)
+    RegStats stats = {};                               // 寄存器路径计数(退出时打日志)
     /* 每队列消费起点(v31: 队列按对端×block 划分, 各队列独立游标持久于保留区, 换轮零丢失) */
     for (uint32_t ordinal = 0; ordinal < scan.count; ++ordinal) {
         const uint32_t q = scan.queues[ordinal];
@@ -706,6 +788,7 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
             break;
         }
         uint32_t batch = 0;
+        stats.gmScans++;
         ret = consumeBatch(p, &ctx, ssid, scan, batch, [p](uint32_t q) {
             return loadCell(p->resBase + SMEM_SHM_SDMA_RS_REQ_TAIL + q * SMEM_SHM_SDMA_RS_CURSOR_STRIDE);
         });
@@ -716,8 +799,23 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
             break;
         }
         if (batch == 0) { // 全环空(扫描一轮零消费)
-            continue;
+            if (regBaseArr == nullptr) {
+                continue; // 原 GM 路径: 行为不变(无休眠全队列轮询)
+            }
+            if (!pollNotifyCells(p, regBaseArr, lastCond, result, &stats)) {
+                if (idleSpins < HYBM_SDMA_ORCH_REG_FORCE_SCAN) {
+                    idleSpins++;
+                    usleep(HYBM_SDMA_ORCH_EPOCH_IDLE_US);
+                    continue;
+                }
+                idleSpins = 0; // 兜底: 强制下一轮 GM 全扫(通知丢失不丢请求)
+                stats.forceScans++;
+            } else {
+                idleSpins = 0;
+            }
+            continue; // 下一轮 consumeBatch 扫 GM
         }
+        idleSpins = 0;                    // 有消费: 退出空闲等待
         ret = flushBatchDoorbell(p, &ctx); // 批末统一敲铃
         if (ret != 0) {
             result->mainRet = static_cast<uint32_t>(ret);
@@ -728,6 +826,15 @@ extern "C" __attribute__((visibility("default"))) uint32_t HybmSdmaOrchEpoch(voi
     uint32_t headA = ctx.sqHead; // head 采样初值(查询失败时兜底)
     (void)cp1QueryProp(p->devId, p->sqId, DRV_SQCQ_PROP_SQ_HEAD, &headA, nullptr); // 逐单日志: head 采样
     result->headAfter = headA;
+    /* 设备默认日志级别为 3(ERROR), 用 ERROR 级保证落盘; 每 epoch 退出打一行, 作为路径判据:
+     * register-notify 且 condReads>0 表示确实读过 AICore COND; gm-poll 则寄存器计数恒 0。 */
+    ORCH_LOG(3 /* DLOG_ERROR */,
+             "[hybm_sdma_orch] epoch exit: path=%s commByReg=%u reason=%u consumed=%u condReads=%llu "
+             "condChanges=%llu ackWrites=%llu forceScans=%llu gmScans=%llu",
+             regBaseArr != nullptr ? "register-notify" : "gm-poll", p->commByReg, result->exitReason,
+             result->consumed, static_cast<unsigned long long>(stats.condReads),
+             static_cast<unsigned long long>(stats.condChanges), static_cast<unsigned long long>(stats.ackWrites),
+             static_cast<unsigned long long>(stats.forceScans), static_cast<unsigned long long>(stats.gmScans));
     finishResult(result);
     return (result->exitReason == HYBM_SDMA_ORCH_EXIT_ERROR) ? 1 : 0;
 }

@@ -36,6 +36,8 @@ struct smem_shm_sdma_ctx_t {
     uint32_t rankSize;   /* 世界大小 */
     uint32_t block;      /* GetBlockIdx，混合kernel的逻辑block号 */
     uint32_t producerMask = SMEM_SHM_SDMA_DEFAULT_PRODUCER_MASK;
+    uint8_t commByReg;   /* 寄存器通知开关(保留区槽, host 写; 1=入口自注册+提交后 set_cond) */
+    uint32_t ackTimeoutUs; /* 出口等待回执上限(保留区槽, host 写; 0=默认 100ms) */
 };
 
 #ifdef __cplusplus
@@ -98,6 +100,67 @@ SMEM_SHM_INLINE_AICORE void SdmaWriteCell(__gm__ uint8_t *res, uint64_t off, uin
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(t);
 }
 
+/* ---- 寄存器通知(commByReg)原语 ----
+ * AICore 入口把本核物理核号写入保留区通知槽(握手), 提交请求后 set_cond 写本核 COND;
+ * AICPU 只读该槽上报核的 COND, 不扫其它核。出口先撤 active 再有界等待 AICPU 回执,
+ * 保证 AICPU 读 COND 时该核仍在 kernel 内。未启用时全部为空操作。 */
+SMEM_SHM_INLINE_AICORE void SdmaSetCond(uint64_t value)
+{
+#if defined(__CCE__)
+    set_cond(static_cast<int64_t>(value));
+#else
+    (void)value;
+#endif
+}
+
+SMEM_SHM_INLINE_AICORE uint64_t SdmaGetCoreId()
+{
+#if defined(__CCE__)
+    return static_cast<uint64_t>(get_coreid());
+#else
+    return 0;
+#endif
+}
+
+SMEM_SHM_INLINE_AICORE uint64_t SdmaNotifyCellOff(const smem_shm_sdma_ctx_t &ctx)
+{
+    return SMEM_SHM_SDMA_RS_NOTIFY + static_cast<uint64_t>(ctx.block) * SMEM_SHM_SDMA_RS_NOTIFY_STRIDE;
+}
+
+/* 握手: 写 magic/coreId/gen/ack, 最后写 active=1(AICPU 只在 active=1 时读核号) */
+SMEM_SHM_INLINE_AICORE void SdmaNotifyBegin(const smem_shm_sdma_ctx_t &ctx)
+{
+    if (ctx.commByReg == 0) {
+        return;
+    }
+    const uint64_t off = SdmaNotifyCellOff(ctx);
+    const uint64_t gen = SdmaReadCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_GEN_OFF) + 1;
+    SdmaWriteCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_MAGIC_OFF, SMEM_SHM_SDMA_NOTIFY_MAGIC);
+    SdmaWriteCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_COREID_OFF, SdmaGetCoreId());
+    SdmaWriteCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_GEN_OFF, gen);
+    SdmaWriteCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_ACK_OFF, 0);
+    SdmaWriteCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_ACTIVE_OFF, 1);
+}
+
+/* 撤注册 + 有界等待 AICPU 回执(ack==gen); 超时返回 false, 调用方照常退出(GM 结果仍正确) */
+SMEM_SHM_INLINE_AICORE bool SdmaNotifyEnd(const smem_shm_sdma_ctx_t &ctx, uint32_t timeoutUs)
+{
+    if (ctx.commByReg == 0) {
+        return true;
+    }
+    const uint64_t off = SdmaNotifyCellOff(ctx);
+    const uint64_t gen = SdmaReadCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_GEN_OFF);
+    SdmaWriteCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_ACTIVE_OFF, 0);
+    uint32_t delay = SMEM_SHM_SDMA_BACKOFF_START;
+    for (uint64_t i = 0; i < timeoutUs; ++i) {
+        if (SdmaReadCell(ctx.res, off + SMEM_SHM_SDMA_RS_NOTIFY_ACK_OFF) == gen) {
+            return true;
+        }
+        SdmaPollBackoff(i, delay);
+    }
+    return false;
+}
+
 /* ============================ 公开 API ============================ */
 
 SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
@@ -110,6 +173,9 @@ SMEM_SHM_INLINE_AICORE smem_shm_sdma_ctx_t smem_shm_sdma_ctx(__gm__ void *gva)
     c.res = static_cast<__gm__ uint8_t *>(gva) + c.symm * c.rank + (c.phys - SMEM_SHM_SDMA_RESERVED);
     c.block = static_cast<uint32_t>(AscendC::GetBlockIdx()); /* v31: 队列按 block 划分 */
     c.producerMask = static_cast<uint32_t>(SdmaReadCell(c.res, SMEM_SHM_SDMA_RS_PRODUCER_MASK));
+    c.commByReg = static_cast<uint8_t>(SdmaReadCell(c.res, SMEM_SHM_SDMA_RS_COMM_BY_REG) & 0xFF);
+    const uint64_t ackUs = SdmaReadCell(c.res, SMEM_SHM_SDMA_RS_ACK_TIMEOUT);
+    c.ackTimeoutUs = ackUs == 0 ? SMEM_SHM_SDMA_ACK_TIMEOUT_US_DEFAULT : static_cast<uint32_t>(ackUs);
     return c;
 }
 
@@ -193,6 +259,10 @@ SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, u
     gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(gm);
     SdmaWriteCell(ctx.res, SMEM_SHM_SDMA_RS_REQ_TAIL + queue * SMEM_SHM_SDMA_RS_CURSOR_STRIDE, tail + 1);
+    if (ctx.commByReg != 0) {
+        /* 寄存器通知: 写本核 COND(值含 block 与队列尾, 变化即活动; AICPU 只判变化) */
+        SdmaSetCond((static_cast<uint64_t>(ctx.block) << 32) | (tail + 1));
+    }
 }
 
 SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,

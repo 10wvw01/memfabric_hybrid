@@ -33,6 +33,7 @@
 #include <vector>
 #include "mf_scope_guard.h"
 #include <set>
+#include <sstream>
 #include <string>
 #include <unistd.h>
 
@@ -61,6 +62,20 @@ constexpr uint32_t HYBM_SDMA_ORCH_CMD_BUF_SIZE = 512; /* KFC 命令缓冲尺寸(
 constexpr int32_t HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED = 507018;
 constexpr uint32_t HYBM_SDMA_ORCH_SUPERVISOR_MAX_ERR = 16; /* 监督线程连续失败上限(放弃后数据面停在背压) */
 
+/* halMemCtl 私有接口最小集(查 AICore 控制寄存器基址)。返回的 ptr 是设备侧 AICPU 进程的
+ * VA, host 不能解引用, 只能 H2D 传给 AICPU kernel(volatile 读目标核 SPR)。 */
+constexpr uint32_t HYBM_ADDR_MAP_TYPE_REG_AIC_CTRL = 2;
+struct HybmAddrMapInPara {
+    uint32_t addrType;
+    uint32_t devId;
+};
+struct HybmAddrMapOutPara {
+    uint64_t ptr;
+    uint64_t len;
+};
+typedef int (*HalMemCtlFunc)(int type, void *in, size_t inSize, void *out, size_t *outSizeRet);
+constexpr char HYBM_HAL_LIB_PATH[] = "/usr/local/Ascend/driver/lib64/driver/libascend_hal.so";
+
 /* 解析每轮时长(秒): MF_SDMA_ORCH_EPOCH_BUDGET_S 显式指定;
  * 非法/未设 → 默认 15s; 4294967295 → 永不退出的专用值(诊断模式, 会阻塞全设备同步) */
 uint32_t ResolveEpochBudgetS()
@@ -81,6 +96,67 @@ uint32_t ResolveEpochBudgetS()
         return HYBM_SDMA_ORCH_EPOCH_TIME_BUDGET_S; /* 0 语义 = 默认(kernel 契约) */
     }
     return static_cast<uint32_t>(parsed);
+}
+
+/* 解析 AICore 出口等待回执上限(毫秒): 缺省 100, 硬上限 60000 */
+uint32_t ResolveAckTimeoutMs()
+{
+    const std::string &val = env::MF_SDMA_ORCH_ACK_TIMEOUT_MS;
+    if (val.empty()) {
+        return HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_DEFAULT;
+    }
+    errno = 0;
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(val.c_str(), &end, 10);
+    if (errno != 0 || end == nullptr || *end != '\0' || parsed == 0) {
+        BM_LOG_WARN("invalid MF_SDMA_ORCH_ACK_TIMEOUT_MS: " << val << ", fallback to default "
+                    << HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_DEFAULT << "ms");
+        return HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_DEFAULT;
+    }
+    if (parsed > HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_MAX) {
+        BM_LOG_WARN("MF_SDMA_ORCH_ACK_TIMEOUT_MS exceeds max, clamp to " << HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_MAX);
+        return HYBM_SDMA_ORCH_ACK_TIMEOUT_MS_MAX;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+
+/* 逻辑设备号 → 物理 chip 号: 设了 ASCEND_RT_VISIBLE_DEVICES 时, 进程内 devId 是重映射后的
+ * 逻辑下标, 而 halMemCtl 的 devid 要物理 chip 号(hal 私有接口不感知 runtime 重映射, 传逻辑号
+ * 实测返回 42)。取可见列表第 devId 项; 未设/解析失败/越界 → devId 原样返回(由调用方降级 GM)。 */
+uint32_t ResolvePhysicalDevId(uint32_t devId)
+{
+    const char *visible = std::getenv("ASCEND_RT_VISIBLE_DEVICES");
+    if (visible == nullptr || visible[0] == '\0') {
+        return devId; /* 未重映射: 逻辑号即物理号 */
+    }
+    std::vector<uint32_t> list;
+    std::string item;
+    std::istringstream ss(visible);
+    while (std::getline(ss, item, ',')) {
+        errno = 0;
+        char *end = nullptr;
+        const unsigned long lo = std::strtoul(item.c_str(), &end, 10);
+        if (errno != 0 || end == nullptr || end == item.c_str()) {
+            return devId; /* 含不可解析项: 不猜, 原样返回 */
+        }
+        if (*end == '-') { /* "a-b" 区间展开 */
+            const unsigned long hi = std::strtoul(end + 1, &end, 10);
+            if (errno != 0 || end == nullptr || *end != '\0' || hi < lo) {
+                return devId;
+            }
+            for (unsigned long v = lo; v <= hi; ++v) {
+                list.push_back(static_cast<uint32_t>(v));
+            }
+        } else if (*end != '\0') {
+            return devId;
+        } else {
+            list.push_back(static_cast<uint32_t>(lo));
+        }
+    }
+    if (devId >= list.size()) {
+        return devId; /* 越界: 交由 halMemCtl 报错降级 */
+    }
+    return list[devId];
 }
 } // namespace
 
@@ -149,7 +225,63 @@ Result SdmaOrchestrator::InitOnce(uint16_t devId)
     if (ret != BM_OK) {
         return ret;
     }
+    QueryAicoreRegs(devId); /* 寄存器通知查询: 失败不报错, 只降级 commByReg_=false 走 GM */
     return BM_OK;
+}
+
+/* 寄存器通知(commByReg)查询: MF_SDMA_ORCH_COMM_BY_REG=1 时经 halMemCtl 查 AICore 控制寄存器
+ * 基址, 查到后 regBase 数组(10 核 × 2MB stride)H2D 到设备内存, AICPU 只读注册核的 COND。
+ * 任何失败路径只置 commByReg_=false 降级 GM(零功能损失)。 */
+void SdmaOrchestrator::QueryAicoreRegs(uint16_t devId)
+{
+    commByReg_ = false;
+    const auto &enable = env::MF_SDMA_ORCH_COMM_BY_REG;
+    if (enable != "1" && enable != "on") { /* 默认关: 显式 opt-in 才尝试 */
+        return;
+    }
+    void *h = dlopen(HYBM_HAL_LIB_PATH, RTLD_NOW);
+    if (h == nullptr) {
+        BM_LOG_WARN("commByReg: dlopen libascend_hal.so failed, fallback to GM: " << dlerror());
+        return;
+    }
+    auto halMemCtl = reinterpret_cast<HalMemCtlFunc>(dlsym(h, "halMemCtl"));
+    if (halMemCtl == nullptr) {
+        BM_LOG_WARN("commByReg: dlsym halMemCtl failed, fallback to GM: " << dlerror());
+        dlclose(h);
+        return;
+    }
+    HybmAddrMapInPara in = {HYBM_ADDR_MAP_TYPE_REG_AIC_CTRL, ResolvePhysicalDevId(devId)};
+    HybmAddrMapOutPara out = {0, 0};
+    const int ctlRet = halMemCtl(0, &in, sizeof(in), &out, nullptr);
+    if (ctlRet != 0 || out.ptr == 0) {
+        BM_LOG_WARN("commByReg: halMemCtl(AIC_CTRL) failed ret: " << ctlRet << ", fallback to GM");
+        dlclose(h);
+        return;
+    }
+    BM_LOG_INFO("commByReg: halMemCtl OK, base=0x" << std::hex << out.ptr << " len="
+                << (out.len / (1024 * 1024)) << "MB");
+    dlclose(h);
+    uint64_t regBaseHost[REG_BASE_CORES] = {0};
+    for (uint32_t i = 0; i < REG_BASE_CORES; i++) {
+        regBaseHost[i] = out.ptr + static_cast<uint64_t>(i) * REG_CORE_STRIDE;
+    }
+    void *devRegBase = nullptr;
+    auto aclRet = DlAclApi::AclrtMalloc(&devRegBase, sizeof(regBaseHost), ACL_MEM_MALLOC_HUGE_FIRST);
+    if (aclRet != BM_OK) {
+        BM_LOG_WARN("commByReg: aclrtMalloc regBase failed, fallback to GM: " << aclRet);
+        return;
+    }
+    aclRet = DlAclApi::AclrtMemcpy(devRegBase, sizeof(regBaseHost), regBaseHost, sizeof(regBaseHost),
+                                   ACL_MEMCPY_HOST_TO_DEVICE);
+    if (aclRet != BM_OK) {
+        BM_LOG_WARN("commByReg: aclrtMemcpy regBase failed, fallback to GM: " << aclRet);
+        (void)DlAclApi::AclrtFree(devRegBase);
+        return;
+    }
+    regBaseDevAddr_ = reinterpret_cast<uint64_t>(devRegBase);
+    commByReg_ = true;
+    BM_LOG_INFO("commByReg: enabled, regBase devAddr=0x" << std::hex << regBaseDevAddr_
+                << " cores=" << std::dec << REG_BASE_CORES);
 }
 
 Result SdmaOrchestrator::InitCpStream(uint16_t devId)
@@ -792,6 +924,25 @@ Result SdmaOrchestrator::ConfigureOrch(uint64_t ownSegGva, uint64_t physSize, ui
     epochParam_.rankCount = rankCount;
     epochParam_.producerMask = producerMask;
     epochParam_.poolBaseGva = poolBaseGva; /* v29: dstSeg → 目的 rank 的换算原点(路由复核) */
+    /* 寄存器通知透传: commByReg=0(默认)时 AICPU 走原 GM 路径, 行为不变 */
+    epochParam_.commByReg = commByReg_ ? 1 : 0;
+    epochParam_.regBaseAddr = regBaseDevAddr_;
+    if (commByReg_) {
+        /* 保留区开关槽 + 回执等待上限(微秒): AICore ctx() 读这两处决定自注册与出口等待 */
+        const uint8_t regFlag = 1;
+        ret = DlAclApi::AclrtMemcpy(reinterpret_cast<void *>(resBase + SMEM_SHM_SDMA_RS_COMM_BY_REG),
+                                    sizeof(regFlag), &regFlag, sizeof(regFlag), ACL_MEMCPY_HOST_TO_DEVICE);
+        const uint64_t ackUs = static_cast<uint64_t>(ResolveAckTimeoutMs()) * 1000ULL;
+        if (ret == BM_OK) {
+            ret = DlAclApi::AclrtMemcpy(reinterpret_cast<void *>(resBase + SMEM_SHM_SDMA_RS_ACK_TIMEOUT),
+                                        sizeof(ackUs), &ackUs, sizeof(ackUs), ACL_MEMCPY_HOST_TO_DEVICE);
+        }
+        if (ret != BM_OK) { /* 槽写失败不致命: AICore 不注册/不等待, AICPU 退回 GM 扫描 */
+            BM_LOG_WARN("commByReg: write reserved slots failed, ret: " << ret);
+        } else {
+            BM_LOG_INFO("commByReg: reserved slots written, ackTimeoutUs: " << ackUs);
+        }
+    }
     /* 首轮内联下发: 失败立即报错(池创建失败, 调用方可重试)——监督线程只负责后续重拉,
      * 不得吞掉首轮失败造成池看似就绪实则无消费者的静默半死 */
     ret = DlAclApi::AclrtCreateStream(&epochStream_);
@@ -1050,6 +1201,11 @@ void SdmaOrchestrator::Cleanup()
         (void)DlAclApi::AclrtFree(reinterpret_cast<void *>(workspace_.load()));
         workspace_ = 0;
     }
+    if (regBaseDevAddr_ != 0) { /* 寄存器通知 regBase 数组释放 */
+        (void)DlAclApi::AclrtFree(reinterpret_cast<void *>(regBaseDevAddr_));
+        regBaseDevAddr_ = 0;
+    }
+    commByReg_ = false;
     /* binHandle_ 无对应卸载接口(DlAclApi 未封装), 随进程生命周期释放 */
     binHandle_ = nullptr;
     funcHandle_ = nullptr;

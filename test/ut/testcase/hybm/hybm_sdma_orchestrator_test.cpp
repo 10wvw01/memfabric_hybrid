@@ -596,8 +596,9 @@ TEST(SdmaOrchestratorTest, DualHeaderLayoutInvariants)
 /* 用例 3b: 契约不变式(KFCKernel/type 5 不受设备侧 28s 强制结束约束; v11: 按时长分轮+主机报时) */
 TEST(SdmaOrchestratorTest, V9ResidentInvariants)
 {
-    /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部使用 rank/rankCount/poolBaseGva), 80B */
-    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 88U);
+    /* 参数布局锁: v29 重构(reqBase/quietBase→resBase, 尾部使用 rank/rankCount/poolBaseGva), 88B;
+     * commByReg 追加 commByReg u8 + rsv2[7] + regBaseAddr u64 → 104B */
+    EXPECT_EQ(sizeof(HybmSdmaOrchParam), 104U);
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, producerMask), 80U);
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, epochBudgetS), 12U); // 第 4 个 u32 槽位
     EXPECT_EQ(offsetof(HybmSdmaOrchParam, resBase), 16U);       // 保留区基址(定位原点)
