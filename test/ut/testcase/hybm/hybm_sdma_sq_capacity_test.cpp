@@ -251,6 +251,13 @@ protected:
         std::memcpy(&value, ring.data() + descriptor * kSqeSize + offset, sizeof(value));
         return value;
     }
+
+    uint32_t DescriptorLength(uint32_t descriptor)
+    {
+        uint32_t value = 0;
+        std::memcpy(&value, ring.data() + descriptor * kSqeSize + 28, sizeof(value));
+        return value;
+    }
 };
 
 TEST_F(SdmaDirectionTest, GetUsesRemoteSourceAndLocalCompletion)
@@ -689,11 +696,69 @@ TEST_F(SdmaDirectionTest, PutSignalOrdersDataNotificationAndCompletion)
     EXPECT_EQ(context.sqTail, 3U);
     EXPECT_EQ(DescriptorAddress(0, 40), param.poolBaseGva + param.symSize + 8192);
     EXPECT_EQ(DescriptorAddress(1, 40), signal[0]);
+    EXPECT_EQ(DescriptorLength(1), 8U);
+    EXPECT_EQ(DescriptorLength(2), 8U);
     EXPECT_EQ(DescriptorAddress(2, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
     const uint64_t source = DescriptorAddress(1, 32);
     EXPECT_EQ(*reinterpret_cast<uint64_t *>(source), 1234567U);
     signal[1] = 9;
     EXPECT_EQ(*reinterpret_cast<uint64_t *>(source), 1234567U);
+}
+
+TEST_F(SdmaDirectionTest, PutSignal32PreservesPayloadAndCompletionOrder)
+{
+    const uint64_t add = (ock::mf::HYBM_SDMA_IMM_MAGIC << 48) | (uint64_t(ock::mf::HYBM_SDMA_SQE_OP_FP32_ADD) << 40);
+    SetMail(false, add | SMEM_SHM_SDMA_SIGNAL_FLAG | SMEM_SHM_SDMA_SIGNAL32_FLAG);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase);
+    mail->len = (20 * 2048 * sizeof(float)) | (1ULL << 63);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = param.poolBaseGva + param.symSize + param.physSize - SMEM_SHM_SDMA_RESERVED - 4;
+    signal[1] = 0x12345678;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 3U);
+    EXPECT_EQ(DescriptorLength(0), 163840U);
+    EXPECT_EQ(ring[16], ock::mf::HYBM_SDMA_SQE_OP_FP32_ADD);
+    EXPECT_EQ(DescriptorLength(1), 4U);
+    EXPECT_EQ(DescriptorAddress(1, 40), signal[0]);
+    EXPECT_EQ(*reinterpret_cast<uint32_t *>(DescriptorAddress(1, 32)), 0x12345678U);
+    EXPECT_EQ(DescriptorLength(2), 8U);
+    EXPECT_EQ(DescriptorAddress(2, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+}
+
+TEST_F(SdmaDirectionTest, StandaloneSignal32HasNoPayloadDescriptor)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG | SMEM_SHM_SDMA_SIGNAL32_FLAG);
+    auto *mail = reinterpret_cast<ock::mf::HybmSdmaReqMail *>(param.resBase);
+    mail->src = 0;
+    mail->len = 1ULL << 63;
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    signal[0] = mail->dst + 4;
+    signal[1] = 1;
+    ASSERT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 0);
+    EXPECT_EQ(context.sqTail, 2U);
+    EXPECT_EQ(DescriptorLength(0), 4U);
+    EXPECT_EQ(DescriptorAddress(0, 40), signal[0]);
+    EXPECT_EQ(DescriptorLength(1), 8U);
+    EXPECT_EQ(DescriptorAddress(1, 40), param.resBase + SMEM_SHM_SDMA_RS_QUIET);
+}
+
+TEST_F(SdmaDirectionTest, RejectsSignal32FlagWithoutNotification)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL32_FLAG);
+    EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1333);
+    EXPECT_EQ(context.sqTail, 0U);
+}
+
+TEST_F(SdmaDirectionTest, RejectsSignal32UnalignedWrongPeerAndOutOfBoundsSlots)
+{
+    SetMail(false, SMEM_SHM_SDMA_SIGNAL_FLAG | SMEM_SHM_SDMA_SIGNAL32_FLAG);
+    auto *signal = reinterpret_cast<uint64_t *>(param.resBase + SMEM_SHM_SDMA_RS_SIGNAL);
+    const uint64_t peer = param.poolBaseGva + param.symSize;
+    for (uint64_t addr : {peer + 2, param.poolBaseGva + 4, peer + param.physSize - SMEM_SHM_SDMA_RESERVED}) {
+        signal[0] = addr;
+        EXPECT_EQ(consumeOneMail(&param, &context, 0, 0, 0), 1330);
+        EXPECT_EQ(context.sqTail, 0U);
+    }
 }
 
 TEST_F(SdmaDirectionTest, StandaloneSignalHasNoDataDescriptor)

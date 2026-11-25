@@ -120,8 +120,8 @@ SMEM_SHM_INLINE_AICORE uint32_t smem_shm_sdma_peer_cnt(const smem_shm_sdma_ctx_t
 }
 
 SMEM_SHM_INLINE_AICORE bool SdmaResolveQueue(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
-                                             uint64_t len, smem_shm_sdma_op_t op, bool get, __gm__ uint64_t *signal,
-                                             uint32_t &queue)
+                                             uint64_t len, smem_shm_sdma_op_t op, bool get, __gm__ void *signal,
+                                             uint32_t &queue, uint32_t signalBytes = 8)
 {
     if (len > UINT32_MAX || ((reinterpret_cast<uint64_t>(src) | reinterpret_cast<uint64_t>(dst) | len) & 3) ||
         static_cast<uint32_t>(op) > SMEM_SHM_SDMA_OP_ADD_FP16) {
@@ -148,7 +148,10 @@ SMEM_SHM_INLINE_AICORE bool SdmaResolveQueue(const smem_shm_sdma_ctx_t &ctx, __g
     if (offset >= usable || len > usable - offset) { return false; }
     if (signal) {
         const uint64_t addr = reinterpret_cast<uint64_t>(signal);
-        if (get || (addr & 7) || addr < remoteSeg || addr - remoteSeg >= usable || usable - (addr - remoteSeg) < 8) {
+        if ((signalBytes != 4 && signalBytes != 8) || get || (addr & (signalBytes - 1)) || addr < remoteSeg ||
+            addr - remoteSeg >= usable || usable - (addr - remoteSeg) < signalBytes) {
+            AscendC::printf("[SMEM][ERROR] invalid SDMA signal: rank=%u block=%u bytes=%u address=%llu\n", ctx.rank,
+                            ctx.block, signalBytes, static_cast<unsigned long long>(addr));
             return false;
         }
     }
@@ -171,7 +174,7 @@ SMEM_SHM_INLINE_AICORE bool SdmaReserveRequest(const smem_shm_sdma_ctx_t &ctx, u
 
 SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, uint32_t queue, uint64_t tail,
                                                __gm__ void *src, __gm__ void *dst, uint64_t len, smem_shm_sdma_op_t op,
-                                               __gm__ uint64_t *signal, uint64_t value)
+                                               __gm__ void *signal, uint64_t value, uint32_t signalBytes = 8)
 {
     __gm__ uint8_t *slot = ctx.res + SMEM_SHM_SDMA_RS_REQ_RING + queue * SMEM_SHM_SDMA_RS_REQ_RING_STRIDE +
                            (tail % SMEM_SHM_SDMA_RS_REQ_SLOTS) * 32;
@@ -188,7 +191,8 @@ SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, u
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 8) = reinterpret_cast<uint64_t>(dst);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 16) = len | (1ULL << 63);
     *reinterpret_cast<__gm__ volatile uint64_t *>(slot + 24) =
-        (opcode ? SdmaEncodeOp(opcode) : 0) | (signal ? SMEM_SHM_SDMA_SIGNAL_FLAG : 0);
+        (opcode ? SdmaEncodeOp(opcode) : 0) | (signal ? SMEM_SHM_SDMA_SIGNAL_FLAG : 0) |
+        (signal && signalBytes == 4 ? SMEM_SHM_SDMA_SIGNAL32_FLAG : 0);
     AscendC::GlobalTensor<int32_t> gm;
     gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(slot), 8);
     AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE>(gm);
@@ -196,16 +200,17 @@ SMEM_SHM_INLINE_AICORE void SdmaPublishRequest(const smem_shm_sdma_ctx_t &ctx, u
 }
 
 SMEM_SHM_INLINE_AICORE bool SdmaSubmitAt(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src, __gm__ void *dst,
-                                         uint64_t len, smem_shm_sdma_op_t op, bool get,
-                                         __gm__ uint64_t *signal = nullptr, uint64_t value = 0)
+                                         uint64_t len, smem_shm_sdma_op_t op, bool get, __gm__ void *signal = nullptr,
+                                         uint64_t value = 0, uint32_t signalBytes = 8)
 {
     if (len == 0 && !signal)
         return true;
     uint32_t queue = 0;
     uint64_t tail = 0;
-    if (!SdmaResolveQueue(ctx, src, dst, len, op, get, signal, queue) || !SdmaReserveRequest(ctx, queue, tail))
+    if (!SdmaResolveQueue(ctx, src, dst, len, op, get, signal, queue, signalBytes) ||
+        !SdmaReserveRequest(ctx, queue, tail))
         return false;
-    SdmaPublishRequest(ctx, queue, tail, src, dst, len, op, signal, value);
+    SdmaPublishRequest(ctx, queue, tail, src, dst, len, op, signal, value, signalBytes);
     return true;
 }
 
@@ -330,6 +335,24 @@ SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal_nbi_at(const smem_shm_sdma_
         return SdmaSubmitAt(ctx, nullptr, signal, 0, SMEM_SHM_SDMA_OP_COPY, false, signal, value);
     }
     return SdmaSubmitAt(ctx, src, dst, bytes, op, false, signal, value);
+}
+
+/* 对发送方独占的32位通知槽执行SET，数据和通知按同一队列顺序完成。
+ * signal按4字节对齐，其余源数据生命周期及缓存约束与64位通知接口相同。 */
+SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal32_nbi_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src,
+                                                              __gm__ void *dst, uint64_t bytes, __gm__ uint32_t *signal,
+                                                              uint32_t value,
+                                                              smem_shm_sdma_op_t op = SMEM_SHM_SDMA_OP_COPY)
+{
+    if (signal == nullptr) {
+        AscendC::printf("[SMEM][ERROR] null signal32: rank=%u block=%u bytes=%llu\n", ctx.rank, ctx.block,
+                        static_cast<unsigned long long>(bytes));
+        return false;
+    }
+    if (bytes == 0) {
+        return SdmaSubmitAt(ctx, nullptr, signal, 0, SMEM_SHM_SDMA_OP_COPY, false, signal, value, 4);
+    }
+    return SdmaSubmitAt(ctx, src, dst, bytes, op, false, signal, value, 4);
 }
 
 SMEM_SHM_INLINE_AICORE bool smem_shm_sdma_put_signal_at(const smem_shm_sdma_ctx_t &ctx, __gm__ void *src,

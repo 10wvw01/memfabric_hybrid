@@ -358,7 +358,7 @@ void dbgLogMail(const ock::mf::HybmSdmaOrchParam *p, uint64_t seq, const ock::mf
 // 数据传输与本端完成按 SQ FIFO 顺序执行。
 int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint16_t ssid, uint16_t taskId,
                       const ock::mf::HybmSdmaReqMail &mail, uint64_t stageSlot, uint64_t quietStampSlot,
-                      uint8_t sqeOpcode, uint64_t signalDst = 0)
+                      uint8_t sqeOpcode, uint64_t signalDst = 0, uint32_t signalBytes = 8)
 {
     const uint16_t streamId = static_cast<uint16_t>(ctx->streamId);
     uint8_t sqe[kSqeSize];
@@ -388,8 +388,8 @@ int32_t issueMailSqes(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint1
         }
     }
     if (signalDst) {
-        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + (mail.len ? 1 : 0)),
-                          stageSlot + 8, signalDst, 8, p->devId, p->overflowAddr, ssid);
+        buildStarsSdmaSqe(sqe, streamId, static_cast<uint16_t>(taskId + (mail.len ? 1 : 0)), stageSlot + 8, signalDst,
+                          signalBytes, p->devId, p->overflowAddr, ssid);
         if (submitSqe(p, ctx, sqe) != 0) {
             return 1362;
         }
@@ -432,7 +432,14 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
         return 1332;
     }
     const bool hasSignal = (mail.imm & SMEM_SHM_SDMA_SIGNAL_FLAG) != 0;
-    mail.imm &= ~SMEM_SHM_SDMA_SIGNAL_FLAG;
+    const bool signal32 = (mail.imm & SMEM_SHM_SDMA_SIGNAL32_FLAG) != 0;
+    if (signal32 && !hasSignal) {
+        std::fprintf(stderr, "[MF][ERROR] signal32 flag without notification: rank=%u queue=%u seq=%llu\n", p->rank,
+                     queueIdx, static_cast<unsigned long long>(seq));
+        return 1333;
+    }
+    const uint32_t signalBytes = signal32 ? 4U : 8U;
+    mail.imm &= ~(SMEM_SHM_SDMA_SIGNAL_FLAG | SMEM_SHM_SDMA_SIGNAL32_FLAG);
     if (mail.len == 0 && !hasSignal) {
         return 1332;
     }
@@ -466,8 +473,10 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
          sqeOpcode != HYBM_SDMA_SQE_OP_FP16_ADD)) {
         return 1330;
     }
-    if (hasSignal && (isGet || (signalDst & 7) || signalDst < peerSegExpect || signalDst - peerSegExpect >= usable ||
-                      usable - (signalDst - peerSegExpect) < 8)) {
+    if (hasSignal && (isGet || (signalDst & (signalBytes - 1)) || signalDst < peerSegExpect ||
+                      signalDst - peerSegExpect >= usable || usable - (signalDst - peerSegExpect) < signalBytes)) {
+        std::fprintf(stderr, "[MF][ERROR] invalid SDMA notification: rank=%u peer=%u queue=%u bytes=%u address=%llu\n",
+                     p->rank, peerRank, queueIdx, signalBytes, static_cast<unsigned long long>(signalDst));
         return 1330;
     }
     const uint64_t stageSlot = p->resBase + SMEM_SHM_SDMA_RS_STAGE + queueIdx * SMEM_SHM_SDMA_RS_STAGE_STRIDE +
@@ -495,8 +504,8 @@ int32_t consumeOneMail(const ock::mf::HybmSdmaOrchParam *p, SqContext *ctx, uint
     const uint64_t quietStamp = p->resBase + SMEM_SHM_SDMA_RS_QUIET + queueIdx * SMEM_SHM_SDMA_RS_QUIET_STRIDE +
                                 (seq % SMEM_SHM_SDMA_RS_QUIET_SLOTS) * 8; // 本端完成戳槽(队列内)
     const uint64_t tailBefore = ctx->sqTail;
-    auto ret =
-        issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode, signalDst);
+    auto ret = issueMailSqes(p, ctx, ssid, static_cast<uint16_t>(seq), mail, stageSlot, quietStamp, sqeOpcode,
+                             signalDst, signalBytes);
     if (ret != 0) {
         return ret;
     }

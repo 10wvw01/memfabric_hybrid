@@ -54,6 +54,7 @@ constexpr uint64_t SMEM_SHM_SDMA_RS_STAGE_STRIDE = 0x4000; /* 队列间距(512×
 constexpr uint64_t SMEM_SHM_SDMA_RS_SIGNAL = 0xDF800;
 constexpr uint64_t SMEM_SHM_SDMA_RS_SIGNAL_STRIDE = 0x400;
 constexpr uint64_t SMEM_SHM_SDMA_SIGNAL_FLAG = 1ULL << 39;
+constexpr uint64_t SMEM_SHM_SDMA_SIGNAL32_FLAG = 1ULL << 38;
 // 初始化后保持不变，与游标及通知参数分开占用缓存行。
 constexpr uint64_t SMEM_SHM_SDMA_RS_PRODUCER_MASK = 0xEF800;
 static_assert(SMEM_SHM_SDMA_RS_SIGNAL + 48 * SMEM_SHM_SDMA_RS_SIGNAL_STRIDE <=
