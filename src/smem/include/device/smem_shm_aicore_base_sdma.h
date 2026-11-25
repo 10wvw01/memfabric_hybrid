@@ -22,6 +22,11 @@
 #include "smem_shm_aicore_base_meta.h"
 #include "smem_shm_sdma_layout.h"
 #include "smem_shm_signal_define.h"
+
+#if SMEM_SHM_ON_DEVICE && (SMEM_SHM_TARGET != SMEM_SHM_TARGET_310P)
+#error "smem_shm_aicore_base_sdma.h requires 310P target (--npu-arch=dav-2002); " \
+       "A2/A3/A5 请使用 smem_shm_aicore_base_api.h 公共入口走 copy/rdma 接口。"
+#endif
 typedef enum smem_shm_sdma_op {
     SMEM_SHM_SDMA_OP_COPY = 0,     /* dst = src */
     SMEM_SHM_SDMA_OP_ADD_FP32 = 1, /* 搬运+reduce dst += src (fp32 逐元素) */

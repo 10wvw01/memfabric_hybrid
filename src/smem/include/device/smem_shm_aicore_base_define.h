@@ -19,6 +19,20 @@ constexpr uint32_t SMEM_SHM_ALIGN_SIZE = 32;
 
 #define SMEM_SHM_INLINE_AICORE __attribute__((always_inline)) inline __aicore__
 
+/* 设备平台标识: SMEM_SHM_TARGET_310P/910B/950 为各平台命名常量(对齐 CANN soc_spec.h
+ * 的 DAV_* 值); SMEM_SHM_TARGET 取当前编译目标平台值; SMEM_SHM_ON_DEVICE 标识当前
+ * 是否在编译设备侧代码。供设备头按平台分发或自检。 */
+#define SMEM_SHM_TARGET_310P 2002
+#define SMEM_SHM_TARGET_910B 2201
+#define SMEM_SHM_TARGET_950  3510
+#if defined(__NPU_DEVICE__)
+#define SMEM_SHM_ON_DEVICE 1
+#define SMEM_SHM_TARGET    __NPU_ARCH__
+#else
+#define SMEM_SHM_ON_DEVICE 0
+#define SMEM_SHM_TARGET     0
+#endif
+
 #ifndef SMEM_SHM_ALIGN_DOWN
 #define SMEM_SHM_ALIGN_DOWN(val, al) ((val) & ~((al) - 1))
 #endif

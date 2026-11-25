@@ -1,7 +1,7 @@
 #ifndef MEMFABRIC_SDMA_READY_H
 #define MEMFABRIC_SDMA_READY_H
 
-#include "smem_shm_aicore_base_sdma.h"
+#include "smem_shm_aicore_base_api.h"
 
 // 每个通知槽独占缓存行，槽位间距保留以兼容已有用例。
 #define SDMA_READY_INLINE __attribute__((always_inline)) __aicore__ inline

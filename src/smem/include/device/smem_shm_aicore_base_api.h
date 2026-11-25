@@ -13,8 +13,12 @@
 #define __MEMFABRIC_SMEM_AI_CORE_BASE_API_H__
 
 #include "smem_shm_aicore_base_meta.h"
+#if SMEM_SHM_TARGET == SMEM_SHM_TARGET_310P
+#include "smem_shm_aicore_base_sdma.h"
+#else
 #include "smem_shm_aicore_base_copy.h"
 #include "smem_shm_aicore_base_rdma.h"
+#endif
 
 /**
  * @brief Get rank which is set by function smem_shm_create from host side

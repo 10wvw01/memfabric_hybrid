@@ -1,5 +1,5 @@
 #include "kernel_operator.h"
-#include "smem_shm_aicore_base_sdma.h"
+#include "smem_shm_aicore_base_api.h"
 
 constexpr uint64_t kBlockBytes = 4096;
 constexpr uint64_t kFlagBase = 1024 * 1024;
