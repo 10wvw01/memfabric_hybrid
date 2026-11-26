@@ -153,6 +153,7 @@ using aclrtSetCurrentContextFunc = int (*)(void *);
 using aclrtDestroyContextFunc = int (*)(void *);
 using aclrtSetStreamAttributeFunc = int (*)(void *, aclrtStreamAttr, aclrtStreamAttrValue *);
 using aclrtDestroyStreamFunc = int (*)(void *);
+using aclrtGetLastErrorFunc = int (*)(int32_t);
 using aclrtSynchronizeStreamFunc = int (*)(void *);
 using aclrtMallocFunc = int32_t (*)(void **, size_t, uint32_t);
 using aclrtFreeFunc = int (*)(void *);
@@ -431,6 +432,15 @@ public:
             return BM_UNDER_API_UNLOAD;
         }
         return pAclrtDestroyStream(stream);
+    }
+
+    static inline Result AclrtGetLastError(int32_t level)
+    {
+        if (pAclrtGetLastError == nullptr) {
+            BM_LOG_ERROR("aclrtGetLastError unavailable, level: " << level);
+            return BM_DL_FUNCTION_FAILED;
+        }
+        return pAclrtGetLastError(level);
     }
 
     static inline Result AclrtSynchronizeStream(void *stream)
@@ -846,6 +856,7 @@ private:
     static aclrtDestroyContextFunc pAclrtDestroyContext;
     static aclrtSetStreamAttributeFunc pAclrtSetStreamAttribute;
     static aclrtDestroyStreamFunc pAclrtDestroyStream;
+    static aclrtGetLastErrorFunc pAclrtGetLastError;
     static aclrtSynchronizeStreamFunc pAclrtSynchronizeStream;
     static aclrtBinaryLoadFromFileFunc pAclrtBinaryLoadFromFile;
     static aclrtBinaryGetFunctionFunc pAclrtBinaryGetFunction;
