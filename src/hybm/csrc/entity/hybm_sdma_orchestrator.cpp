@@ -604,6 +604,15 @@ Result SdmaOrchestrator::KfcExec(const std::string &cmd)
         }
     }
     (void)DlAclApi::AclrtDestroyStream(commandStream);
+    if (ret == HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
+        // shell 同步异常会保留在线程错误记录中，先取走它再执行文件校验。
+        const auto last = DlAclApi::AclrtGetLastError(0); // ACL_RT_THREAD_LEVEL
+        BM_LOG_INFO("shell thread error consumed: " << last);
+        if (last != BM_OK && last != HYBM_SDMA_ORCH_KFC_RESULT_UNCONFIRMED) {
+            BM_LOG_ERROR("unexpected shell thread error: " << last << " sync: " << ret);
+            return BM_ERROR;
+        }
+    }
     return ret;
 }
 

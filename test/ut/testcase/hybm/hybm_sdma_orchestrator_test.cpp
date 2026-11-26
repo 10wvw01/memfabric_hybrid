@@ -362,6 +362,7 @@ TEST_F(SdmaDeployTest, SyncExceptionKeepsUnconfirmedCommandStatus)
     MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(BM_OK));
     MOCKER(DlAclApi::AclrtSynchronizeStream).stubs().will(returnValue(507018));
     MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtGetLastError).expects(once()).with(eq(0)).will(returnValue(507018));
     EXPECT_EQ(prep.KfcExec("true"), 507018);
 }
 
@@ -712,6 +713,71 @@ TEST(SdmaProducerConfigTest, FailedDeviceMaskWritePreventsEpochLaunch)
     EXPECT_EQ(prep.ConfigureOrch(1ULL << 30, 1ULL << 30, 1ULL << 30, 0, 1ULL << 30, 2), BM_ERROR);
     EXPECT_FALSE(prep.configured_);
     GlobalMockObject::verify();
+}
+
+TEST_F(SdmaDeployTest, SuccessfulShellPreservesThreadError)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LoadKfcChannel, int32_t(*)(SdmaOrchestrator *, aclrtFuncHandle &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtSynchronizeStream).stubs().will(returnValue(0));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtGetLastError).expects(never());
+    EXPECT_EQ(prep.KfcExec("true"), BM_OK);
+}
+
+TEST_F(SdmaDeployTest, OtherSyncFailurePreservesThreadError)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LoadKfcChannel, int32_t(*)(SdmaOrchestrator *, aclrtFuncHandle &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtSynchronizeStream).stubs().will(returnValue(507001));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtGetLastError).expects(never());
+    EXPECT_EQ(prep.KfcExec("true"), 507001);
+}
+
+TEST_F(SdmaDeployTest, UnexpectedThreadErrorRejectsUnconfirmedShell)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LoadKfcChannel, int32_t(*)(SdmaOrchestrator *, aclrtFuncHandle &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtSynchronizeStream).stubs().will(returnValue(507018));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtGetLastError).expects(once()).with(eq(0)).will(returnValue(507001));
+    EXPECT_EQ(prep.KfcExec("true"), BM_ERROR);
+}
+
+TEST_F(SdmaDeployTest, MissingErrorApiRejectsUnconfirmedShell)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LoadKfcChannel, int32_t(*)(SdmaOrchestrator *, aclrtFuncHandle &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtSynchronizeStream).stubs().will(returnValue(507018));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtGetLastError).expects(once()).with(eq(0)).will(returnValue(BM_DL_FUNCTION_FAILED));
+    EXPECT_EQ(prep.KfcExec("true"), BM_ERROR);
+}
+
+TEST_F(SdmaDeployTest, ConsumedThreadErrorKeepsUnconfirmedStatus)
+{
+    MOCKER_CPP(&SdmaOrchestrator::LoadKfcChannel, int32_t(*)(SdmaOrchestrator *, aclrtFuncHandle &))
+        .stubs()
+        .will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtCreateStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtLaunchKernelWithHostArgs).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtSynchronizeStream).stubs().will(returnValue(507018));
+    MOCKER(DlAclApi::AclrtDestroyStream).stubs().will(returnValue(BM_OK));
+    MOCKER(DlAclApi::AclrtGetLastError).expects(once()).with(eq(0)).will(returnValue(0));
+    EXPECT_EQ(prep.KfcExec("true"), 507018);
 }
 
 } // namespace mf
