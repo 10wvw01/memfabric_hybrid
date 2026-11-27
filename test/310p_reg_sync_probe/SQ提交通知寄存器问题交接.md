@@ -191,3 +191,34 @@ memfabric 的 SDMA 编排 kernel 跑在 CP1 里，需要把构造好的 SQE 写�
    - 第二步：用直写写同一个 N（若 TSFW 幂等重发同一 tail，预期无副作用），观察 CQE 与设备健康；
    - 第三步：确认幂等后再直写 N+1 真正提交。
    - 全程单卡运行，设备可热复位。
+
+### 实机观测（2026-11-27，driver 25.6.rc1.b010，kprobe）
+
+在已装驱动的 host 上用 ftrace kprobe 做无侵入插桩，验证"08 示例通过期间 host 内核是否执行了 SQ 查询/设置 ioctl"。
+
+**环境约束（先说能做什么、不能做什么）：**
+
+- 已装内核模块为 drv_devdrv_host / drv_tsdrv_platform_host（旧 kernel_space tsdrv 架构），kallsyms 里没有任何 `trs_*` 符号——sdk_driver trs 内核模块没有随这版驱动加载，`trs_ring_ts_db` / `trs_get_ts_db_val` / `CTRL_CMD_SQ_TAIL_UPDATE` 三处插桩按原方案不可行。
+- 容器内也不能替换或重载 host 已加载的内核模块。
+- 能做的：对已装内核里存在的 `tsdrv_ioctl_sqcq_query` / `tsdrv_ioctl_sqcq_set`（kernel_space 路径）注册 kprobe，观测它们是否被调用。
+
+**kprobe 机制自检（阳性对照）：**
+
+- 对 `devdrv_ioctl_sqcq_alloc` 注册 kprobe，运行 sq_db_probe，trace 命中 4 次（进程 sq_db_probe 与 MONITOR_0）——kprobe 机制本身有效。
+
+**观测结果：**
+
+- 08 示例全程（EX08 r0/r1 PASS，退出码 0）：`tsdrv_ioctl_sqcq_query` 与 `tsdrv_ioctl_sqcq_set` 命中 **0 次**。
+- sq_db_probe 全程（其 halSqCqQuery/halSqCqConfig 返回 65534 NOT_SUPPORT，EXIT=0）：同样 **0 次** 命中。
+
+**结论：**
+
+- "08 示例跑通 = host 内核读该寄存器成功"被实测排除：示例通过期间 host 内核的 SQ 查询 ioctl 一次都没被调用。
+- 结合源码：CP 流的 cp1LiveQuery 走 `cp1QueryProp` → `halSqCqQuery`（`hybm_sdma_orch_kernel.cc:259-270`），在 `HybmSdmaOrchEpoch` 入口必调，失败会置 mainRet=13xx，示例通过说明查询在 CP1 内部返回了 0。
+- **边界：CP1 是设备侧 AICPU 进程，它的 halSqCqQuery 由设备侧 HAL 服务，和 host 侧这份 trs 用户态 + host 内核代码不是同一份执行体。本次观测只能排除"host 内核 tsdrv 查询 ioctl 被调用"，不能判定设备侧实际读了哪个地址。** 设备侧 HAL 的查询路径（是否读寄存器、读哪个地址）仍需设备侧插桩或反汇编确认。
+
+**未做的三项及原因：**
+
+1. `trs_ring_ts_db` 等三处内核插桩：目标符号不在已装内核（kallsyms 0 命中），容器内不能换 host 内核模块。需要一台能装重编驱动模块的机器才能做。
+2. msprof 数据量化 `doorbellViaHal` 占比：`msprof_allreduce/`、`msprof_demo/` 目录在本工作区不存在，占比计算没有输入数据。需要先找到 profiling 数据所在位置。
+3. 幂等三步写测试：前提是先拿到可靠的 db 地址映射（需内核补丁装机），当前已装驱动不满足前提。
