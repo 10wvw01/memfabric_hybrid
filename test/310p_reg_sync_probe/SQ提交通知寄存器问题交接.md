@@ -142,10 +142,8 @@ memfabric 的 SDMA 编排 kernel 跑在 CP1 里，需要把构造好的 SQE 写�
 - 08 示例 SDMA 数据面端到端正确；
 - 验证程序跑完后设备全部健康。
 
-**存疑（原推断已被新证据动摇，见第 10 节）**：
-- ~~该寄存器槽只写不读~~：内核存在活的读路径（`halSqCqQuery(SQ_TAIL)` 在 CP 流上能用的，走 `ka_mm_readl` 读同一个槽），“只写不读”待内核插桩验证。
-
 **推断（未实机验证）**：
+- 该寄存器槽只写不读（内核代码层面成立，见第 10 节核验结果：写路径 `trs_ring_ts_db` 每次提交都执行，读路径只在 agent 通道上执行，CP 流不是 agent 通道）；
 - TSFW 内部解析 SQE 的结构；
 - `flushBatchDoorbell` 返回 0 时提交通知确实被写；
 - CP 流 SQ 在 310P 上的实际分配标志与 chan 对象状态。
@@ -160,19 +158,29 @@ memfabric 的 SDMA 编排 kernel 跑在 CP1 里，需要把构造好的 SQE 写�
 - 唯一未能核验的是 `driver/src/ascend_hal/trs/...` 用户态 HAL 部分（核验机器上只有 .run 安装包和解包产物），但该部分行号精确、自洽。
 - 文档关于验证程序 `halSqCqQuery/Config` 返回 NOT_SUPPORT 的根因候选（缺 trs chan 对象 vs CP 流有完整对象）方向正确。
 
-### 重要新线索：内核存在活的读路径
+### 核验方提出的“内核存在活的读路径”——本地复核不成立（针对 CP 流）
 
-- `halSqCqQuery(SQ_TAIL)` 在 CP 流上是能用的（`cp1LiveQuery` 里 `rTail != 0` 即返回失败，08 示例跑通 = TAIL 查询成功）。
-- 其 310P 实现链：`trs_tscpu_chan_sqcq.c` → `trs_tscpu_get_sq_tail` → `trs_get_ts_db_val(TRS_DB_TASK_SQ)` → `ka_mm_readl`，读的是同一个提交通知寄存器槽。
-- 因此用户态 mmap 读停住的首选怀疑改为：
-  1. 用户态 mmap 的内存属性错了——cacheable 映射打在 MMIO 上会停住或行为不定；
-  2. VA→PA 实际没落到该槽（SMMU 翻译差异）。
-- 待确认边界：CP1 进程内的 `halSqCqQuery` 实现是否与 driver 仓 trs 用户态实现完全一致，需插桩确认。
+核验方原判断：`halSqCqQuery(SQ_TAIL)` 在 CP 流上能用，说明内核走 `ka_mm_readl` 读同一个提交通知寄存器槽，因此“只写不读”存疑。
+
+本地逐层复核后，这个判断对 CP 流不成立：
+
+- 读路径代码确实存在：`ioctl TRS_SQCQ_QUERY` → `trs_sqcq_query`（`trs_hw_sqcq.c:1680`）→ `trs_chan_query(CHAN_QUERY_CMD_SQ_TAIL)`（`chan_rxtx.c:1136`）。
+- 但 `CHAN_QUERY_CMD_SQ_TAIL` 分支只在 `trs_chan_sqcq_is_agent(chan)` 为真时才调用 `trs_chan_update_sq_tail_from_hw`（`chan_rxtx.c:1141-1144`）；否则直接返回软件维护的 `chan->sq.sq_tail`（`chan_rxtx.c:1145`）。
+- `trs_chan_sqcq_is_agent` 判的是 `CHAN_FLAG_AGENT_ID_BIT`（`chan_init.h:178-181`）。
+- CP 流用的标志是 `ACL_STREAM_DEVICE_USE_ONLY`(0x20) → `RT_STREAM_CP_PROCESS_USE`（`acl/aclrt_impl/stream.cpp:77`）→ `TSDRV_FLAG_REMOTE_ID`（`npu_driver_res.cc:1003` 等）→ 内核置 `CHAN_FLAG_REMOTE_ID_BIT` + `CHAN_FLAG_USE_MASTER_PID_BIT`，**不置** `CHAN_FLAG_AGENT_ID_BIT`（`trs_hw_sqcq.c:524-531`）。
+- 结论：CP 流的 `halSqCqQuery(SQ_TAIL)` 返回的是软件缓存的 tail，不会执行 `trs_tscpu_get_sq_tail` → `trs_get_ts_db_val` → `ka_mm_readl`。08 示例跑通只证明查询返回了非零的缓存 tail（`cp1LiveQuery` 的 `rTail != 0` 判据因此通过），**不能证明该寄存器可读**。
+- 写路径则是真实执行的：`DRV_SQCQ_PROP_SQ_TAIL` → `trs_chan_ctrl(CHAN_CTRL_CMD_SQ_TAIL_SET)` → `trs_chan_set_sq_tail` → `trs_tscpu_sq_tail_update` → `trs_ring_ts_db` → `ka_mm_writel`（`trs_hw_sqcq.c:1570-1575`、`chan_rxtx.c:327/470`、`trs_tscpu_sq.c:33-36`、`trs_ts_db.c:273-298`）。
+
+因此：
+
+- “该寄存器槽只写不读”在内核代码层面重新成立（写每次提交都执行，读只在 agent 通道上执行）。
+- 用户态 mmap 读停住仍需要自己的解释；mmap 内存属性错、VA→PA 未落到该槽（SMMU 翻译差异）这两个方向仍然值得查，但不能再拿“内核有活读路径”作为依据。
+- 待实机确认的边界：CP 流通道的 `chan->flag` 里确实没有 agent 位（代码推断，未插桩打印）。
 
 ### 后续工作（按优先级）
 
-1. **先内核侧插桩**，不要继续用户态试错。在 `trs_ring_ts_db`、`CTRL_CMD_SQ_TAIL_UPDATE` 处理入口、`trs_get_ts_db_val` 三处加一次性 log（或 kprobe），跑一遍 08 示例，一次确定四个待查：TAIL 查询实际走哪条链、写语义（tail 值还是 sq_id）、寄存器槽与 sqId 对应关系、CP1 的 HAL 实现与 driver 仓 trs 是否一致。
-2. **先量化收益再决定投入**。用 `msprof_allreduce/`、`msprof_demo/` 的数据计算 `doorbellViaHal` 占比；若 <5%，整条直写路线降级，转走备选方案 a。
+1. **先内核侧插桩**，不要继续用户态试错。在 `trs_ring_ts_db`、`CTRL_CMD_SQ_TAIL_UPDATE` 处理入口、`trs_get_ts_db_val` 三处加一次性 log（或 kprobe），跑一遍 08 示例，一次确定：写路径是否每次提交都执行、`trs_get_ts_db_val` 是否一次都没被调用、写语义（tail 值还是 sq_id）、寄存器槽与 sqId 对应关系。
+2. **先量化收益再决定投入**。核验方提到的 `msprof_allreduce/`、`msprof_demo/` 目录在本工作区（`/home/w00930648`）内不存在，无法据此计算 `doorbellViaHal` 占比；需要先找到这些数据所在位置，或另取 profiling 数据。若占比 <5%，整条直写路线降级，转走备选方案 a。
 3. **备选方案排序**：
    - a. 维持 ioctl 内核代写 + 加大批次（一次 ioctl 提交更多 SQE，摊薄单次开销）；
    - b. commByReg 式自映射直写（本文档主线）；
