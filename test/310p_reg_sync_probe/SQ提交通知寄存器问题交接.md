@@ -63,10 +63,15 @@ memfabric 的 SDMA 编排 kernel 跑在 CP1 里，需要把构造好的 SQE 写�
 - `db_addr` 由 `chan_init.c:240` 经 `QUERY_CMD_SQ_DB_PADDR` 从 TS 侧查询；TSCPU 路径的实现是 `trs_tscpu_get_sq_db_paddr` → `trs_get_ts_db_paddr(TRS_DB_TASK_SQ, sqid)`（`trs_tscpu_sq.c:38-41`）。
 - 结果：`db == NULL`，`halSqCqConfig(SQ_TAIL)` 的 UIO 分支返回 NOT_SUPPORT，只能走 ioctl。
 
-### C. 硬件/固件层：读该寄存器会让 AICPU 核停住
+### C. 用户态 mmap 读该寄存器会让 AICPU 核停住（原因待定，见第 10 节修正）
 
 - 实测（v4 验证程序）：该寄存器页 mmap 成功，但读 offset 0 的 u32 load 让 AICPU 核永久停在那条指令上（阶段标记 slot14 停在 7，host 等 60 秒后 EXIT=124）。
-- 推断：该寄存器槽只实现写通路，读没有硬件应答；AICPU 总线不超时，CPU 停在 load 指令上。
+- 原推断“该寄存器槽只写不读、读没有硬件应答”**已被新的代码证据动摇**：内核存在活的读路径。310P 的 `halSqCqQuery(SQ_TAIL)` 实现为 `trs_tscpu_chan_sqcq.c:43` → `trs_tscpu_get_sq_tail` → `trs_get_ts_db_val(TRS_DB_TASK_SQ)` → `ka_mm_readl` 读同一个寄存器槽（`trs_ts_db.c:300-325`）。
+- 而且 CP1 里的 `halSqCqQuery(SQ_TAIL)` 必须成功：编排 kernel 的 `cp1LiveQuery` 在 `rTail != 0` 时直接返回 `1400 + err`（`hybm_sdma_orch_kernel.cc:290-294`），08 示例能跑通说明 TAIL 查询返回成功。
+- 因此用户态读停住的首选怀疑改为：
+  1. 用户态 mmap 的内存属性不对——把 cacheable 映射打在 MMIO 上会停住或读到不确定值；
+  2. 用户态 VA→PA 没有落到该寄存器槽（SMMU 翻译差异）。
+- 需要说明的边界：CP1 进程里的 `halSqCqQuery` 是否与 driver 仓这份 trs 实现完全一致，要靠内核插桩确认（见第 10 节）。
 - 写通路是否单独可用尚未测。风险：写错值可能触发 TS 异常或设备停住。
 
 ## 5. 验证程序 sq_db_probe 的实测结果（v6，已跑完，设备健康）
@@ -93,7 +98,8 @@ memfabric 的 SDMA 编排 kernel 跑在 CP1 里，需要把构造好的 SQE 写�
    - `trs_sq_task_send_set_db`：软队列模式写 sq_id（`trs_sqcq.c:1527`），普通模式写 tail（`:1530`）。
    - memfabric 代码注释提到“固件把 doorbell 尾值 0 当作空环，插入自拷贝占位使尾值非零”（`hybm_sdma_orch_kernel.cc:446`），说明 TSFW 直接解析尾值。
 3. 寄存器槽与 sqId 的对应关系：`trs_get_ts_db_paddr` 用 `paddr + sqid*4K`；CP 流 SQ 的 sqId（如 65）是否落在 TASK_SQ 槽 0..512 内、是否与 TS 侧槽号一致？验证程序拿到的 sqId=65 在范围内，但未验证该槽是否就是该 SQ 的。
-4. 读停住的硬件原因与安全写测试方案：该寄存器槽是否只写不读？能否用“写当前 tail 原值”这类无害值验证写通路？需要风险控制（单设备、可热复位）。
+4. 用户态读停住的原因与安全写测试方案：**先不要按“只写不读”下结论**（内核读路径存在，见 4C 与第 10 节）。先查用户态 mmap 的页属性是否 uncached/device、VA→PA 是否真的落在该槽。
+   - 无害写测试建议：先经 ioctl 正常提交一批，记录 tail=N；再用直写写同一个 N（TSFW 幂等重发，应无副作用），观测 CQE 与设备健康；确认幂等后再直写 N+1 做真提交。全程单卡 + 可热复位。
 5. 内核映射放开后的完整路径：`tsdrv_sq_db_map` 需要调用者预置 `sqDbVaddr`，这个地址由谁分配（runtime / 闭源 HAL 的 `TsDrvNormalSqCqMap`）？闭源 HAL 是否愿意在 CP1 场景传非 0 地址？如果不传，内核改了也永远不会映射。
 6. remote SQ 分配在 310P 是否真的走 REMOTE 标志：`devdrv_support_remote_sqcq` 要求 `devdrv_is_support_uio_d()`；若 310P 不支持 UIO_D，CP 流 SQ 可能是普通分配。这决定 `TSDRV_REMOTE_FLAG` 那段直接返回是否真是 310P 的问题（旧结论可能需要修正）。
 7. `resid_query` 缺失：310P 没有注册 `resid_query`（只在 ascend610 注册），导致 `tsdrv_sq_head_tail_map` 返回 -EOPNOTSUPP。remote 分配路径是否因此失败？是否需要为 310P 补注册（参考 `ascend610/tsdrv_hwts.c:105-113`）？
@@ -136,8 +142,44 @@ memfabric 的 SDMA 编排 kernel 跑在 CP1 里，需要把构造好的 SQE 写�
 - 08 示例 SDMA 数据面端到端正确；
 - 验证程序跑完后设备全部健康。
 
+**存疑（原推断已被新证据动摇，见第 10 节）**：
+- ~~该寄存器槽只写不读~~：内核存在活的读路径（`halSqCqQuery(SQ_TAIL)` 在 CP 流上能用的，走 `ka_mm_readl` 读同一个槽），“只写不读”待内核插桩验证。
+
 **推断（未实机验证）**：
-- 该寄存器槽只写不读；
 - TSFW 内部解析 SQE 的结构；
 - `flushBatchDoorbell` 返回 0 时提交通知确实被写；
 - CP 流 SQ 在 310P 上的实际分配标志与 chan 对象状态。
+
+## 10. 文档核验记录与后续工作建议（2026-11-27）
+
+另一名分析者在本地三个仓（kernel_space / driver / memfabric_hybrid）对本文档逐项核验，结论与修正如下。
+
+### 核验结论
+
+- 本地三仓可核验的事实全部命中（含行号引用）。
+- 唯一未能核验的是 `driver/src/ascend_hal/trs/...` 用户态 HAL 部分（核验机器上只有 .run 安装包和解包产物），但该部分行号精确、自洽。
+- 文档关于验证程序 `halSqCqQuery/Config` 返回 NOT_SUPPORT 的根因候选（缺 trs chan 对象 vs CP 流有完整对象）方向正确。
+
+### 重要新线索：内核存在活的读路径
+
+- `halSqCqQuery(SQ_TAIL)` 在 CP 流上是能用的（`cp1LiveQuery` 里 `rTail != 0` 即返回失败，08 示例跑通 = TAIL 查询成功）。
+- 其 310P 实现链：`trs_tscpu_chan_sqcq.c` → `trs_tscpu_get_sq_tail` → `trs_get_ts_db_val(TRS_DB_TASK_SQ)` → `ka_mm_readl`，读的是同一个提交通知寄存器槽。
+- 因此用户态 mmap 读停住的首选怀疑改为：
+  1. 用户态 mmap 的内存属性错了——cacheable 映射打在 MMIO 上会停住或行为不定；
+  2. VA→PA 实际没落到该槽（SMMU 翻译差异）。
+- 待确认边界：CP1 进程内的 `halSqCqQuery` 实现是否与 driver 仓 trs 用户态实现完全一致，需插桩确认。
+
+### 后续工作（按优先级）
+
+1. **先内核侧插桩**，不要继续用户态试错。在 `trs_ring_ts_db`、`CTRL_CMD_SQ_TAIL_UPDATE` 处理入口、`trs_get_ts_db_val` 三处加一次性 log（或 kprobe），跑一遍 08 示例，一次确定四个待查：TAIL 查询实际走哪条链、写语义（tail 值还是 sq_id）、寄存器槽与 sqId 对应关系、CP1 的 HAL 实现与 driver 仓 trs 是否一致。
+2. **先量化收益再决定投入**。用 `msprof_allreduce/`、`msprof_demo/` 的数据计算 `doorbellViaHal` 占比；若 <5%，整条直写路线降级，转走备选方案 a。
+3. **备选方案排序**：
+   - a. 维持 ioctl 内核代写 + 加大批次（一次 ioctl 提交更多 SQE，摊薄单次开销）；
+   - b. commByReg 式自映射直写（本文档主线）；
+   - c. UIO 路径补全；
+   - d. 完成侧优化。
+4. **无害写测试修正为幂等三步法**：
+   - 第一步：经 ioctl 正常提交一批，记录 tail=N；
+   - 第二步：用直写写同一个 N（若 TSFW 幂等重发同一 tail，预期无副作用），观察 CQE 与设备健康；
+   - 第三步：确认幂等后再直写 N+1 真正提交。
+   - 全程单卡运行，设备可热复位。
